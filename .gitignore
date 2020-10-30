@@ -19,5 +19,9 @@ vendor/
 .idea/
 bin/
 
+test/
+
 .idea
 .vscode
+
+*.iml
