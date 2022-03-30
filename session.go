@@ -1,16 +1,17 @@
-package mouthofoddin
+package gosdk
 
 import (
 	"errors"
+	"time"
+
 	"github.com/google/uuid"
-	log "github.com/sirupsen/logrus"
 	"github.com/oddin-gg/gosdk/internal/cache"
 	"github.com/oddin-gg/gosdk/internal/factory"
 	"github.com/oddin-gg/gosdk/internal/feed"
 	feedXML "github.com/oddin-gg/gosdk/internal/feed/xml"
 	"github.com/oddin-gg/gosdk/internal/producer"
 	"github.com/oddin-gg/gosdk/protocols"
-	"time"
+	log "github.com/sirupsen/logrus"
 )
 
 type sdkOddsFeedSession interface {

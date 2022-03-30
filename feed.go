@@ -1,4 +1,4 @@
-package mouthofoddin
+package gosdk
 
 import (
 	"fmt"

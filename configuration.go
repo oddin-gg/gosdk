@@ -1,4 +1,4 @@
-package mouthofoddin
+package gosdk
 
 import "github.com/oddin-gg/gosdk/protocols"
 
