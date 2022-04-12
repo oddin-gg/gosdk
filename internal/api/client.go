@@ -124,6 +124,11 @@ func (c *Client) FetchTournaments(sportID protocols.URN, locale protocols.Locale
 		return nil, err
 	}
 
+	if resp.Tournaments == nil {
+		// sport has no tournaments
+		return nil, nil
+	}
+
 	return resp.Tournaments.Tournament, nil
 }
 

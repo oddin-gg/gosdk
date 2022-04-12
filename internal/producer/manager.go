@@ -161,6 +161,39 @@ func (m *Manager) ActiveProducers() (map[uint]protocols.Producer, error) {
 	return res, nil
 }
 
+// ActiveProducersInScope ...
+func (m *Manager) ActiveProducersInScope(scope protocols.ProducerScope) (map[uint]protocols.Producer, error) {
+	producers, err := m.producers()
+	if err != nil {
+		return nil, err
+	}
+
+	res := make(map[uint]protocols.Producer, len(producers))
+	for i := range producers {
+		data := producers[i]
+		if !data.active {
+			continue
+		}
+
+		p, err := buildProducerImpl(data)
+		if err != nil {
+			return nil, err
+		}
+
+		inScope := false
+		for _, s := range p.producerScopes {
+			if s == scope {
+				inScope = true
+				break
+			}
+		}
+		if inScope {
+			res[i] = p
+		}
+	}
+	return res, nil
+}
+
 // GetProducer ...
 func (m *Manager) GetProducer(id uint) (protocols.Producer, error) {
 	producers, err := m.producers()

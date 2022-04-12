@@ -42,6 +42,7 @@ type Producer interface {
 type ProducerManager interface {
 	AvailableProducers() (map[uint]Producer, error)
 	ActiveProducers() (map[uint]Producer, error)
+	ActiveProducersInScope(scope ProducerScope) (map[uint]Producer, error)
 	GetProducer(id uint) (Producer, error)
 	SetProducerState(id uint, enabled bool) error
 	SetProducerRecoveryFromTimestamp(producerID uint, timestamp time.Time) error
