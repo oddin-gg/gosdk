@@ -2,15 +2,16 @@ package feed
 
 import (
 	"encoding/xml"
+	"strings"
+	"sync"
+	"time"
+
 	"github.com/oddin-gg/gosdk/internal/factory"
 	feedXML "github.com/oddin-gg/gosdk/internal/feed/xml"
 	"github.com/oddin-gg/gosdk/protocols"
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 	"github.com/streadway/amqp"
-	"strings"
-	"sync"
-	"time"
 )
 
 const (
@@ -34,7 +35,7 @@ type ChannelConsumer struct {
 	outgoing           chan *protocols.QueueMessage
 	feedMessageFactory *factory.FeedMessageFactory
 	logger             *log.Logger
-	mux                sync.Mutex
+	mux                sync.RWMutex
 	exchangeName       string
 	messageInterest    *protocols.MessageInterest
 	routingKeys        []string
@@ -61,19 +62,11 @@ func (c *ChannelConsumer) Open(routingKeys []string, messageInterest *protocols.
 
 // Close ...
 func (c *ChannelConsumer) Close() {
-	c.mux.Lock()
 	c.closed = true
-	c.mux.Unlock()
-
-	c.client.Close()
 }
 
 func (c *ChannelConsumer) reconnect() {
-	c.mux.Lock()
-	isClosed := c.closed
-	c.mux.Unlock()
-
-	if isClosed {
+	if c.closed {
 		return
 	}
 
@@ -93,6 +86,10 @@ func (c *ChannelConsumer) reconnect() {
 func (c *ChannelConsumer) consumeMessage(ch <-chan amqp.Delivery) {
 	go func() {
 		for msg := range ch {
+			if c.closed {
+				return
+			}
+
 			c.processMessage(msg)
 		}
 

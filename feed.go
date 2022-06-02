@@ -124,6 +124,7 @@ func (o *oddsFeedImpl) Close() error {
 	}
 
 	o.cacheManager.Close()
+	o.rabbitMQClient.Close()
 
 	if o.msgCh != nil {
 		close(o.msgCh)

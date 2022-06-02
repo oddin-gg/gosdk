@@ -3,11 +3,12 @@ package feed
 import (
 	"errors"
 	"fmt"
+	"sync"
+	"time"
+
 	"github.com/oddin-gg/gosdk/protocols"
 	log "github.com/sirupsen/logrus"
 	"github.com/streadway/amqp"
-	"sync"
-	"time"
 )
 
 // Client ...
@@ -18,6 +19,7 @@ type Client struct {
 	mux                   sync.Mutex
 	errorCh               chan *amqp.Error
 	logger                *log.Logger
+	closed                bool
 }
 
 // NewClient ...
@@ -76,6 +78,8 @@ func (c *Client) CreateChannel(routingKeys []string, exchangeName string) (<-cha
 
 // Close ...
 func (c *Client) Close() {
+	c.closed = true
+
 	_ = c.connection.Close()
 }
 
@@ -115,8 +119,11 @@ func (c *Client) Open() error {
 	errorCh := make(chan *amqp.Error, 1)
 	go func() {
 		for err := range errorCh {
-			if err == nil {
+			switch {
+			case err == nil:
 				continue
+			case c.closed:
+				return
 			}
 
 			go c.reconnect()
@@ -128,8 +135,6 @@ func (c *Client) Open() error {
 }
 
 func (c *Client) reconnect() {
-	c.Close()
-
 	err := c.Open()
 	if err != nil {
 		c.logger.WithError(err).Error("reconnect to rabbitmq failed, retrying...")
