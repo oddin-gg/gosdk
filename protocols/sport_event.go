@@ -63,6 +63,8 @@ type Scoreboard interface {
 	AwayDestroyedTowers() *int32
 	HomeGoals() *uint32
 	AwayGoals() *uint32
+	Time() *uint32
+	GameTime() *uint32
 }
 
 // CompetitionStatus ...
