@@ -32,9 +32,10 @@ type Observer interface {
 type Client struct {
 	cfg        protocols.OddsFeedConfiguration
 	msgCh      chan protocols.Response
-	lock       sync.Mutex
+	lock       sync.RWMutex
 	observers  []Observer
 	httpClient http.Client
+	closed     bool
 }
 
 // FetchWhoAmI ...
@@ -401,6 +402,7 @@ func (c *Client) Close() {
 	c.lock.Lock()
 	defer c.lock.Unlock()
 
+	c.closed = true
 	c.observers = nil
 
 	if c.msgCh != nil {
@@ -447,12 +449,12 @@ func (c *Client) fetchData(path string, entity interface{}, locale *protocols.Lo
 		Locale: locale,
 	}
 
-	if c.msgCh != nil {
+	c.lock.RLock()
+	defer c.lock.RUnlock()
+
+	if c.msgCh != nil && !c.closed {
 		c.msgCh <- apiResponse
 	}
-
-	c.lock.Lock()
-	defer c.lock.Unlock()
 
 	for _, observer := range c.observers {
 		observer.OnAPIResponse(apiResponse)
