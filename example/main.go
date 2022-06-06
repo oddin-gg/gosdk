@@ -372,6 +372,24 @@ func (e *Example) processOddsChange(msg protocols.OddsChange) {
 		}
 		log.Printf("odds change market to status %d: %s", m.Status(), *name)
 	}
+
+	// Scoreboard
+	if ok, err := match.Status().IsScoreboardAvailable(); ok && err == nil {
+		if scoreboard, err := match.Status().Scoreboard(); scoreboard != nil && err == nil {
+			if scoreboard.HomeGoals() != nil {
+				log.Printf("HomeGoals: %d\n", *scoreboard.HomeGoals())
+			}
+			if scoreboard.AwayGoals() != nil {
+				log.Printf("AwayGoals: %d\n", *scoreboard.AwayGoals())
+			}
+			if scoreboard.Time() != nil {
+				log.Printf("Time: %d\n", *scoreboard.Time())
+			}
+			if scoreboard.GameTime() != nil {
+				log.Printf("GameTime: %d\n", *scoreboard.GameTime())
+			}
+		}
+	}
 }
 
 func (e *Example) processFixtureChange(msg protocols.FixtureChangeMessage) {

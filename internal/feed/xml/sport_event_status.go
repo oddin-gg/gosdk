@@ -63,4 +63,6 @@ type Scoreboard struct {
 	AwayGold             *uint32 `xml:"away_gold,attr,omitempty"`
 	HomeGoals            *uint32 `xml:"home_goals,attr,omitempty"`
 	AwayGoals            *uint32 `xml:"away_goals,attr,omitempty"`
+	Time                 *uint32 `xml:"time,attr,omitempty"`
+	GameTime             *uint32 `xml:"game_time,attr,omitempty"`
 }

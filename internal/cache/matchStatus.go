@@ -79,6 +79,8 @@ type scoreboardImpl struct {
 	awayDestroyedTowers  *int32
 	homeGoals            *uint32
 	awayGoals            *uint32
+	time                 *uint32
+	gameTime             *uint32
 }
 
 func (s scoreboardImpl) CurrentCTTeam() *uint32 {
@@ -135,6 +137,14 @@ func (s scoreboardImpl) HomeGoals() *uint32 {
 
 func (s scoreboardImpl) AwayGoals() *uint32 {
 	return s.awayGoals
+}
+
+func (s scoreboardImpl) Time() *uint32 {
+	return s.time
+}
+
+func (s scoreboardImpl) GameTime() *uint32 {
+	return s.gameTime
 }
 
 // MatchStatusCache ...
@@ -318,6 +328,8 @@ func (m MatchStatusCache) makeFeedScoreboard(scoreboard *feedXML.Scoreboard) pro
 		awayDestroyedTowers:  scoreboard.AwayDestroyedTowers,
 		homeGoals:            scoreboard.HomeGoals,
 		awayGoals:            scoreboard.AwayGoals,
+		time:                 scoreboard.Time,
+		gameTime:             scoreboard.GameTime,
 	}
 }
 
@@ -337,6 +349,8 @@ func (m MatchStatusCache) makeAPIScoreboard(scoreboard *apiXML.Scoreboard) proto
 		awayDestroyedTowers:  scoreboard.AwayDestroyedTowers,
 		homeGoals:            scoreboard.HomeGoals,
 		awayGoals:            scoreboard.AwayGoals,
+		time:                 scoreboard.Time,
+		gameTime:             scoreboard.GameTime,
 	}
 }
 
