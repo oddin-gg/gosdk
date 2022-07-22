@@ -63,6 +63,10 @@ func (o configuration) SetMQURL(url string) {
 	o.forcedMQURL = url
 }
 
+func (o configuration) SetMessagingPort(port int) {
+	o.messagingPort = port
+}
+
 func (o configuration) APIURL() (string, error) {
 	if len(o.forcedAPIURL) == 0 {
 		return o.SelectedEnvironment().APIEndpoint()

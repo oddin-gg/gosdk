@@ -66,6 +66,7 @@ type OddsFeedConfiguration interface {
 	ReportExtendedData() bool
 	SetAPIURL(url string)
 	SetMQURL(url string)
+	SetMessagingPort(port int)
 	APIURL() (string, error)
 	MQURL() (string, error)
 }
