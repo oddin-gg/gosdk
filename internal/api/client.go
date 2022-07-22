@@ -411,7 +411,7 @@ func (c *Client) Close() {
 }
 
 func (c *Client) makeRequest(path, method string) (*http.Request, error) {
-	basePath, err := c.cfg.SelectedEnvironment().APIEndpoint()
+	basePath, err := c.cfg.APIURL()
 	if err != nil {
 		return nil, err
 	}

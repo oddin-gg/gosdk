@@ -1,9 +1,9 @@
 package producer
 
 import (
-	errors "github.com/pkg/errors"
 	"github.com/oddin-gg/gosdk/internal/api/xml"
 	"github.com/oddin-gg/gosdk/protocols"
+	errors "github.com/pkg/errors"
 	"time"
 )
 
@@ -161,7 +161,7 @@ func buildProducerImpl(producerData *data) (*producerImpl, error) {
 }
 
 func buildProducerImplFromUnknown(unknownProducerID uint, cfg protocols.OddsFeedConfiguration) (*producerImpl, error) {
-	apiURL, err := cfg.SelectedEnvironment().APIEndpoint()
+	apiURL, err := cfg.APIURL()
 	if err != nil {
 		return nil, err
 	}

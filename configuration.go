@@ -11,6 +11,8 @@ type configuration struct {
 	sdkNodeID                   *int
 	selectedEnvironment         *protocols.Environment
 	reportExtendedData          bool
+	forcedAPIURL                string
+	forcedMQURL                 string
 }
 
 func (o configuration) ExchangeName() string {
@@ -51,6 +53,30 @@ func (o configuration) SelectedEnvironment() *protocols.Environment {
 
 func (o configuration) ReportExtendedData() bool {
 	return o.reportExtendedData
+}
+
+func (o configuration) SetAPIURL(url string) {
+	o.forcedAPIURL = url
+}
+
+func (o configuration) SetMQURL(url string) {
+	o.forcedMQURL = url
+}
+
+func (o configuration) APIURL() (string, error) {
+	if len(o.forcedAPIURL) == 0 {
+		return o.SelectedEnvironment().APIEndpoint()
+	}
+
+	return o.forcedAPIURL, nil
+}
+
+func (o configuration) MQURL() (string, error) {
+	if len(o.forcedMQURL) == 0 {
+		return o.SelectedEnvironment().MQEndpoint()
+	}
+
+	return o.forcedMQURL, nil
 }
 
 // NewConfiguration ...

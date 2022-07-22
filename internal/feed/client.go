@@ -85,7 +85,7 @@ func (c *Client) Close() {
 
 // Open ...
 func (c *Client) Open() error {
-	mqURL, err := c.oddsFeedConfiguration.SelectedEnvironment().MQEndpoint()
+	mqURL, err := c.oddsFeedConfiguration.MQURL()
 	if err != nil {
 		return err
 	}
