@@ -55,16 +55,19 @@ func (o configuration) ReportExtendedData() bool {
 	return o.reportExtendedData
 }
 
-func (o configuration) SetAPIURL(url string) {
+func (o configuration) SetAPIURL(url string) protocols.OddsFeedConfiguration {
 	o.forcedAPIURL = url
+	return o
 }
 
-func (o configuration) SetMQURL(url string) {
+func (o configuration) SetMQURL(url string) protocols.OddsFeedConfiguration {
 	o.forcedMQURL = url
+	return o
 }
 
-func (o configuration) SetMessagingPort(port int) {
+func (o configuration) SetMessagingPort(port int) protocols.OddsFeedConfiguration {
 	o.messagingPort = port
+	return o
 }
 
 func (o configuration) APIURL() (string, error) {

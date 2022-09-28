@@ -64,9 +64,9 @@ type OddsFeedConfiguration interface {
 	ExchangeName() string
 	ReplayExchangeName() string
 	ReportExtendedData() bool
-	SetAPIURL(url string)
-	SetMQURL(url string)
-	SetMessagingPort(port int)
+	SetAPIURL(url string) OddsFeedConfiguration
+	SetMQURL(url string) OddsFeedConfiguration
+	SetMessagingPort(port int) OddsFeedConfiguration
 	APIURL() (string, error)
 	MQURL() (string, error)
 }
