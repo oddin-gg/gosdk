@@ -50,6 +50,7 @@ type PeriodScore interface {
 // Scoreboard ...
 type Scoreboard interface {
 	CurrentCTTeam() *uint32
+	CurrentDefenderTeam() *uint32
 	HomeWonRounds() *uint32
 	AwayWonRounds() *uint32
 	CurrentRound() *uint32
