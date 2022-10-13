@@ -320,7 +320,10 @@ func (o *oddsFeedImpl) init() error {
 
 	entityFactory := factory.NewEntityFactory(o.cacheManager)
 
-	marketDescriptionFactory := factory.NewMarketDescriptionFactory(o.cacheManager.MarketDescriptionCache)
+	marketDescriptionFactory := factory.NewMarketDescriptionFactory(
+		o.cacheManager.MarketDescriptionCache,
+		o.cacheManager.MarketVoidReasonsCache,
+	)
 	marketDataFactory := factory.NewMarketDataFactory(o.cfg, marketDescriptionFactory)
 	marketFactory := factory.NewMarketFactory(
 		marketDataFactory,

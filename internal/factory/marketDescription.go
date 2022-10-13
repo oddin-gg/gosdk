@@ -8,6 +8,7 @@ import (
 // MarketDescriptionFactory ...
 type MarketDescriptionFactory struct {
 	marketDescriptionCache *cache.MarketDescriptionCache
+	marketVoidReasonsCache *cache.MarketVoidReasonsCache
 }
 
 // MarketDescriptionByID ...
@@ -19,6 +20,43 @@ func (m MarketDescriptionFactory) MarketDescriptionByID(marketID uint, specifier
 	}
 
 	return cache.NewMarketDescription(marketID, variant, m.marketDescriptionCache, locales)
+}
+
+// MarketVoidReasons ...
+func (m MarketDescriptionFactory) MarketVoidReasons() ([]protocols.MarketVoidReason, error) {
+	data, err := m.marketVoidReasonsCache.MarketVoidReasons()
+	if err != nil {
+		return nil, err
+	}
+
+	result := make([]protocols.MarketVoidReason, len(data))
+	for i, d := range data {
+
+		params := make([]string, len(d.VoidReasonParams))
+		for i, p := range d.VoidReasonParams {
+			params[i] = p.Name
+		}
+
+		description := cache.NewMarketVoidReason(
+			d.ID,
+			d.Name,
+			d.Description,
+			d.Template,
+			params,
+		)
+		result[i] = description
+	}
+
+	return result, nil
+}
+
+// ReloadMarketVoidReasons ...
+func (m MarketDescriptionFactory) ReloadMarketVoidReasons() ([]protocols.MarketVoidReason, error) {
+	if err := m.marketVoidReasonsCache.ReloadMarketVoidReasons(); err != nil {
+		return nil, err
+	}
+
+	return m.MarketVoidReasons()
 }
 
 // MarketDescriptions ...
@@ -43,8 +81,12 @@ func (m MarketDescriptionFactory) MarketDescriptions(locale protocols.Locale) ([
 }
 
 // NewMarketDescriptionFactory ...
-func NewMarketDescriptionFactory(marketDescriptionCache *cache.MarketDescriptionCache) *MarketDescriptionFactory {
+func NewMarketDescriptionFactory(
+	marketDescriptionCache *cache.MarketDescriptionCache,
+	marketVoidReasonsCache *cache.MarketVoidReasonsCache,
+) *MarketDescriptionFactory {
 	return &MarketDescriptionFactory{
 		marketDescriptionCache: marketDescriptionCache,
+		marketVoidReasonsCache: marketVoidReasonsCache,
 	}
 }

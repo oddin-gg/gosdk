@@ -17,6 +17,7 @@ type Manager struct {
 	MatchStatusCache           *MatchStatusCache
 	LocalizedStaticMatchStatus *LocalizedStaticDataCache
 	logger                     *log.Logger
+	MarketVoidReasonsCache     *MarketVoidReasonsCache
 }
 
 // OnFeedMessageReceived ...
@@ -53,6 +54,8 @@ func NewManager(client *api.Client, oddsFeedConfiguration protocols.OddsFeedConf
 		TournamentCache:        newTournamentCache(client, logger),
 		MatchCache:             newMatchCache(client, logger),
 		MatchStatusCache:       newMatchStatusCache(client, oddsFeedConfiguration, logger),
+		MarketVoidReasonsCache: newMarketVoidReasonsCache(client),
+
 		LocalizedStaticMatchStatus: newLocalizedStaticDataCache(oddsFeedConfiguration, func(locale protocols.Locale) ([]protocols.StaticData, error) {
 			data, err := client.FetchMatchStatusDescriptions(locale)
 			if err != nil {

@@ -28,6 +28,16 @@ func (m Manager) ClearMarketDescription(marketID uint, variant *string) {
 	m.cacheManager.MarketDescriptionCache.ClearCacheItem(marketID, variant)
 }
 
+// MarketVoidReasons ...
+func (m Manager) MarketVoidReasons() ([]protocols.MarketVoidReason, error) {
+	return m.marketDescriptionFactory.MarketVoidReasons()
+}
+
+// ReloadMarketVoidReasons ...
+func (m Manager) ReloadMarketVoidReasons() ([]protocols.MarketVoidReason, error) {
+	return m.marketDescriptionFactory.ReloadMarketVoidReasons()
+}
+
 // NewManager ...
 func NewManager(cacheManager *cache.Manager, marketDescriptionFactory *factory.MarketDescriptionFactory, oddsFeedConfiguration protocols.OddsFeedConfiguration) *Manager {
 	return &Manager{
