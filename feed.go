@@ -110,8 +110,13 @@ func (o *oddsFeedImpl) ReplayManager() (protocols.ReplayManager, error) {
 
 func (o *oddsFeedImpl) Close() error {
 	o.opened = false
-	o.recoveryManager.Close()
-	o.apiClient.Close()
+	if o.recoveryManager != nil {
+		o.recoveryManager.Close()
+	}
+
+	if o.apiClient != nil {
+		o.apiClient.Close()
+	}
 
 	if o.sessionMap != nil {
 		for _, value := range o.sessionMap {
@@ -123,8 +128,13 @@ func (o *oddsFeedImpl) Close() error {
 		close(o.closeCh)
 	}
 
-	o.cacheManager.Close()
-	o.rabbitMQClient.Close()
+	if o.cacheManager != nil {
+		o.cacheManager.Close()
+	}
+
+	if o.rabbitMQClient != nil {
+		o.rabbitMQClient.Close()
+	}
 
 	if o.msgCh != nil {
 		close(o.msgCh)
