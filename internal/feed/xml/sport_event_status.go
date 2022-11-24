@@ -66,4 +66,8 @@ type Scoreboard struct {
 	Time                 *uint32 `xml:"time,attr,omitempty"`
 	GameTime             *uint32 `xml:"game_time,attr,omitempty"`
 	CurrentDefenderTeam  *uint32 `xml:"current_def_team,attr,omitempty"`
+	// VirtualBasketballScoreboard
+	HomePoints        *uint32 `xml:"home_points,attr,omitempty"`
+	AwayPoints        *uint32 `xml:"away_points,attr,omitempty"`
+	RemainingGameTime *uint32 `xml:"remaining_game_time,attr,omitempty"`
 }

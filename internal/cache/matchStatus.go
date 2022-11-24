@@ -82,6 +82,10 @@ type scoreboardImpl struct {
 	time                 *uint32
 	gameTime             *uint32
 	currentDefenderTeam  *uint32
+	// VirtualBasketballScoreboard
+	homePoints        *uint32
+	awayPoints        *uint32
+	remainingGameTime *uint32
 }
 
 func (s scoreboardImpl) CurrentCTTeam() *uint32 {
@@ -90,6 +94,18 @@ func (s scoreboardImpl) CurrentCTTeam() *uint32 {
 
 func (s scoreboardImpl) CurrentDefenderTeam() *uint32 {
 	return s.currentDefenderTeam
+}
+
+func (s scoreboardImpl) HomePoints() *uint32 {
+	return s.homePoints
+}
+
+func (s scoreboardImpl) AwayPoints() *uint32 {
+	return s.awayPoints
+}
+
+func (s scoreboardImpl) RemainingGameTime() *uint32 {
+	return s.remainingGameTime
 }
 
 func (s scoreboardImpl) HomeWonRounds() *uint32 {
@@ -336,6 +352,9 @@ func (m MatchStatusCache) makeFeedScoreboard(scoreboard *feedXML.Scoreboard) pro
 		time:                 scoreboard.Time,
 		gameTime:             scoreboard.GameTime,
 		currentDefenderTeam:  scoreboard.CurrentDefenderTeam,
+		homePoints:           scoreboard.HomePoints,
+		awayPoints:           scoreboard.AwayPoints,
+		remainingGameTime:    scoreboard.RemainingGameTime,
 	}
 }
 
@@ -358,6 +377,9 @@ func (m MatchStatusCache) makeAPIScoreboard(scoreboard *apiXML.Scoreboard) proto
 		time:                 scoreboard.Time,
 		gameTime:             scoreboard.GameTime,
 		currentDefenderTeam:  scoreboard.CurrentDefenderTeam,
+		homePoints:           scoreboard.HomePoints,
+		awayPoints:           scoreboard.AwayPoints,
+		remainingGameTime:    scoreboard.RemainingGameTime,
 	}
 }
 
