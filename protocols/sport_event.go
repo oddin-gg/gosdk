@@ -45,6 +45,8 @@ type PeriodScore interface {
 	AwayKills() *int32
 	HomeGoals() *uint32
 	AwayGoals() *uint32
+	HomePoints() *uint32
+	AwayPoints() *uint32
 }
 
 // Scoreboard ...

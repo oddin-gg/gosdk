@@ -10,12 +10,19 @@ type PeriodScore struct {
 	RoundsPeriodScore
 	KillsPeriodsScore
 	GoalsPeriodsScore
+	PointsPeriodScore
 }
 
 // RoundsPeriodScore ...
 type RoundsPeriodScore struct {
 	HomeWonRounds *uint32 `xml:"home_won_rounds,attr,omitempty"`
 	AwayWonRounds *uint32 `xml:"away_won_rounds,attr,omitempty"`
+}
+
+// PointsPeriodScore ...
+type PointsPeriodScore struct {
+	HomePoints *uint32 `xml:"home_points,attr,omitempty"`
+	AwayPoints *uint32 `xml:"away_points,attr,omitempty"`
 }
 
 // KillsPeriodsScore ...
