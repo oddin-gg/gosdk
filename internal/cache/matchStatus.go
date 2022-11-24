@@ -2,14 +2,17 @@ package cache
 
 import (
 	"errors"
+	"time"
+
 	"github.com/oddin-gg/gosdk/internal/api"
 	apiXML "github.com/oddin-gg/gosdk/internal/api/xml"
 	feedXML "github.com/oddin-gg/gosdk/internal/feed/xml"
 	"github.com/oddin-gg/gosdk/protocols"
 	"github.com/patrickmn/go-cache"
 	log "github.com/sirupsen/logrus"
-	"time"
 )
+
+var _ protocols.PeriodScore = (*periodScoreImpl)(nil)
 
 type periodScoreImpl struct {
 	homeScore       float64
@@ -22,6 +25,8 @@ type periodScoreImpl struct {
 	awayKills       *int32
 	homeGoals       *uint32
 	awayGoals       *uint32
+	homePoints      *uint32
+	awayPoints      *uint32
 }
 
 func (p periodScoreImpl) HomeGoals() *uint32 {
@@ -62,6 +67,14 @@ func (p periodScoreImpl) HomeKills() *int32 {
 
 func (p periodScoreImpl) AwayKills() *int32 {
 	return p.awayKills
+}
+
+func (p periodScoreImpl) HomePoints() *uint32 {
+	return p.homePoints
+}
+
+func (p periodScoreImpl) AwayPoints() *uint32 {
+	return p.awayPoints
 }
 
 type scoreboardImpl struct {
@@ -306,6 +319,8 @@ func (m MatchStatusCache) mapAPIPeriodScores(periodScores []*apiXML.PeriodScore)
 			awayKills:       periodScore.AwayKills,
 			homeGoals:       periodScore.HomeGoals,
 			awayGoals:       periodScore.AwayGoals,
+			homePoints:      periodScore.HomePoints,
+			awayPoints:      periodScore.AwayPoints,
 		}
 	}
 
@@ -327,6 +342,8 @@ func (m MatchStatusCache) mapFeedPeriodScores(periodScores []*feedXML.PeriodScor
 			awayKills:       periodScore.AwayKills,
 			homeGoals:       periodScore.HomeGoals,
 			awayGoals:       periodScore.AwayGoals,
+			homePoints:      periodScore.HomePoints,
+			awayPoints:      periodScore.AwayPoints,
 		}
 	}
 
