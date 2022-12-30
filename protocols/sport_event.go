@@ -35,6 +35,7 @@ type SportEvent interface {
 
 // PeriodScore ...
 type PeriodScore interface {
+	Type() string
 	HomeScore() float64
 	AwayScore() float64
 	PeriodNumber() uint

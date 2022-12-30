@@ -15,6 +15,7 @@ import (
 var _ protocols.PeriodScore = (*periodScoreImpl)(nil)
 
 type periodScoreImpl struct {
+	periodType      string
 	homeScore       float64
 	awayScore       float64
 	periodNumber    uint
@@ -27,6 +28,10 @@ type periodScoreImpl struct {
 	awayGoals       *uint32
 	homePoints      *uint32
 	awayPoints      *uint32
+}
+
+func (p periodScoreImpl) Type() string {
+	return p.periodType
 }
 
 func (p periodScoreImpl) HomeGoals() *uint32 {
@@ -309,6 +314,7 @@ func (m MatchStatusCache) mapAPIPeriodScores(periodScores []*apiXML.PeriodScore)
 	for i := range periodScores {
 		periodScore := periodScores[i]
 		result[i] = periodScoreImpl{
+			periodType:      periodScore.Type,
 			homeScore:       periodScore.HomeScore,
 			awayScore:       periodScore.AwayScore,
 			periodNumber:    periodScore.Number,
@@ -332,6 +338,7 @@ func (m MatchStatusCache) mapFeedPeriodScores(periodScores []*feedXML.PeriodScor
 	for i := range periodScores {
 		periodScore := periodScores[i]
 		result[i] = periodScoreImpl{
+			periodType:      periodScore.Type,
 			homeScore:       periodScore.HomeScore,
 			awayScore:       periodScore.AwayScore,
 			periodNumber:    periodScore.Number,
