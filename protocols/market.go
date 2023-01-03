@@ -46,6 +46,8 @@ type MarketWithSettlement interface {
 // MarketCancel ...
 type MarketCancel interface {
 	Market
+	VoidReasonID() *uint
+	VoidReasonParams() *string
 }
 
 // OutcomeDescription ...
@@ -72,9 +74,20 @@ type MarketDescription interface {
 	Specifiers() ([]Specifier, error)
 }
 
+// MarketVoidReason ...
+type MarketVoidReason interface {
+	ID() uint
+	Name() string
+	Description() *string
+	Template() *string
+	Params() []string
+}
+
 // MarketDescriptionManager ...
 type MarketDescriptionManager interface {
 	MarketDescriptions() ([]MarketDescription, error)
 	LocalizedMarketDescriptions(locale Locale) ([]MarketDescription, error)
 	ClearMarketDescription(marketID uint, variant *string)
+	MarketVoidReasons() ([]MarketVoidReason, error)
+	ReloadMarketVoidReasons() ([]MarketVoidReason, error)
 }

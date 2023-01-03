@@ -200,11 +200,13 @@ func (m marketWithSettlementImpl) OutcomeSettlements() []protocols.OutcomeSettle
 }
 
 type marketCancelImpl struct {
-	id         uint
-	refID      *uint
-	specifiers map[string]string
-	marketData protocols.MarketData
-	locale     protocols.Locale
+	id               uint
+	refID            *uint
+	specifiers       map[string]string
+	marketData       protocols.MarketData
+	locale           protocols.Locale
+	voidReasonID     *uint
+	voidReasonParams *string
 }
 
 func (m marketCancelImpl) ID() uint {
@@ -225,4 +227,12 @@ func (m marketCancelImpl) Name() (*string, error) {
 
 func (m marketCancelImpl) LocalizedName(locale protocols.Locale) (*string, error) {
 	return m.marketData.MarketName(locale)
+}
+
+func (m marketCancelImpl) VoidReasonID() *uint {
+	return m.voidReasonID
+}
+
+func (m marketCancelImpl) VoidReasonParams() *string {
+	return m.voidReasonParams
 }

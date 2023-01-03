@@ -130,6 +130,7 @@ func (e *Example) apiExamples() {
 }
 
 func (e *Example) workWithMarketManager() error {
+	// display markets
 	markets, err := e.marketManager.MarketDescriptions()
 	if err != nil {
 		return err
@@ -147,6 +148,24 @@ func (e *Example) workWithMarketManager() error {
 		for _, outcomeDesc := range outcomeDescriptions {
 			log.Println("   Outcome:", *outcomeDesc.LocalizedName(locale))
 		}
+	}
+
+	// display void reasons
+	voidReasons, err := e.marketManager.MarketVoidReasons()
+	if err != nil {
+		return err
+	}
+
+	for _, v := range voidReasons {
+		description := "(nil)"
+		if v.Description() != nil {
+			description = *v.Description()
+		}
+		template := "(nil)"
+		if v.Template() != nil {
+			template = *v.Template()
+		}
+		log.Println("Void Reason:", v.ID(), "|", v.Name(), "|", description, "|", template, "|", v.Params())
 	}
 
 	return nil
@@ -425,7 +444,24 @@ func (e *Example) processBetCancel(msg protocols.BetCancel) {
 	}
 
 	log.Printf("betCancel received for: %s", *name)
-	log.Printf("betCancel sport: %s", sportURN.ToString())
+	log.Printf("betCancel sport: %s\n", sportURN.ToString())
+
+	for _, m := range msg.Markets() {
+		marketName, err := m.LocalizedName(locale)
+		if err != nil {
+			log.Println(err)
+			return
+		}
+		voidReasonID := uint(0)
+		if m.VoidReasonID() != nil {
+			voidReasonID = *m.VoidReasonID()
+		}
+		voidReasonParams := "(nil)"
+		if m.VoidReasonParams() != nil {
+			voidReasonParams = *m.VoidReasonParams()
+		}
+		log.Printf("Canceled market: '%v'; VoidReasonID: %d; VoidReasonParams: %v\n", *marketName, voidReasonID, voidReasonParams)
+	}
 }
 
 func (e *Example) processBetSettlement(msg protocols.BetSettlement) {

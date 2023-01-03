@@ -15,7 +15,9 @@ type MarketAttributes struct {
 // MarketWithoutOutcome ...
 type MarketWithoutOutcome struct {
 	MarketAttributes
-	VoidReason int `xml:"void_reason,attr,omitempty"`
+	VoidReason       int     `xml:"void_reason,attr,omitempty"`
+	VoidReasonID     *uint   `xml:"void_reason_id,attr,omitempty"`
+	VoidReasonParams *string `xml:"void_reason_params,attr,omitempty"`
 }
 
 // MarketWithOutcome ...

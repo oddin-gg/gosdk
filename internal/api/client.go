@@ -199,6 +199,15 @@ func (c *Client) FetchMarketDescriptions(locale protocols.Locale) ([]data.Market
 	return resp.Markets, nil
 }
 
+// FetchMarketVoidReasons ...
+func (c *Client) FetchMarketVoidReasons() ([]data.MarketVoidReasons, error) {
+	var resp data.MarketVoidReasonsResponse
+	if err := c.fetchData("/descriptions/void_reasons", &resp, nil); err != nil {
+		return nil, err
+	}
+	return resp.VoidReasons, nil
+}
+
 // PostEventStatefulRecovery ...
 func (c *Client) PostEventStatefulRecovery(producerName string, eventID protocols.URN, requestID uint, nodeID *int) (bool, error) {
 	path := fmt.Sprintf("/%s/stateful_messages/events/%s/initiate_request?request_id=%d", producerName, eventID.ToString(), requestID)

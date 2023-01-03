@@ -62,11 +62,13 @@ func (m MarketFactory) BuildMarketCancel(event interface{}, market *feedXML.Mark
 	marketData := m.marketDataFactory.BuildMarketData(event, market.ID, specifiersMap)
 
 	return marketCancelImpl{
-		id:         market.ID,
-		refID:      market.RefID,
-		specifiers: specifiersMap,
-		marketData: marketData,
-		locale:     m.locales[0],
+		id:               market.ID,
+		refID:            market.RefID,
+		specifiers:       specifiersMap,
+		marketData:       marketData,
+		locale:           m.locales[0],
+		voidReasonID:     market.VoidReasonID,
+		voidReasonParams: market.VoidReasonParams,
 	}
 }
 
