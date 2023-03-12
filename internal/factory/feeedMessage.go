@@ -1,10 +1,11 @@
 package factory
 
 import (
-	"github.com/pkg/errors"
+	"time"
+
 	feedXML "github.com/oddin-gg/gosdk/internal/feed/xml"
 	"github.com/oddin-gg/gosdk/protocols"
-	"time"
+	"github.com/pkg/errors"
 )
 
 // FeedMessageFactory ...
@@ -80,6 +81,24 @@ func (f *FeedMessageFactory) BuildMessage(feedMessage *protocols.FeedMessage) (i
 			rawMessage: feedMessage.RawMessage,
 			message:    msg,
 			event:      event,
+		}, nil
+	case *feedXML.RollbackBetSettlement:
+		return rollbackBetSettlementImpl{
+			producer:      producer,
+			timestamp:     timestamp,
+			rawMessage:    feedMessage.RawMessage,
+			message:       msg,
+			event:         event,
+			marketFactory: f.marketFactory,
+		}, nil
+	case *feedXML.RollbackBetCancel:
+		return rollbackBetCancelImpl{
+			producer:      producer,
+			timestamp:     timestamp,
+			rawMessage:    feedMessage.RawMessage,
+			message:       msg,
+			event:         event,
+			marketFactory: f.marketFactory,
 		}, nil
 	default:
 		return nil, errors.Errorf("unknown message type %s", msg)
@@ -387,4 +406,86 @@ func (f fixtureChangeImpl) ChangeType() protocols.FixtureChangeType {
 	default:
 		return protocols.UnknownFixtureChangeType
 	}
+}
+
+type rollbackBetSettlementImpl struct {
+	producer      protocols.Producer
+	timestamp     protocols.MessageTimestamp
+	rawMessage    []byte
+	message       *feedXML.RollbackBetSettlement
+	event         interface{}
+	marketFactory *MarketFactory
+	markets       []protocols.Market
+}
+
+func (m rollbackBetSettlementImpl) Producer() protocols.Producer {
+	return m.producer
+}
+
+func (m rollbackBetSettlementImpl) Timestamp() protocols.MessageTimestamp {
+	return m.timestamp
+}
+
+func (m rollbackBetSettlementImpl) RequestID() *uint {
+	return m.message.RequestID
+}
+
+func (m rollbackBetSettlementImpl) RawMessage() []byte {
+	return m.rawMessage
+}
+
+func (m rollbackBetSettlementImpl) Event() interface{} {
+	return m.event
+}
+
+func (m rollbackBetSettlementImpl) RolledBackSettledMarkets() []protocols.Market {
+	if m.markets == nil {
+		m.markets = make([]protocols.Market, len(m.message.Markets))
+		for i, market := range m.message.Markets {
+			m.markets[i] = m.marketFactory.BuildMarket(m.event, &market.MarketAttributes)
+		}
+	}
+
+	return m.markets
+}
+
+type rollbackBetCancelImpl struct {
+	producer      protocols.Producer
+	timestamp     protocols.MessageTimestamp
+	rawMessage    []byte
+	message       *feedXML.RollbackBetCancel
+	event         interface{}
+	marketFactory *MarketFactory
+	markets       []protocols.Market
+}
+
+func (m rollbackBetCancelImpl) Producer() protocols.Producer {
+	return m.producer
+}
+
+func (m rollbackBetCancelImpl) Timestamp() protocols.MessageTimestamp {
+	return m.timestamp
+}
+
+func (m rollbackBetCancelImpl) RequestID() *uint {
+	return m.message.RequestID
+}
+
+func (m rollbackBetCancelImpl) RawMessage() []byte {
+	return m.rawMessage
+}
+
+func (m rollbackBetCancelImpl) Event() interface{} {
+	return m.event
+}
+
+func (m rollbackBetCancelImpl) RolledBackCanceledMarkets() []protocols.Market {
+	if m.markets == nil {
+		m.markets = make([]protocols.Market, len(m.message.Markets))
+		for i, market := range m.message.Markets {
+			m.markets[i] = m.marketFactory.BuildMarket(m.event, &market.MarketAttributes)
+		}
+	}
+
+	return m.markets
 }

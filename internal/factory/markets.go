@@ -14,6 +14,19 @@ type MarketFactory struct {
 	logger            *log.Logger
 }
 
+// BuildMarket ...
+func (m MarketFactory) BuildMarket(event interface{}, market *feedXML.MarketAttributes) protocols.Market {
+	specifiersMap := m.extractSpecifiers(market.Specifiers)
+	marketData := m.marketDataFactory.BuildMarketData(event, market.ID, specifiersMap)
+	return marketImpl{
+		id:         market.ID,
+		refID:      market.RefID,
+		specifiers: specifiersMap,
+		marketData: marketData,
+		locale:     m.locales[0],
+	}
+}
+
 // BuildMarketWithOdds ...
 func (m MarketFactory) BuildMarketWithOdds(event interface{}, market *feedXML.MarketWithOutcome) protocols.MarketWithOdds {
 	specifiersMap := m.extractSpecifiers(market.Specifiers)

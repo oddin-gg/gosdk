@@ -373,6 +373,10 @@ func (e *Example) handleFeedMessage(sessionMsg protocols.SessionMessage, request
 		e.processBetCancel(msg)
 	case protocols.BetSettlement:
 		e.processBetSettlement(msg)
+	case protocols.RollbackBetSettlement:
+		e.processRollbackBetSettlement(msg)
+	case protocols.RollbackBetCancel:
+		e.processRollbackBetCancel(msg)
 	default:
 		log.Printf("unknown msg type %T", msg)
 	}
@@ -491,4 +495,58 @@ func leftN(s string, n int) string {
 
 func (e *Example) stop() {
 	e.closeCh <- true
+}
+
+func (e *Example) processRollbackBetSettlement(msg protocols.RollbackBetSettlement) {
+	sportEvent := msg.Event().(protocols.SportEvent)
+	name, err := sportEvent.LocalizedName(locale)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
+	sportURN, err := sportEvent.SportID()
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
+	log.Printf("rollbackBetSettlement received for: %s", *name)
+	log.Printf("rollbackBetSettlement sport: %s\n", sportURN.ToString())
+
+	for _, m := range msg.RolledBackSettledMarkets() {
+		marketName, err := m.LocalizedName(locale)
+		if err != nil {
+			log.Println(err)
+			return
+		}
+		log.Printf("Rollback Bet Settlement: '%v'\n", *marketName)
+	}
+}
+
+func (e *Example) processRollbackBetCancel(msg protocols.RollbackBetCancel) {
+	sportEvent := msg.Event().(protocols.SportEvent)
+	name, err := sportEvent.LocalizedName(locale)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
+	sportURN, err := sportEvent.SportID()
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
+	log.Printf("processRollbackBetCancel received for: %s", *name)
+	log.Printf("processRollbackBetCancel sport: %s\n", sportURN.ToString())
+
+	for _, m := range msg.RolledBackCanceledMarkets() {
+		marketName, err := m.LocalizedName(locale)
+		if err != nil {
+			log.Println(err)
+			return
+		}
+		log.Printf("Rollback Bet Cancel: '%v'\n", *marketName)
+	}
 }
