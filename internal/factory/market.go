@@ -72,6 +72,7 @@ type outcomeSettlementImpl struct {
 	marketData protocols.MarketData
 	locale     protocols.Locale
 	result     *feedXML.OutcomeResult
+	voidFactor *float32
 }
 
 func (o outcomeSettlementImpl) ID() uint {
@@ -100,6 +101,19 @@ func (o outcomeSettlementImpl) OutcomeResult() protocols.OutcomeResult {
 		return protocols.UndecidedYetOutcomeResult
 	default:
 		return protocols.UnknownOutcomeResult
+	}
+}
+
+func (o outcomeSettlementImpl) VoidFactor() *protocols.VoidFactor {
+	switch {
+	case o.voidFactor != nil && *o.voidFactor == 0.5:
+		v := protocols.VoidFactorRefundHalf
+		return &v
+	case o.voidFactor != nil && *o.voidFactor == 1.0:
+		v := protocols.VoidFactorRefundFull
+		return &v
+	default:
+		return nil
 	}
 }
 

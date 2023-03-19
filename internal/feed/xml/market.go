@@ -63,5 +63,6 @@ type Outcome struct {
 	Probabilities *float32 `xml:"probabilities,attr,omitempty"`
 	Active        *uint    `xml:"active,attr"`
 	// Settlement outcome fields
-	Result *OutcomeResult `xml:"result,attr,omitempty"`
+	Result     *OutcomeResult `xml:"result,attr,omitempty"`
+	VoidFactor *float32       `xml:"void_factor,attr,omitempty"`
 }

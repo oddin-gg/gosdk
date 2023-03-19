@@ -480,6 +480,14 @@ func (e *Example) processBetSettlement(msg protocols.BetSettlement) {
 
 	log.Printf("betSettlement received for: %s", *name)
 	log.Printf("betSettlement sport: %s", sportURN.ToString())
+
+	for _, m := range msg.Markets() {
+		for _, o := range m.OutcomeSettlements() {
+			if o.VoidFactor() != nil {
+				log.Printf("outcome with void factor %f", *o.VoidFactor())
+			}
+		}
+	}
 }
 
 func leftN(s string, n int) string {
