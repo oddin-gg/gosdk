@@ -115,6 +115,7 @@ func (m MarketFactory) buildOutcomeSettlement(outcome feedXML.Outcome, marketDat
 		marketData: marketData,
 		locale:     locale,
 		result:     outcome.Result,
+		voidFactor: outcome.VoidFactor,
 	}
 }
 

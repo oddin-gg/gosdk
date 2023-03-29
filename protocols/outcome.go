@@ -9,6 +9,26 @@ const (
 	AmericanOddsDisplayType OddsDisplayType = 2
 )
 
+// VoidFactor ...
+type VoidFactor float64
+
+const (
+	VoidFactorRefundHalf VoidFactor = 0.5
+	VoidFactorRefundFull VoidFactor = 1.0
+)
+
+// String representation of the type
+func (v VoidFactor) String() string {
+	switch v {
+	case VoidFactorRefundFull:
+		return "REFUND_FULL"
+	case VoidFactorRefundHalf:
+		return "REFUND_HALF"
+	default:
+		return ""
+	}
+}
+
 // Outcome ...
 type Outcome interface {
 	ID() uint
@@ -45,4 +65,5 @@ const (
 type OutcomeSettlement interface {
 	Outcome
 	OutcomeResult() OutcomeResult
+	VoidFactor() *VoidFactor
 }
