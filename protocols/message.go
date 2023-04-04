@@ -2,7 +2,7 @@ package protocols
 
 import "time"
 
-//RoutingKeyInfo ...
+// RoutingKeyInfo ...
 type RoutingKeyInfo struct {
 	FullRoutingKey     string
 	SportID            *URN
@@ -109,4 +109,18 @@ type ProducerStatus interface {
 	IsDown() bool
 	IsDelayed() bool
 	ProducerStatusReason() ProducerStatusReason
+}
+
+// RollbackBetSettlement ...
+type RollbackBetSettlement interface {
+	RequestMessage
+	EventMessage
+	RolledBackSettledMarkets() []Market
+}
+
+// RollbackBetCancel ...
+type RollbackBetCancel interface {
+	RequestMessage
+	EventMessage
+	RolledBackCanceledMarkets() []Market
 }

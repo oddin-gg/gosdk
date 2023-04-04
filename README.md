@@ -92,23 +92,27 @@ func handleRecoveryMessage(recoveryMsg *protocols.RecoveryMessage) {
 Handle Feed messages:
 ```go
 func handleFeedMessage(sessionMsg protocols.SessionMessage, requestID *uint) {
-	if requestID == nil {
-		// if producer is down, message is out of order - not recovered and no request id
-		log.Print("message out of order")
-	}
+    if requestID == nil {
+        // if producer is down, message is out of order - not recovered and no request id
+        log.Print("message out of order")
+    }
 
-	switch msg := sessionMsg.Message.(type) {
-	case protocols.OddsChange:
-		e.processOddsChange(msg)
-	case protocols.FixtureChangeMessage:
-		e.processFixtureChange(msg)
-	case protocols.BetCancel:
-		e.processBetCancel(msg)
-	case protocols.BetSettlement:
-		e.processBetSettlement(msg)
-	default:
-		log.Printf("unknown msg type %T", msg)
-	}
+    switch msg := sessionMsg.Message.(type) {
+    case protocols.OddsChange:
+        e.processOddsChange(msg)
+    case protocols.FixtureChangeMessage:
+        e.processFixtureChange(msg)
+    case protocols.BetCancel:
+        e.processBetCancel(msg)
+    case protocols.BetSettlement:
+        e.processBetSettlement(msg)
+    case protocols.RollbackBetSettlement:
+        e.processRollbackBetSettlement(msg)
+    case protocols.RollbackBetCancel:
+        e.processRollbackBetCancel(msg)
+    default:
+        log.Printf("unknown msg type %T", msg)
+    }
 }
 ```
 

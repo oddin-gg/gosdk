@@ -250,3 +250,31 @@ func (m marketCancelImpl) VoidReasonID() *uint {
 func (m marketCancelImpl) VoidReasonParams() *string {
 	return m.voidReasonParams
 }
+
+type marketImpl struct {
+	id         uint
+	refID      *uint
+	specifiers map[string]string
+	marketData protocols.MarketData
+	locale     protocols.Locale
+}
+
+func (m marketImpl) ID() uint {
+	return m.id
+}
+
+func (m marketImpl) RefID() *uint {
+	return m.refID
+}
+
+func (m marketImpl) Specifiers() map[string]string {
+	return m.specifiers
+}
+
+func (m marketImpl) Name() (*string, error) {
+	return m.marketData.MarketName(m.locale)
+}
+
+func (m marketImpl) LocalizedName(locale protocols.Locale) (*string, error) {
+	return m.marketData.MarketName(locale)
+}

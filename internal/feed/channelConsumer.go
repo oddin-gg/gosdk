@@ -20,13 +20,15 @@ const (
 )
 
 type envelope struct {
-	SnapshotComplete *feedXML.SnapshotComplete `xml:"snapshot_complete"`
-	Alive            *feedXML.Alive            `xml:"alive"`
-	BetCancel        *feedXML.BetCancel        `xml:"bet_cancel"`
-	BetStop          *feedXML.BetStop          `xml:"bet_stop"`
-	FixtureChange    *feedXML.FixtureChange    `xml:"fixture_change"`
-	OddsChange       *feedXML.OddsChange       `xml:"odds_change"`
-	BetSettlement    *feedXML.BetSettlement    `xml:"bet_settlement"`
+	SnapshotComplete      *feedXML.SnapshotComplete      `xml:"snapshot_complete"`
+	Alive                 *feedXML.Alive                 `xml:"alive"`
+	BetCancel             *feedXML.BetCancel             `xml:"bet_cancel"`
+	BetStop               *feedXML.BetStop               `xml:"bet_stop"`
+	FixtureChange         *feedXML.FixtureChange         `xml:"fixture_change"`
+	OddsChange            *feedXML.OddsChange            `xml:"odds_change"`
+	BetSettlement         *feedXML.BetSettlement         `xml:"bet_settlement"`
+	RollbackBetSettlement *feedXML.RollbackBetSettlement `xml:"rollback_bet_settlement"`
+	RollbackBetCancel     *feedXML.RollbackBetCancel     `xml:"rollback_bet_cancel"`
 }
 
 // ChannelConsumer ...
@@ -171,6 +173,10 @@ func (c *ChannelConsumer) processMessage(msg amqp.Delivery) {
 		message = envelope.Alive
 	case envelope.SnapshotComplete != nil:
 		message = envelope.SnapshotComplete
+	case envelope.RollbackBetSettlement != nil:
+		message = envelope.RollbackBetSettlement
+	case envelope.RollbackBetCancel != nil:
+		message = envelope.RollbackBetCancel
 	default:
 		c.logger.Errorf("unknown message - %s", string(msg.Body))
 		message := protocols.FeedMessage{

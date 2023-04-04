@@ -184,6 +184,14 @@ func (o *oddsFeedSessionImpl) processFeedMessage(feedMessage *protocols.FeedMess
 		o.msgCh <- protocols.SessionMessage{
 			Message: msg,
 		}
+	case protocols.RollbackBetSettlement:
+		o.msgCh <- protocols.SessionMessage{
+			Message: msg,
+		}
+	case protocols.RollbackBetCancel:
+		o.msgCh <- protocols.SessionMessage{
+			Message: msg,
+		}
 	default:
 		unparsableMsg := o.feedMessageFactory.BuildUnparsableMessage(feedMessage)
 		o.msgCh <- protocols.SessionMessage{
