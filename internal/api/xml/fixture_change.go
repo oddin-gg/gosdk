@@ -2,6 +2,7 @@ package xml
 
 import (
 	"encoding/xml"
+
 	"github.com/oddin-gg/gosdk/internal/utils"
 )
 
@@ -14,7 +15,8 @@ type FixtureChangesResponse struct {
 
 // FixtureChange ...
 type FixtureChange struct {
-	SportEventID    string         `xml:"sport_event_id,attr"`
+	SportEventID string `xml:"sport_event_id,attr"`
+	// Deprecated: do not use this property, it will be removed in future
 	SportEventRefID *string        `xml:"sport_event_ref_id,attr,omitempty"`
 	UpdatedAt       utils.DateTime `xml:"update_time,attr"`
 }

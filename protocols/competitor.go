@@ -1,17 +1,13 @@
 package protocols
 
-// Player ...
-type Player interface {
+// Competitor ...
+type Competitor interface {
 	ID() URN
+	// Deprecated: do not use this method, it will be removed in future
 	RefID() (*URN, error)
 	Names() (map[Locale]string, error)
 	LocalizedName(locale Locale) (*string, error)
 	IconPath() (*string, error)
-}
-
-// Competitor ...
-type Competitor interface {
-	Player
 	Abbreviations() (map[Locale]string, error)
 	LocalizedAbbreviation(locale Locale) (*string, error)
 }

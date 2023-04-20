@@ -289,6 +289,7 @@ func (s sportImpl) ID() protocols.URN {
 	return s.id
 }
 
+// Deprecated: do not use this method, it will be removed in future
 func (s sportImpl) RefID() (*protocols.URN, error) {
 	item, err := s.sportDataCache.Sport(s.id, s.locales)
 	if err != nil {

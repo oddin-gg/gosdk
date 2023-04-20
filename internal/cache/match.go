@@ -284,6 +284,7 @@ func (m matchImpl) ID() protocols.URN {
 	return m.id
 }
 
+// Deprecated: do not use this method, it will be removed in future
 func (m matchImpl) RefID() (*protocols.URN, error) {
 	item, err := m.matchCache.Match(m.id, m.locales)
 	if err != nil {

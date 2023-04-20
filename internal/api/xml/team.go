@@ -10,7 +10,8 @@ type CompetitorResponse struct {
 
 // Team ...
 type Team struct {
-	ID           string  `xml:"id,attr"`
+	ID string `xml:"id,attr"`
+	// Deprecated: do not use this property, it will be removed in future
 	RefID        *string `xml:"ref_id,attr,omitempty"`
 	Name         string  `xml:"name,attr"`
 	Abbreviation string  `xml:"abbreviation,attr"`
@@ -34,18 +35,17 @@ func (t Team) GetAbbreviation() string {
 	return t.Abbreviation
 }
 
-// GetRefID ...
+// Deprecated: do not use this method, it will be removed in future
 func (t Team) GetRefID() *string {
 	return t.RefID
 }
-
 
 // TeamExtended ...
 type TeamExtended struct {
 	Team
 	Sports     []Sport    `xml:"sport,omitempty"`
 	Categories []Category `xml:"category,omitempty"`
-	IconPath     *string `xml:"icon_path,attr,omitempty"`
+	IconPath   *string    `xml:"icon_path,attr,omitempty"`
 }
 
 // TeamCompetitor ...

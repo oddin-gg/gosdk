@@ -16,6 +16,7 @@ type Manager struct {
 	MatchCache                 *MatchCache
 	MatchStatusCache           *MatchStatusCache
 	LocalizedStaticMatchStatus *LocalizedStaticDataCache
+	PlayersCache               *PlayersCache
 	logger                     *log.Logger
 	MarketVoidReasonsCache     *MarketVoidReasonsCache
 }
@@ -55,6 +56,7 @@ func NewManager(client *api.Client, oddsFeedConfiguration protocols.OddsFeedConf
 		MatchCache:             newMatchCache(client, logger),
 		MatchStatusCache:       newMatchStatusCache(client, oddsFeedConfiguration, logger),
 		MarketVoidReasonsCache: newMarketVoidReasonsCache(client),
+		PlayersCache:           newPlayersCache(client),
 
 		LocalizedStaticMatchStatus: newLocalizedStaticDataCache(oddsFeedConfiguration, func(locale protocols.Locale) ([]protocols.StaticData, error) {
 			data, err := client.FetchMatchStatusDescriptions(locale)

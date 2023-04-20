@@ -1,6 +1,9 @@
 package cache
 
 import (
+	"sync"
+	"time"
+
 	"github.com/oddin-gg/gosdk/internal/api"
 	apiXML "github.com/oddin-gg/gosdk/internal/api/xml"
 	"github.com/patrickmn/go-cache"
@@ -9,13 +12,12 @@ import (
 	// "github.com/oddin-gg/gosdk/factory"
 	feedXML "github.com/oddin-gg/gosdk/internal/feed/xml"
 	"github.com/oddin-gg/gosdk/protocols"
-	"sync"
-	"time"
 )
 
 // TournamentWrapper ...
 type TournamentWrapper interface {
 	GetID() string
+	// Deprecated: do not use this method, it will be removed in future
 	GetRefID() *string
 	GetStartDate() *time.Time
 	GetEndDate() *time.Time

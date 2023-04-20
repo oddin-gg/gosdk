@@ -8,8 +8,9 @@ import (
 // OddsChange ...
 type OddsChange struct {
 	MessageWithTimestamp
-	XMLName          xml.Name          `xml:"odds_change"`
-	EventID          string            `xml:"event_id,attr"`
+	XMLName xml.Name `xml:"odds_change"`
+	EventID string   `xml:"event_id,attr"`
+	// Deprecated: do not use this property, it will be removed in future
 	EventRefID       *string           `xml:"event_ref_id,attr,omitempty"`
 	ProductID        uint              `xml:"product,attr"`
 	SportEventStatus *SportEventStatus `xml:"sport_event_status,omitempty"`

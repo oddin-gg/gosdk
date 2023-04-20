@@ -3,12 +3,13 @@ package protocols
 // MarketData ...
 type MarketData interface {
 	MarketName(locale Locale) (*string, error)
-	OutcomeName(id uint, locale Locale) (*string, error)
+	OutcomeName(id string, locale Locale) (*string, error)
 }
 
 // Market ...
 type Market interface {
 	ID() uint
+	// Deprecated: do not use this method, it will be removed in future
 	RefID() *uint
 	Specifiers() map[string]string
 	Name() (*string, error)
@@ -52,7 +53,8 @@ type MarketCancel interface {
 
 // OutcomeDescription ...
 type OutcomeDescription interface {
-	ID() uint
+	ID() string
+	// Deprecated: do not use this method, it will be removed in future
 	RefID() *uint
 	LocalizedName(locale Locale) *string
 	Description(locale Locale) *string
@@ -67,8 +69,11 @@ type Specifier interface {
 // MarketDescription ...
 type MarketDescription interface {
 	ID() (uint, error)
+	// Deprecated: do not use this method, it will be removed in future
 	RefID() (*uint, error)
 	LocalizedName(locale Locale) (*string, error)
+	IncludesOutcomesOfType() *string
+	OutcomeType() *string
 	Outcomes() ([]OutcomeDescription, error)
 	Variant() (*string, error)
 	Specifiers() ([]Specifier, error)
@@ -86,6 +91,7 @@ type MarketVoidReason interface {
 // MarketDescriptionManager ...
 type MarketDescriptionManager interface {
 	MarketDescriptions() ([]MarketDescription, error)
+	MarketDescriptionByIdAndVariant(marketID uint, variant *string) (MarketDescription, error)
 	LocalizedMarketDescriptions(locale Locale) ([]MarketDescription, error)
 	ClearMarketDescription(marketID uint, variant *string)
 	MarketVoidReasons() ([]MarketVoidReason, error)
