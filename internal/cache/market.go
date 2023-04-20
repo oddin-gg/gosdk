@@ -2,15 +2,17 @@ package cache
 
 import (
 	"fmt"
-	"github.com/oddin-gg/gosdk/internal/api"
-	data "github.com/oddin-gg/gosdk/internal/api/xml"
-	"github.com/oddin-gg/gosdk/protocols"
-	"github.com/patrickmn/go-cache"
-	"github.com/pkg/errors"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/oddin-gg/gosdk/internal/api"
+	data "github.com/oddin-gg/gosdk/internal/api/xml"
+	"github.com/oddin-gg/gosdk/internal/utils"
+	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/patrickmn/go-cache"
+	"github.com/pkg/errors"
 )
 
 // CompositeKey ...
@@ -28,20 +30,20 @@ type MarketDescriptionCache struct {
 }
 
 // LocalizedMarketDescriptions ...
-func (m *MarketDescriptionCache) LocalizedMarketDescriptions(locale protocols.Locale) ([]CompositeKey, error) {
+func (m *MarketDescriptionCache) LocalizedMarketDescriptions(locale protocols.Locale) (map[CompositeKey]*LocalizedMarketDescription, error) {
 	m.mux.Lock()
 	_, ok := m.loadedLocales[locale]
 	m.mux.Unlock()
 
 	if !ok {
-		err := m.loadAndCacheItem([]protocols.Locale{locale})
+		err := m.loadAndCacheAllItems([]protocols.Locale{locale})
 		if err != nil {
 			return nil, err
 		}
 	}
 
 	items := m.internalCache.Items()
-	result := make([]CompositeKey, 0, len(items))
+	result := make(map[CompositeKey]*LocalizedMarketDescription, len(items))
 	for key, value := range items {
 		mds := value.Object.(*LocalizedMarketDescription)
 		_, ok := mds.name[locale]
@@ -54,14 +56,18 @@ func (m *MarketDescriptionCache) LocalizedMarketDescriptions(locale protocols.Lo
 			return nil, err
 		}
 
-		result = append(result, cpKey)
+		result[cpKey] = mds
 	}
 
 	return result, nil
 }
 
-// MarketDescriptionByID ...
-func (m *MarketDescriptionCache) MarketDescriptionByID(marketID uint, variant *string, locales []protocols.Locale) (*LocalizedMarketDescription, error) {
+// MarketDescriptionByID returns LocalizedMarketDescription from cache. Error is returned when entity is not found
+func (m *MarketDescriptionCache) MarketDescriptionByID(
+	marketID uint,
+	variant *string,
+	locales []protocols.Locale,
+) (*LocalizedMarketDescription, error) {
 	var missingLocales []protocols.Locale
 	key := m.makeStringKey(marketID, variant)
 	item, _ := m.internalCache.Get(key)
@@ -81,21 +87,26 @@ func (m *MarketDescriptionCache) MarketDescriptionByID(marketID uint, variant *s
 	}
 
 	if len(missingLocales) != 0 {
-		err := m.loadAndCacheItem(missingLocales)
+		err := m.loadAndCacheItem(&marketID, variant, missingLocales)
 		if err != nil {
 			return nil, err
 		}
 
-		item, _ = m.internalCache.Get(key)
+		item, found := m.internalCache.Get(key)
+		if !found {
+			return nil, errors.Errorf("item missing key=%q", key)
+		}
+
 		result, ok = item.(*LocalizedMarketDescription)
 		if !ok {
-			return nil, errors.New("item missing")
+			return nil, errors.Errorf("unknown item type: %T with key=%q", item, key)
 		}
 	}
 
 	return result, nil
 }
 
+// TODO kafkapre - delete it? there is no load if it is missing, I tried to add fetch but arg of this method has no locale
 // MarketDescriptionByKey ...
 func (m *MarketDescriptionCache) MarketDescriptionByKey(key CompositeKey) (*LocalizedMarketDescription, error) {
 	strKey := m.makeStringKey(key.MarketID, key.Variant)
@@ -118,15 +129,33 @@ func (m *MarketDescriptionCache) ClearCacheItem(marketID uint, variant *string) 
 	m.internalCache.Delete(key)
 }
 
-func (m *MarketDescriptionCache) loadAndCacheItem(locales []protocols.Locale) error {
+func (m *MarketDescriptionCache) loadAndCacheAllItems(locales []protocols.Locale) error {
+	return m.loadAndCacheItem(nil, nil, locales)
+}
+
+func (m *MarketDescriptionCache) loadAndCacheItem(
+	marketID *uint,
+	variant *string,
+	locales []protocols.Locale,
+) error {
 	m.mux.Lock()
 	defer m.mux.Unlock()
 
-	for i := range locales {
-		locale := locales[i]
-		descriptions, err := m.apiClient.FetchMarketDescriptions(locale)
-		if err != nil {
-			return err
+	for _, locale := range locales {
+
+		var descriptions []data.MarketDescription
+		var err error
+		if marketID != nil && variant != nil && utils.IsMarketVariantWithDynamicOutcomes(*variant) {
+			descriptions, err = m.apiClient.FetchMarketDescriptionsWithDynamicOutcomes(*marketID, *variant, locale)
+			if err != nil {
+				return err
+			}
+		} else {
+			// fetch all descriptions
+			descriptions, err = m.apiClient.FetchMarketDescriptions(locale)
+			if err != nil {
+				return err
+			}
 		}
 
 		for k := range descriptions {
@@ -148,10 +177,10 @@ func (m *MarketDescriptionCache) refreshOrInsertItem(description data.MarketDesc
 	var dsc *LocalizedMarketDescription
 	if !ok {
 		if description.Outcomes == nil {
-			return errors.Errorf("missing outcomes in %s", description)
+			return errors.Errorf("missing outcomes in %v", description)
 		}
 
-		outcomes := make(map[uint]*LocalizedOutcomeDescription)
+		outcomes := make(map[string]*LocalizedOutcomeDescription)
 		for _, outcome := range description.Outcomes.Outcome {
 			outcomes[outcome.ID] = &LocalizedOutcomeDescription{
 				refID:       outcome.RefID,
@@ -160,9 +189,11 @@ func (m *MarketDescriptionCache) refreshOrInsertItem(description data.MarketDesc
 			}
 		}
 		dsc = &LocalizedMarketDescription{
-			refID:    description.RefID,
-			outcomes: outcomes,
-			name:     make(map[protocols.Locale]string),
+			refID:                  description.RefID,
+			IncludesOutcomesOfType: description.IncludesOutcomesOfType,
+			OutcomeType:            description.OutcomeType,
+			outcomes:               outcomes,
+			name:                   make(map[protocols.Locale]string),
 		}
 	} else {
 		dsc, ok = item.(*LocalizedMarketDescription)
@@ -177,7 +208,7 @@ func (m *MarketDescriptionCache) refreshOrInsertItem(description data.MarketDesc
 	for _, outcome := range description.Outcomes.Outcome {
 		localizedOutcome, ok := dsc.outcomes[outcome.ID]
 		if !ok {
-			return errors.Errorf("missing outcome in cache %d", outcome.ID)
+			return errors.Errorf("missing outcome in cache %s", outcome.ID)
 		}
 
 		localizedOutcome.name[locale] = outcome.Name
@@ -253,11 +284,14 @@ func newMarketDescriptionCache(client *api.Client) *MarketDescriptionCache {
 
 // LocalizedMarketDescription ...
 type LocalizedMarketDescription struct {
-	refID      *uint
-	outcomes   map[uint]*LocalizedOutcomeDescription
-	specifiers []protocols.Specifier
-	name       map[protocols.Locale]string
-	mux        sync.Mutex
+	refID                  *uint
+	IncludesOutcomesOfType *string
+	OutcomeType            *string
+	outcomes               map[string]*LocalizedOutcomeDescription
+	specifiers             []protocols.Specifier
+	name                   map[protocols.Locale]string
+	// locks outcomes and name properties
+	mux sync.Mutex
 }
 
 // LocalizedOutcomeDescription ...
@@ -282,11 +316,11 @@ func (s specifierImpl) Type() string {
 }
 
 type outcomeDescriptionImpl struct {
-	id                          uint
+	id                          string
 	localizedOutcomeDescription *LocalizedOutcomeDescription
 }
 
-func (o outcomeDescriptionImpl) ID() uint {
+func (o outcomeDescriptionImpl) ID() string {
 	return o.id
 }
 
@@ -320,6 +354,8 @@ func (o outcomeDescriptionImpl) Description(locale protocols.Locale) *string {
 
 type marketDescriptionImpl struct {
 	id                     uint
+	includesOutcomesOfType *string
+	outcomeType            *string
 	variant                *string
 	marketDescriptionCache *MarketDescriptionCache
 	locales                []protocols.Locale
@@ -353,6 +389,18 @@ func (m marketDescriptionImpl) LocalizedName(locale protocols.Locale) (*string, 
 	}
 
 	return &name, nil
+}
+
+// IncludesOutcomesOfType return optional value of includesOutcomesOfType property. For more info about
+// includesOutcomesOfType property check xsd schema.
+func (m marketDescriptionImpl) IncludesOutcomesOfType() *string {
+	return m.includesOutcomesOfType
+}
+
+// OutcomeType return optional value of outcomeType property. For more info about outcomeType property
+// check xsd schema.
+func (m marketDescriptionImpl) OutcomeType() *string {
+	return m.outcomeType
 }
 
 func (m marketDescriptionImpl) Outcomes() ([]protocols.OutcomeDescription, error) {
@@ -391,9 +439,18 @@ func (m marketDescriptionImpl) Specifiers() ([]protocols.Specifier, error) {
 }
 
 // NewMarketDescription ...
-func NewMarketDescription(id uint, variant *string, marketDescriptionCache *MarketDescriptionCache, locales []protocols.Locale) protocols.MarketDescription {
+func NewMarketDescription(
+	id uint,
+	includesOutcomesOfType *string,
+	outcomeType *string,
+	variant *string,
+	marketDescriptionCache *MarketDescriptionCache,
+	locales []protocols.Locale,
+) protocols.MarketDescription {
 	return &marketDescriptionImpl{
 		id:                     id,
+		includesOutcomesOfType: includesOutcomesOfType,
+		outcomeType:            outcomeType,
 		variant:                variant,
 		marketDescriptionCache: marketDescriptionCache,
 		locales:                locales,

@@ -3,7 +3,9 @@ package factory
 import (
 	"strings"
 
+	"github.com/oddin-gg/gosdk/internal/cache"
 	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/pkg/errors"
 )
 
 // MarketDataFactory ...
@@ -37,17 +39,56 @@ type marketDataImpl struct {
 	event                    interface{}
 }
 
-func (m marketDataImpl) OutcomeName(id uint, locale protocols.Locale) (*string, error) {
-	marketDescription := m.marketDescriptionFactory.MarketDescriptionByID(m.marketID, m.specifiers, []protocols.Locale{locale})
+func (m marketDataImpl) OutcomeName(outcomeID string, locale protocols.Locale) (*string, error) {
+	marketDescription, err := m.marketDescriptionFactory.MarketDescriptionByIdAndSpecifiers(m.marketID, m.specifiers, []protocols.Locale{locale})
+	if err != nil {
+		return nil, err
+	}
+
 	outcomes, err := marketDescription.Outcomes()
 	if err != nil {
 		return nil, err
 	}
 
+	found := false
 	var outcomeName *string
 	for _, outcome := range outcomes {
-		if outcome.ID() == id {
+		if outcome.ID() == outcomeID {
 			outcomeName = outcome.LocalizedName(locale)
+			found = true
+			break
+		}
+	}
+
+	// market with dynamic outcomes can have also non-dynamic outcome, that's reason why outcome with outcomeID exists at first
+	if !found && marketDescription.OutcomeType() != nil {
+		switch outcomeType(*marketDescription.OutcomeType()) {
+		case playerOutcomeType:
+			player, err := m.marketDescriptionFactory.playerCache.GetPlayer(cache.PlayerCacheKey{PlayerID: outcomeID, Locale: locale})
+			if err != nil {
+				return nil, errors.Wrapf(err, "derivation of outcome name for dynamic player outcome failed for id [%s]", outcomeID)
+			}
+			outcomeName = &player.LocalizedName
+
+		case competitorOutcomeType:
+			urn, err := protocols.ParseURN(outcomeID)
+			if err != nil {
+				return nil, errors.Errorf("unsupported competitor id in outcome: %s", outcomeID)
+			}
+			competitor, err := m.marketDescriptionFactory.competitorCache.Competitor(*urn, []protocols.Locale{locale})
+			if err != nil {
+				return nil, errors.Wrapf(err, "derivation of outcome name for dynamic player outcome failed for id [%s]", outcomeID)
+			}
+
+			name, err := competitor.LocalizedName(locale)
+			if err != nil {
+				return nil, errors.Wrapf(err, "missing locale %s", locale)
+			}
+
+			outcomeName = name
+
+		default:
+			return nil, errors.Errorf("unsupported outcome type [%s]", *marketDescription.OutcomeType())
 		}
 	}
 
@@ -55,7 +96,11 @@ func (m marketDataImpl) OutcomeName(id uint, locale protocols.Locale) (*string, 
 }
 
 func (m marketDataImpl) MarketName(locale protocols.Locale) (*string, error) {
-	marketDescription := m.marketDescriptionFactory.MarketDescriptionByID(m.marketID, m.specifiers, []protocols.Locale{locale})
+	marketDescription, err := m.marketDescriptionFactory.MarketDescriptionByIdAndSpecifiers(m.marketID, m.specifiers, []protocols.Locale{locale})
+	if err != nil {
+		return nil, err
+	}
+
 	name, err := marketDescription.LocalizedName(locale)
 	if err != nil {
 		return nil, err

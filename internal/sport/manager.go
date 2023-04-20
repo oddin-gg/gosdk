@@ -17,6 +17,7 @@ type fixtureChangeImpl struct {
 	updatedTime time.Time
 }
 
+// Deprecated: do not use this method, it will be removed in future
 func (f fixtureChangeImpl) SportEventRefID() *protocols.URN {
 	return f.refID
 }

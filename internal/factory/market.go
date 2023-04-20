@@ -1,13 +1,14 @@
 package factory
 
 import (
+	"math"
+
 	feedXML "github.com/oddin-gg/gosdk/internal/feed/xml"
 	"github.com/oddin-gg/gosdk/protocols"
-	"math"
 )
 
 type outcomeOddsImpl struct {
-	id          uint
+	id          string
 	refID       *uint
 	probability *float32
 	marketData  protocols.MarketData
@@ -16,10 +17,11 @@ type outcomeOddsImpl struct {
 	odds        *float32
 }
 
-func (o outcomeOddsImpl) ID() uint {
+func (o outcomeOddsImpl) ID() string {
 	return o.id
 }
 
+// Deprecated: do not use this method, it will be removed in future
 func (o outcomeOddsImpl) RefID() *uint {
 	return o.refID
 }
@@ -67,7 +69,7 @@ func (o outcomeOddsImpl) convertToAmericanOdds(odds *float32) *float32 {
 }
 
 type outcomeSettlementImpl struct {
-	id         uint
+	id         string
 	refID      *uint
 	marketData protocols.MarketData
 	locale     protocols.Locale
@@ -75,10 +77,11 @@ type outcomeSettlementImpl struct {
 	voidFactor *float32
 }
 
-func (o outcomeSettlementImpl) ID() uint {
+func (o outcomeSettlementImpl) ID() string {
 	return o.id
 }
 
+// Deprecated: do not use this method, it will be removed in future
 func (o outcomeSettlementImpl) RefID() *uint {
 	return o.refID
 }
@@ -132,6 +135,7 @@ func (m marketWithOddsImpl) ID() uint {
 	return m.id
 }
 
+// Deprecated: do not use this method, it will be removed in future
 func (m marketWithOddsImpl) RefID() *uint {
 	return m.refID
 }
@@ -193,6 +197,7 @@ func (m marketWithSettlementImpl) ID() uint {
 	return m.id
 }
 
+// Deprecated: do not use this method, it will be removed in future
 func (m marketWithSettlementImpl) RefID() *uint {
 	return m.refID
 }
@@ -227,6 +232,7 @@ func (m marketCancelImpl) ID() uint {
 	return m.id
 }
 
+// Deprecated: do not use this method, it will be removed in future
 func (m marketCancelImpl) RefID() *uint {
 	return m.refID
 }
@@ -252,7 +258,8 @@ func (m marketCancelImpl) VoidReasonParams() *string {
 }
 
 type marketImpl struct {
-	id         uint
+	id uint
+	// Deprecated: do not use this property, it will be removed in future
 	refID      *uint
 	specifiers map[string]string
 	marketData protocols.MarketData
@@ -263,6 +270,7 @@ func (m marketImpl) ID() uint {
 	return m.id
 }
 
+// Deprecated: do not use this method, it will be removed in future
 func (m marketImpl) RefID() *uint {
 	return m.refID
 }

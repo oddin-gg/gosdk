@@ -326,6 +326,8 @@ func (o *oddsFeedImpl) init() error {
 	marketDescriptionFactory := factory.NewMarketDescriptionFactory(
 		o.cacheManager.MarketDescriptionCache,
 		o.cacheManager.MarketVoidReasonsCache,
+		o.cacheManager.PlayersCache,
+		o.cacheManager.CompetitorCache,
 	)
 	marketDataFactory := factory.NewMarketDataFactory(o.cfg, marketDescriptionFactory)
 	marketFactory := factory.NewMarketFactory(

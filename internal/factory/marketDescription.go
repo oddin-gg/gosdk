@@ -3,23 +3,48 @@ package factory
 import (
 	"github.com/oddin-gg/gosdk/internal/cache"
 	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/pkg/errors"
 )
 
 // MarketDescriptionFactory ...
 type MarketDescriptionFactory struct {
 	marketDescriptionCache *cache.MarketDescriptionCache
 	marketVoidReasonsCache *cache.MarketVoidReasonsCache
+	playerCache            *cache.PlayersCache
+	competitorCache        *cache.CompetitorCache
 }
 
-// MarketDescriptionByID ...
-func (m MarketDescriptionFactory) MarketDescriptionByID(marketID uint, specifiers map[string]string, locales []protocols.Locale) protocols.MarketDescription {
+// MarketDescriptionByIdAndSpecifiers returns market description from cache based on marketID, specifiers and locales
+func (m MarketDescriptionFactory) MarketDescriptionByIdAndSpecifiers(
+	marketID uint,
+	specifiers map[string]string,
+	locales []protocols.Locale,
+) (protocols.MarketDescription, error) {
 	var variant *string
 	specifier, ok := specifiers["variant"]
 	if ok {
 		variant = &specifier
 	}
 
-	return cache.NewMarketDescription(marketID, variant, m.marketDescriptionCache, locales)
+	return m.MarketDescriptionByIdAndVariant(marketID, variant, locales)
+}
+
+// MarketDescriptionByIdAndVariant returns market description from cache based on marketID, optional market variant
+// and locales
+func (m MarketDescriptionFactory) MarketDescriptionByIdAndVariant(
+	marketID uint,
+	variant *string,
+	locales []protocols.Locale,
+) (protocols.MarketDescription, error) {
+	mds, err := m.marketDescriptionCache.MarketDescriptionByID(marketID, variant, locales)
+	if err != nil {
+		return nil, errors.Wrap(err, "get market description by id failed")
+	}
+	if mds == nil {
+		return nil, errors.New("get market description by id failed - cannot be nil")
+	}
+
+	return cache.NewMarketDescription(marketID, mds.IncludesOutcomesOfType, mds.OutcomeType, variant, m.marketDescriptionCache, locales), nil
 }
 
 // MarketVoidReasons ...
@@ -61,20 +86,22 @@ func (m MarketDescriptionFactory) ReloadMarketVoidReasons() ([]protocols.MarketV
 
 // MarketDescriptions ...
 func (m MarketDescriptionFactory) MarketDescriptions(locale protocols.Locale) ([]protocols.MarketDescription, error) {
-	keys, err := m.marketDescriptionCache.LocalizedMarketDescriptions(locale)
+	marketDescriptions, err := m.marketDescriptionCache.LocalizedMarketDescriptions(locale)
 	if err != nil {
 		return nil, err
 	}
 
-	result := make([]protocols.MarketDescription, len(keys))
-	for i, key := range keys {
+	result := make([]protocols.MarketDescription, 0, len(marketDescriptions))
+	for key, value := range marketDescriptions {
 		description := cache.NewMarketDescription(
 			key.MarketID,
+			value.IncludesOutcomesOfType,
+			value.OutcomeType,
 			key.Variant,
 			m.marketDescriptionCache,
 			[]protocols.Locale{locale},
 		)
-		result[i] = description
+		result = append(result, description)
 	}
 
 	return result, nil
@@ -84,9 +111,13 @@ func (m MarketDescriptionFactory) MarketDescriptions(locale protocols.Locale) ([
 func NewMarketDescriptionFactory(
 	marketDescriptionCache *cache.MarketDescriptionCache,
 	marketVoidReasonsCache *cache.MarketVoidReasonsCache,
+	playerCache *cache.PlayersCache,
+	competitorCache *cache.CompetitorCache,
 ) *MarketDescriptionFactory {
 	return &MarketDescriptionFactory{
 		marketDescriptionCache: marketDescriptionCache,
 		marketVoidReasonsCache: marketVoidReasonsCache,
+		playerCache:            playerCache,
+		competitorCache:        competitorCache,
 	}
 }

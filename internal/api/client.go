@@ -199,6 +199,25 @@ func (c *Client) FetchMarketDescriptions(locale protocols.Locale) ([]data.Market
 	return resp.Markets, nil
 }
 
+// FetchMarketDescriptionsWithDynamicOutcomes ...
+func (c *Client) FetchMarketDescriptionsWithDynamicOutcomes(
+	marketTypeID uint,
+	marketVariant string,
+	locale protocols.Locale,
+) ([]data.MarketDescription, error) {
+	var resp data.MarketDescriptionResponse
+	err := c.fetchData(
+		fmt.Sprintf("/descriptions/%s/markets/%d/variants/%s", locale, marketTypeID, marketVariant),
+		&resp,
+		&locale,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return resp.Markets, nil
+}
+
 // FetchMarketVoidReasons ...
 func (c *Client) FetchMarketVoidReasons() ([]data.MarketVoidReasons, error) {
 	var resp data.MarketVoidReasonsResponse
@@ -206,6 +225,16 @@ func (c *Client) FetchMarketVoidReasons() ([]data.MarketVoidReasons, error) {
 		return nil, err
 	}
 	return resp.VoidReasons, nil
+}
+
+// FetchPlayerProfile fetch player's profile
+func (c *Client) FetchPlayerProfile(playerID string, locale protocols.Locale) (*data.PlayerProfile, error) {
+	var resp data.PlayerProfile
+	err := c.fetchData(fmt.Sprintf("/sports/%s/players/%s/profile", locale, playerID), &resp, &locale)
+	if err != nil {
+		return nil, err
+	}
+	return &resp, nil
 }
 
 // PostEventStatefulRecovery ...

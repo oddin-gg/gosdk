@@ -6,7 +6,8 @@ import (
 
 // MarketAttributes ...
 type MarketAttributes struct {
-	ID                 uint    `xml:"id,attr"`
+	ID uint `xml:"id,attr"`
+	// Deprecated: do not use this property, it will be removed in future
 	RefID              *uint   `xml:"ref_id,attr,omitempty"`
 	Specifiers         *string `xml:"specifiers,attr,omitempty"`
 	ExtendedSpecifiers *string `xml:"extended_specifiers,attr,omitempty"`
@@ -56,8 +57,9 @@ const (
 // Outcome ...
 type Outcome struct {
 	XMLName xml.Name `xml:"outcome"`
-	ID      uint     `xml:"id,attr"`
-	RefID   *uint    `xml:"ref_id,attr,omitempty"`
+	ID      string   `xml:"id,attr"`
+	// Deprecated: do not use this property, it will be removed in future
+	RefID *uint `xml:"ref_id,attr,omitempty"`
 	// Odds change outcome fields
 	Odds          *float32 `xml:"odds,attr,omitempty"`
 	Probabilities *float32 `xml:"probabilities,attr,omitempty"`

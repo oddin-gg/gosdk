@@ -1,19 +1,21 @@
 package cache
 
 import (
+	"sync"
+	"time"
+
 	"github.com/oddin-gg/gosdk/internal/api"
 	"github.com/oddin-gg/gosdk/internal/api/xml"
 	"github.com/oddin-gg/gosdk/protocols"
 	"github.com/patrickmn/go-cache"
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
-	"sync"
-	"time"
 )
 
 // TeamWrapper ...
 type TeamWrapper interface {
 	GetID() string
+	// Deprecated: do not use this method, it will be removed in future
 	GetRefID() *string
 	GetName() string
 	GetAbbreviation() string
@@ -237,6 +239,18 @@ func (l *LocalizedCompetitor) loadedLocales() map[protocols.Locale]struct{} {
 	return result
 }
 
+func (l *LocalizedCompetitor) LocalizedName(locale protocols.Locale) (*string, error) {
+	l.mux.Lock()
+	defer l.mux.Unlock()
+
+	result, ok := l.name[locale]
+	if !ok {
+		return nil, errors.Errorf("missing locale %s", locale)
+	}
+
+	return &result, nil
+}
+
 type competitorImpl struct {
 	id              protocols.URN
 	competitorCache *CompetitorCache
@@ -260,6 +274,7 @@ func (c competitorImpl) ID() protocols.URN {
 	return c.id
 }
 
+// Deprecated: do not use this method, it will be removed in future
 func (c competitorImpl) RefID() (*protocols.URN, error) {
 	item, err := c.competitorCache.Competitor(c.id, c.locales)
 	if err != nil {
@@ -293,15 +308,7 @@ func (c competitorImpl) LocalizedName(locale protocols.Locale) (*string, error) 
 		return nil, err
 	}
 
-	item.mux.Lock()
-	defer item.mux.Unlock()
-
-	result, ok := item.name[locale]
-	if !ok {
-		return nil, errors.Errorf("missing locale %s", locale)
-	}
-
-	return &result, nil
+	return item.LocalizedName(locale)
 }
 
 func (c competitorImpl) Abbreviations() (map[protocols.Locale]string, error) {

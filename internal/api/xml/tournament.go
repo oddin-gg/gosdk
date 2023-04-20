@@ -2,8 +2,9 @@ package xml
 
 import (
 	"encoding/xml"
-	"github.com/oddin-gg/gosdk/internal/utils"
 	"time"
+
+	"github.com/oddin-gg/gosdk/internal/utils"
 )
 
 // SportTournamentInfoResponse ...
@@ -36,8 +37,9 @@ type TournamentsResponse struct {
 
 // Tournament ...
 type Tournament struct {
-	XMLName          xml.Name           `xml:"tournament"`
-	ID               string             `xml:"id,attr"`
+	XMLName xml.Name `xml:"tournament"`
+	ID      string   `xml:"id,attr"`
+	// Deprecated: do not use this property, it will be removed in future
 	RefID            *string            `xml:"ref_id,attr,omitempty"`
 	Name             string             `xml:"name,attr"`
 	Scheduled        *utils.DateTime    `xml:"scheduled,attr,omitempty"`
@@ -62,7 +64,7 @@ func (t Tournament) GetID() string {
 	return t.ID
 }
 
-// GetRefID ...
+// Deprecated: do not use this method, it will be removed in future
 func (t Tournament) GetRefID() *string {
 	return t.RefID
 }
