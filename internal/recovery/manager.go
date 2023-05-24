@@ -1,14 +1,16 @@
 package recovery
 
 import (
+	"math"
+	"sync"
+	"time"
+
 	"github.com/google/uuid"
 	"github.com/oddin-gg/gosdk/internal/api"
 	"github.com/oddin-gg/gosdk/internal/producer"
 	"github.com/oddin-gg/gosdk/protocols"
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
-	"sync"
-	"time"
 )
 
 const (
@@ -275,7 +277,7 @@ func (m *Manager) calculateTiming(data *producerRecoveryData, now time.Time) boo
 	messageProcessingDelay := now.Sub(lastProcessedMessageGenTimestamp)
 	userAliveDelay := now.Sub(lastUserSessionAliveReceivedTimestamp)
 
-	return messageProcessingDelay.Seconds() < maxInactivity && userAliveDelay.Seconds() < maxInactivity
+	return math.Abs(messageProcessingDelay.Seconds()) < maxInactivity && math.Abs(userAliveDelay.Seconds()) < maxInactivity
 }
 
 func (m *Manager) producerDown(data *producerRecoveryData, reason protocols.ProducerDownReason) error {
