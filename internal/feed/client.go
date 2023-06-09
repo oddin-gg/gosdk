@@ -80,7 +80,9 @@ func (c *Client) CreateChannel(routingKeys []string, exchangeName string) (<-cha
 func (c *Client) Close() {
 	c.closed = true
 
-	_ = c.connection.Close()
+	if c.connection != nil {
+		_ = c.connection.Close()
+	}
 }
 
 // Open ...
