@@ -68,7 +68,7 @@ func (m *Manager) OnMessageProcessingEnded(sessionID uuid.UUID, producerID uint,
 	case start.IsZero():
 		m.logger.Warn("message processing ended, but was not started")
 	case time.Now().Sub(start).Milliseconds() > 1000:
-		m.logger.Warn("processing message took more than 1s")
+		m.logger.Warnf("processing message took more than 1s - %d ms", time.Now().Sub(start).Milliseconds())
 	}
 
 	delete(m.messageProcessingTimes, sessionID)
