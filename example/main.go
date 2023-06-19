@@ -16,6 +16,7 @@ import (
 const (
 	token  = "YOUR TOKEN"
 	env    = protocols.IntegrationEnvironment
+	region = protocols.DefaulRegion
 	nodeID = 1
 	locale = protocols.EnLocale
 )
@@ -60,7 +61,10 @@ type Example struct {
 
 // newExample inits configuration and feed
 func newExample() (*Example, error) {
-	cfg := gosdk.NewConfiguration(token, env, nodeID, false)
+	cfg := gosdk.
+		NewConfiguration(token, env, nodeID, false).
+		SetRegion(region)
+
 	feed := gosdk.NewOddsFeed(cfg)
 
 	producerManager, err := feed.ProducerManager()

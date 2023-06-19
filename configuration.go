@@ -10,6 +10,7 @@ type configuration struct {
 	messagingPort               int
 	sdkNodeID                   *int
 	selectedEnvironment         *protocols.Environment
+	selectedRegion              protocols.Region
 	reportExtendedData          bool
 	forcedAPIURL                string
 	forcedMQURL                 string
@@ -51,6 +52,15 @@ func (o configuration) SelectedEnvironment() *protocols.Environment {
 	return o.selectedEnvironment
 }
 
+func (o configuration) SelectedRegion() protocols.Region {
+	return o.selectedRegion
+}
+
+func (o configuration) SetRegion(region protocols.Region) protocols.OddsFeedConfiguration {
+	o.selectedRegion = region
+	return o
+}
+
 func (o configuration) ReportExtendedData() bool {
 	return o.reportExtendedData
 }
@@ -72,7 +82,7 @@ func (o configuration) SetMessagingPort(port int) protocols.OddsFeedConfiguratio
 
 func (o configuration) APIURL() (string, error) {
 	if len(o.forcedAPIURL) == 0 {
-		return o.SelectedEnvironment().APIEndpoint()
+		return o.SelectedEnvironment().APIEndpoint(o.SelectedRegion())
 	}
 
 	return o.forcedAPIURL, nil
@@ -80,7 +90,7 @@ func (o configuration) APIURL() (string, error) {
 
 func (o configuration) MQURL() (string, error) {
 	if len(o.forcedMQURL) == 0 {
-		return o.SelectedEnvironment().MQEndpoint()
+		return o.SelectedEnvironment().MQEndpoint(o.SelectedRegion())
 	}
 
 	return o.forcedMQURL, nil
@@ -95,6 +105,7 @@ func NewConfiguration(accessToken string, environment protocols.Environment, nod
 		messagingPort:               5672,
 		accessToken:                 &accessToken,
 		selectedEnvironment:         &environment,
+		selectedRegion:              protocols.DefaulRegion,
 		sdkNodeID:                   &nodeID,
 		reportExtendedData:          reportExtendedData,
 	}
