@@ -1,46 +1,59 @@
 package protocols
 
-import "github.com/pkg/errors"
+import (
+	"fmt"
+
+	"github.com/pkg/errors"
+)
 
 // Environment ...
 type Environment int
 
 // Environments
 const (
-	UnknownEnvironment     Environment = 0
-	IntegrationEnvironment Environment = 1
-	ProductionEnvironment  Environment = 2
+	UnknownEnvironment Environment = iota
+	IntegrationEnvironment
+	ProductionEnvironment
 	// Used for internal purposes
-	TestEnvironment Environment = 3
+	TestEnvironment
 )
 
 // APIEndpoint ...
-func (e Environment) APIEndpoint() (string, error) {
+func (e Environment) APIEndpoint(region Region) (string, error) {
 	switch e {
 	case IntegrationEnvironment:
-		return "api-mq.integration.oddin.gg", nil
+		return fmt.Sprintf("api-mq.integration.%soddin.gg", region), nil
 	case ProductionEnvironment:
-		return "api-mq.oddin.gg", nil
+		return fmt.Sprintf("api-mq.%soddin.gg", region), nil
 	case TestEnvironment:
-		return "api-mq-test.integration.oddin.gg", nil
+		return fmt.Sprintf("api-mq-test.integration.%soddin.gg", region), nil
 	default:
 		return "", errors.Errorf("unknown environment %d", e)
 	}
 }
 
 // MQEndpoint ...
-func (e Environment) MQEndpoint() (string, error) {
+func (e Environment) MQEndpoint(region Region) (string, error) {
 	switch e {
 	case IntegrationEnvironment:
-		return "mq.integration.oddin.gg", nil
+		return fmt.Sprintf("mq.integration.%soddin.gg", region), nil
 	case ProductionEnvironment:
-		return "mq.oddin.gg", nil
+		return fmt.Sprintf("mq.%soddin.gg", region), nil
 	case TestEnvironment:
-		return "mq-test.integration.oddin.gg", nil
+		return fmt.Sprintf("mq-test.integration.%soddin.gg", region), nil
 	default:
 		return "", errors.Errorf("unknown environment %d", e)
 	}
 }
+
+// Region ...
+type Region string
+
+// Regions
+const (
+	DefaulRegion Region = ""
+	APSouthEast1        = "ap-southeast-1."
+)
 
 // Locale ...
 type Locale string
@@ -61,6 +74,8 @@ type OddsFeedConfiguration interface {
 	MessagingPort() int
 	SdkNodeID() *int
 	SelectedEnvironment() *Environment
+	SelectedRegion() Region
+	SetRegion(region Region) OddsFeedConfiguration
 	ExchangeName() string
 	ReplayExchangeName() string
 	ReportExtendedData() bool
