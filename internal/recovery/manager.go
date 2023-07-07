@@ -67,8 +67,8 @@ func (m *Manager) OnMessageProcessingEnded(sessionID uuid.UUID, producerID uint,
 	switch {
 	case start.IsZero():
 		m.logger.Warn("message processing ended, but was not started")
-	case time.Now().Sub(start).Milliseconds() > 1000:
-		m.logger.Warnf("processing message took more than 1s - %d ms", time.Now().Sub(start).Milliseconds())
+	case time.Since(start).Milliseconds() > 1000:
+		m.logger.Warnf("processing message took more than 1s - %d ms", time.Since(start).Milliseconds())
 	}
 
 	delete(m.messageProcessingTimes, sessionID)
@@ -155,7 +155,7 @@ func (m *Manager) Open() (<-chan protocols.RecoveryMessage, error) {
 		m.producerRecoveryData[id] = newProducerRecoveryData(id, m.producerManager)
 	}
 
-	m.msgCh = make(chan protocols.RecoveryMessage, 0)
+	m.msgCh = make(chan protocols.RecoveryMessage)
 	m.closeCh = make(chan bool, 1)
 	go func() {
 		time.Sleep(initialDelay)
@@ -503,6 +503,9 @@ func (m *Manager) makeSnapshotRecovery(data *producerRecoveryData, timestamp tim
 		m.cfg.SdkNodeID(),
 		recoverFrom,
 	)
+	if err != nil {
+		return err
+	}
 
 	recoveryInfo := newRecoveryInfoImpl(recoverFrom, now, requestID, success, m.cfg.SdkNodeID())
 	return m.producerManager.SetProducerRecoveryInfo(data.producerID, recoveryInfo)

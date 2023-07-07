@@ -1,13 +1,14 @@
 package cache
 
 import (
+	"sync"
+
 	"github.com/oddin-gg/gosdk/internal/api"
 	"github.com/oddin-gg/gosdk/internal/api/xml"
 	"github.com/oddin-gg/gosdk/protocols"
 	"github.com/patrickmn/go-cache"
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
-	"sync"
 )
 
 // SportCache ...
@@ -222,6 +223,9 @@ func (s *SportCache) handleTournamentData(locale protocols.Locale, tournamentDat
 		}
 
 		err = s.refreshOrInsertItem(*sportID, locale, tournamentData[key], tournamentID)
+		if err != nil {
+			return err
+		}
 	}
 
 	return nil

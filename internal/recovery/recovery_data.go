@@ -1,11 +1,12 @@
 package recovery
 
 import (
+	"sync"
+	"time"
+
 	"github.com/oddin-gg/gosdk/internal/producer"
 	"github.com/oddin-gg/gosdk/protocols"
 	"github.com/pkg/errors"
-	"sync"
-	"time"
 )
 
 type producerRecoveryData struct {
@@ -144,7 +145,7 @@ func (p *producerRecoveryData) validateProducerSnapshotCompletes(receivedSnapsho
 	}
 
 	for _, value := range finished {
-		if value == false {
+		if !value {
 			return false, nil
 		}
 	}

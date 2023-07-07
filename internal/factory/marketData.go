@@ -1,8 +1,9 @@
 package factory
 
 import (
-	"github.com/oddin-gg/gosdk/protocols"
 	"strings"
+
+	"github.com/oddin-gg/gosdk/protocols"
 )
 
 // MarketDataFactory ...
@@ -100,7 +101,7 @@ func (m marketDataImpl) makeMarketName(marketName string, locale protocols.Local
 	template := marketName
 	for key, value := range m.specifiers {
 		key = "{" + key + "}"
-		if strings.Index(template, key) == -1 {
+		if !strings.Contains(template, key) {
 			continue
 		}
 

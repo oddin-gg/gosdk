@@ -255,9 +255,12 @@ func (o *oddsFeedImpl) Open() (protocols.GlobalMessageDelivery, error) {
 	}
 
 	recoveryCh, err := o.recoveryManager.Open()
+	if err != nil {
+		return nil, err
+	}
 	apiCh := o.apiClient.Open()
 
-	o.msgCh = make(chan protocols.GlobalMessage, 0)
+	o.msgCh = make(chan protocols.GlobalMessage)
 	o.closeCh = make(chan bool, 1)
 	go func() {
 		for {
