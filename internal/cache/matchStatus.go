@@ -28,6 +28,17 @@ type periodScoreImpl struct {
 	awayGoals       *uint32
 	homePoints      *uint32
 	awayPoints      *uint32
+
+	// RushCricket
+	homeRuns          *uint32
+	awayRuns          *uint32
+	homeWicketsFallen *uint32
+	awayWicketsFallen *uint32
+	homeOversPlayed   *uint32
+	homeBallsPlayed   *uint32
+	awayOversPlayed   *uint32
+	awayBallsPlayed   *uint32
+	homeWonCoinToss   *bool
 }
 
 func (p periodScoreImpl) Type() string {
@@ -82,6 +93,42 @@ func (p periodScoreImpl) AwayPoints() *uint32 {
 	return p.awayPoints
 }
 
+func (p periodScoreImpl) HomeRuns() *uint32 {
+	return p.homeRuns
+}
+
+func (p periodScoreImpl) AwayRuns() *uint32 {
+	return p.awayRuns
+}
+
+func (p periodScoreImpl) HomeWicketsFallen() *uint32 {
+	return p.homeWicketsFallen
+}
+
+func (p periodScoreImpl) AwayWicketsFallen() *uint32 {
+	return p.awayWicketsFallen
+}
+
+func (p periodScoreImpl) HomeOversPlayed() *uint32 {
+	return p.homeOversPlayed
+}
+
+func (p periodScoreImpl) AwayOversPlayed() *uint32 {
+	return p.awayOversPlayed
+}
+
+func (p periodScoreImpl) HomeBallsPlayed() *uint32 {
+	return p.homeBallsPlayed
+}
+
+func (p periodScoreImpl) AwayBallsPlayed() *uint32 {
+	return p.awayBallsPlayed
+}
+
+func (p periodScoreImpl) HomeWonCoinToss() *bool {
+	return p.homeWonCoinToss
+}
+
 type scoreboardImpl struct {
 	currentCTTeam        *uint32
 	homeWonRounds        *uint32
@@ -100,10 +147,25 @@ type scoreboardImpl struct {
 	time                 *uint32
 	gameTime             *uint32
 	currentDefenderTeam  *uint32
+
 	// VirtualBasketballScoreboard
 	homePoints        *uint32
 	awayPoints        *uint32
 	remainingGameTime *uint32
+
+	// RushCricketScoreboard
+	homeRuns          *uint32
+	awayRuns          *uint32
+	homeWicketsFallen *uint32
+	awayWicketsFallen *uint32
+	homeOversPlayed   *uint32
+	homeBallsPlayed   *uint32
+	awayOversPlayed   *uint32
+	awayBallsPlayed   *uint32
+	homeWonCoinToss   *bool
+	homeBatting       *bool
+	awayBatting       *bool
+	inning            *uint32
 }
 
 func (s scoreboardImpl) CurrentCTTeam() *uint32 {
@@ -184,6 +246,54 @@ func (s scoreboardImpl) Time() *uint32 {
 
 func (s scoreboardImpl) GameTime() *uint32 {
 	return s.gameTime
+}
+
+func (s scoreboardImpl) HomeRuns() *uint32 {
+	return s.homeRuns
+}
+
+func (s scoreboardImpl) AwayRuns() *uint32 {
+	return s.awayRuns
+}
+
+func (s scoreboardImpl) HomeWicketsFallen() *uint32 {
+	return s.homeWicketsFallen
+}
+
+func (s scoreboardImpl) AwayWicketsFallen() *uint32 {
+	return s.awayWicketsFallen
+}
+
+func (s scoreboardImpl) HomeOversPlayed() *uint32 {
+	return s.homeOversPlayed
+}
+
+func (s scoreboardImpl) HomeBallsPlayed() *uint32 {
+	return s.homeBallsPlayed
+}
+
+func (s scoreboardImpl) AwayOversPlayed() *uint32 {
+	return s.awayOversPlayed
+}
+
+func (s scoreboardImpl) AwayBallsPlayed() *uint32 {
+	return s.awayBallsPlayed
+}
+
+func (s scoreboardImpl) HomeWonCoinToss() *bool {
+	return s.homeWonCoinToss
+}
+
+func (s scoreboardImpl) HomeBatting() *bool {
+	return s.homeBatting
+}
+
+func (s scoreboardImpl) AwayBatting() *bool {
+	return s.awayBatting
+}
+
+func (s scoreboardImpl) Inning() *uint32 {
+	return s.inning
 }
 
 // MatchStatusCache ...
@@ -314,19 +424,28 @@ func (m MatchStatusCache) mapAPIPeriodScores(periodScores []*apiXML.PeriodScore)
 	for i := range periodScores {
 		periodScore := periodScores[i]
 		result[i] = periodScoreImpl{
-			periodType:      periodScore.Type,
-			homeScore:       periodScore.HomeScore,
-			awayScore:       periodScore.AwayScore,
-			periodNumber:    periodScore.Number,
-			matchStatusCode: periodScore.MatchStatusCode,
-			homeWonRounds:   periodScore.HomeWonRounds,
-			awayWonRounds:   periodScore.AwayWonRounds,
-			homeKills:       periodScore.HomeKills,
-			awayKills:       periodScore.AwayKills,
-			homeGoals:       periodScore.HomeGoals,
-			awayGoals:       periodScore.AwayGoals,
-			homePoints:      periodScore.HomePoints,
-			awayPoints:      periodScore.AwayPoints,
+			periodType:        periodScore.Type,
+			homeScore:         periodScore.HomeScore,
+			awayScore:         periodScore.AwayScore,
+			periodNumber:      periodScore.Number,
+			matchStatusCode:   periodScore.MatchStatusCode,
+			homeWonRounds:     periodScore.HomeWonRounds,
+			awayWonRounds:     periodScore.AwayWonRounds,
+			homeKills:         periodScore.HomeKills,
+			awayKills:         periodScore.AwayKills,
+			homeGoals:         periodScore.HomeGoals,
+			awayGoals:         periodScore.AwayGoals,
+			homePoints:        periodScore.HomePoints,
+			awayPoints:        periodScore.AwayPoints,
+			homeRuns:          periodScore.HomeRuns,
+			awayRuns:          periodScore.AwayRuns,
+			homeWicketsFallen: periodScore.HomeWicketsFallen,
+			awayWicketsFallen: periodScore.AwayWicketsFallen,
+			homeOversPlayed:   periodScore.HomeOversPlayed,
+			homeBallsPlayed:   periodScore.HomeBallsPlayed,
+			awayOversPlayed:   periodScore.AwayOversPlayed,
+			awayBallsPlayed:   periodScore.AwayBallsPlayed,
+			homeWonCoinToss:   periodScore.HomeWonCoinToss,
 		}
 	}
 
@@ -338,19 +457,28 @@ func (m MatchStatusCache) mapFeedPeriodScores(periodScores []*feedXML.PeriodScor
 	for i := range periodScores {
 		periodScore := periodScores[i]
 		result[i] = periodScoreImpl{
-			periodType:      periodScore.Type,
-			homeScore:       periodScore.HomeScore,
-			awayScore:       periodScore.AwayScore,
-			periodNumber:    periodScore.Number,
-			matchStatusCode: periodScore.MatchStatusCode,
-			homeWonRounds:   periodScore.HomeWonRounds,
-			awayWonRounds:   periodScore.AwayWonRounds,
-			homeKills:       periodScore.HomeKills,
-			awayKills:       periodScore.AwayKills,
-			homeGoals:       periodScore.HomeGoals,
-			awayGoals:       periodScore.AwayGoals,
-			homePoints:      periodScore.HomePoints,
-			awayPoints:      periodScore.AwayPoints,
+			periodType:        periodScore.Type,
+			homeScore:         periodScore.HomeScore,
+			awayScore:         periodScore.AwayScore,
+			periodNumber:      periodScore.Number,
+			matchStatusCode:   periodScore.MatchStatusCode,
+			homeWonRounds:     periodScore.HomeWonRounds,
+			awayWonRounds:     periodScore.AwayWonRounds,
+			homeKills:         periodScore.HomeKills,
+			awayKills:         periodScore.AwayKills,
+			homeGoals:         periodScore.HomeGoals,
+			awayGoals:         periodScore.AwayGoals,
+			homePoints:        periodScore.HomePoints,
+			awayPoints:        periodScore.AwayPoints,
+			homeRuns:          periodScore.HomeRuns,
+			awayRuns:          periodScore.AwayRuns,
+			homeWicketsFallen: periodScore.HomeWicketsFallen,
+			awayWicketsFallen: periodScore.AwayWicketsFallen,
+			homeOversPlayed:   periodScore.HomeOversPlayed,
+			homeBallsPlayed:   periodScore.HomeBallsPlayed,
+			awayOversPlayed:   periodScore.AwayOversPlayed,
+			awayBallsPlayed:   periodScore.AwayBallsPlayed,
+			homeWonCoinToss:   periodScore.HomeWonCoinToss,
 		}
 	}
 
@@ -379,6 +507,18 @@ func (m MatchStatusCache) makeFeedScoreboard(scoreboard *feedXML.Scoreboard) pro
 		homePoints:           scoreboard.HomePoints,
 		awayPoints:           scoreboard.AwayPoints,
 		remainingGameTime:    scoreboard.RemainingGameTime,
+		homeRuns:             scoreboard.HomeRuns,
+		awayRuns:             scoreboard.AwayRuns,
+		homeWicketsFallen:    scoreboard.HomeWicketsFallen,
+		awayWicketsFallen:    scoreboard.AwayWicketsFallen,
+		homeOversPlayed:      scoreboard.HomeOversPlayed,
+		homeBallsPlayed:      scoreboard.HomeBallsPlayed,
+		awayOversPlayed:      scoreboard.AwayOversPlayed,
+		awayBallsPlayed:      scoreboard.AwayBallsPlayed,
+		homeWonCoinToss:      scoreboard.HomeWonCoinToss,
+		homeBatting:          scoreboard.HomeBatting,
+		awayBatting:          scoreboard.AwayBatting,
+		inning:               scoreboard.Inning,
 	}
 }
 
@@ -404,6 +544,18 @@ func (m MatchStatusCache) makeAPIScoreboard(scoreboard *apiXML.Scoreboard) proto
 		homePoints:           scoreboard.HomePoints,
 		awayPoints:           scoreboard.AwayPoints,
 		remainingGameTime:    scoreboard.RemainingGameTime,
+		homeRuns:             scoreboard.HomeRuns,
+		awayRuns:             scoreboard.AwayRuns,
+		homeWicketsFallen:    scoreboard.HomeWicketsFallen,
+		awayWicketsFallen:    scoreboard.AwayWicketsFallen,
+		homeOversPlayed:      scoreboard.HomeOversPlayed,
+		homeBallsPlayed:      scoreboard.HomeBallsPlayed,
+		awayOversPlayed:      scoreboard.AwayOversPlayed,
+		awayBallsPlayed:      scoreboard.AwayBallsPlayed,
+		homeWonCoinToss:      scoreboard.HomeWonCoinToss,
+		homeBatting:          scoreboard.HomeBatting,
+		awayBatting:          scoreboard.AwayBatting,
+		inning:               scoreboard.Inning,
 	}
 }
 
