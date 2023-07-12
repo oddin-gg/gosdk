@@ -2,6 +2,7 @@ package xml
 
 import (
 	"encoding/xml"
+
 	"github.com/oddin-gg/gosdk/internal/utils"
 )
 
@@ -46,6 +47,7 @@ type PeriodScore struct {
 	KillsPeriodsScore
 	GoalsPeriodsScore
 	PointsPeriodScore
+	RunPeriodsScore
 }
 
 // RoundsPeriodScore ...
@@ -72,6 +74,19 @@ type GoalsPeriodsScore struct {
 	AwayGoals *uint32 `xml:"away_goals,attr,omitempty"`
 }
 
+// RunPeriodsScore ...
+type RunPeriodsScore struct {
+	HomeRuns          *uint32 `xml:"home_runs,attr,omitempty"`
+	AwayRuns          *uint32 `xml:"away_runs,attr,omitempty"`
+	HomeWicketsFallen *uint32 `xml:"home_wickets_fallen,attr,omitempty"`
+	AwayWicketsFallen *uint32 `xml:"away_wickets_fallen,attr,omitempty"`
+	HomeOversPlayed   *uint32 `xml:"home_overs_played,attr,omitempty"`
+	HomeBallsPlayed   *uint32 `xml:"home_balls_played,attr,omitempty"`
+	AwayOversPlayed   *uint32 `xml:"away_overs_played,attr,omitempty"`
+	AwayBallsPlayed   *uint32 `xml:"away_balls_played,attr,omitempty"`
+	HomeWonCoinToss   *bool   `xml:"home_won_coin_toss,attr,omitempty"`
+}
+
 // Scoreboard ...
 type Scoreboard struct {
 	CurrentCTTeam        *uint32 `xml:"current_ct_team,attr,omitempty"`
@@ -91,8 +106,23 @@ type Scoreboard struct {
 	Time                 *uint32 `xml:"time,attr,omitempty"`
 	GameTime             *uint32 `xml:"game_time,attr,omitempty"`
 	CurrentDefenderTeam  *uint32 `xml:"current_def_team,attr,omitempty"`
+
 	// VirtualBasketballScoreboard
 	HomePoints        *uint32 `xml:"home_points,attr,omitempty"`
 	AwayPoints        *uint32 `xml:"away_points,attr,omitempty"`
 	RemainingGameTime *uint32 `xml:"remaining_game_time,attr,omitempty"`
+
+	// RushCricketScoreboard
+	HomeRuns          *uint32 `xml:"home_runs,attr,omitempty"`
+	AwayRuns          *uint32 `xml:"away_runs,attr,omitempty"`
+	HomeWicketsFallen *uint32 `xml:"home_wickets_fallen,attr,omitempty"`
+	AwayWicketsFallen *uint32 `xml:"away_wickets_fallen,attr,omitempty"`
+	HomeOversPlayed   *uint32 `xml:"home_overs_played,attr,omitempty"`
+	HomeBallsPlayed   *uint32 `xml:"home_balls_played,attr,omitempty"`
+	AwayOversPlayed   *uint32 `xml:"away_overs_played,attr,omitempty"`
+	AwayBallsPlayed   *uint32 `xml:"away_balls_played,attr,omitempty"`
+	HomeWonCoinToss   *bool   `xml:"home_won_coin_toss,attr,omitempty"`
+	HomeBatting       *bool   `xml:"home_batting,attr,omitempty"`
+	AwayBatting       *bool   `xml:"away_batting,attr,omitempty"`
+	Inning            *uint32 `xml:"inning,attr,omitempty"`
 }

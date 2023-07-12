@@ -48,6 +48,15 @@ type PeriodScore interface {
 	AwayGoals() *uint32
 	HomePoints() *uint32
 	AwayPoints() *uint32
+	HomeRuns() *uint32
+	AwayRuns() *uint32
+	HomeWicketsFallen() *uint32
+	AwayWicketsFallen() *uint32
+	HomeOversPlayed() *uint32
+	HomeBallsPlayed() *uint32
+	AwayOversPlayed() *uint32
+	AwayBallsPlayed() *uint32
+	HomeWonCoinToss() *bool
 }
 
 // Scoreboard ...
@@ -72,6 +81,18 @@ type Scoreboard interface {
 	HomePoints() *uint32
 	AwayPoints() *uint32
 	RemainingGameTime() *uint32
+	HomeRuns() *uint32
+	AwayRuns() *uint32
+	HomeWicketsFallen() *uint32
+	AwayWicketsFallen() *uint32
+	HomeOversPlayed() *uint32
+	HomeBallsPlayed() *uint32
+	AwayOversPlayed() *uint32
+	AwayBallsPlayed() *uint32
+	HomeWonCoinToss() *bool
+	HomeBatting() *bool
+	AwayBatting() *bool
+	Inning() *uint32
 }
 
 // CompetitionStatus ...
