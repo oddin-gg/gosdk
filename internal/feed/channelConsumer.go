@@ -3,7 +3,6 @@ package feed
 import (
 	"encoding/xml"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/oddin-gg/gosdk/internal/factory"
@@ -37,7 +36,6 @@ type ChannelConsumer struct {
 	outgoing           chan *protocols.QueueMessage
 	feedMessageFactory *factory.FeedMessageFactory
 	logger             *log.Logger
-	mux                sync.RWMutex
 	exchangeName       string
 	messageInterest    *protocols.MessageInterest
 	routingKeys        []string
@@ -55,7 +53,7 @@ func (c *ChannelConsumer) Open(routingKeys []string, messageInterest *protocols.
 	c.messageInterest = messageInterest
 	c.exchangeName = exchangeName
 
-	c.outgoing = make(chan *protocols.QueueMessage, 0)
+	c.outgoing = make(chan *protocols.QueueMessage)
 
 	c.consumeMessage(ch)
 

@@ -1,13 +1,14 @@
 package sport
 
 import (
-	"github.com/pkg/errors"
+	"strings"
+	"time"
+
 	"github.com/oddin-gg/gosdk/internal/api"
 	"github.com/oddin-gg/gosdk/internal/cache"
 	"github.com/oddin-gg/gosdk/internal/factory"
 	"github.com/oddin-gg/gosdk/protocols"
-	"strings"
-	"time"
+	"github.com/pkg/errors"
 )
 
 type fixtureChangeImpl struct {
@@ -58,16 +59,13 @@ func (m *Manager) LocalizedActiveTournaments(locale protocols.Locale) ([]protoco
 		return nil, err
 	}
 
-	result := make([]protocols.Tournament, 0)
+	var result []protocols.Tournament
 	for _, sport := range sports {
 		tournaments, err := sport.Tournaments()
 		if err != nil {
 			return nil, err
 		}
-		for i := range tournaments {
-			tournament := tournaments[i]
-			result = append(result, tournament)
-		}
+		result = append(result, tournaments...)
 	}
 
 	return result, nil
@@ -91,7 +89,7 @@ func (m *Manager) LocalizedSportActiveTournaments(sportName string, locale proto
 			return nil, err
 		}
 
-		if strings.ToLower(*name) == strings.ToLower(sportName) {
+		if strings.EqualFold(*name, sportName) {
 			return sport.Tournaments()
 		}
 	}
@@ -213,8 +211,6 @@ func (m *Manager) ListOfMatches(startIndex uint, limit uint) ([]protocols.Match,
 // LocalizedListOfMatches ...
 func (m *Manager) LocalizedListOfMatches(startIndex uint, limit uint, locale protocols.Locale) ([]protocols.Match, error) {
 	switch {
-	case startIndex < 0:
-		return nil, errors.Errorf("start index has to bigger than zero")
 	case limit > 1000:
 		return nil, errors.Errorf("max limit is 1000")
 	case limit < 1:

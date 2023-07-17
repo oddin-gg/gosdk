@@ -37,7 +37,6 @@ type oddsFeedSessionImpl struct {
 	closeCh                  chan bool
 	msgCh                    chan protocols.SessionMessage
 	isReplay                 bool
-	messageInterest          interface{}
 }
 
 func (o *oddsFeedSessionImpl) RespCh() protocols.SessionMessageDelivery {
@@ -221,6 +220,6 @@ func newSession(
 		sessionID:                uuid.New(),
 		isReplay:                 isReplay,
 		logger:                   logger,
-		msgCh:                    make(chan protocols.SessionMessage, 0),
+		msgCh:                    make(chan protocols.SessionMessage),
 	}
 }

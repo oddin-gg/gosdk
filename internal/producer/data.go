@@ -1,10 +1,11 @@
 package producer
 
 import (
+	"time"
+
 	"github.com/oddin-gg/gosdk/internal/api/xml"
 	"github.com/oddin-gg/gosdk/protocols"
 	errors "github.com/pkg/errors"
-	"time"
 )
 
 type data struct {
@@ -45,10 +46,7 @@ type producerImpl struct {
 	active                          bool
 	name                            string
 	description                     string
-	lastMessageTimestamp            time.Time
-	isAvailable                     bool
 	enabled                         bool
-	isFlaggedDown                   bool
 	apiEndpoint                     string
 	producerScopes                  []protocols.ProducerScope
 	statefulRecoveryWindowInMinutes uint
@@ -111,7 +109,7 @@ func (p producerImpl) LastProcessedMessageGenTimestamp() time.Time {
 }
 
 func (p producerImpl) ProcessingQueDelay() time.Duration {
-	return time.Now().Sub(p.LastProcessedMessageGenTimestamp())
+	return time.Since(p.LastProcessedMessageGenTimestamp())
 }
 
 func (p producerImpl) TimestampForRecovery() time.Time {

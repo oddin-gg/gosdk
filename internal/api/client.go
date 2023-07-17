@@ -393,7 +393,7 @@ func (c *Client) PostReplayStart(nodeID *int, speed *int, maxDelay *int, useRepl
 
 // Open for async processing
 func (c *Client) Open() <-chan protocols.Response {
-	c.msgCh = make(chan protocols.Response, 0)
+	c.msgCh = make(chan protocols.Response)
 
 	return c.msgCh
 }

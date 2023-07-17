@@ -1,11 +1,12 @@
 package producer
 
 import (
+	"time"
+
 	"github.com/oddin-gg/gosdk/internal/api"
 	"github.com/oddin-gg/gosdk/protocols"
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
-	"time"
 )
 
 // Manager ...
@@ -231,7 +232,7 @@ func (m *Manager) SetProducerRecoveryFromTimestamp(id uint, timestamp time.Time)
 	switch {
 	case timestamp.IsZero():
 		break
-	case time.Now().Sub(timestamp) > (time.Duration(maxRequestMinutes) * time.Minute):
+	case time.Since(timestamp) > (time.Duration(maxRequestMinutes) * time.Minute):
 		return errors.New("last received message timestamp can not be so long in past")
 	}
 

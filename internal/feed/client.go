@@ -3,7 +3,6 @@ package feed
 import (
 	"errors"
 	"fmt"
-	"sync"
 	"time"
 
 	"github.com/oddin-gg/gosdk/protocols"
@@ -16,8 +15,6 @@ type Client struct {
 	connection            *amqp.Connection
 	oddsFeedConfiguration protocols.OddsFeedConfiguration
 	whoAmIManager         protocols.WhoAmIManager
-	mux                   sync.Mutex
-	errorCh               chan *amqp.Error
 	logger                *log.Logger
 	closed                bool
 }
