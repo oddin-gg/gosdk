@@ -91,7 +91,7 @@ type MarketVoidReason interface {
 // MarketDescriptionManager ...
 type MarketDescriptionManager interface {
 	MarketDescriptions() ([]MarketDescription, error)
-	MarketDescriptionByIdAndVariant(marketID uint, variant *string) (MarketDescription, error)
+	MarketDescriptionByIDAndVariant(marketID uint, variant *string) (MarketDescription, error)
 	LocalizedMarketDescriptions(locale Locale) ([]MarketDescription, error)
 	ClearMarketDescription(marketID uint, variant *string)
 	MarketVoidReasons() ([]MarketVoidReason, error)

@@ -52,7 +52,7 @@ type Region string
 // Regions
 const (
 	DefaulRegion Region = ""
-	APSouthEast1        = "ap-southeast-1."
+	APSouthEast1 Region = "ap-southeast-1."
 )
 
 // Locale ...

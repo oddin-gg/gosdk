@@ -36,7 +36,7 @@ func (s *SportCache) OnAPIResponse(apiResponse protocols.Response) {
 
 	err := s.handleTournamentData(*apiResponse.Locale, result)
 	if err != nil {
-		s.logger.WithError(err).Errorf("failed to process api response %s", apiResponse)
+		s.logger.WithError(err).Errorf("failed to process api response %v", apiResponse)
 	}
 }
 

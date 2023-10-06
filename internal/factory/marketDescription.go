@@ -14,8 +14,8 @@ type MarketDescriptionFactory struct {
 	competitorCache        *cache.CompetitorCache
 }
 
-// MarketDescriptionByIdAndSpecifiers returns market description from cache based on marketID, specifiers and locales
-func (m MarketDescriptionFactory) MarketDescriptionByIdAndSpecifiers(
+// MarketDescriptionByIDAndSpecifiers returns market description from cache based on marketID, specifiers and locales
+func (m MarketDescriptionFactory) MarketDescriptionByIDAndSpecifiers(
 	marketID uint,
 	specifiers map[string]string,
 	locales []protocols.Locale,
@@ -26,12 +26,12 @@ func (m MarketDescriptionFactory) MarketDescriptionByIdAndSpecifiers(
 		variant = &specifier
 	}
 
-	return m.MarketDescriptionByIdAndVariant(marketID, variant, locales)
+	return m.MarketDescriptionByIDAndVariant(marketID, variant, locales)
 }
 
-// MarketDescriptionByIdAndVariant returns market description from cache based on marketID, optional market variant
+// MarketDescriptionByIDAndVariant returns market description from cache based on marketID, optional market variant
 // and locales
-func (m MarketDescriptionFactory) MarketDescriptionByIdAndVariant(
+func (m MarketDescriptionFactory) MarketDescriptionByIDAndVariant(
 	marketID uint,
 	variant *string,
 	locales []protocols.Locale,

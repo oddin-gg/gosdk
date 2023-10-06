@@ -257,8 +257,6 @@ type betStopImpl struct {
 	event      interface{}
 }
 
-func (b betStopImpl) isBetStop() {}
-
 func (b betStopImpl) Producer() protocols.Producer {
 	return b.producer
 }

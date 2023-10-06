@@ -6,8 +6,8 @@ import (
 	"time"
 
 	"github.com/oddin-gg/gosdk/protocols"
+	amqp "github.com/rabbitmq/amqp091-go"
 	log "github.com/sirupsen/logrus"
-	"github.com/streadway/amqp"
 )
 
 // Client ...

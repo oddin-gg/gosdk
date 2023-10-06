@@ -58,7 +58,7 @@ func (m *Manager) Open() error {
 		m.producerMap[p.ID] = newData(p)
 	}
 
-	m.logger.Debugf("mapped producer list - %s", m.producers)
+	m.logger.Debugf("mapped producer list - %v", apiProducers)
 	return nil
 }
 

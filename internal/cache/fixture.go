@@ -1,11 +1,12 @@
 package cache
 
 import (
-	"github.com/patrickmn/go-cache"
+	"time"
+
 	"github.com/oddin-gg/gosdk/internal/api"
 	feedXML "github.com/oddin-gg/gosdk/internal/feed/xml"
 	"github.com/oddin-gg/gosdk/protocols"
-	"time"
+	"github.com/patrickmn/go-cache"
 )
 
 // FixtureCache ...

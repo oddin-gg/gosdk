@@ -43,7 +43,7 @@ func (m *MatchCache) OnAPIResponse(apiResponse protocols.Response) {
 
 	err := m.handleMatchData(*apiResponse.Locale, events)
 	if err != nil {
-		m.logger.WithError(err).Errorf("failed to process api response %s", apiResponse)
+		m.logger.WithError(err).Errorf("failed to process api response %v", apiResponse)
 	}
 }
 

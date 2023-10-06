@@ -9,8 +9,8 @@ import (
 	feedXML "github.com/oddin-gg/gosdk/internal/feed/xml"
 	"github.com/oddin-gg/gosdk/protocols"
 	"github.com/pkg/errors"
+	amqp "github.com/rabbitmq/amqp091-go"
 	log "github.com/sirupsen/logrus"
-	"github.com/streadway/amqp"
 )
 
 const (

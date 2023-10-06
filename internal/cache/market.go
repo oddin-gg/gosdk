@@ -106,8 +106,8 @@ func (m *MarketDescriptionCache) MarketDescriptionByID(
 	return result, nil
 }
 
-// TODO kafkapre - delete it? there is no load if it is missing, I tried to add fetch but arg of this method has no locale
 // MarketDescriptionByKey ...
+// Deprecated: do not use this function, there is no load when missing
 func (m *MarketDescriptionCache) MarketDescriptionByKey(key CompositeKey) (*LocalizedMarketDescription, error) {
 	strKey := m.makeStringKey(key.MarketID, key.Variant)
 	item, ok := m.internalCache.Get(strKey)
