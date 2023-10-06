@@ -40,7 +40,7 @@ type marketDataImpl struct {
 }
 
 func (m marketDataImpl) OutcomeName(outcomeID string, locale protocols.Locale) (*string, error) {
-	marketDescription, err := m.marketDescriptionFactory.MarketDescriptionByIdAndSpecifiers(m.marketID, m.specifiers, []protocols.Locale{locale})
+	marketDescription, err := m.marketDescriptionFactory.MarketDescriptionByIDAndSpecifiers(m.marketID, m.specifiers, []protocols.Locale{locale})
 	if err != nil {
 		return nil, err
 	}
@@ -96,7 +96,7 @@ func (m marketDataImpl) OutcomeName(outcomeID string, locale protocols.Locale) (
 }
 
 func (m marketDataImpl) MarketName(locale protocols.Locale) (*string, error) {
-	marketDescription, err := m.marketDescriptionFactory.MarketDescriptionByIdAndSpecifiers(m.marketID, m.specifiers, []protocols.Locale{locale})
+	marketDescription, err := m.marketDescriptionFactory.MarketDescriptionByIDAndSpecifiers(m.marketID, m.specifiers, []protocols.Locale{locale})
 	if err != nil {
 		return nil, err
 	}

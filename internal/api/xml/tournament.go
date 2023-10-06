@@ -64,6 +64,7 @@ func (t Tournament) GetID() string {
 	return t.ID
 }
 
+// GetRefID ...
 // Deprecated: do not use this method, it will be removed in future
 func (t Tournament) GetRefID() *string {
 	return t.RefID

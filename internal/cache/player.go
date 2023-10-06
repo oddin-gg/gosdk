@@ -60,7 +60,7 @@ func (c *PlayersCache) GetPlayers(ids []PlayerCacheKey) (map[PlayerCacheKey]Loca
 		return resultPlayers, nil
 	}
 
-	dbPlayers, err := c.fetchPlayersFromApi(missingPlayersIDs)
+	dbPlayers, err := c.fetchPlayersFromAPI(missingPlayersIDs)
 	if err != nil {
 		return nil, errors.Wrap(err, "GetPlayers failed")
 	}
@@ -98,7 +98,7 @@ func (c *PlayersCache) getPlayersFromCache(
 	return foundPlayers, missingPlayersIDs
 }
 
-func (c *PlayersCache) fetchPlayersFromApi(keys []PlayerCacheKey) (map[PlayerCacheKey]xml.PlayerProfile, error) {
+func (c *PlayersCache) fetchPlayersFromAPI(keys []PlayerCacheKey) (map[PlayerCacheKey]xml.PlayerProfile, error) {
 	res := make(map[PlayerCacheKey]xml.PlayerProfile, len(keys))
 
 	for _, key := range keys {

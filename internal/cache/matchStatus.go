@@ -324,12 +324,12 @@ func (m MatchStatusCache) OnAPIResponse(apiResponse protocols.Response) {
 	case *apiXML.MatchSummaryResponse:
 		id, err := protocols.ParseURN(msg.SportEvent.ID)
 		if err != nil {
-			m.logger.WithError(err).Errorf("failed to parse urn %s", id)
+			m.logger.WithError(err).Errorf("failed to parse urn %s", msg.SportEvent.ID)
 		}
 
 		err = m.refreshOrInsertAPIItem(*id, msg.SportEventStatus)
 		if err != nil {
-			m.logger.WithError(err).Errorf("failed to parse urn %s", id)
+			m.logger.WithError(err).Errorf("failed to refresh api item %v", *id)
 		}
 	}
 }

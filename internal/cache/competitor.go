@@ -74,7 +74,7 @@ func (c *CompetitorCache) OnAPIResponse(apiResponse protocols.Response) {
 
 	err := c.handleTeamData(*apiResponse.Locale, result)
 	if err != nil {
-		c.logger.WithError(err).Errorf("failed to precess api data %s", apiResponse)
+		c.logger.WithError(err).Errorf("failed to precess api data %v", apiResponse)
 	}
 }
 

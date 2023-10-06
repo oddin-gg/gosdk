@@ -1,11 +1,9 @@
 package whoami
 
 import (
-	"errors"
-	"fmt"
-	log "github.com/sirupsen/logrus"
 	"github.com/oddin-gg/gosdk/internal/api"
 	"github.com/oddin-gg/gosdk/protocols"
+	log "github.com/sirupsen/logrus"
 	"time"
 )
 
@@ -54,22 +52,6 @@ func (m *Manager) BookmakerDetails() (protocols.BookmakerDetail, error) {
 	m.bookmakerDetails, err = m.fetchBookmakerDetails()
 
 	return m.bookmakerDetails, err
-}
-
-func (m *Manager) bookmakerDescription() (*string, error) {
-	if m.bookmakerDetails == nil {
-		return nil, errors.New("missing bookmaker detail")
-	}
-
-	var sdkNodeID int
-	if m.cfg.SdkNodeID() == nil {
-		sdkNodeID = -1
-	} else {
-		sdkNodeID = *m.cfg.SdkNodeID()
-	}
-
-	output := fmt.Sprintf("of-sdk-%d-%d", m.bookmakerDetails.BookmakerID(), sdkNodeID)
-	return &output, nil
 }
 
 func (m *Manager) fetchBookmakerDetails() (protocols.BookmakerDetail, error) {

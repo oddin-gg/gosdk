@@ -18,13 +18,13 @@ func (m Manager) MarketDescriptions() ([]protocols.MarketDescription, error) {
 	return m.LocalizedMarketDescriptions(m.oddsFeedConfiguration.DefaultLocale())
 }
 
-// MarketDescriptionByIdAndVariant ...
-func (m Manager) MarketDescriptionByIdAndVariant(
+// MarketDescriptionByIDAndVariant ...
+func (m Manager) MarketDescriptionByIDAndVariant(
 	marketID uint,
 	variant *string,
 ) (protocols.MarketDescription, error) {
 	locale := []protocols.Locale{m.oddsFeedConfiguration.DefaultLocale()}
-	return m.marketDescriptionFactory.MarketDescriptionByIdAndVariant(marketID, variant, locale)
+	return m.marketDescriptionFactory.MarketDescriptionByIDAndVariant(marketID, variant, locale)
 }
 
 // LocalizedMarketDescriptions ...

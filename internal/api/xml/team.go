@@ -35,6 +35,7 @@ func (t Team) GetAbbreviation() string {
 	return t.Abbreviation
 }
 
+// GetRefID ...
 // Deprecated: do not use this method, it will be removed in future
 func (t Team) GetRefID() *string {
 	return t.RefID

@@ -151,7 +151,7 @@ func (o *oddsFeedSessionImpl) processFeedMessage(feedMessage *protocols.FeedMess
 
 	message, err := o.feedMessageFactory.BuildMessage(feedMessage)
 	if err != nil {
-		o.logger.WithError(err).Errorf("failed to build message from feed message %s", feedMessage)
+		o.logger.WithError(err).Errorf("failed to build message from feed message %v", feedMessage)
 		unparsableMsg := o.feedMessageFactory.BuildUnparsableMessage(feedMessage)
 		o.msgCh <- protocols.SessionMessage{
 			UnparsableMessage: unparsableMsg,

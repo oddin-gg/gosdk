@@ -105,7 +105,7 @@ func (t *TournamentCache) OnAPIResponse(apiResponse protocols.Response) {
 
 	err := t.handleTournamentsData(*apiResponse.Locale, result)
 	if err != nil {
-		t.logger.WithError(err).Errorf("failed to precess api data %s", apiResponse)
+		t.logger.WithError(err).Errorf("failed to precess api data %v", apiResponse)
 	}
 }
 

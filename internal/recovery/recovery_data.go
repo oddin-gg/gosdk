@@ -179,15 +179,6 @@ func (p *producerRecoveryData) timestampForRecovery() (time.Time, error) {
 	return prod.TimestampForRecovery(), nil
 }
 
-func (p *producerRecoveryData) lastMessageReceivedTimestamp() (time.Time, error) {
-	prod, err := p.producerManager.GetProducer(p.producerID)
-	if err != nil {
-		return time.Time{}, err
-	}
-
-	return prod.LastMessageTimestamp(), nil
-}
-
 func (p *producerRecoveryData) setLastMessageReceivedTimestamp(timestamp time.Time) error {
 	if timestamp.IsZero() {
 		return errors.New("required non zero timestamp")
@@ -220,15 +211,6 @@ func (p *producerRecoveryData) producerName() (string, error) {
 	}
 
 	return prod.Name(), nil
-}
-
-func (p *producerRecoveryData) statefulRecoveryWindowInMinutes() (uint, error) {
-	prod, err := p.producerManager.GetProducer(p.producerID)
-	if err != nil {
-		return 0, err
-	}
-
-	return prod.StatefulRecoveryWindowInMinutes(), nil
 }
 
 func (p *producerRecoveryData) setProducerRecoveryState(recoveryID uint, recoveryStatedAt time.Time, recoveryState protocols.RecoveryState) {
