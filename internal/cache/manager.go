@@ -17,7 +17,7 @@ type Manager struct {
 	MatchStatusCache           *MatchStatusCache
 	LocalizedStaticMatchStatus *LocalizedStaticDataCache
 	PlayersCache               *PlayersCache
-	logger                     *log.Logger
+	logger                     *log.Entry
 	MarketVoidReasonsCache     *MarketVoidReasonsCache
 }
 
@@ -46,7 +46,7 @@ func (m Manager) Close() {
 }
 
 // NewManager ...
-func NewManager(client *api.Client, oddsFeedConfiguration protocols.OddsFeedConfiguration, logger *log.Logger) *Manager {
+func NewManager(client *api.Client, oddsFeedConfiguration protocols.OddsFeedConfiguration, logger *log.Entry) *Manager {
 	manager := &Manager{
 		MarketDescriptionCache: newMarketDescriptionCache(client),
 		CompetitorCache:        newCompetitorCache(client),

@@ -18,7 +18,7 @@ import (
 type MatchCache struct {
 	apiClient     *api.Client
 	internalCache *cache.Cache
-	logger        *log.Logger
+	logger        *log.Entry
 }
 
 // OnAPIResponse ...
@@ -243,7 +243,7 @@ func (m *MatchCache) unwrapTime(dateTime *utils.DateTime) (*time.Time, error) {
 	return &parsed, nil
 }
 
-func newMatchCache(client *api.Client, logger *log.Logger) *MatchCache {
+func newMatchCache(client *api.Client, logger *log.Entry) *MatchCache {
 	matchCache := &MatchCache{
 		apiClient:     client,
 		internalCache: cache.New(12*time.Hour, 10*time.Minute),

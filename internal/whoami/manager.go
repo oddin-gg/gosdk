@@ -34,11 +34,10 @@ type Manager struct {
 }
 
 // NewManager ...
-func NewManager(cfg protocols.OddsFeedConfiguration, client *api.Client, logger *log.Logger) protocols.WhoAmIManager {
+func NewManager(cfg protocols.OddsFeedConfiguration, client *api.Client) protocols.WhoAmIManager {
 	return &Manager{
 		cfg:       cfg,
 		apiClient: client,
-		logger:    logger,
 	}
 }
 
@@ -59,8 +58,6 @@ func (m *Manager) fetchBookmakerDetails() (protocols.BookmakerDetail, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	m.logger.Infof("client id: %d", details.BookmakerID)
 
 	exp := time.Time(details.ExpireAt)
 	if exp.After(exp.Add(7 * 24 * time.Hour)) {

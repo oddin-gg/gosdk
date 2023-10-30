@@ -39,7 +39,7 @@ type TournamentCache struct {
 	apiClient     *api.Client
 	internalCache *cache.Cache
 	iconCache     *cache.Cache
-	logger        *log.Logger
+	logger        *log.Entry
 }
 
 // OnFeedMessage ...
@@ -285,7 +285,7 @@ func (t *TournamentCache) refreshOrInsertItem(id protocols.URN, locale protocols
 	return nil
 }
 
-func newTournamentCache(client *api.Client, logger *log.Logger) *TournamentCache {
+func newTournamentCache(client *api.Client, logger *log.Entry) *TournamentCache {
 	tournamentCache := &TournamentCache{
 		apiClient:     client,
 		internalCache: cache.New(12*time.Hour, 10*time.Minute),

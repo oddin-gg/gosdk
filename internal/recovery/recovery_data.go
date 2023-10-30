@@ -13,7 +13,7 @@ type producerRecoveryData struct {
 	producerID      uint
 	producerManager *producer.Manager
 
-	lock sync.Mutex
+	lock sync.RWMutex
 
 	currentRecovery *recoveryData
 	eventRecoveries map[uint]*eventRecovery
@@ -100,7 +100,10 @@ func (p *producerRecoveryData) validateSnapshotComplete(recoveryID uint, message
 }
 
 func (p *producerRecoveryData) validateEventSnapshotComplete(recoveryID uint, interest protocols.MessageInterest) bool {
-	eventRecovery, ok := p.eventRecoveries[recoveryID]
+	p.lock.RLock()
+	defer p.lock.RUnlock()
+
+	er, ok := p.eventRecoveries[recoveryID]
 	if !ok {
 		return false
 	}
@@ -110,7 +113,7 @@ func (p *producerRecoveryData) validateEventSnapshotComplete(recoveryID uint, in
 		return true
 	}
 
-	res, err := p.validateProducerSnapshotCompletes(eventRecovery.snapshotComplete(interest))
+	res, err := p.validateProducerSnapshotCompletes(er.snapshotComplete(interest))
 	if err != nil {
 		return false
 	}
@@ -119,6 +122,9 @@ func (p *producerRecoveryData) validateEventSnapshotComplete(recoveryID uint, in
 }
 
 func (p *producerRecoveryData) isKnownRecovery(requestID uint) bool {
+	p.lock.RLock()
+	defer p.lock.RUnlock()
+
 	hasRequestID := p.currentRecovery != nil && p.currentRecovery.recoveryID == requestID
 	_, ok := p.eventRecoveries[requestID]
 	return hasRequestID || ok
@@ -158,6 +164,9 @@ func (p *producerRecoveryData) snapshotValidationNeeded(interest protocols.Messa
 }
 
 func (p *producerRecoveryData) eventRecovery(recoveryID uint) *eventRecovery {
+	p.lock.RLock()
+	defer p.lock.RUnlock()
+
 	return p.eventRecoveries[recoveryID]
 }
 
@@ -244,12 +253,15 @@ func (p *producerRecoveryData) setProducerUp() error {
 }
 
 func (p *producerRecoveryData) setEventRecoveryState(eventID protocols.URN, recoveryID uint, recoveryStartedAt time.Time) {
+	p.lock.Lock()
+	defer p.lock.Unlock()
+
 	switch {
 	case recoveryID == 0 && recoveryStartedAt.IsZero():
 		delete(p.eventRecoveries, recoveryID)
 	default:
-		eventRecovery := newEventRecovery(eventID, recoveryID, recoveryStartedAt)
-		p.eventRecoveries[recoveryID] = &eventRecovery
+		er := newEventRecovery(eventID, recoveryID, recoveryStartedAt)
+		p.eventRecoveries[recoveryID] = &er
 	}
 }
 

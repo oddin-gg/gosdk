@@ -13,7 +13,7 @@ import (
 type Manager struct {
 	apiClient   *api.Client
 	cfg         protocols.OddsFeedConfiguration
-	logger      *log.Logger
+	logger      *log.Entry
 	producerMap map[uint]*data
 }
 
@@ -261,7 +261,7 @@ func (m *Manager) IsProducerDown(id uint) (bool, error) {
 }
 
 // NewManager ...
-func NewManager(cfg protocols.OddsFeedConfiguration, apiClient *api.Client, logger *log.Logger) *Manager {
+func NewManager(cfg protocols.OddsFeedConfiguration, apiClient *api.Client, logger *log.Entry) *Manager {
 	return &Manager{
 		apiClient: apiClient,
 		cfg:       cfg,

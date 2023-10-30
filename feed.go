@@ -32,7 +32,7 @@ type oddsFeedImpl struct {
 	sportsInfoManager        protocols.SportsInfoManager
 	replayManager            protocols.ReplayManager
 	cfg                      protocols.OddsFeedConfiguration
-	logger                   *log.Logger
+	logger                   *log.Entry
 	apiClient                *api.Client
 	opened                   bool
 	cacheManager             *cache.Manager
@@ -310,12 +310,14 @@ func (o *oddsFeedImpl) init() error {
 
 	o.apiClient = api.New(o.cfg)
 
-	o.whoAmIManager = whoami.NewManager(o.cfg, o.apiClient, o.logger)
+	o.whoAmIManager = whoami.NewManager(o.cfg, o.apiClient)
 	// Try to fetch bookmaker details
-	_, err := o.whoAmIManager.BookmakerDetails()
+	details, err := o.whoAmIManager.BookmakerDetails()
 	if err != nil {
 		return err
 	}
+
+	o.logger = log.New().WithField("client_id", details.BookmakerID())
 
 	o.producerManager = producer.NewManager(o.cfg, o.apiClient, o.logger)
 
@@ -470,7 +472,6 @@ func (o *oddsFeedImpl) validateInterestCombination(sessionsData map[uuid.UUID]ke
 func NewOddsFeed(configuration protocols.OddsFeedConfiguration) protocols.OddsFeed {
 	return &oddsFeedImpl{
 		cfg:        configuration,
-		logger:     log.New(),
 		sessionMap: make(map[uuid.UUID]*sessionData),
 	}
 }

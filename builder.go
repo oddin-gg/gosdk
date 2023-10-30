@@ -22,7 +22,7 @@ type builderImpl struct {
 	cacheManager             *cache.Manager
 	feedMessageFactory       *factory.FeedMessageFactory
 	recoveryMessageProcessor protocols.RecoveryMessageProcessor
-	logger                   *log.Logger
+	logger                   *log.Entry
 }
 
 func (b *builderImpl) SetMessageInterest(messageInterest protocols.MessageInterest) protocols.OddsFeedSessionBuilder {

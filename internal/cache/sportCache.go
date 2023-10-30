@@ -17,7 +17,7 @@ type SportCache struct {
 	internalCache *cache.Cache
 	loadedLocales map[protocols.Locale]struct{}
 	mux           sync.Mutex
-	logger        *log.Logger
+	logger        *log.Entry
 }
 
 // OnAPIResponse ...
@@ -231,7 +231,7 @@ func (s *SportCache) handleTournamentData(locale protocols.Locale, tournamentDat
 	return nil
 }
 
-func newSportDataCache(client *api.Client, logger *log.Logger) *SportCache {
+func newSportDataCache(client *api.Client, logger *log.Entry) *SportCache {
 	sportDataCache := &SportCache{
 		apiClient:     client,
 		internalCache: cache.New(cache.NoExpiration, cache.NoExpiration),

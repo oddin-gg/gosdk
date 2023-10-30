@@ -23,9 +23,9 @@ type Manager struct {
 	cfg                    protocols.OddsFeedConfiguration
 	producerManager        *producer.Manager
 	apiClient              *api.Client
-	lock                   sync.Mutex
+	lock                   sync.RWMutex
 	producerRecoveryData   map[uint]*producerRecoveryData
-	logger                 *log.Logger
+	logger                 *log.Entry
 	ticker                 *time.Ticker
 	closeCh                chan bool
 	messageProcessingTimes map[uuid.UUID]time.Time
@@ -36,9 +36,9 @@ type Manager struct {
 // OnMessageProcessingStarted ...
 func (m *Manager) OnMessageProcessingStarted(sessionID uuid.UUID, producerID uint, timestamp time.Time) {
 	m.lock.Lock()
-	defer m.lock.Unlock()
-
 	m.messageProcessingTimes[sessionID] = timestamp
+	m.lock.Unlock()
+
 	data := m.findOrMakeProducerRecoveryData(producerID)
 	err := data.setLastMessageReceivedTimestamp(timestamp)
 	if err != nil {
@@ -48,9 +48,6 @@ func (m *Manager) OnMessageProcessingStarted(sessionID uuid.UUID, producerID uin
 
 // OnMessageProcessingEnded ...
 func (m *Manager) OnMessageProcessingEnded(sessionID uuid.UUID, producerID uint, timestamp time.Time) {
-	m.lock.Lock()
-	defer m.lock.Unlock()
-
 	if !timestamp.IsZero() {
 		data := m.findOrMakeProducerRecoveryData(producerID)
 		err := data.setLastProcessedMessageGenTimestamp(timestamp)
@@ -59,10 +56,12 @@ func (m *Manager) OnMessageProcessingEnded(sessionID uuid.UUID, producerID uint,
 		}
 	}
 
+	m.lock.RLock()
 	start, ok := m.messageProcessingTimes[sessionID]
 	if !ok {
 		start = time.Time{}
 	}
+	m.lock.RUnlock()
 
 	switch {
 	case start.IsZero():
@@ -71,15 +70,15 @@ func (m *Manager) OnMessageProcessingEnded(sessionID uuid.UUID, producerID uint,
 		m.logger.Warnf("processing message took more than 1s - %d ms", time.Since(start).Milliseconds())
 	}
 
+	m.lock.Lock()
 	delete(m.messageProcessingTimes, sessionID)
+	m.lock.Unlock()
 }
 
 // OnAliveReceived ...
 func (m *Manager) OnAliveReceived(producerID uint, timestamp protocols.MessageTimestamp, isSubscribed bool, messageInterest protocols.MessageInterest) {
-	m.lock.Lock()
-	defer m.lock.Unlock()
-
 	data := m.findOrMakeProducerRecoveryData(producerID)
+
 	switch {
 	case data.isDisabled():
 		return
@@ -97,10 +96,10 @@ func (m *Manager) OnAliveReceived(producerID uint, timestamp protocols.MessageTi
 
 // OnSnapshotCompleteReceived ...
 func (m *Manager) OnSnapshotCompleteReceived(producerID uint, requestID uint, messageInterest protocols.MessageInterest) {
-	m.lock.Lock()
-	defer m.lock.Unlock()
-
+	m.lock.RLock()
 	data, ok := m.producerRecoveryData[producerID]
+	m.lock.RUnlock()
+
 	if !ok {
 		return
 	}
@@ -150,10 +149,12 @@ func (m *Manager) Open() (<-chan protocols.RecoveryMessage, error) {
 		m.logger.Warn("no active producers")
 	}
 
+	m.lock.Lock()
 	m.producerRecoveryData = make(map[uint]*producerRecoveryData)
 	for id := range activeProducers {
 		m.producerRecoveryData[id] = newProducerRecoveryData(id, m.producerManager)
 	}
+	m.lock.Unlock()
 
 	m.msgCh = make(chan protocols.RecoveryMessage)
 	m.closeCh = make(chan bool, 1)
@@ -194,9 +195,6 @@ func (m *Manager) Close() {
 }
 
 func (m *Manager) makeEventRecovery(producerID uint, eventID protocols.URN, callback func(string, protocols.URN, uint, *int) (bool, error)) (uint, error) {
-	m.lock.Lock()
-	defer m.lock.Unlock()
-
 	now := time.Now()
 	data := m.findOrMakeProducerRecoveryData(producerID)
 
@@ -222,6 +220,9 @@ func (m *Manager) makeEventRecovery(producerID uint, eventID protocols.URN, call
 }
 
 func (m *Manager) findOrMakeProducerRecoveryData(producerID uint) *producerRecoveryData {
+	m.lock.Lock()
+	defer m.lock.Unlock()
+
 	data, ok := m.producerRecoveryData[producerID]
 	if !ok {
 		data = newProducerRecoveryData(producerID, m.producerManager)
@@ -232,30 +233,36 @@ func (m *Manager) findOrMakeProducerRecoveryData(producerID uint) *producerRecov
 }
 
 func (m *Manager) timerTick() {
-	m.lock.Lock()
-	defer m.lock.Unlock()
+	// Make a copy to don't block
+	m.lock.RLock()
+	localRecoveryData := make(map[uint]*producerRecoveryData, len(m.producerRecoveryData))
+	for i := range m.producerRecoveryData {
+		rd := m.producerRecoveryData[i]
+		localRecoveryData[i] = rd
+	}
+	m.lock.RUnlock()
 
 	now := time.Now()
 
-	for i := range m.producerRecoveryData {
-		recoveryData := m.producerRecoveryData[i]
-		disabled := recoveryData.isDisabled()
+	for i := range localRecoveryData {
+		rd := localRecoveryData[i]
+		disabled := rd.isDisabled()
 		if disabled {
 			continue
 		}
 
 		var lastTimestamp time.Time
-		if recoveryData.lastSystemAliveReceivedTimestamp != nil {
-			lastTimestamp = *recoveryData.lastSystemAliveReceivedTimestamp
+		if rd.lastSystemAliveReceivedTimestamp != nil {
+			lastTimestamp = *rd.lastSystemAliveReceivedTimestamp
 		}
 
 		aliveInterval := now.Sub(lastTimestamp)
 		var err error
 		switch {
 		case aliveInterval.Seconds() > float64(m.cfg.MaxInactivitySeconds()):
-			err = m.producerDown(recoveryData, protocols.AliveInternalViolationProducerDownReason)
-		case !m.calculateTiming(recoveryData, now):
-			err = m.producerDown(recoveryData, protocols.ProcessingQueueDelayViolationProducerDownReason)
+			err = m.producerDown(rd, protocols.AliveInternalViolationProducerDownReason)
+		case !m.calculateTiming(rd, now):
+			err = m.producerDown(rd, protocols.ProcessingQueueDelayViolationProducerDownReason)
 		}
 
 		if err != nil {
@@ -527,7 +534,7 @@ func (m *Manager) producerUp(data *producerRecoveryData, reason protocols.Produc
 }
 
 // NewManager ...
-func NewManager(cfg protocols.OddsFeedConfiguration, producerManager *producer.Manager, apiClient *api.Client, logger *log.Logger) *Manager {
+func NewManager(cfg protocols.OddsFeedConfiguration, producerManager *producer.Manager, apiClient *api.Client, logger *log.Entry) *Manager {
 	return &Manager{
 		cfg:                    cfg,
 		producerManager:        producerManager,

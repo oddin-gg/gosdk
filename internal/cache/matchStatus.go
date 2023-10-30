@@ -300,7 +300,7 @@ func (s scoreboardImpl) Inning() *uint32 {
 type MatchStatusCache struct {
 	apiClient             *api.Client
 	internalCache         *cache.Cache
-	logger                *log.Logger
+	logger                *log.Entry
 	oddsFeedConfiguration protocols.OddsFeedConfiguration
 }
 
@@ -596,7 +596,7 @@ func (m MatchStatusCache) fromAPI(status apiXML.SportEventStatusType) protocols.
 	}
 }
 
-func newMatchStatusCache(client *api.Client, oddsFeedConfiguration protocols.OddsFeedConfiguration, logger *log.Logger) *MatchStatusCache {
+func newMatchStatusCache(client *api.Client, oddsFeedConfiguration protocols.OddsFeedConfiguration, logger *log.Entry) *MatchStatusCache {
 	matchStatusCache := &MatchStatusCache{
 		apiClient:             client,
 		oddsFeedConfiguration: oddsFeedConfiguration,

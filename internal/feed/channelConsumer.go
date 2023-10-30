@@ -35,7 +35,7 @@ type ChannelConsumer struct {
 	client             *Client
 	outgoing           chan *protocols.QueueMessage
 	feedMessageFactory *factory.FeedMessageFactory
-	logger             *log.Logger
+	logger             *log.Entry
 	exchangeName       string
 	messageInterest    *protocols.MessageInterest
 	routingKeys        []string
@@ -254,7 +254,7 @@ func (c *ChannelConsumer) parseRoute(route string) (*protocols.RoutingKeyInfo, e
 }
 
 // NewChannelConsumer ...
-func NewChannelConsumer(client *Client, feedMessageFactory *factory.FeedMessageFactory, logger *log.Logger) *ChannelConsumer {
+func NewChannelConsumer(client *Client, feedMessageFactory *factory.FeedMessageFactory, logger *log.Entry) *ChannelConsumer {
 	return &ChannelConsumer{
 		client:             client,
 		feedMessageFactory: feedMessageFactory,

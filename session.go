@@ -33,7 +33,7 @@ type oddsFeedSessionImpl struct {
 	recoveryMessageProcessor protocols.RecoveryMessageProcessor
 	exchangeName             string
 	sessionID                uuid.UUID
-	logger                   *log.Logger
+	logger                   *log.Entry
 	closeCh                  chan bool
 	msgCh                    chan protocols.SessionMessage
 	isReplay                 bool
@@ -209,7 +209,7 @@ func newSession(
 	recoverMessageProcessor protocols.RecoveryMessageProcessor,
 	exchangeName string,
 	isReplay bool,
-	logger *log.Logger) sdkOddsFeedSession {
+	logger *log.Entry) sdkOddsFeedSession {
 	return &oddsFeedSessionImpl{
 		channelConsumer:          feed.NewChannelConsumer(rabbitMQClient, feedMessageFactory, logger),
 		producerManager:          producerManager,

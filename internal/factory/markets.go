@@ -11,7 +11,7 @@ import (
 type MarketFactory struct {
 	marketDataFactory *MarketDataFactory
 	locales           []protocols.Locale
-	logger            *log.Logger
+	logger            *log.Entry
 }
 
 // BuildMarket ...
@@ -133,7 +133,7 @@ func (m MarketFactory) buildOutcomeSettlement(outcome feedXML.Outcome, marketDat
 }
 
 // NewMarketFactory ...
-func NewMarketFactory(marketDataFactory *MarketDataFactory, locales []protocols.Locale, logger *log.Logger) *MarketFactory {
+func NewMarketFactory(marketDataFactory *MarketDataFactory, locales []protocols.Locale, logger *log.Entry) *MarketFactory {
 	return &MarketFactory{
 		marketDataFactory: marketDataFactory,
 		locales:           locales,

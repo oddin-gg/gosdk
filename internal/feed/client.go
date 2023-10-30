@@ -15,12 +15,12 @@ type Client struct {
 	connection            *amqp.Connection
 	oddsFeedConfiguration protocols.OddsFeedConfiguration
 	whoAmIManager         protocols.WhoAmIManager
-	logger                *log.Logger
+	logger                *log.Entry
 	closed                bool
 }
 
 // NewClient ...
-func NewClient(oddsFeedConfiguration protocols.OddsFeedConfiguration, whoAmIManager protocols.WhoAmIManager, logger *log.Logger) *Client {
+func NewClient(oddsFeedConfiguration protocols.OddsFeedConfiguration, whoAmIManager protocols.WhoAmIManager, logger *log.Entry) *Client {
 	return &Client{
 		oddsFeedConfiguration: oddsFeedConfiguration,
 		whoAmIManager:         whoAmIManager,
