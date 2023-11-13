@@ -157,12 +157,15 @@ func (m *Manager) Open() (<-chan protocols.RecoveryMessage, error) {
 	m.lock.Unlock()
 
 	m.msgCh = make(chan protocols.RecoveryMessage)
-	m.closeCh = make(chan bool, 1)
+	m.closeCh = make(chan bool)
 	go func() {
-		time.Sleep(initialDelay)
+		select {
+		case <-time.After(initialDelay):
+		case <-m.closeCh:
+			return
+		}
 
 		m.ticker = time.NewTicker(tickPeriod)
-
 		for {
 			select {
 			case <-m.ticker.C:
@@ -184,10 +187,9 @@ func (m *Manager) Close() {
 	}
 
 	if m.closeCh != nil {
+		// make sure we timerTick is not running
 		m.closeCh <- true
 	}
-
-	m.closeCh = nil
 
 	if m.msgCh != nil {
 		close(m.msgCh)
