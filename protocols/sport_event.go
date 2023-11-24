@@ -94,6 +94,8 @@ type Scoreboard interface {
 	HomeBatting() *bool
 	AwayBatting() *bool
 	Inning() *uint32
+	HomeGames() *uint32
+	AwayGames() *uint32
 }
 
 // CompetitionStatus ...
