@@ -125,4 +125,8 @@ type Scoreboard struct {
 	HomeBatting       *bool   `xml:"home_batting,attr,omitempty"`
 	AwayBatting       *bool   `xml:"away_batting,attr,omitempty"`
 	Inning            *uint32 `xml:"inning,attr,omitempty"`
+
+	// TableTennisScoreboard
+	HomeGames *uint32 `xml:"home_games,attr,omitempty"`
+	AwayGames *uint32 `xml:"away_games,attr,omitempty"`
 }
