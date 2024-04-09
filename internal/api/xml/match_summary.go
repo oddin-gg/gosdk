@@ -108,6 +108,7 @@ type Scoreboard struct {
 	CurrentDefenderTeam  *uint32 `xml:"current_def_team,attr,omitempty"`
 
 	// VirtualBasketballScoreboard
+	// TableTennisScoreboard
 	HomePoints        *uint32 `xml:"home_points,attr,omitempty"`
 	AwayPoints        *uint32 `xml:"away_points,attr,omitempty"`
 	RemainingGameTime *uint32 `xml:"remaining_game_time,attr,omitempty"`
@@ -125,8 +126,4 @@ type Scoreboard struct {
 	HomeBatting       *bool   `xml:"home_batting,attr,omitempty"`
 	AwayBatting       *bool   `xml:"away_batting,attr,omitempty"`
 	Inning            *uint32 `xml:"inning,attr,omitempty"`
-
-	// TableTennisScoreboard
-	HomeGames *uint32 `xml:"home_games,attr,omitempty"`
-	AwayGames *uint32 `xml:"away_games,attr,omitempty"`
 }
