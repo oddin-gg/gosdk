@@ -9,7 +9,9 @@ import (
 type BetCancel struct {
 	XMLName xml.Name `xml:"bet_cancel"`
 	MessageAttributes
-	Markets []*MarketWithoutOutcome `xml:"market"`
+	StartTime *uint                   `xml:"start_time,attr,omitempty"`
+	EndTime   *uint                   `xml:"end_time,attr,omitempty"`
+	Markets   []*MarketWithoutOutcome `xml:"market"`
 }
 
 // Product ...

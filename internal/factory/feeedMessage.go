@@ -361,6 +361,22 @@ func (m betCancelImpl) Markets() []protocols.MarketCancel {
 	return m.markets
 }
 
+func (m betCancelImpl) StartTime() *time.Time {
+	if m.message.StartTime == nil {
+		return nil
+	}
+	startTime := time.Unix(int64(*m.message.StartTime), 0)
+	return &startTime
+}
+
+func (m betCancelImpl) EndTime() *time.Time {
+	if m.message.EndTime == nil {
+		return nil
+	}
+	endTime := time.Unix(int64(*m.message.EndTime), 0)
+	return &endTime
+}
+
 type fixtureChangeImpl struct {
 	producer   protocols.Producer
 	timestamp  protocols.MessageTimestamp
@@ -486,4 +502,20 @@ func (m rollbackBetCancelImpl) RolledBackCanceledMarkets() []protocols.Market {
 	}
 
 	return m.markets
+}
+
+func (m rollbackBetCancelImpl) StartTime() *time.Time {
+	if m.message.StartTime == nil {
+		return nil
+	}
+	startTime := time.Unix(int64(*m.message.StartTime), 0)
+	return &startTime
+}
+
+func (m rollbackBetCancelImpl) EndTime() *time.Time {
+	if m.message.EndTime == nil {
+		return nil
+	}
+	endTime := time.Unix(int64(*m.message.EndTime), 0)
+	return &endTime
 }

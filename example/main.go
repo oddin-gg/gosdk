@@ -453,6 +453,16 @@ func (e *Example) processBetCancel(msg protocols.BetCancel) {
 
 	log.Printf("betCancel received for: %s", *name)
 	log.Printf("betCancel sport: %s\n", sportURN.ToString())
+	if startTime := msg.StartTime(); startTime == nil {
+		log.Println("betCancel start time: Not set")
+	} else {
+		log.Println("betCancel start time:", startTime.Format(time.RFC3339))
+	}
+	if endTime := msg.EndTime(); endTime == nil {
+		log.Println("betCancel end time: Not set")
+	} else {
+		log.Println("betCancel end time:", endTime.Format(time.RFC3339))
+	}
 
 	for _, m := range msg.Markets() {
 		marketName, err := m.LocalizedName(locale)
@@ -552,6 +562,16 @@ func (e *Example) processRollbackBetCancel(msg protocols.RollbackBetCancel) {
 
 	log.Printf("processRollbackBetCancel received for: %s", *name)
 	log.Printf("processRollbackBetCancel sport: %s\n", sportURN.ToString())
+	if startTime := msg.StartTime(); startTime == nil {
+		log.Println("processRollbackBetCancel start time: Not set")
+	} else {
+		log.Println("processRollbackBetCancel start time:", startTime.Format(time.RFC3339))
+	}
+	if endTime := msg.EndTime(); endTime == nil {
+		log.Println("processRollbackBetCancel end time: Not set")
+	} else {
+		log.Println("processRollbackBetCancel end time:", endTime.Format(time.RFC3339))
+	}
 
 	for _, m := range msg.RolledBackCanceledMarkets() {
 		marketName, err := m.LocalizedName(locale)
