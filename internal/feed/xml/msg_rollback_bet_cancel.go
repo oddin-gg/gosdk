@@ -8,8 +8,10 @@ import (
 // RollbackBetCancel ...
 type RollbackBetCancel struct {
 	MessageAttributes
-	XMLName xml.Name                  `xml:"rollback_bet_cancel"`
-	Markets []RollbackBetCancelMarket `xml:"market"`
+	XMLName   xml.Name                  `xml:"rollback_bet_cancel"`
+	StartTime *uint                     `xml:"start_time,attr,omitempty"`
+	EndTime   *uint                     `xml:"end_time,attr,omitempty"`
+	Markets   []RollbackBetCancelMarket `xml:"market"`
 }
 
 type RollbackBetCancelMarket struct {

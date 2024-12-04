@@ -79,6 +79,8 @@ type BetSettlement interface {
 type BetCancel interface {
 	RequestMessage
 	EventMessage
+	StartTime() *time.Time
+	EndTime() *time.Time
 	Markets() []MarketCancel
 }
 
@@ -122,5 +124,7 @@ type RollbackBetSettlement interface {
 type RollbackBetCancel interface {
 	RequestMessage
 	EventMessage
+	StartTime() *time.Time
+	EndTime() *time.Time
 	RolledBackCanceledMarkets() []Market
 }
