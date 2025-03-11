@@ -233,7 +233,7 @@ func (m *Manager) SetProducerRecoveryFromTimestamp(id uint, timestamp time.Time)
 	switch {
 	case timestamp.IsZero():
 		break
-	case time.Since(timestamp) > (time.Duration(maxRequestMinutes) * time.Minute):
+	case time.Since(timestamp).Minutes() > float64(maxRequestMinutes):
 		return errors.New("last received message timestamp can not be so long in past")
 	}
 
