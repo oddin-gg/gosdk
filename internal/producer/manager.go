@@ -1,11 +1,12 @@
 package producer
 
 import (
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/oddin-gg/gosdk/internal/api"
 	"github.com/oddin-gg/gosdk/protocols"
-	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -37,7 +38,7 @@ func (m *Manager) producer(id uint) (*data, error) {
 
 	producer, ok := producers[id]
 	if !ok {
-		return nil, errors.Errorf("missing producer %d", id)
+		return nil, fmt.Errorf("missing producer %d", id)
 	}
 
 	return producer, nil
@@ -232,7 +233,7 @@ func (m *Manager) SetProducerRecoveryFromTimestamp(id uint, timestamp time.Time)
 	switch {
 	case timestamp.IsZero():
 		break
-	case time.Since(timestamp) > (time.Duration(maxRequestMinutes) * time.Minute):
+	case time.Since(timestamp).Minutes() > float64(maxRequestMinutes):
 		return errors.New("last received message timestamp can not be so long in past")
 	}
 

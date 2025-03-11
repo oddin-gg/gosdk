@@ -12,7 +12,6 @@ import (
 
 	data "github.com/oddin-gg/gosdk/internal/api/xml"
 	"github.com/oddin-gg/gosdk/protocols"
-	"github.com/pkg/errors"
 )
 
 const (
@@ -244,10 +243,11 @@ func (c *Client) PostEventStatefulRecovery(producerName string, eventID protocol
 		path = fmt.Sprintf("%s&node_id=%d", path, *nodeID)
 	}
 
-	_, err := c.do(http.MethodPost, path)
+	res, err := c.do(http.MethodPost, path)
 	if err != nil {
 		return false, err
 	}
+	_ = res.Body.Close()
 
 	return true, nil
 }
@@ -259,10 +259,11 @@ func (c *Client) PostEventOddsRecovery(producerName string, eventID protocols.UR
 		path = fmt.Sprintf("%s&node_id=%d", path, *nodeID)
 	}
 
-	_, err := c.do(http.MethodPost, path)
+	res, err := c.do(http.MethodPost, path)
 	if err != nil {
 		return false, err
 	}
+	_ = res.Body.Close()
 
 	return true, nil
 }
@@ -278,10 +279,11 @@ func (c *Client) PostRecovery(producerName string, requestID uint, nodeID *int, 
 		path = fmt.Sprintf("%s&after=%d", path, after.UnixNano()/1e6)
 	}
 
-	_, err := c.do(http.MethodPost, path)
+	res, err := c.do(http.MethodPost, path)
 	if err != nil {
 		return false, err
 	}
+	_ = res.Body.Close()
 
 	return true, nil
 }
@@ -293,10 +295,11 @@ func (c *Client) PostReplayClear(nodeID *int) (bool, error) {
 		path = fmt.Sprintf("%s?node_id=%d", path, *nodeID)
 	}
 
-	_, err := c.do(http.MethodPost, path)
+	res, err := c.do(http.MethodPost, path)
 	if err != nil {
 		return false, err
 	}
+	_ = res.Body.Close()
 
 	return true, nil
 }
@@ -308,10 +311,11 @@ func (c *Client) PostReplayStop(nodeID *int) (bool, error) {
 		path = fmt.Sprintf("%s?node_id=%d", path, *nodeID)
 	}
 
-	_, err := c.do(http.MethodPost, path)
+	res, err := c.do(http.MethodPost, path)
 	if err != nil {
 		return false, err
 	}
+	_ = res.Body.Close()
 
 	return true, nil
 }
@@ -339,10 +343,11 @@ func (c *Client) PutReplayEvent(eventID protocols.URN, nodeID *int) (bool, error
 		path = fmt.Sprintf("%s?node_id=%d", path, *nodeID)
 	}
 
-	_, err := c.do(http.MethodPut, path)
+	res, err := c.do(http.MethodPut, path)
 	if err != nil {
 		return false, err
 	}
+	_ = res.Body.Close()
 
 	return true, nil
 }
@@ -354,10 +359,11 @@ func (c *Client) DeleteReplayEvent(eventID protocols.URN, nodeID *int) (bool, er
 		path = fmt.Sprintf("%s?node_id=%d", path, *nodeID)
 	}
 
-	_, err := c.do(http.MethodDelete, path)
+	res, err := c.do(http.MethodDelete, path)
 	if err != nil {
 		return false, err
 	}
+	_ = res.Body.Close()
 
 	return true, nil
 }
@@ -412,10 +418,11 @@ func (c *Client) PostReplayStart(nodeID *int, speed *int, maxDelay *int, useRepl
 		path = fmt.Sprintf("%s?%s", path, query)
 	}
 
-	_, err := c.do(http.MethodPost, path)
+	res, err := c.do(http.MethodPost, path)
 	if err != nil {
 		return false, err
 	}
+	_ = res.Body.Close()
 
 	return true, nil
 }
@@ -470,6 +477,7 @@ func (c *Client) fetchData(path string, entity interface{}, locale *protocols.Lo
 	if err != nil {
 		return err
 	}
+	defer func() { _ = resp.Body.Close() }()
 
 	err = xml.NewDecoder(resp.Body).Decode(entity)
 	if err != nil {
@@ -478,7 +486,7 @@ func (c *Client) fetchData(path string, entity interface{}, locale *protocols.Lo
 
 	respWithCode, ok := entity.(protocols.ResponseWithCode)
 	if ok && respWithCode.Code() != protocols.OkResponseCode {
-		return errors.Errorf("not acceptable response code from API: %s", respWithCode.Code())
+		return fmt.Errorf("not acceptable response code from API: %s", respWithCode.Code())
 	}
 
 	apiResponse := protocols.Response{
@@ -545,10 +553,10 @@ func (c *Client) do(method, path string) (*http.Response, error) {
 		apiErr, err := c.unmarshallPossibleError(resp.Body)
 		// This means no parsable error in request
 		if err != nil {
-			return nil, errors.Errorf("failed to %s data to server with status code %d", method, resp.StatusCode)
+			return nil, fmt.Errorf("failed to %s data to server with status code %d", method, resp.StatusCode)
 		}
 
-		return nil, errors.Errorf("api server returned err - %s", apiErr.Message)
+		return nil, fmt.Errorf("api server returned err - %s", apiErr.Message)
 	}
 
 	return resp, nil

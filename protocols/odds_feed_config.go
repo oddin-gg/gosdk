@@ -2,8 +2,6 @@ package protocols
 
 import (
 	"fmt"
-
-	"github.com/pkg/errors"
 )
 
 // Environment ...
@@ -28,7 +26,7 @@ func (e Environment) APIEndpoint(region Region) (string, error) {
 	case TestEnvironment:
 		return fmt.Sprintf("api-mq-test.integration.%soddin.dev", region), nil
 	default:
-		return "", errors.Errorf("unknown environment %d", e)
+		return "", fmt.Errorf("unknown environment %d", e)
 	}
 }
 
@@ -42,7 +40,7 @@ func (e Environment) MQEndpoint(region Region) (string, error) {
 	case TestEnvironment:
 		return fmt.Sprintf("mq-test.integration.%soddin.dev", region), nil
 	default:
-		return "", errors.Errorf("unknown environment %d", e)
+		return "", fmt.Errorf("unknown environment %d", e)
 	}
 }
 

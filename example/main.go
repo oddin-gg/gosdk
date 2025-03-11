@@ -2,9 +2,12 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -13,7 +16,7 @@ import (
 )
 
 // Demo constants
-const (
+var (
 	token  = "YOUR TOKEN"
 	env    = protocols.IntegrationEnvironment
 	region = protocols.DefaulRegion
@@ -23,6 +26,9 @@ const (
 
 // Sample demo working with Oddin.gg Api and Feed
 func main() {
+
+	// replace config with env variables, if provided
+	initEnv()
 
 	example, err := newExample()
 	if err != nil {
@@ -44,6 +50,45 @@ func main() {
 	// Make sure the signal kills us for good.
 	signal.Stop(sigCh)
 	example.stop()
+}
+
+// initEnv replaces config with env variables, if provided
+func initEnv() {
+	if v := os.Getenv("TOKEN"); len(v) > 0 {
+		token = v
+	}
+
+	if v := strings.ToLower(os.Getenv("ENV")); len(v) > 0 {
+		switch v {
+		case "integration":
+			env = protocols.IntegrationEnvironment
+		case "production":
+			env = protocols.ProductionEnvironment
+		case "test":
+			env = protocols.TestEnvironment
+		default:
+			log.Printf("ENV environment variable has invalid value %s, using default", v)
+		}
+	}
+
+	if v := strings.ToLower(os.Getenv("REGION")); len(v) > 0 {
+		switch v {
+		case "ap":
+			region = protocols.APSouthEast1
+		case "eu":
+			region = protocols.DefaulRegion
+		default:
+			log.Printf("REGION environment variable has invalid value %s, using default", v)
+		}
+	}
+
+	if v := os.Getenv("NODE"); len(v) > 0 {
+		var err error
+		nodeID, err = strconv.Atoi(v)
+		if err != nil || nodeID <= 0 {
+			log.Printf("NODE environment variable has invalid value %s, using default", v)
+		}
+	}
 }
 
 type Example struct {
@@ -287,8 +332,11 @@ func (e *Example) workWithRecovery() error {
 		break
 	}
 
-	// explicitly call for a recovery of a match
+	if liveProducer == nil {
+		return fmt.Errorf("no active producers with LIVE scope")
+	}
 
+	// explicitly call for a recovery of a match
 	requestID, err := e.recoveryManager.InitiateEventOddsMessagesRecovery(liveProducer.ID(), *matchURN)
 	if err != nil {
 		log.Println(err)

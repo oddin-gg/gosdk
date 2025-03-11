@@ -1,12 +1,13 @@
 package recovery
 
 import (
+	"errors"
+	"fmt"
 	"sync"
 	"time"
 
 	"github.com/oddin-gg/gosdk/internal/producer"
 	"github.com/oddin-gg/gosdk/protocols"
-	"github.com/pkg/errors"
 )
 
 type producerRecoveryData struct {
@@ -104,11 +105,10 @@ func (p *producerRecoveryData) validateEventSnapshotComplete(recoveryID uint, in
 	defer p.lock.RUnlock()
 
 	er, ok := p.eventRecoveries[recoveryID]
-	if !ok {
-		return false
-	}
 
 	switch {
+	case !ok:
+		return false
 	case !p.snapshotValidationNeeded(interest):
 		return true
 	}
@@ -145,7 +145,7 @@ func (p *producerRecoveryData) validateProducerSnapshotCompletes(receivedSnapsho
 			case protocols.PrematchProducerScope:
 				finished[i] = interest == protocols.PrematchOnlyMessageInterest
 			default:
-				return false, errors.Errorf("unknown producer scope - %d", scope)
+				return false, fmt.Errorf("unknown producer scope - %d", scope)
 			}
 		}
 	}

@@ -1,17 +1,17 @@
 package cache
 
 import (
+	"errors"
+	"fmt"
 	"sync"
 	"time"
 
 	"github.com/oddin-gg/gosdk/internal/api"
 	apiXML "github.com/oddin-gg/gosdk/internal/api/xml"
-	"github.com/patrickmn/go-cache"
-	"github.com/pkg/errors"
-	log "github.com/sirupsen/logrus"
-	// "github.com/oddin-gg/gosdk/factory"
 	feedXML "github.com/oddin-gg/gosdk/internal/feed/xml"
 	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/patrickmn/go-cache"
+	log "github.com/sirupsen/logrus"
 )
 
 // TournamentWrapper ...
@@ -323,7 +323,7 @@ type tournamentImpl struct {
 
 func (t tournamentImpl) IconPath() (*string, error) {
 	if len(t.locales) == 0 {
-		return nil, errors.Errorf("missing locales")
+		return nil, fmt.Errorf("missing locales")
 	}
 
 	item, err := t.tournamentCache.TournamentIcon(t.id, t.locales[0])
@@ -358,7 +358,7 @@ func (t tournamentImpl) LocalizedAbbreviation(locale protocols.Locale) (*string,
 
 	result, ok := item.abbreviation[locale]
 	if !ok {
-		return nil, errors.Errorf("missing locale %s", locale)
+		return nil, fmt.Errorf("missing locale %s", locale)
 	}
 
 	return &result, nil
@@ -375,7 +375,7 @@ func (t tournamentImpl) LocalizedName(locale protocols.Locale) (*string, error) 
 
 	result, ok := item.name[locale]
 	if !ok {
-		return nil, errors.Errorf("missing locale %s", locale)
+		return nil, fmt.Errorf("missing locale %s", locale)
 	}
 
 	return &result, nil

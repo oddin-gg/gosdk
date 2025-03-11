@@ -1,6 +1,8 @@
 package cache
 
 import (
+	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -10,7 +12,6 @@ import (
 	"github.com/oddin-gg/gosdk/internal/utils"
 	"github.com/oddin-gg/gosdk/protocols"
 	"github.com/patrickmn/go-cache"
-	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -305,7 +306,7 @@ func (m matchImpl) LocalizedName(locale protocols.Locale) (*string, error) {
 
 	name, ok := item.name[locale]
 	if !ok {
-		return nil, errors.Errorf("missing locale %s", locale)
+		return nil, fmt.Errorf("missing locale %s", locale)
 	}
 
 	return &name, nil

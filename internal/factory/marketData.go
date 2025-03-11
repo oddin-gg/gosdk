@@ -1,11 +1,11 @@
 package factory
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/oddin-gg/gosdk/internal/cache"
 	"github.com/oddin-gg/gosdk/protocols"
-	"github.com/pkg/errors"
 )
 
 // MarketDataFactory ...
@@ -66,29 +66,29 @@ func (m marketDataImpl) OutcomeName(outcomeID string, locale protocols.Locale) (
 		case playerOutcomeType:
 			player, err := m.marketDescriptionFactory.playerCache.GetPlayer(cache.PlayerCacheKey{PlayerID: outcomeID, Locale: locale})
 			if err != nil {
-				return nil, errors.Wrapf(err, "derivation of outcome name for dynamic player outcome failed for id [%s]", outcomeID)
+				return nil, fmt.Errorf("derivation of outcome name for dynamic player outcome failed for id [%s]: %w", outcomeID, err)
 			}
 			outcomeName = &player.LocalizedName
 
 		case competitorOutcomeType:
 			urn, err := protocols.ParseURN(outcomeID)
 			if err != nil {
-				return nil, errors.Errorf("unsupported competitor id in outcome: %s", outcomeID)
+				return nil, fmt.Errorf("unsupported competitor id in outcome: %s", outcomeID)
 			}
 			competitor, err := m.marketDescriptionFactory.competitorCache.Competitor(*urn, []protocols.Locale{locale})
 			if err != nil {
-				return nil, errors.Wrapf(err, "derivation of outcome name for dynamic player outcome failed for id [%s]", outcomeID)
+				return nil, fmt.Errorf("derivation of outcome name for dynamic player outcome failed for id [%s]: %w", outcomeID, err)
 			}
 
 			name, err := competitor.LocalizedName(locale)
 			if err != nil {
-				return nil, errors.Wrapf(err, "missing locale %s", locale)
+				return nil, fmt.Errorf("missing locale %s: %w", locale, err)
 			}
 
 			outcomeName = name
 
 		default:
-			return nil, errors.Errorf("unsupported outcome type [%s]", *marketDescription.OutcomeType())
+			return nil, fmt.Errorf("unsupported outcome type [%s]", *marketDescription.OutcomeType())
 		}
 	}
 

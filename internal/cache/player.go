@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
@@ -8,7 +9,6 @@ import (
 	"github.com/oddin-gg/gosdk/internal/api/xml"
 	"github.com/oddin-gg/gosdk/protocols"
 	"github.com/patrickmn/go-cache"
-	"github.com/pkg/errors"
 )
 
 // PlayerCacheKey represent cache key
@@ -29,16 +29,16 @@ func (c *PlayersCache) GetPlayer(id PlayerCacheKey) (*LocalizedPlayer, error) {
 	players, err := c.GetPlayers([]PlayerCacheKey{id})
 	switch {
 	case err != nil:
-		return nil, errors.Wrap(err, "get player from cache failed")
+		return nil, fmt.Errorf("get player from cache failed: %w", err)
 	case len(players) == 0:
-		return nil, errors.Wrapf(ErrItemNotFoundInCache, "player %s not found", id)
+		return nil, fmt.Errorf("player %s not found: %w", id, ErrItemNotFoundInCache)
 	case len(players) > 1:
-		return nil, errors.Errorf("get player from cache failed - more than one player found for id: %s", id)
+		return nil, fmt.Errorf("get player from cache failed - more than one player found for id: %s", id)
 	}
 
 	player, found := players[id]
 	if !found {
-		return nil, errors.Wrapf(ErrItemNotFoundInCache, "get player from cache - player found for id: %s in player hash map", id)
+		return nil, fmt.Errorf("get player from cache - player found for id: %s in player hash map: %w", id, ErrItemNotFoundInCache)
 	}
 	return &player, nil
 }
@@ -62,7 +62,7 @@ func (c *PlayersCache) GetPlayers(ids []PlayerCacheKey) (map[PlayerCacheKey]Loca
 
 	dbPlayers, err := c.fetchPlayersFromAPI(missingPlayersIDs)
 	if err != nil {
-		return nil, errors.Wrap(err, "GetPlayers failed")
+		return nil, fmt.Errorf("GetPlayers failed: %w", err)
 	}
 
 	for key, playerProfile := range dbPlayers {
@@ -79,7 +79,7 @@ func (c *PlayersCache) GetPlayers(ids []PlayerCacheKey) (map[PlayerCacheKey]Loca
 		return resultPlayers, nil
 	}
 
-	return nil, errors.Wrapf(ErrItemNotFoundInCache, "get player from cache - some players %v not found in db", missingPlayersIDs)
+	return nil, fmt.Errorf("get player from cache - some players %v not found in db: %w", missingPlayersIDs, ErrItemNotFoundInCache)
 }
 
 func (c *PlayersCache) getPlayersFromCache(
@@ -105,7 +105,7 @@ func (c *PlayersCache) fetchPlayersFromAPI(keys []PlayerCacheKey) (map[PlayerCac
 		data, err := c.apiClient.FetchPlayerProfile(key.PlayerID, key.Locale)
 
 		if err != nil {
-			return nil, errors.Wrap(err, "fetch player profiles failed")
+			return nil, fmt.Errorf("fetch player profiles failed: %w", err)
 		}
 		if data == nil {
 			continue

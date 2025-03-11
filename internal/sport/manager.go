@@ -1,6 +1,7 @@
 package sport
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -8,7 +9,6 @@ import (
 	"github.com/oddin-gg/gosdk/internal/cache"
 	"github.com/oddin-gg/gosdk/internal/factory"
 	"github.com/oddin-gg/gosdk/protocols"
-	"github.com/pkg/errors"
 )
 
 type fixtureChangeImpl struct {
@@ -95,7 +95,7 @@ func (m *Manager) LocalizedSportActiveTournaments(sportName string, locale proto
 		}
 	}
 
-	return nil, errors.Errorf("cannot find any sport with given name %s or locale %s combination", sportName, locale)
+	return nil, fmt.Errorf("cannot find any sport with given name %s or locale %s combination", sportName, locale)
 }
 
 // MatchesFor ...
@@ -213,9 +213,9 @@ func (m *Manager) ListOfMatches(startIndex uint, limit uint) ([]protocols.Match,
 func (m *Manager) LocalizedListOfMatches(startIndex uint, limit uint, locale protocols.Locale) ([]protocols.Match, error) {
 	switch {
 	case limit > 1000:
-		return nil, errors.Errorf("max limit is 1000")
+		return nil, fmt.Errorf("max limit is 1000")
 	case limit < 1:
-		return nil, errors.Errorf("min limit is 1")
+		return nil, fmt.Errorf("min limit is 1")
 	}
 
 	data, err := m.apiClient.FetchSchedule(startIndex, limit, locale)

@@ -332,8 +332,7 @@ func (m MatchStatusCache) OnFeedMessage(id protocols.URN, feedMessage *protocols
 
 // OnAPIResponse ...
 func (m MatchStatusCache) OnAPIResponse(apiResponse protocols.Response) {
-	switch msg := apiResponse.Data.(type) {
-	case *apiXML.MatchSummaryResponse:
+	if msg, ok := apiResponse.Data.(*apiXML.MatchSummaryResponse); ok {
 		id, err := protocols.ParseURN(msg.SportEvent.ID)
 		if err != nil {
 			m.logger.WithError(err).Errorf("failed to parse urn %s", msg.SportEvent.ID)

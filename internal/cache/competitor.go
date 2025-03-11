@@ -1,6 +1,8 @@
 package cache
 
 import (
+	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -8,7 +10,6 @@ import (
 	"github.com/oddin-gg/gosdk/internal/api/xml"
 	"github.com/oddin-gg/gosdk/protocols"
 	"github.com/patrickmn/go-cache"
-	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -245,7 +246,7 @@ func (l *LocalizedCompetitor) LocalizedName(locale protocols.Locale) (*string, e
 
 	result, ok := l.name[locale]
 	if !ok {
-		return nil, errors.Errorf("missing locale %s", locale)
+		return nil, fmt.Errorf("missing locale %s", locale)
 	}
 
 	return &result, nil
@@ -259,7 +260,7 @@ type competitorImpl struct {
 
 func (c competitorImpl) IconPath() (*string, error) {
 	if len(c.locales) == 0 {
-		return nil, errors.Errorf("missing locales")
+		return nil, fmt.Errorf("missing locales")
 	}
 
 	item, err := c.competitorCache.CompetitorIcon(c.id, c.locales[0])
@@ -340,7 +341,7 @@ func (c competitorImpl) LocalizedAbbreviation(locale protocols.Locale) (*string,
 
 	result, ok := item.abbreviation[locale]
 	if !ok {
-		return nil, errors.Errorf("missing locale %s", locale)
+		return nil, fmt.Errorf("missing locale %s", locale)
 	}
 
 	return &result, nil

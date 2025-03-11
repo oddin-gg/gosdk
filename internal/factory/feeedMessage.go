@@ -1,11 +1,12 @@
 package factory
 
 import (
+	"errors"
+	"fmt"
 	"time"
 
 	feedXML "github.com/oddin-gg/gosdk/internal/feed/xml"
 	"github.com/oddin-gg/gosdk/protocols"
-	"github.com/pkg/errors"
 )
 
 // FeedMessageFactory ...
@@ -101,7 +102,7 @@ func (f *FeedMessageFactory) BuildMessage(feedMessage *protocols.FeedMessage) (i
 			marketFactory: f.marketFactory,
 		}, nil
 	default:
-		return nil, errors.Errorf("unknown message type %s", msg)
+		return nil, fmt.Errorf("unknown message type %s", msg)
 	}
 }
 
