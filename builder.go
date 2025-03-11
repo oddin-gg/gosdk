@@ -1,6 +1,8 @@
 package gosdk
 
 import (
+	"errors"
+
 	"github.com/google/uuid"
 	"github.com/oddin-gg/gosdk/internal/cache"
 	"github.com/oddin-gg/gosdk/internal/factory"
@@ -8,7 +10,6 @@ import (
 	"github.com/oddin-gg/gosdk/internal/producer"
 	"github.com/oddin-gg/gosdk/internal/recovery"
 	"github.com/oddin-gg/gosdk/protocols"
-	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 )
 

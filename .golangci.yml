@@ -1,0 +1,31 @@
+run:
+  timeout: 5m
+output:
+  formats:
+    - format: colored-line-number
+  print-issued-lines: true
+  print-linter-name: true
+
+linters:
+  disable-all: true
+  enable: #https://golangci-lint.run/usage/linters/
+    - gocritic # Provides diagnostics that check for bugs, performance and style issues.
+    - prealloc
+    - gosec # Inspects source code for security problems.
+    - bodyclose # Checks whether HTTP response body is closed successfully.
+    - gofmt # Gofmt checks whether code was gofmt-ed. By default this tool runs with -s option to check for code simplification
+    - unconvert   # Remove unnecessary type conversions.
+    - nolintlint # Reports ill-formed or insufficient nolint directives.
+    - rowserrcheck # Checks whether Rows.Err of rows is checked successfully.
+    - revive # Replacement for golint.
+linters-settings:
+  revive:
+    severity: warning
+  misspell:
+    locale: US
+  gosec:
+    excludes:
+      - G404 # Use of weak random number generator
+  gocritic:
+    disabled-checks:
+      - assignOp
