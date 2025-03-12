@@ -17,6 +17,7 @@ type SportEvent struct {
 	// Elements
 	Tournament  Tournament             `xml:"tournament,omitempty"`
 	Competitors *SportEventCompetitors `xml:"competitors,omitempty"`
+	ExtraInfo   *ExtraInfoWrapper      `xml:"extra_info,omitempty"`
 }
 
 // LiveOdds ...
