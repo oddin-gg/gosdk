@@ -2,7 +2,12 @@ package xml
 
 import (
 	"encoding/xml"
+
 	"github.com/oddin-gg/gosdk/internal/utils"
+)
+
+const (
+	ExtraInfoSportFormatKey = "sport_format"
 )
 
 // FixtureResponse ...
@@ -16,7 +21,6 @@ type FixtureResponse struct {
 type Fixture struct {
 	SportEvent
 	StartTime  *utils.DateTime    `xml:"start_time,attr,omitempty"`
-	ExtraInfo  *ExtraInfoWrapper  `xml:"extra_info,omitempty"`
 	TVChannels *TvChannelsWrapper `xml:"tv_channels,omitempty"`
 }
 
