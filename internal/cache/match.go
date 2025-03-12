@@ -138,20 +138,6 @@ func (m *MatchCache) handleMatchData(locale protocols.Locale, matches []apiXML.S
 }
 
 func (m *MatchCache) refreshOrInsertItem(id protocols.URN, locale protocols.Locale, match apiXML.SportEvent) error {
-	var homeTeamID *string
-	var homeTeamQualifier *string
-
-	var awayTeamID *string
-	var awayTeamQualifier *string
-
-	if match.Competitors != nil && len(match.Competitors.Competitor) == 2 {
-		homeTeamID = &match.Competitors.Competitor[0].ID
-		homeTeamQualifier = &match.Competitors.Competitor[0].Qualifier
-
-		awayTeamID = &match.Competitors.Competitor[1].ID
-		awayTeamQualifier = &match.Competitors.Competitor[1].Qualifier
-	}
-
 	item, _ := m.internalCache.Get(id.ToString())
 	result, ok := item.(*LocalizedMatch)
 
@@ -168,6 +154,43 @@ func (m *MatchCache) refreshOrInsertItem(id protocols.URN, locale protocols.Loca
 		}
 	}
 
+	result.sportFormat = protocols.SportFormatClassic
+	result.extraInfo = make(map[string]string)
+	if match.ExtraInfo.List != nil {
+		for _, info := range match.ExtraInfo.List {
+			if info.Key == apiXML.ExtraInfoSportFormatKey && len(info.Value) > 0 {
+				switch info.Value {
+				case protocols.SportFormatRace:
+					result.sportFormat = protocols.SportFormatRace
+				case protocols.SportFormatClassic:
+					result.sportFormat = protocols.SportFormatClassic
+				default:
+					return fmt.Errorf("unknown sport format for match %s: %s", match.ID, info.Value)
+				}
+			}
+			result.extraInfo[info.Key] = info.Value
+		}
+	}
+
+	var competitors []competitor
+	if match.Competitors != nil && len(match.Competitors.Competitor) > 0 {
+		for _, c := range match.Competitors.Competitor {
+			urn, err := protocols.ParseURN(c.ID)
+			switch {
+			case err != nil:
+				return err
+			case urn == nil:
+				return fmt.Errorf("invalid or empty urn: %s", c.ID)
+			}
+
+			competitors = append(competitors, competitor{
+				urn:       *urn,
+				qualifier: c.Qualifier,
+			})
+		}
+	}
+	result.competitors = competitors
+
 	tournamentID, err := m.unwrapURN(&match.Tournament.ID)
 	if err != nil {
 		return err
@@ -179,21 +202,6 @@ func (m *MatchCache) refreshOrInsertItem(id protocols.URN, locale protocols.Loca
 		return err
 	}
 	result.sportID = *sportID
-
-	homeTeamURN, err := m.unwrapURN(homeTeamID)
-	if err != nil {
-		return err
-	}
-	result.homeTeamID = homeTeamURN
-
-	awayTeamURN, err := m.unwrapURN(awayTeamID)
-	if err != nil {
-		return err
-	}
-	result.awayTeamID = awayTeamURN
-
-	result.homeTeamQualifier = homeTeamQualifier
-	result.awayTeamQualifier = awayTeamQualifier
 
 	var liveOdds protocols.LiveOddsAvailability
 	switch match.LiveOdds {
@@ -264,13 +272,18 @@ type LocalizedMatch struct {
 	scheduledEndTime     *time.Time
 	sportID              protocols.URN
 	tournamentID         protocols.URN
-	homeTeamID           *protocols.URN
-	awayTeamID           *protocols.URN
-	homeTeamQualifier    *string
-	awayTeamQualifier    *string
+	competitors          []competitor
 	liveOddsAvailability *protocols.LiveOddsAvailability
 	name                 map[protocols.Locale]string
-	mux                  sync.Mutex
+	sportFormat          protocols.SportFormat
+	extraInfo            map[string]string
+
+	mux sync.Mutex
+}
+
+type competitor struct {
+	urn       protocols.URN
+	qualifier string
 }
 
 type matchImpl struct {
@@ -354,17 +367,42 @@ func (m matchImpl) LiveOddsAvailability() (*protocols.LiveOddsAvailability, erro
 }
 
 func (m matchImpl) Competitors() ([]protocols.Competitor, error) {
-	home, err := m.HomeCompetitor()
+	item, err := m.matchCache.Match(m.id, m.locales)
 	if err != nil {
 		return nil, err
 	}
 
-	away, err := m.AwayCompetitor()
+	if len(item.competitors) < 2 {
+		return nil, fmt.Errorf("match %s has less than 2 competitors", m.id.ToString())
+	}
+
+	competitors := make([]protocols.Competitor, 0, len(item.competitors))
+	for _, team := range item.competitors {
+		competitors = append(competitors, teamCompetitorImpl{
+			qualifier:  &team.qualifier,
+			competitor: m.entityFactory.BuildCompetitor(team.urn, m.locales),
+		})
+	}
+
+	return competitors, nil
+}
+
+func (m matchImpl) SportFormat() (protocols.SportFormat, error) {
+	item, err := m.matchCache.Match(m.id, m.locales)
+	if err != nil {
+		return protocols.SportFormatUnknown, err
+	}
+
+	return item.sportFormat, nil
+}
+
+func (m matchImpl) ExtraInfo() (map[string]string, error) {
+	item, err := m.matchCache.Match(m.id, m.locales)
 	if err != nil {
 		return nil, err
 	}
 
-	return []protocols.Competitor{home, away}, nil
+	return item.extraInfo, nil
 }
 
 func (m matchImpl) Status() protocols.MatchStatus {
@@ -385,38 +423,41 @@ func (m matchImpl) Tournament() (protocols.Tournament, error) {
 	return m.entityFactory.BuildTournament(item.tournamentID, *sportID, m.locales), nil
 }
 
-func (m matchImpl) HomeCompetitor() (protocols.TeamCompetitor, error) {
+func (m matchImpl) homeAwayCompetitor(home bool) (protocols.TeamCompetitor, error) {
 	item, err := m.matchCache.Match(m.id, m.locales)
 	if err != nil {
 		return nil, err
 	}
 
-	if item.homeTeamID == nil {
-		return nil, errors.New("missing home team id")
+	var team competitor
+
+	switch {
+	case len(item.competitors) < 2:
+		return nil, fmt.Errorf("match %s has less than 2 competitors", m.id.ToString())
+	case item.sportFormat != protocols.SportFormatClassic:
+		return nil, fmt.Errorf("match %s is not a classic sport format", m.id.ToString())
+	case len(item.competitors) > 2:
+		return nil, fmt.Errorf("classic sport match %s has more than 2 competitors", m.id.ToString())
+	default:
+		if home {
+			team = item.competitors[0]
+		} else {
+			team = item.competitors[1]
+		}
 	}
 
-	competitor := m.entityFactory.BuildCompetitor(*item.homeTeamID, m.locales)
 	return teamCompetitorImpl{
-		qualifier:  item.homeTeamQualifier,
-		competitor: competitor,
+		qualifier:  &team.qualifier,
+		competitor: m.entityFactory.BuildCompetitor(team.urn, m.locales),
 	}, nil
 }
 
+func (m matchImpl) HomeCompetitor() (protocols.TeamCompetitor, error) {
+	return m.homeAwayCompetitor(true)
+}
+
 func (m matchImpl) AwayCompetitor() (protocols.TeamCompetitor, error) {
-	item, err := m.matchCache.Match(m.id, m.locales)
-	if err != nil {
-		return nil, err
-	}
-
-	if item.homeTeamID == nil {
-		return nil, errors.New("missing home team id")
-	}
-
-	competitor := m.entityFactory.BuildCompetitor(*item.awayTeamID, m.locales)
-	return teamCompetitorImpl{
-		qualifier:  item.awayTeamQualifier,
-		competitor: competitor,
-	}, nil
+	return m.homeAwayCompetitor(false)
 }
 
 func (m matchImpl) Fixture() protocols.Fixture {
