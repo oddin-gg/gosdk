@@ -73,7 +73,7 @@ func (m marketDataImpl) OutcomeName(outcomeID string, locale protocols.Locale) (
 		case competitorOutcomeType:
 			urn, err := protocols.ParseURN(outcomeID)
 			if err != nil {
-				return nil, fmt.Errorf("unsupported competitor id in outcome: %s", outcomeID)
+				return nil, fmt.Errorf("unsupported competitor id in outcome %s: %w", outcomeID, err)
 			}
 			competitor, err := m.marketDescriptionFactory.competitorCache.Competitor(*urn, []protocols.Locale{locale})
 			if err != nil {

@@ -15,12 +15,14 @@ import (
 	"github.com/oddin-gg/gosdk/protocols"
 )
 
+const defaultNodeID = 1
+
 // Demo constants
 var (
 	token  = "YOUR TOKEN"
 	env    = protocols.IntegrationEnvironment
 	region = protocols.DefaulRegion
-	nodeID = 1
+	nodeID = defaultNodeID
 	locale = protocols.EnLocale
 )
 
@@ -87,6 +89,8 @@ func initEnv() {
 		nodeID, err = strconv.Atoi(v)
 		if err != nil || nodeID <= 0 {
 			log.Printf("NODE environment variable has invalid value %s, using default", v)
+		} else {
+			nodeID = defaultNodeID
 		}
 	}
 }
@@ -170,6 +174,9 @@ func (e *Example) apiExamples() {
 			log.Println(err)
 		}
 		if err := e.workWithSportsManager(); err != nil {
+			log.Println(err)
+		}
+		if err := e.workWithRaceSports(); err != nil {
 			log.Println(err)
 		}
 		if err := e.workWithBookmaker(); err != nil {
@@ -308,6 +315,48 @@ func (e *Example) workWithSportsManager() error {
 			return err
 		}
 		log.Println("   Status:", *status.GetDescription())
+	}
+
+	return nil
+}
+
+func (e *Example) workWithRaceSports() error {
+	raceURN, err := protocols.ParseURN("od:match:6516")
+	if err != nil {
+		return err
+	}
+
+	m, err := e.sportsManager.Match(*raceURN)
+	if err != nil {
+		return err
+	}
+
+	raceName, err := m.LocalizedName(locale)
+	if err != nil {
+		return err
+	}
+
+	if raceName != nil {
+		log.Println("Race name:", *raceName)
+	}
+
+	sportFormat, err := m.SportFormat()
+	if err != nil {
+		return err
+	}
+	log.Println("Sport format:", sportFormat)
+
+	competitors, err := m.Competitors()
+	if err != nil {
+		return err
+	}
+
+	for _, c := range competitors {
+		name, err := c.LocalizedName(locale)
+		if err != nil {
+			return err
+		}
+		log.Println("   Competitor:", *name)
 	}
 
 	return nil

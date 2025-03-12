@@ -22,6 +22,14 @@ const (
 	AvailableLiveOddsAvailability    LiveOddsAvailability = "available"
 )
 
+type SportFormat string
+
+const (
+	SportFormatUnknown = "unknown"
+	SportFormatClassic = "classic"
+	SportFormatRace    = "race"
+)
+
 // SportEvent ...
 type SportEvent interface {
 	ID() URN
@@ -145,6 +153,8 @@ type Match interface {
 	HomeCompetitor() (TeamCompetitor, error)
 	AwayCompetitor() (TeamCompetitor, error)
 	Fixture() Fixture
+	SportFormat() (SportFormat, error)
+	ExtraInfo() (map[string]string, error)
 }
 
 // LongTermEvent ...

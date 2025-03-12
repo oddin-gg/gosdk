@@ -17,6 +17,7 @@ type SportEvent struct {
 	// Elements
 	Tournament  Tournament             `xml:"tournament,omitempty"`
 	Competitors *SportEventCompetitors `xml:"competitors,omitempty"`
+	ExtraInfo   *ExtraInfoWrapper      `xml:"extra_info,omitempty"`
 }
 
 // LiveOdds ...
@@ -29,6 +30,17 @@ const (
 	LiveOddsBookable     LiveOdds = "bookable"
 	LiveOddsBuyable      LiveOdds = "buyable"
 )
+
+// ExtraInfoWrapper ...
+type ExtraInfoWrapper struct {
+	List []ExtraInfo `xml:"info"`
+}
+
+// ExtraInfo ...
+type ExtraInfo struct {
+	Key   string `xml:"key,attr"`
+	Value string `xml:"value,attr"`
+}
 
 // SportEventStatusType ...
 type SportEventStatusType string

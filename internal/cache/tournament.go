@@ -310,7 +310,8 @@ type LocalizedTournament struct {
 	name             map[protocols.Locale]string
 	abbreviation     map[protocols.Locale]string
 	competitorIDs    map[protocols.URN]struct{}
-	mux              sync.Mutex
+
+	mux sync.Mutex
 }
 
 type tournamentImpl struct {
