@@ -283,6 +283,24 @@ func (e *Example) workWithSportsManager() error {
 		log.Println("   Competitor:", *name)
 	}
 
+	// Competitor Players
+	competitorURN, err := protocols.ParseURN("od:competitor:2976")
+	if err != nil {
+		return err
+	}
+	competitor, err := e.sportsManager.Competitor(*competitorURN)
+	if err != nil {
+		return err
+	}
+	players, err := competitor.LocalizedPlayers(locale)
+	if err != nil {
+		return err
+	}
+	log.Println("Competitor Players:")
+	for _, player := range players {
+		log.Println("Localized name:", player.LocalizedName())
+	}
+
 	// fixture changes
 	changes, err := e.sportsManager.FixtureChanges(time.Now().Add(-1 * time.Hour))
 	if err != nil {
@@ -484,7 +502,11 @@ func (e *Example) handleFeedMessage(sessionMsg protocols.SessionMessage, request
 }
 
 func (e *Example) processOddsChange(msg protocols.OddsChange) {
-	match := msg.Event().(protocols.Match)
+	match, ok := msg.Event().(protocols.Match)
+	if !ok {
+		return
+	}
+
 	log.Printf("odds changed in %s", match.ID().ToString())
 	log.Println("raw message:", leftN(string(msg.RawMessage()), 256))
 

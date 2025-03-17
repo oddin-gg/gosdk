@@ -4,8 +4,34 @@ import "encoding/xml"
 
 // CompetitorResponse ...
 type CompetitorResponse struct {
-	XMLName    xml.Name     `xml:"competitor_profile"`
-	Competitor TeamExtended `xml:"competitor"`
+	XMLName    xml.Name          `xml:"competitor_profile"`
+	Competitor TeamExtended      `xml:"competitor"`
+	Players    []PlayerWithSport `xml:"players>player"`
+}
+
+// GetID ...
+func (cr CompetitorResponse) GetID() string {
+	return cr.Competitor.ID
+}
+
+// GetName ...
+func (cr CompetitorResponse) GetName() string {
+	return cr.Competitor.Name
+}
+
+// GetAbbreviation ...
+func (cr CompetitorResponse) GetAbbreviation() string {
+	return cr.Competitor.Abbreviation
+}
+
+// GetRefID ...
+// Deprecated: do not use this method, it will be removed in future
+func (cr CompetitorResponse) GetRefID() *string {
+	return cr.Competitor.RefID
+}
+
+func (cr CompetitorResponse) GetPlayers() []PlayerWithSport {
+	return cr.Players
 }
 
 // Team ...
@@ -53,4 +79,9 @@ type TeamExtended struct {
 type TeamCompetitor struct {
 	Team
 	Qualifier string `xml:"qualifier,attr,omitempty"`
+}
+
+type PlayerWithSport struct {
+	Player
+	SportID string `xml:"sport,attr"`
 }
