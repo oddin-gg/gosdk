@@ -21,6 +21,11 @@ type TeamWrapper interface {
 	GetAbbreviation() string
 }
 
+type TeamWithPlayers interface {
+	TeamWrapper
+	GetPlayers() []xml.PlayerWithSport
+}
+
 // CompetitorCache ...
 type CompetitorCache struct {
 	apiClient     *api.Client
@@ -123,8 +128,8 @@ func (c *CompetitorCache) CompetitorIcon(id protocols.URN, locale protocols.Loca
 		return nil, err
 	}
 
-	c.iconCache.Set(id.ToString(), data.IconPath, 0)
-	return data.IconPath, nil
+	c.iconCache.Set(id.ToString(), data.Competitor.IconPath, 0)
+	return data.Competitor.IconPath, nil
 }
 
 func (c *CompetitorCache) handleTeamData(locale protocols.Locale, teams []TeamWrapper) error {
@@ -163,12 +168,28 @@ func (c *CompetitorCache) refreshOrInsertItem(id protocols.URN, locale protocols
 			refID:        refID,
 			name:         make(map[protocols.Locale]string),
 			abbreviation: make(map[protocols.Locale]string),
+			players:      make(map[protocols.Locale][]protocols.Player, 0),
 		}
 	}
 
 	result.mux.Lock()
 	result.name[locale] = team.GetName()
 	result.abbreviation[locale] = team.GetAbbreviation()
+	if teamWithPlayers, ok := team.(TeamWithPlayers); ok {
+		playersWithSport := teamWithPlayers.GetPlayers()
+
+		players := make([]protocols.Player, 0, len(playersWithSport))
+		for _, p := range playersWithSport {
+			players = append(players, &playerWithSport{
+				id:       p.ID,
+				name:     p.Name,
+				fullname: p.FullName,
+				sportID:  p.SportID,
+			})
+		}
+
+		result.players[locale] = players
+	}
 	result.mux.Unlock()
 
 	c.internalCache.Set(id.ToString(), result, 0)
@@ -185,7 +206,7 @@ func (c *CompetitorCache) loadAndCacheItem(id protocols.URN, locales []protocols
 		}
 
 		// Set icon if needed
-		c.iconCache.Set(id.ToString(), data.IconPath, 0)
+		c.iconCache.Set(id.ToString(), data.Competitor.IconPath, 0)
 
 		err = c.refreshOrInsertItem(id, locale, data)
 		if err != nil {
@@ -219,6 +240,7 @@ type LocalizedCompetitor struct {
 	refID        *protocols.URN
 	name         map[protocols.Locale]string
 	abbreviation map[protocols.Locale]string
+	players      map[protocols.Locale][]protocols.Player
 	mux          sync.Mutex
 }
 
@@ -249,6 +271,18 @@ func (l *LocalizedCompetitor) LocalizedName(locale protocols.Locale) (*string, e
 	}
 
 	return &result, nil
+}
+
+func (l *LocalizedCompetitor) LocalizedPlayers(locale protocols.Locale) ([]protocols.Player, error) {
+	l.mux.Lock()
+	defer l.mux.Unlock()
+
+	result, ok := l.players[locale]
+	if !ok {
+		return nil, errors.Errorf("missing locale %s", locale)
+	}
+
+	return result, nil
 }
 
 type competitorImpl struct {
@@ -346,6 +380,41 @@ func (c competitorImpl) LocalizedAbbreviation(locale protocols.Locale) (*string,
 	return &result, nil
 }
 
+func (c competitorImpl) Players() (map[protocols.Locale][]protocols.Player, error) {
+	item, err := c.competitorCache.Competitor(c.id, c.locales)
+	if err != nil {
+		return nil, err
+	}
+
+	item.mux.Lock()
+	defer item.mux.Unlock()
+
+	// Return copy of map
+	result := make(map[protocols.Locale][]protocols.Player, len(item.players))
+	for key, value := range item.players {
+		result[key] = value
+	}
+
+	return result, nil
+}
+
+func (c competitorImpl) LocalizedPlayers(locale protocols.Locale) ([]protocols.Player, error) {
+	item, err := c.competitorCache.Competitor(c.id, c.locales)
+	if err != nil {
+		return nil, err
+	}
+
+	item.mux.Lock()
+	defer item.mux.Unlock()
+
+	result, ok := item.players[locale]
+	if !ok {
+		return nil, errors.Errorf("missing locale %s", locale)
+	}
+
+	return result, nil
+}
+
 type teamCompetitorImpl struct {
 	qualifier  *string
 	competitor protocols.Competitor
@@ -379,8 +448,39 @@ func (t teamCompetitorImpl) LocalizedAbbreviation(locale protocols.Locale) (*str
 	return t.competitor.LocalizedAbbreviation(locale)
 }
 
+func (t teamCompetitorImpl) Players() (map[protocols.Locale][]protocols.Player, error) {
+	return t.competitor.Players()
+}
+
+func (t teamCompetitorImpl) LocalizedPlayers(locale protocols.Locale) ([]protocols.Player, error) {
+	return t.competitor.LocalizedPlayers(locale)
+}
+
 func (t teamCompetitorImpl) Qualifier() *string {
 	return t.qualifier
+}
+
+type playerWithSport struct {
+	id       string
+	name     string
+	fullname string
+	sportID  string
+}
+
+func (p playerWithSport) ID() string {
+	return p.id
+}
+
+func (p playerWithSport) LocalizedName() string {
+	return p.name
+}
+
+func (p playerWithSport) FullName() string {
+	return p.fullname
+}
+
+func (p playerWithSport) SportID() string {
+	return p.sportID
 }
 
 // NewCompetitor ...
