@@ -9,6 +9,7 @@ import (
 	"github.com/oddin-gg/gosdk/internal/api/xml"
 	"github.com/oddin-gg/gosdk/protocols"
 	"github.com/patrickmn/go-cache"
+	log "github.com/sirupsen/logrus"
 )
 
 // PlayerCacheKey represent cache key
@@ -21,6 +22,28 @@ type PlayersCache struct {
 	internalCache *cache.Cache
 	apiClient     *api.Client
 	mux           sync.Mutex
+	logger        *log.Entry
+}
+
+// OnAPIResponse ...
+func (c *PlayersCache) OnAPIResponse(apiResponse protocols.Response) {
+	if apiResponse.Locale == nil || apiResponse.Data == nil {
+		return
+	}
+
+	players := make([]xml.Player, 0)
+	if data, ok := apiResponse.Data.(*xml.CompetitorResponse); ok {
+		players = append(players, data.Players...)
+	}
+
+	if len(players) == 0 {
+		return
+	}
+
+	err := c.handlePlayerData(*apiResponse.Locale, players)
+	if err != nil {
+		c.logger.WithError(err).Errorf("failed to process api data %v", apiResponse)
+	}
 }
 
 // GetPlayer returns cached LocalizedPlayer if is in cache, if it is not then the team is fetched via api and stored in cache.
@@ -69,6 +92,8 @@ func (c *PlayersCache) GetPlayers(ids []PlayerCacheKey) (map[PlayerCacheKey]Loca
 		convertedPlayer := LocalizedPlayer{
 			ID:            playerProfile.Player.ID,
 			LocalizedName: playerProfile.Player.Name,
+			FullName:      playerProfile.Player.FullName,
+			SportID:       playerProfile.Player.SportID,
 			locale:        key.Locale,
 		}
 		c.setPlayer(key, convertedPlayer)
@@ -80,6 +105,36 @@ func (c *PlayersCache) GetPlayers(ids []PlayerCacheKey) (map[PlayerCacheKey]Loca
 	}
 
 	return nil, fmt.Errorf("get player from cache - some players %v not found in db: %w", missingPlayersIDs, ErrItemNotFoundInCache)
+}
+
+func (c *PlayersCache) handlePlayerData(locale protocols.Locale, players []xml.Player) error {
+	for i := range players {
+		err := c.refreshOrInsertItem(players[i], locale)
+		if err != nil {
+			return fmt.Errorf("refreshing or inserting player: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func (c *PlayersCache) refreshOrInsertItem(player xml.Player, locale protocols.Locale) error {
+	key := PlayerCacheKey{PlayerID: player.ID, Locale: locale}
+
+	result, ok := c.getPlayer(key)
+	if !ok {
+		result = LocalizedPlayer{}
+	}
+
+	result.ID = player.ID
+	result.LocalizedName = player.Name
+	result.FullName = player.FullName
+	result.SportID = player.SportID
+	result.locale = locale
+
+	c.setPlayer(key, result)
+
+	return nil
 }
 
 func (c *PlayersCache) getPlayersFromCache(
@@ -132,15 +187,68 @@ func (c *PlayersCache) setPlayer(id PlayerCacheKey, obj LocalizedPlayer) {
 	c.internalCache.Set(c.key(id), obj, cache.DefaultExpiration)
 }
 
-func newPlayersCache(apiClient *api.Client) *PlayersCache {
-	return &PlayersCache{
+func newPlayersCache(apiClient *api.Client, logger *log.Entry) *PlayersCache {
+	playersCache := &PlayersCache{
 		internalCache: cache.New(12*time.Hour, 1*time.Hour),
 		apiClient:     apiClient,
+		logger:        logger,
 	}
+
+	apiClient.SubscribeWithAPIObserver(playersCache)
+
+	return playersCache
 }
 
 type LocalizedPlayer struct {
 	ID            string
 	LocalizedName string
+	FullName      string
+	SportID       string
 	locale        protocols.Locale
+}
+
+type playerImpl struct {
+	key         PlayerCacheKey
+	playerCache *PlayersCache
+}
+
+func (p playerImpl) ID() string {
+	return p.key.PlayerID
+}
+
+func (p playerImpl) LocalizedName() (string, error) {
+	item, err := p.playerCache.GetPlayer(p.key)
+	if err != nil {
+		return "", fmt.Errorf("getting player from cache: %w", err)
+	}
+
+	return item.LocalizedName, nil
+}
+
+func (p playerImpl) FullName() (string, error) {
+	item, err := p.playerCache.GetPlayer(p.key)
+	if err != nil {
+		return "", fmt.Errorf("getting player from cache: %w", err)
+	}
+
+	return item.FullName, nil
+}
+
+func (p playerImpl) SportID() (string, error) {
+	item, err := p.playerCache.GetPlayer(p.key)
+	if err != nil {
+		return "", fmt.Errorf("getting player from cache: %w", err)
+	}
+
+	return item.SportID, nil
+}
+
+// NewPlayer ...
+func NewPlayer(id protocols.URN, playerCache *PlayersCache, locale protocols.Locale) protocols.Player {
+	key := PlayerCacheKey{PlayerID: id.ToString(), Locale: locale}
+
+	return &playerImpl{
+		key:         key,
+		playerCache: playerCache,
+	}
 }

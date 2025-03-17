@@ -64,7 +64,7 @@ func (e *EntityFactory) BuildCompetitors(competitorIDs []protocols.URN, locales 
 	result := make([]protocols.Competitor, len(competitorIDs))
 	for i := range competitorIDs {
 		id := competitorIDs[i]
-		result[i] = cache.NewCompetitor(id, e.cacheManager.CompetitorCache, locales)
+		result[i] = cache.NewCompetitor(id, e.cacheManager.CompetitorCache, e, locales)
 	}
 
 	return result
@@ -72,7 +72,12 @@ func (e *EntityFactory) BuildCompetitors(competitorIDs []protocols.URN, locales 
 
 // BuildCompetitor ...
 func (e *EntityFactory) BuildCompetitor(id protocols.URN, locales []protocols.Locale) protocols.Competitor {
-	return cache.NewCompetitor(id, e.cacheManager.CompetitorCache, locales)
+	return cache.NewCompetitor(id, e.cacheManager.CompetitorCache, e, locales)
+}
+
+// BuildPlayer ...
+func (e *EntityFactory) BuildPlayer(id protocols.URN, locale protocols.Locale) protocols.Player {
+	return cache.NewPlayer(id, e.cacheManager.PlayersCache, locale)
 }
 
 // BuildFixture ...

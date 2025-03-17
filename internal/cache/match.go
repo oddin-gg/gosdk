@@ -156,7 +156,7 @@ func (m *MatchCache) refreshOrInsertItem(id protocols.URN, locale protocols.Loca
 
 	result.sportFormat = protocols.SportFormatClassic
 	result.extraInfo = make(map[string]string)
-	if match.ExtraInfo.List != nil {
+	if match.ExtraInfo != nil && match.ExtraInfo.List != nil {
 		for _, info := range match.ExtraInfo.List {
 			if info.Key == apiXML.ExtraInfoSportFormatKey && len(info.Value) > 0 {
 				switch info.Value {

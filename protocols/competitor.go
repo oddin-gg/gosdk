@@ -10,6 +10,8 @@ type Competitor interface {
 	IconPath() (*string, error)
 	Abbreviations() (map[Locale]string, error)
 	LocalizedAbbreviation(locale Locale) (*string, error)
+	Players() (map[Locale][]Player, error)
+	LocalizedPlayers(locale Locale) ([]Player, error)
 }
 
 // TeamCompetitor ...

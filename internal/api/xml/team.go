@@ -6,6 +6,32 @@ import "encoding/xml"
 type CompetitorResponse struct {
 	XMLName    xml.Name     `xml:"competitor_profile"`
 	Competitor TeamExtended `xml:"competitor"`
+	Players    []Player     `xml:"players>player,omitempty"`
+}
+
+// GetID ...
+func (cr CompetitorResponse) GetID() string {
+	return cr.Competitor.ID
+}
+
+// GetName ...
+func (cr CompetitorResponse) GetName() string {
+	return cr.Competitor.Name
+}
+
+// GetAbbreviation ...
+func (cr CompetitorResponse) GetAbbreviation() string {
+	return cr.Competitor.Abbreviation
+}
+
+// GetRefID ...
+// Deprecated: do not use this method, it will be removed in future
+func (cr CompetitorResponse) GetRefID() *string {
+	return cr.Competitor.RefID
+}
+
+func (cr CompetitorResponse) GetPlayers() []Player {
+	return cr.Players
 }
 
 // Team ...
