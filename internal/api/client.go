@@ -144,14 +144,14 @@ func (c *Client) FetchTournament(id protocols.URN, locale protocols.Locale) (*da
 }
 
 // FetchCompetitorProfile ...
-func (c *Client) FetchCompetitorProfile(id protocols.URN, locale protocols.Locale) (*data.TeamExtended, error) {
+func (c *Client) FetchCompetitorProfile(id protocols.URN, locale protocols.Locale) (*data.CompetitorResponse, error) {
 	var resp data.CompetitorResponse
 	err := c.fetchData(fmt.Sprintf("/sports/%s/competitors/%s/profile", locale, id.ToString()), &resp, &locale)
 	if err != nil {
 		return nil, err
 	}
 
-	return &resp.Competitor, nil
+	return &resp, nil
 }
 
 // FetchMatchSummary ...
