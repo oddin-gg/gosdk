@@ -15,12 +15,14 @@ import (
 	"github.com/oddin-gg/gosdk/protocols"
 )
 
+const defaultNodeID = 1
+
 // Demo constants
 var (
 	token  = "YOUR TOKEN"
 	env    = protocols.IntegrationEnvironment
 	region = protocols.DefaulRegion
-	nodeID = 1
+	nodeID = defaultNodeID
 	locale = protocols.EnLocale
 )
 
@@ -87,6 +89,8 @@ func initEnv() {
 		nodeID, err = strconv.Atoi(v)
 		if err != nil || nodeID <= 0 {
 			log.Printf("NODE environment variable has invalid value %s, using default", v)
+		} else {
+			nodeID = defaultNodeID
 		}
 	}
 }

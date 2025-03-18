@@ -24,17 +24,6 @@ type Fixture struct {
 	TVChannels *TvChannelsWrapper `xml:"tv_channels,omitempty"`
 }
 
-// ExtraInfoWrapper ...
-type ExtraInfoWrapper struct {
-	List []ExtraInfo `xml:"info"`
-}
-
-// ExtraInfo ...
-type ExtraInfo struct {
-	Key   string `xml:"key,attr"`
-	Value string `xml:"value,attr"`
-}
-
 // TvChannelsWrapper ...
 type TvChannelsWrapper struct {
 	List []TVChannel `xml:"tv_channel"`

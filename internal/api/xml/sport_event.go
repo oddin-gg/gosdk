@@ -31,6 +31,17 @@ const (
 	LiveOddsBuyable      LiveOdds = "buyable"
 )
 
+// ExtraInfoWrapper ...
+type ExtraInfoWrapper struct {
+	List []ExtraInfo `xml:"info"`
+}
+
+// ExtraInfo ...
+type ExtraInfo struct {
+	Key   string `xml:"key,attr"`
+	Value string `xml:"value,attr"`
+}
+
 // SportEventStatusType ...
 type SportEventStatusType string
 
