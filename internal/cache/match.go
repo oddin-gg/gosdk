@@ -423,7 +423,7 @@ func (m matchImpl) Tournament() (protocols.Tournament, error) {
 	return m.entityFactory.BuildTournament(item.tournamentID, *sportID, m.locales), nil
 }
 
-func (m matchImpl) HomeCompetitor() (protocols.TeamCompetitor, error) {
+func (m matchImpl) homeAwayCompetitor(home bool) (protocols.TeamCompetitor, error) {
 	item, err := m.matchCache.Match(m.id, m.locales)
 	if err != nil {
 		return nil, err
@@ -435,11 +435,15 @@ func (m matchImpl) HomeCompetitor() (protocols.TeamCompetitor, error) {
 	case len(item.competitors) < 2:
 		return nil, fmt.Errorf("match %s has less than 2 competitors", m.id.ToString())
 	case item.sportFormat != protocols.SportFormatClassic:
-		return nil, fmt.Errorf("match %s is not classic sport format", m.id.ToString())
+		return nil, fmt.Errorf("match %s is not a classic sport format", m.id.ToString())
 	case len(item.competitors) > 2:
 		return nil, fmt.Errorf("classic sport match %s has more than 2 competitors", m.id.ToString())
 	default:
-		team = item.competitors[0]
+		if home {
+			team = item.competitors[0]
+		} else {
+			team = item.competitors[1]
+		}
 	}
 
 	return teamCompetitorImpl{
@@ -448,29 +452,12 @@ func (m matchImpl) HomeCompetitor() (protocols.TeamCompetitor, error) {
 	}, nil
 }
 
+func (m matchImpl) HomeCompetitor() (protocols.TeamCompetitor, error) {
+	return m.homeAwayCompetitor(true)
+}
+
 func (m matchImpl) AwayCompetitor() (protocols.TeamCompetitor, error) {
-	item, err := m.matchCache.Match(m.id, m.locales)
-	if err != nil {
-		return nil, err
-	}
-
-	var team competitor
-
-	switch {
-	case len(item.competitors) < 2:
-		return nil, fmt.Errorf("match %s has less than 2 competitors", m.id.ToString())
-	case item.sportFormat != protocols.SportFormatClassic:
-		return nil, fmt.Errorf("match %s is not classic sport format", m.id.ToString())
-	case len(item.competitors) > 2:
-		return nil, fmt.Errorf("classic sport match %s has more than 2 competitors", m.id.ToString())
-	default:
-		team = item.competitors[1]
-	}
-
-	return teamCompetitorImpl{
-		qualifier:  &team.qualifier,
-		competitor: m.entityFactory.BuildCompetitor(team.urn, m.locales),
-	}, nil
+	return m.homeAwayCompetitor(false)
 }
 
 func (m matchImpl) Fixture() protocols.Fixture {
