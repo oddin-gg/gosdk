@@ -280,7 +280,7 @@ func (l *LocalizedCompetitor) LocalizedPlayers(locale protocols.Locale) ([]proto
 
 	result, ok := l.players[locale]
 	if !ok {
-		return nil, errors.Errorf("missing locale %s", locale)
+		return nil, fmt.Errorf("missing locale %s", locale)
 	}
 
 	return result, nil
@@ -410,7 +410,7 @@ func (c competitorImpl) LocalizedPlayers(locale protocols.Locale) ([]protocols.P
 
 	result, ok := item.players[locale]
 	if !ok {
-		return nil, errors.Errorf("missing locale %s", locale)
+		return nil, fmt.Errorf("missing locale %s", locale)
 	}
 
 	return result, nil

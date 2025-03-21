@@ -366,7 +366,7 @@ func (m betCancelImpl) StartTime() *time.Time {
 	if m.message.StartTime == nil {
 		return nil
 	}
-	startTime := time.Unix(int64(*m.message.StartTime), 0)
+	startTime := time.Unix(int64(*m.message.StartTime), 0) //nolint:gosec
 	return &startTime
 }
 
@@ -374,7 +374,7 @@ func (m betCancelImpl) EndTime() *time.Time {
 	if m.message.EndTime == nil {
 		return nil
 	}
-	endTime := time.Unix(int64(*m.message.EndTime), 0)
+	endTime := time.Unix(int64(*m.message.EndTime), 0) //nolint:gosec
 	return &endTime
 }
 
@@ -509,7 +509,7 @@ func (m rollbackBetCancelImpl) StartTime() *time.Time {
 	if m.message.StartTime == nil {
 		return nil
 	}
-	startTime := time.Unix(int64(*m.message.StartTime), 0)
+	startTime := time.Unix(int64(*m.message.StartTime), 0) //nolint:gosec
 	return &startTime
 }
 
@@ -517,6 +517,6 @@ func (m rollbackBetCancelImpl) EndTime() *time.Time {
 	if m.message.EndTime == nil {
 		return nil
 	}
-	endTime := time.Unix(int64(*m.message.EndTime), 0)
+	endTime := time.Unix(int64(*m.message.EndTime), 0) //nolint:gosec
 	return &endTime
 }
