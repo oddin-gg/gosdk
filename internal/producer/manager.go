@@ -1,11 +1,12 @@
 package producer
 
 import (
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/oddin-gg/gosdk/internal/api"
 	"github.com/oddin-gg/gosdk/protocols"
-	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -37,7 +38,7 @@ func (m *Manager) producer(id uint) (*data, error) {
 
 	producer, ok := producers[id]
 	if !ok {
-		return nil, errors.Errorf("missing producer %d", id)
+		return nil, fmt.Errorf("missing producer %d", id)
 	}
 
 	return producer, nil

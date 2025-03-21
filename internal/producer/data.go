@@ -1,11 +1,11 @@
 package producer
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/oddin-gg/gosdk/internal/api/xml"
 	"github.com/oddin-gg/gosdk/protocols"
-	errors "github.com/pkg/errors"
 )
 
 type data struct {
@@ -142,7 +142,7 @@ func buildProducerImpl(producerData *data) (*producerImpl, error) {
 	case xml.ScopePrematch:
 		producerScope = protocols.PrematchProducerScope
 	default:
-		return nil, errors.Errorf("unknown producer scope %s", producerData.producerScope)
+		return nil, fmt.Errorf("unknown producer scope %s", producerData.producerScope)
 	}
 
 	return &producerImpl{

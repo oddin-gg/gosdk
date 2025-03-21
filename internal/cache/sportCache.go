@@ -1,13 +1,14 @@
 package cache
 
 import (
+	"errors"
+	"fmt"
 	"sync"
 
 	"github.com/oddin-gg/gosdk/internal/api"
 	"github.com/oddin-gg/gosdk/internal/api/xml"
 	"github.com/oddin-gg/gosdk/protocols"
 	"github.com/patrickmn/go-cache"
-	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -328,7 +329,7 @@ func (s sportImpl) LocalizedName(locale protocols.Locale) (*string, error) {
 
 	result, ok := item.name[locale]
 	if !ok {
-		return nil, errors.Errorf("missing locale %s", locale)
+		return nil, fmt.Errorf("missing locale %s", locale)
 	}
 
 	return &result, nil
@@ -345,7 +346,7 @@ func (s sportImpl) LocalizedAbbreviation(locale protocols.Locale) (*string, erro
 
 	result, ok := item.abbreviation[locale]
 	if !ok {
-		return nil, errors.Errorf("missing locale %s", locale)
+		return nil, fmt.Errorf("missing locale %s", locale)
 	}
 
 	return &result, nil

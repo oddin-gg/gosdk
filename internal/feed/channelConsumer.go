@@ -2,13 +2,13 @@ package feed
 
 import (
 	"encoding/xml"
+	"fmt"
 	"strings"
 	"time"
 
 	"github.com/oddin-gg/gosdk/internal/factory"
 	feedXML "github.com/oddin-gg/gosdk/internal/feed/xml"
 	"github.com/oddin-gg/gosdk/protocols"
-	"github.com/pkg/errors"
 	amqp "github.com/rabbitmq/amqp091-go"
 	log "github.com/sirupsen/logrus"
 )
@@ -207,7 +207,7 @@ func (c *ChannelConsumer) processMessage(msg amqp.Delivery) {
 func (c *ChannelConsumer) parseRoute(route string) (*protocols.RoutingKeyInfo, error) {
 	parts := strings.Split(route, ".")
 	if len(parts) != 8 {
-		return nil, errors.Errorf("incorrect route %s", route)
+		return nil, fmt.Errorf("incorrect route %s", route)
 	}
 
 	sportID := parts[4]

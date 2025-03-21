@@ -1,9 +1,11 @@
 package factory
 
 import (
+	"errors"
+	"fmt"
+
 	"github.com/oddin-gg/gosdk/internal/cache"
 	"github.com/oddin-gg/gosdk/protocols"
-	"github.com/pkg/errors"
 )
 
 // MarketDescriptionFactory ...
@@ -38,7 +40,7 @@ func (m MarketDescriptionFactory) MarketDescriptionByIDAndVariant(
 ) (protocols.MarketDescription, error) {
 	mds, err := m.marketDescriptionCache.MarketDescriptionByID(marketID, variant, locales)
 	if err != nil {
-		return nil, errors.Wrap(err, "get market description by id failed")
+		return nil, fmt.Errorf("get market description by id failed: %w", err)
 	}
 	if mds == nil {
 		return nil, errors.New("get market description by id failed - cannot be nil")

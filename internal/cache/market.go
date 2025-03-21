@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -12,7 +13,6 @@ import (
 	"github.com/oddin-gg/gosdk/internal/utils"
 	"github.com/oddin-gg/gosdk/protocols"
 	"github.com/patrickmn/go-cache"
-	"github.com/pkg/errors"
 )
 
 // CompositeKey ...
@@ -94,12 +94,12 @@ func (m *MarketDescriptionCache) MarketDescriptionByID(
 
 		item, found := m.internalCache.Get(key)
 		if !found {
-			return nil, errors.Errorf("item missing key=%q", key)
+			return nil, fmt.Errorf("item missing key=%q", key)
 		}
 
 		result, ok = item.(*LocalizedMarketDescription)
 		if !ok {
-			return nil, errors.Errorf("unknown item type: %T with key=%q", item, key)
+			return nil, fmt.Errorf("unknown item type: %T with key=%q", item, key)
 		}
 	}
 
@@ -112,12 +112,12 @@ func (m *MarketDescriptionCache) MarketDescriptionByKey(key CompositeKey) (*Loca
 	strKey := m.makeStringKey(key.MarketID, key.Variant)
 	item, ok := m.internalCache.Get(strKey)
 	if !ok {
-		return nil, errors.Errorf("no market description found for %s", strKey)
+		return nil, fmt.Errorf("no market description found for %s", strKey)
 	}
 
 	result, ok := item.(*LocalizedMarketDescription)
 	if !ok {
-		return nil, errors.Errorf("failed to convert market description")
+		return nil, errors.New("convert market description")
 	}
 
 	return result, nil
@@ -177,7 +177,7 @@ func (m *MarketDescriptionCache) refreshOrInsertItem(description data.MarketDesc
 	var dsc *LocalizedMarketDescription
 	if !ok {
 		if description.Outcomes == nil {
-			return errors.Errorf("missing outcomes in %v", description)
+			return fmt.Errorf("missing outcomes in %v", description)
 		}
 
 		outcomes := make(map[string]*LocalizedOutcomeDescription)
@@ -198,7 +198,7 @@ func (m *MarketDescriptionCache) refreshOrInsertItem(description data.MarketDesc
 	} else {
 		dsc, ok = item.(*LocalizedMarketDescription)
 		if !ok {
-			return errors.Errorf("failed to convert market description")
+			return fmt.Errorf("convert market description")
 		}
 	}
 
@@ -208,7 +208,7 @@ func (m *MarketDescriptionCache) refreshOrInsertItem(description data.MarketDesc
 	for _, outcome := range description.Outcomes.Outcome {
 		localizedOutcome, ok := dsc.outcomes[outcome.ID]
 		if !ok {
-			return errors.Errorf("missing outcome in cache %s", outcome.ID)
+			return fmt.Errorf("missing outcome in cache %s", outcome.ID)
 		}
 
 		localizedOutcome.name[locale] = outcome.Name
@@ -258,7 +258,7 @@ func (m *MarketDescriptionCache) makeCompositeKey(key string) (CompositeKey, err
 
 	parts := strings.Split(key, "-")
 	if len(parts) != 2 {
-		return ck, errors.Errorf("malformed key %s", key)
+		return ck, fmt.Errorf("malformed key %s", key)
 	}
 
 	id, err := strconv.Atoi(parts[0])
@@ -385,7 +385,7 @@ func (m marketDescriptionImpl) LocalizedName(locale protocols.Locale) (*string, 
 
 	name, ok := item.name[locale]
 	if !ok {
-		return nil, errors.Errorf("missing locale %s", locale)
+		return nil, fmt.Errorf("missing locale %s", locale)
 	}
 
 	return &name, nil
