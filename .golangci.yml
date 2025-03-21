@@ -1,0 +1,22 @@
+run:
+  timeout: 5m
+output:
+  formats:
+    - format: colored-line-number
+  print-issued-lines: true
+  print-linter-name: true
+
+linters:
+  disable-all: true
+  enable: #https://golangci-lint.run/usage/linters/
+    - prealloc
+    - gofmt         # Gofmt checks whether code was gofmt-ed. By default this tool runs with -s option to check for code simplification
+    - unconvert     # Remove unnecessary type conversions.
+    - nolintlint    # Reports ill-formed or insufficient nolint directives.
+    - rowserrcheck  # Checks whether Rows.Err of rows is checked successfully.
+    - revive        # Replacement for golint.
+linters-settings:
+  revive:
+    severity: warning
+  misspell:
+    locale: US
