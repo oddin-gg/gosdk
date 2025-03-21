@@ -1,7 +1,7 @@
 package protocols
 
 import (
-	"github.com/pkg/errors"
+	"fmt"
 	"strconv"
 	"strings"
 )
@@ -31,7 +31,7 @@ func (u URN) ToString() string {
 func ParseURN(urn string) (*URN, error) {
 	parts := strings.Split(urn, ":")
 	if len(parts) != 3 {
-		return nil, errors.Errorf("cannot parse urn %s", urn)
+		return nil, fmt.Errorf("cannot parse urn %s", urn)
 	}
 
 	id, err := strconv.Atoi(parts[2])

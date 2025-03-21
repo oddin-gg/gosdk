@@ -1,6 +1,7 @@
 package gosdk
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
@@ -15,7 +16,6 @@ import (
 	"github.com/oddin-gg/gosdk/internal/sport"
 	"github.com/oddin-gg/gosdk/internal/whoami"
 	"github.com/oddin-gg/gosdk/protocols"
-	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 )
 

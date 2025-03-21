@@ -12,7 +12,6 @@ import (
 
 	data "github.com/oddin-gg/gosdk/internal/api/xml"
 	"github.com/oddin-gg/gosdk/protocols"
-	"github.com/pkg/errors"
 )
 
 const (
@@ -478,7 +477,7 @@ func (c *Client) fetchData(path string, entity interface{}, locale *protocols.Lo
 
 	respWithCode, ok := entity.(protocols.ResponseWithCode)
 	if ok && respWithCode.Code() != protocols.OkResponseCode {
-		return errors.Errorf("not acceptable response code from API: %s", respWithCode.Code())
+		return fmt.Errorf("not acceptable response code from API: %s", respWithCode.Code())
 	}
 
 	apiResponse := protocols.Response{
@@ -545,10 +544,10 @@ func (c *Client) do(method, path string) (*http.Response, error) {
 		apiErr, err := c.unmarshallPossibleError(resp.Body)
 		// This means no parsable error in request
 		if err != nil {
-			return nil, errors.Errorf("failed to %s data to server with status code %d", method, resp.StatusCode)
+			return nil, fmt.Errorf("failed to %s data to server with status code %d", method, resp.StatusCode)
 		}
 
-		return nil, errors.Errorf("api server returned err - %s", apiErr.Message)
+		return nil, fmt.Errorf("api server returned err - %s", apiErr.Message)
 	}
 
 	return resp, nil

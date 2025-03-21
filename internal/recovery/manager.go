@@ -1,6 +1,7 @@
 package recovery
 
 import (
+	"errors"
 	"math"
 	"sync"
 	"time"
@@ -9,7 +10,6 @@ import (
 	"github.com/oddin-gg/gosdk/internal/api"
 	"github.com/oddin-gg/gosdk/internal/producer"
 	"github.com/oddin-gg/gosdk/protocols"
-	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 )
 
