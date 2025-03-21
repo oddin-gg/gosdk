@@ -91,7 +91,6 @@ jobs:
 
   dep-vulnerability:
     name: Dependency vulnerability scanner
-    # needs: [ tests, golangci ]
     continue-on-error: true
     runs-on: ubuntu-latest
     steps:
