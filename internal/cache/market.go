@@ -412,7 +412,7 @@ func (m marketDescriptionImpl) Outcomes() ([]protocols.OutcomeDescription, error
 	item.mux.Lock()
 	defer item.mux.Unlock()
 
-	var outcomes []protocols.OutcomeDescription
+	outcomes := make([]protocols.OutcomeDescription, 0, len(item.outcomes))
 	for key := range item.outcomes {
 		it := item.outcomes[key]
 		outcome := outcomeDescriptionImpl{

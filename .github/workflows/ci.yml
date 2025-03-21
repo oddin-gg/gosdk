@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+  push:
+    branches:
+      - 'main'
+      - 'develop'
+
+permissions:
+  # Required: allow read access to the content for analysis.
+  contents: read
+  # Optional: allow read access to pull request. Use with `only-new-issues` option.
+  pull-requests: read
+  # Optional: Allow to write access to checks to allow the action to annotate code in the PR.
+  checks: write
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache-dependency-path: 'go.sum'
+      - run: go version
+      - name: Build
+        run: make build
+      - name: Check generated code
+        run: git diff --exit-code
+
+  tests:
+    name: Unit tests
+    needs: [ build ]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare go environment
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache-dependency-path: 'go.sum'
+      - name: Run tests
+        run: make test
+      - name: Archive code coverage results
+        uses: actions/upload-artifact@v4
+        with:
+          name: code-coverage
+          path: coverage.txt
+
+  code_coverage:
+    name: "Code coverage report"
+    if: github.event_name == 'pull_request' # Do not run when workflow is triggered by push to main branch
+    runs-on: ubuntu-latest
+    needs: [ tests ]
+    permissions:
+      contents: read
+      actions: read  # to download code coverage results from "test" job
+      pull-requests: write # write permission needed to comment on PR
+    steps:
+      - uses: fgrosse/go-coverage-report@v1.2.0 # Consider using a Git revision for maximum security
+        with:
+          coverage-artifact-name: "code-coverage" # can be omitted if you used this default value
+          coverage-file-name: "coverage.txt" # can be omitted if you used this default value
+
+  golangci:
+    name: Static code check
+    needs: [ build ]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: false
+      - name: Extract version from Makefile
+        run: |
+          VERSION=$(make golangci-lint-version)
+          echo "golangci_version=$VERSION" >> $GITHUB_ENV
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: ${{ env.golangci_version }}
+          args: --config .golangci.yml --timeout=5m --exclude-dirs vendor
+
+  dep-vulnerability:
+    name: Dependency vulnerability scanner
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare go environment
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: false
+      - name: Check
+        run: make govulncheck
