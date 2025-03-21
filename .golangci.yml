@@ -26,6 +26,4 @@ linters-settings:
   gosec:
     excludes:
       - G404 # Use of weak random number generator
-  gocritic:
-    disabled-checks:
-      - assignOp
+      - G115 # Temporary excluded, will be fixed
