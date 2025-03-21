@@ -16,7 +16,7 @@ func (g *generator) next() uint {
 	g.mux.Lock()
 	defer g.mux.Unlock()
 
-	g.value = g.value + g.increment
+	g.value += g.increment
 	return uint(g.value)
 }
 

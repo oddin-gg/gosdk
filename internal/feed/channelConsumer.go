@@ -128,8 +128,6 @@ func (c *ChannelConsumer) processMessage(msg amqp.Delivery) {
 		return
 	}
 
-	//c.logger.Infof(string(msg.Body))
-
 	envelope := envelope{}
 	envelopeBytes := []byte(`<envelope>` + string(msg.Body) + `</envelope>`)
 	err = xml.Unmarshal(envelopeBytes, &envelope)

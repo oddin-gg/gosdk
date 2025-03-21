@@ -261,7 +261,7 @@ func (m *MarketDescriptionCache) makeCompositeKey(key string) (CompositeKey, err
 		return ck, fmt.Errorf("malformed key %s", key)
 	}
 
-	id, err := strconv.Atoi(parts[0])
+	id, err := strconv.ParseUint(parts[0], 10, 64)
 	if err != nil {
 		return ck, err
 	}
@@ -415,11 +415,10 @@ func (m marketDescriptionImpl) Outcomes() ([]protocols.OutcomeDescription, error
 	outcomes := make([]protocols.OutcomeDescription, 0, len(item.outcomes))
 	for key := range item.outcomes {
 		it := item.outcomes[key]
-		outcome := outcomeDescriptionImpl{
+		outcomes = append(outcomes, outcomeDescriptionImpl{
 			id:                          key,
 			localizedOutcomeDescription: it,
-		}
-		outcomes = append(outcomes, outcome)
+		})
 	}
 
 	return outcomes, nil

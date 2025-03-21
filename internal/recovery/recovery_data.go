@@ -105,11 +105,10 @@ func (p *producerRecoveryData) validateEventSnapshotComplete(recoveryID uint, in
 	defer p.lock.RUnlock()
 
 	er, ok := p.eventRecoveries[recoveryID]
-	if !ok {
-		return false
-	}
 
 	switch {
+	case !ok:
+		return false
 	case !p.snapshotValidationNeeded(interest):
 		return true
 	}

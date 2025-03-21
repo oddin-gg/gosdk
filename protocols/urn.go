@@ -24,7 +24,7 @@ type URN struct {
 
 // ToString ...
 func (u URN) ToString() string {
-	return u.Prefix + ":" + u.Type + ":" + strconv.Itoa(int(u.ID))
+	return u.Prefix + ":" + u.Type + ":" + strconv.FormatUint(uint64(u.ID), 10)
 }
 
 // ParseURN ...
@@ -34,7 +34,7 @@ func ParseURN(urn string) (*URN, error) {
 		return nil, fmt.Errorf("cannot parse urn %s", urn)
 	}
 
-	id, err := strconv.Atoi(parts[2])
+	id, err := strconv.ParseUint(parts[2], 10, 64)
 	if err != nil {
 		return nil, err
 	}

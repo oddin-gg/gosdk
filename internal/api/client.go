@@ -243,10 +243,11 @@ func (c *Client) PostEventStatefulRecovery(producerName string, eventID protocol
 		path = fmt.Sprintf("%s&node_id=%d", path, *nodeID)
 	}
 
-	_, err := c.do(http.MethodPost, path)
+	res, err := c.do(http.MethodPost, path)
 	if err != nil {
 		return false, err
 	}
+	_ = res.Body.Close()
 
 	return true, nil
 }
@@ -258,10 +259,11 @@ func (c *Client) PostEventOddsRecovery(producerName string, eventID protocols.UR
 		path = fmt.Sprintf("%s&node_id=%d", path, *nodeID)
 	}
 
-	_, err := c.do(http.MethodPost, path)
+	res, err := c.do(http.MethodPost, path)
 	if err != nil {
 		return false, err
 	}
+	_ = res.Body.Close()
 
 	return true, nil
 }
@@ -277,10 +279,11 @@ func (c *Client) PostRecovery(producerName string, requestID uint, nodeID *int, 
 		path = fmt.Sprintf("%s&after=%d", path, after.UnixNano()/1e6)
 	}
 
-	_, err := c.do(http.MethodPost, path)
+	res, err := c.do(http.MethodPost, path)
 	if err != nil {
 		return false, err
 	}
+	_ = res.Body.Close()
 
 	return true, nil
 }
@@ -292,10 +295,11 @@ func (c *Client) PostReplayClear(nodeID *int) (bool, error) {
 		path = fmt.Sprintf("%s?node_id=%d", path, *nodeID)
 	}
 
-	_, err := c.do(http.MethodPost, path)
+	res, err := c.do(http.MethodPost, path)
 	if err != nil {
 		return false, err
 	}
+	_ = res.Body.Close()
 
 	return true, nil
 }
@@ -307,10 +311,11 @@ func (c *Client) PostReplayStop(nodeID *int) (bool, error) {
 		path = fmt.Sprintf("%s?node_id=%d", path, *nodeID)
 	}
 
-	_, err := c.do(http.MethodPost, path)
+	res, err := c.do(http.MethodPost, path)
 	if err != nil {
 		return false, err
 	}
+	_ = res.Body.Close()
 
 	return true, nil
 }
@@ -338,10 +343,11 @@ func (c *Client) PutReplayEvent(eventID protocols.URN, nodeID *int) (bool, error
 		path = fmt.Sprintf("%s?node_id=%d", path, *nodeID)
 	}
 
-	_, err := c.do(http.MethodPut, path)
+	res, err := c.do(http.MethodPut, path)
 	if err != nil {
 		return false, err
 	}
+	_ = res.Body.Close()
 
 	return true, nil
 }
@@ -353,10 +359,11 @@ func (c *Client) DeleteReplayEvent(eventID protocols.URN, nodeID *int) (bool, er
 		path = fmt.Sprintf("%s?node_id=%d", path, *nodeID)
 	}
 
-	_, err := c.do(http.MethodDelete, path)
+	res, err := c.do(http.MethodDelete, path)
 	if err != nil {
 		return false, err
 	}
+	_ = res.Body.Close()
 
 	return true, nil
 }
@@ -411,10 +418,11 @@ func (c *Client) PostReplayStart(nodeID *int, speed *int, maxDelay *int, useRepl
 		path = fmt.Sprintf("%s?%s", path, query)
 	}
 
-	_, err := c.do(http.MethodPost, path)
+	res, err := c.do(http.MethodPost, path)
 	if err != nil {
 		return false, err
 	}
+	_ = res.Body.Close()
 
 	return true, nil
 }
@@ -469,6 +477,7 @@ func (c *Client) fetchData(path string, entity interface{}, locale *protocols.Lo
 	if err != nil {
 		return err
 	}
+	defer func() { _ = resp.Body.Close() }()
 
 	err = xml.NewDecoder(resp.Body).Decode(entity)
 	if err != nil {
