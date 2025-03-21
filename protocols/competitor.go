@@ -11,18 +11,10 @@ type Competitor interface {
 	Abbreviations() (map[Locale]string, error)
 	LocalizedAbbreviation(locale Locale) (*string, error)
 	Players() (map[Locale][]Player, error)
-	LocalizedPlayers(locale Locale) ([]Player, error)
 }
 
 // TeamCompetitor ...
 type TeamCompetitor interface {
 	Competitor
 	Qualifier() *string
-}
-
-type Player interface {
-	ID() string
-	LocalizedName() string
-	FullName() string
-	SportID() string
 }

@@ -75,6 +75,11 @@ func (e *EntityFactory) BuildCompetitor(id protocols.URN, locales []protocols.Lo
 	return cache.NewCompetitor(id, e.cacheManager.CompetitorCache, locales)
 }
 
+// BuildPlayer ...
+func (e *EntityFactory) BuildPlayer(id protocols.URN, locales []protocols.Locale) protocols.Player {
+	return cache.NewPlayer(id, e.cacheManager.PlayersCache, locales)
+}
+
 // BuildFixture ...
 func (e *EntityFactory) BuildFixture(id protocols.URN, locales []protocols.Locale) protocols.Fixture {
 	return cache.NewFixture(id, e.cacheManager.FixtureCache, locales)

@@ -9,6 +9,7 @@ import (
 	"github.com/oddin-gg/gosdk/internal/api/xml"
 	"github.com/oddin-gg/gosdk/protocols"
 	"github.com/patrickmn/go-cache"
+	log "github.com/sirupsen/logrus"
 )
 
 // PlayerCacheKey represent cache key
@@ -21,6 +22,31 @@ type PlayersCache struct {
 	internalCache *cache.Cache
 	apiClient     *api.Client
 	mux           sync.Mutex
+	logger        *log.Entry // TODO: Add
+}
+
+// OnAPIResponse ...
+func (c *PlayersCache) OnAPIResponse(apiResponse protocols.Response) {
+	if apiResponse.Locale == nil || apiResponse.Data == nil {
+		return
+	}
+
+	players := make([]xml.Player, 0)
+	switch data := apiResponse.Data.(type) {
+	case *xml.CompetitorResponse:
+		for i := range data.Players {
+			players = append(players, data.Players[i])
+		}
+	}
+
+	if len(players) == 0 {
+		return
+	}
+
+	err := c.handlePlayerData(*apiResponse.Locale, players)
+	if err != nil {
+		c.logger.WithError(err).Errorf("failed to precess api data %v", apiResponse)
+	}
 }
 
 // GetPlayer returns cached LocalizedPlayer if is in cache, if it is not then the team is fetched via api and stored in cache.
@@ -69,6 +95,8 @@ func (c *PlayersCache) GetPlayers(ids []PlayerCacheKey) (map[PlayerCacheKey]Loca
 		convertedPlayer := LocalizedPlayer{
 			ID:            playerProfile.Player.ID,
 			LocalizedName: playerProfile.Player.Name,
+			FullName:      playerProfile.Player.FullName,
+			SportID:       playerProfile.Player.SportID,
 			locale:        key.Locale,
 		}
 		c.setPlayer(key, convertedPlayer)
@@ -80,6 +108,36 @@ func (c *PlayersCache) GetPlayers(ids []PlayerCacheKey) (map[PlayerCacheKey]Loca
 	}
 
 	return nil, fmt.Errorf("get player from cache - some players %v not found in db: %w", missingPlayersIDs, ErrItemNotFoundInCache)
+}
+
+func (c *PlayersCache) handlePlayerData(locale protocols.Locale, players []xml.Player) error {
+	for i := range players {
+		err := c.refreshOrInsertItem(players[i], locale)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (c *PlayersCache) refreshOrInsertItem(player xml.Player, locale protocols.Locale) error {
+	key := PlayerCacheKey{PlayerID: player.ID, Locale: locale}
+
+	result, ok := c.getPlayer(key)
+	if !ok {
+		result = LocalizedPlayer{}
+	}
+
+	result.ID = player.ID
+	result.LocalizedName = player.Name
+	result.FullName = player.FullName
+	result.SportID = player.SportID
+	result.locale = locale
+
+	c.setPlayer(key, result) // TODO: Does it need mux? Seems like no.
+
+	return nil
 }
 
 func (c *PlayersCache) getPlayersFromCache(
@@ -133,14 +191,35 @@ func (c *PlayersCache) setPlayer(id PlayerCacheKey, obj LocalizedPlayer) {
 }
 
 func newPlayersCache(apiClient *api.Client) *PlayersCache {
-	return &PlayersCache{
+	playersCache := &PlayersCache{
 		internalCache: cache.New(12*time.Hour, 1*time.Hour),
 		apiClient:     apiClient,
 	}
+
+	apiClient.SubscribeWithAPIObserver(playersCache)
+
+	return playersCache
 }
 
 type LocalizedPlayer struct {
 	ID            string
 	LocalizedName string
+	FullName      string
+	SportID       string
 	locale        protocols.Locale
+}
+
+type playerImpl struct { // TODO: Implement all methods.
+	id          protocols.URN
+	playerCache *PlayersCache
+	locales     []protocols.Locale
+}
+
+// NewCompetitor ...
+func NewPlayer(id protocols.URN, playerCache *PlayersCache, locales []protocols.Locale) protocols.Competitor {
+	return &playerImpl{
+		id:          id,
+		playerCache: playerCache,
+		locales:     locales,
+	}
 }

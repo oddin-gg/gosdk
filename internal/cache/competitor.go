@@ -24,7 +24,7 @@ type TeamWrapper interface {
 
 type TeamWithPlayers interface {
 	TeamWrapper
-	GetPlayers() []xml.PlayerWithSport
+	GetPlayers() []xml.Player
 }
 
 // CompetitorCache ...
@@ -32,6 +32,7 @@ type CompetitorCache struct {
 	apiClient     *api.Client
 	internalCache *cache.Cache
 	iconCache     *cache.Cache
+	playersCache  *cache.Cache // TODO: Set
 	logger        *log.Logger
 }
 
@@ -169,7 +170,6 @@ func (c *CompetitorCache) refreshOrInsertItem(id protocols.URN, locale protocols
 			refID:        refID,
 			name:         make(map[protocols.Locale]string),
 			abbreviation: make(map[protocols.Locale]string),
-			players:      make(map[protocols.Locale][]protocols.Player, 0),
 		}
 	}
 
@@ -177,19 +177,19 @@ func (c *CompetitorCache) refreshOrInsertItem(id protocols.URN, locale protocols
 	result.name[locale] = team.GetName()
 	result.abbreviation[locale] = team.GetAbbreviation()
 	if teamWithPlayers, ok := team.(TeamWithPlayers); ok {
-		playersWithSport := teamWithPlayers.GetPlayers()
+		players := teamWithPlayers.GetPlayers()
 
-		players := make([]protocols.Player, 0, len(playersWithSport))
-		for _, p := range playersWithSport {
-			players = append(players, &playerWithSport{
-				id:       p.ID,
-				name:     p.Name,
-				fullname: p.FullName,
-				sportID:  p.SportID,
-			})
+		playerURNs := make([]protocols.URN, 0, len(players))
+		for _, p := range players {
+			playerURN, err := protocols.ParseURN(p.ID)
+			if err != nil {
+				return err
+			}
+
+			playerURNs = append(playerURNs, *playerURN)
 		}
 
-		result.players[locale] = players
+		result.players = playerURNs
 	}
 	result.mux.Unlock()
 
@@ -241,7 +241,7 @@ type LocalizedCompetitor struct {
 	refID        *protocols.URN
 	name         map[protocols.Locale]string
 	abbreviation map[protocols.Locale]string
-	players      map[protocols.Locale][]protocols.Player
+	players      []protocols.URN // TODO: Do we need a type for a player?
 	mux          sync.Mutex
 }
 
@@ -390,10 +390,17 @@ func (c competitorImpl) Players() (map[protocols.Locale][]protocols.Player, erro
 	item.mux.Lock()
 	defer item.mux.Unlock()
 
-	// Return copy of map
+	if item.players == nil || len(item.players) == 0 {
+		tem, err := c.competitorCache.loadAndCacheItem(c.id, c.locales)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	result := make(map[protocols.Locale][]protocols.Player, len(item.players))
-	for key, value := range item.players {
-		result[key] = value
+	for _, playerURN := range item.players {
+
+		player := protocols.Player{}
 	}
 
 	return result, nil
@@ -449,7 +456,7 @@ func (t teamCompetitorImpl) LocalizedAbbreviation(locale protocols.Locale) (*str
 	return t.competitor.LocalizedAbbreviation(locale)
 }
 
-func (t teamCompetitorImpl) Players() (map[protocols.Locale][]protocols.Player, error) {
+func (t teamCompetitorImpl) Players() (map[protocols.Locale][]protocols.Player, error) { // TODO?
 	return t.competitor.Players()
 }
 
@@ -461,7 +468,7 @@ func (t teamCompetitorImpl) Qualifier() *string {
 	return t.qualifier
 }
 
-type playerWithSport struct {
+type playerWithSport struct { // TODO: Needed?
 	id       string
 	name     string
 	fullname string
