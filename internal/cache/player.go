@@ -32,8 +32,7 @@ func (c *PlayersCache) OnAPIResponse(apiResponse protocols.Response) {
 	}
 
 	players := make([]xml.Player, 0)
-	switch data := apiResponse.Data.(type) {
-	case *xml.CompetitorResponse:
+	if data, ok := apiResponse.Data.(*xml.CompetitorResponse); ok {
 		players = append(players, data.Players...)
 	}
 
