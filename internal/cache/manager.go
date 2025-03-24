@@ -49,14 +49,14 @@ func (m Manager) Close() {
 func NewManager(client *api.Client, oddsFeedConfiguration protocols.OddsFeedConfiguration, logger *log.Entry) *Manager {
 	manager := &Manager{
 		MarketDescriptionCache: newMarketDescriptionCache(client),
-		CompetitorCache:        newCompetitorCache(client),
+		CompetitorCache:        newCompetitorCache(client, logger),
 		SportDataCache:         newSportDataCache(client, logger),
 		FixtureCache:           newFixtureCache(client),
 		TournamentCache:        newTournamentCache(client, logger),
 		MatchCache:             newMatchCache(client, logger),
 		MatchStatusCache:       newMatchStatusCache(client, oddsFeedConfiguration, logger),
 		MarketVoidReasonsCache: newMarketVoidReasonsCache(client),
-		PlayersCache:           newPlayersCache(client),
+		PlayersCache:           newPlayersCache(client, logger),
 
 		LocalizedStaticMatchStatus: newLocalizedStaticDataCache(oddsFeedConfiguration, func(locale protocols.Locale) ([]protocols.StaticData, error) {
 			data, err := client.FetchMatchStatusDescriptions(locale)

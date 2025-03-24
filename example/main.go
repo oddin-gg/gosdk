@@ -298,7 +298,12 @@ func (e *Example) workWithSportsManager() error {
 	}
 	log.Println("Competitor Players:")
 	for _, player := range players {
-		log.Println("Localized name:", player.LocalizedName())
+		localizedName, err := player.LocalizedName()
+		if err != nil {
+			return err
+		}
+
+		log.Println("    Localized name:", *localizedName)
 	}
 
 	// fixture changes
@@ -333,6 +338,27 @@ func (e *Example) workWithSportsManager() error {
 			return err
 		}
 		log.Println("   Status:", *status.GetDescription())
+
+		home, err := match.HomeCompetitor()
+		if err != nil {
+			return err
+		}
+
+		log.Println("    Home players:")
+		homePlayers, err := home.Players()
+		if err != nil {
+			return err
+		}
+		for _, localizedPlayers := range homePlayers {
+			for _, localizedPlayer := range localizedPlayers {
+				localizedName, err := localizedPlayer.LocalizedName()
+				if err != nil {
+					return err
+				}
+
+				log.Println("        Localized name:", *localizedName)
+			}
+		}
 	}
 
 	return nil
