@@ -302,8 +302,12 @@ func (e *Example) workWithSportsManager() error {
 		if err != nil {
 			return err
 		}
-
-		log.Println("    Localized name:", *localizedName)
+		log.Println("    Localized name:", localizedName)
+		sportID, err := player.SportID()
+		if err != nil {
+			return err
+		}
+		log.Println("    Sport ID:", sportID)
 	}
 
 	// fixture changes
@@ -355,8 +359,12 @@ func (e *Example) workWithSportsManager() error {
 				if err != nil {
 					return err
 				}
-
-				log.Println("        Localized name:", *localizedName)
+				log.Println("        Localized name:", localizedName)
+				sportID, err := localizedPlayer.SportID()
+				if err != nil {
+					return err
+				}
+				log.Println("        Sport ID:", sportID)
 			}
 		}
 	}

@@ -212,40 +212,40 @@ type playerImpl struct {
 	playerCache *PlayersCache
 }
 
-func (p playerImpl) ID() (*string, error) {
+func (p playerImpl) ID() (string, error) {
 	item, err := p.playerCache.GetPlayer(p.key)
 	if err != nil {
-		return nil, fmt.Errorf("getting player from cache: %w", err)
+		return "", fmt.Errorf("getting player from cache: %w", err)
 	}
 
-	return &item.ID, nil
+	return item.ID, nil
 }
 
-func (p playerImpl) LocalizedName() (*string, error) {
+func (p playerImpl) LocalizedName() (string, error) {
 	item, err := p.playerCache.GetPlayer(p.key)
 	if err != nil {
-		return nil, fmt.Errorf("getting player from cache: %w", err)
+		return "", fmt.Errorf("getting player from cache: %w", err)
 	}
 
-	return &item.LocalizedName, nil
+	return item.LocalizedName, nil
 }
 
-func (p playerImpl) FullName() (*string, error) {
+func (p playerImpl) FullName() (string, error) {
 	item, err := p.playerCache.GetPlayer(p.key)
 	if err != nil {
-		return nil, fmt.Errorf("getting player from cache: %w", err)
+		return "", fmt.Errorf("getting player from cache: %w", err)
 	}
 
-	return &item.FullName, nil
+	return item.FullName, nil
 }
 
-func (p playerImpl) SportID() (*string, error) {
+func (p playerImpl) SportID() (string, error) {
 	item, err := p.playerCache.GetPlayer(p.key)
 	if err != nil {
-		return nil, fmt.Errorf("getting player from cache: %w", err)
+		return "", fmt.Errorf("getting player from cache: %w", err)
 	}
 
-	return &item.SportID, nil
+	return item.SportID, nil
 }
 
 // NewPlayer ...

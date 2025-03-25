@@ -129,8 +129,8 @@ func (c *CompetitorCache) CompetitorIcon(id protocols.URN, locale protocols.Loca
 		return nil, err
 	}
 
-	c.iconCache.Set(id.ToString(), data.Competitor.IconPath, 0)
-	return data.Competitor.IconPath, nil
+	c.iconCache.Set(id.ToString(), data.IconPath, 0)
+	return data.IconPath, nil
 }
 
 func (c *CompetitorCache) handleTeamData(locale protocols.Locale, teams []TeamWrapper) error {
@@ -201,7 +201,7 @@ func (c *CompetitorCache) refreshOrInsertItem(id protocols.URN, locale protocols
 func (c *CompetitorCache) loadAndCacheItem(id protocols.URN, locales []protocols.Locale) (*LocalizedCompetitor, error) {
 	for i := range locales {
 		locale := locales[i]
-		data, err := c.apiClient.FetchCompetitorProfile(id, locale)
+		data, err := c.apiClient.FetchCompetitorProfileWithPlayers(id, locale)
 		if err != nil {
 			return nil, err
 		}
