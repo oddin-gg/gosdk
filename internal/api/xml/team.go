@@ -6,7 +6,7 @@ import "encoding/xml"
 type CompetitorResponse struct {
 	XMLName    xml.Name     `xml:"competitor_profile"`
 	Competitor TeamExtended `xml:"competitor"`
-	Players    []Player     `xml:"players>player"`
+	Players    []Player     `xml:"players>player,omitempty"`
 }
 
 // GetID ...
