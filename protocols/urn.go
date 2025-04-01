@@ -13,6 +13,7 @@ type EventType string
 const (
 	TournamentEventType EventType = "tournament"
 	MatchEventType      EventType = "match"
+	PlayerEventType     EventType = "player"
 )
 
 // URN ...

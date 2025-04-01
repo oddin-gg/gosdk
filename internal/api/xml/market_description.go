@@ -29,6 +29,7 @@ type MarketDescription struct {
 	Variant                *string            `xml:"variant,attr,omitempty"`
 	Outcomes               *OutcomesWrapper   `xml:"outcomes"`
 	Specifiers             *SpecifiersWrapper `xml:"specifiers"`
+	Groups                 string             `xml:"groups,attr,omitempty"`
 }
 
 // SpecifiersWrapper ...
