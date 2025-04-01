@@ -1,10 +1,11 @@
 package factory
 
 import (
+	"strings"
+
 	feedXML "github.com/oddin-gg/gosdk/internal/feed/xml"
 	"github.com/oddin-gg/gosdk/protocols"
 	log "github.com/sirupsen/logrus"
-	"strings"
 )
 
 // MarketFactory ...

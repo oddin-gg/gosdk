@@ -2,6 +2,7 @@ package factory
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/oddin-gg/gosdk/internal/cache"
@@ -142,6 +143,14 @@ func (m marketDataImpl) makeMarketName(marketName string, locale protocols.Local
 	}
 
 	match, isMatch := m.event.(protocols.Match)
+	marketDescription, err := m.marketDescriptionFactory.MarketDescriptionByIDAndSpecifiers(m.marketID, m.specifiers, []protocols.Locale{locale})
+	if err != nil {
+		return nil, err
+	}
+	groups, err := marketDescription.Groups()
+	if err != nil {
+		return nil, err
+	}
 
 	template := marketName
 	for key, value := range m.specifiers {
@@ -173,8 +182,40 @@ func (m marketDataImpl) makeMarketName(marketName string, locale protocols.Local
 			value = *name
 		}
 
+		// handle props markets
+		if name, isPropsMarket := m.getPropsName(value, groups, locale); isPropsMarket {
+			value = name
+		}
+
 		template = strings.ReplaceAll(template, key, value)
 	}
 
 	return &template, nil
+}
+
+func (m marketDataImpl) getPropsName(entityID string, groups []string, locale protocols.Locale) (string, bool) {
+	if !slices.Contains(groups, protocols.MarketGroupPlayerProps) {
+		return "", false
+	}
+
+	urn, err := protocols.ParseURN(entityID)
+	if err != nil {
+		return "", false
+	}
+
+	//nolint:gocritic // for simpler extension
+	switch urn.Type {
+	case string(protocols.PlayerEventType):
+		player, err := m.marketDescriptionFactory.playerCache.GetPlayer(
+			cache.PlayerCacheKey{
+				PlayerID: entityID,
+				Locale:   locale,
+			},
+		)
+		if err != nil {
+			return "", false
+		}
+		return player.LocalizedName, true
+	}
+	return "", false
 }

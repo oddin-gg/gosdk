@@ -77,6 +77,7 @@ type MarketDescription interface {
 	Outcomes() ([]OutcomeDescription, error)
 	Variant() (*string, error)
 	Specifiers() ([]Specifier, error)
+	Groups() ([]string, error)
 }
 
 // MarketVoidReason ...
@@ -97,3 +98,7 @@ type MarketDescriptionManager interface {
 	MarketVoidReasons() ([]MarketVoidReason, error)
 	ReloadMarketVoidReasons() ([]MarketVoidReason, error)
 }
+
+const (
+	MarketGroupPlayerProps = "player_props"
+)

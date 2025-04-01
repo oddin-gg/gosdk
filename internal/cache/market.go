@@ -194,6 +194,7 @@ func (m *MarketDescriptionCache) refreshOrInsertItem(description data.MarketDesc
 			OutcomeType:            description.OutcomeType,
 			outcomes:               outcomes,
 			name:                   make(map[protocols.Locale]string),
+			groups:                 strings.Split(description.Groups, "|"),
 		}
 	} else {
 		dsc, ok = item.(*LocalizedMarketDescription)
@@ -290,6 +291,7 @@ type LocalizedMarketDescription struct {
 	outcomes               map[string]*LocalizedOutcomeDescription
 	specifiers             []protocols.Specifier
 	name                   map[protocols.Locale]string
+	groups                 []string
 	// locks outcomes and name properties
 	mux sync.Mutex
 }
@@ -435,6 +437,15 @@ func (m marketDescriptionImpl) Specifiers() ([]protocols.Specifier, error) {
 	}
 
 	return item.specifiers, nil
+}
+
+func (m marketDescriptionImpl) Groups() ([]string, error) {
+	item, err := m.marketDescriptionCache.MarketDescriptionByID(m.id, m.variant, m.locales)
+	if err != nil {
+		return nil, err
+	}
+
+	return item.groups, nil
 }
 
 // NewMarketDescription ...
