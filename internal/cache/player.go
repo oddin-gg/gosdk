@@ -212,13 +212,8 @@ type playerImpl struct {
 	playerCache *PlayersCache
 }
 
-func (p playerImpl) ID() (string, error) {
-	item, err := p.playerCache.GetPlayer(p.key)
-	if err != nil {
-		return "", fmt.Errorf("getting player from cache: %w", err)
-	}
-
-	return item.ID, nil
+func (p playerImpl) ID() string {
+	return p.key.PlayerID
 }
 
 func (p playerImpl) LocalizedName() (string, error) {
