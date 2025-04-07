@@ -4,9 +4,9 @@ import "encoding/xml"
 
 // CompetitorResponse ...
 type CompetitorResponse struct {
-	XMLName    xml.Name          `xml:"competitor_profile"`
-	Competitor TeamExtended      `xml:"competitor"`
-	Players    []PlayerWithSport `xml:"players>player"`
+	XMLName    xml.Name     `xml:"competitor_profile"`
+	Competitor TeamExtended `xml:"competitor"`
+	Players    []Player     `xml:"players>player,omitempty"`
 }
 
 // GetID ...
@@ -30,7 +30,7 @@ func (cr CompetitorResponse) GetRefID() *string {
 	return cr.Competitor.RefID
 }
 
-func (cr CompetitorResponse) GetPlayers() []PlayerWithSport {
+func (cr CompetitorResponse) GetPlayers() []Player {
 	return cr.Players
 }
 
@@ -79,9 +79,4 @@ type TeamExtended struct {
 type TeamCompetitor struct {
 	Team
 	Qualifier string `xml:"qualifier,attr,omitempty"`
-}
-
-type PlayerWithSport struct {
-	Player
-	SportID string `xml:"sport,attr"`
 }

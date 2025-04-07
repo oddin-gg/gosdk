@@ -4,5 +4,6 @@ package xml
 type Player struct {
 	ID       string `xml:"id,attr"`
 	Name     string `xml:"name,attr"`
-	FullName string `xml:"full_name,attr"`
+	FullName string `xml:"full_name,attr,omitempty"`
+	SportID  string `xml:"sport,attr"`
 }
