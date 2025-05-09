@@ -47,6 +47,7 @@ type Tournament struct {
 	TournamentLength []TournamentLength `xml:"tournament_length,omitempty"`
 	Sport            Sport              `xml:"sport"`
 	Abbreviation     string             `xml:"abbreviation,attr"`
+	RiskTier         int                `xml:"risk_tier,attr"`
 }
 
 // GetName ...
@@ -101,6 +102,10 @@ func (t Tournament) GetEndDate() *time.Time {
 	}
 
 	return (*time.Time)(&t.TournamentLength[0].EndDate)
+}
+
+func (t Tournament) GetRiskTier() int {
+	return t.RiskTier
 }
 
 // TournamentLength ...

@@ -26,6 +26,7 @@ type TournamentWrapper interface {
 	GetScheduledEndTime() *time.Time
 	GetName() string
 	GetAbbreviation() string
+	GetRiskTier() int
 }
 
 // TournamentExtendedWrapper ...
@@ -261,6 +262,7 @@ func (t *TournamentCache) refreshOrInsertItem(id protocols.URN, locale protocols
 			competitorIDs:    make(map[protocols.URN]struct{}),
 			name:             make(map[protocols.Locale]string),
 			abbreviation:     make(map[protocols.Locale]string),
+			riskTier:         tournament.GetRiskTier(),
 		}
 	}
 
@@ -307,6 +309,7 @@ type LocalizedTournament struct {
 	sportID          protocols.URN
 	scheduledTime    *time.Time
 	scheduledEndTime *time.Time
+	riskTier         int
 	name             map[protocols.Locale]string
 	abbreviation     map[protocols.Locale]string
 	competitorIDs    map[protocols.URN]struct{}
@@ -320,6 +323,7 @@ type tournamentImpl struct {
 	tournamentCache *TournamentCache
 	entityFactory   protocols.EntityFactory
 	locales         []protocols.Locale
+	riskTier        int
 }
 
 func (t tournamentImpl) IconPath() (*string, error) {
@@ -450,6 +454,15 @@ func (t tournamentImpl) EndDate() (*time.Time, error) {
 	}
 
 	return item.endDate, nil
+}
+
+func (t tournamentImpl) RiskTier() (int, error) {
+	item, err := t.tournamentCache.Tournament(t.id, t.locales)
+	if err != nil {
+		return 0, err
+	}
+
+	return item.riskTier, nil
 }
 
 // NewTournament ...
