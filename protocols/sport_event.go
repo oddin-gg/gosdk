@@ -171,6 +171,7 @@ type Tournament interface {
 	EndDate() (*time.Time, error)
 	LocalizedAbbreviation(locale Locale) (*string, error)
 	IconPath() (*string, error)
+	RiskTier() (int, error)
 }
 
 // SportSummary ...
