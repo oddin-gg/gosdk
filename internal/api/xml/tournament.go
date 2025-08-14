@@ -48,6 +48,7 @@ type Tournament struct {
 	Sport            Sport              `xml:"sport"`
 	Abbreviation     string             `xml:"abbreviation,attr"`
 	RiskTier         int                `xml:"risk_tier,attr"`
+	Category         *Category          `xml:"category,attr"`
 }
 
 // GetName ...
@@ -108,6 +109,10 @@ func (t Tournament) GetRiskTier() int {
 	return t.RiskTier
 }
 
+func (t Tournament) GetCategory() *Category {
+	return t.Category
+}
+
 // TournamentLength ...
 type TournamentLength struct {
 	StartDate utils.Date `xml:"start_date,attr,omitempty"`
@@ -116,9 +121,9 @@ type TournamentLength struct {
 
 // Category ...
 type Category struct {
-	ID          string `xml:"id,attr"`
-	Name        string `xml:"name,attr"`
-	CountryCode string `xml:"country_code,attr,omitempty"`
+	ID          string  `xml:"id,attr"`
+	Name        string  `xml:"name,attr"`
+	CountryCode *string `xml:"country_code,attr,omitempty"`
 }
 
 // TournamentExtended ...

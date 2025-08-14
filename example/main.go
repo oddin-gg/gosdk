@@ -268,6 +268,12 @@ func (e *Example) workWithSportsManager() error {
 	}
 	log.Println("Tournament risk tier:", riskTier)
 
+	category, err := t.Category()
+	if err != nil {
+		return err
+	}
+	log.Println("Tournament category:", category.ID(), category.Name())
+
 	sport := t.Sport()
 	sportURN := sport.ID()
 
