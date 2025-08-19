@@ -48,7 +48,7 @@ type Tournament struct {
 	Sport            Sport              `xml:"sport"`
 	Abbreviation     string             `xml:"abbreviation,attr"`
 	RiskTier         int                `xml:"risk_tier,attr"`
-	Category         *Category          `xml:"category,attr"`
+	Category         *Category          `xml:"category"`
 }
 
 // GetName ...
