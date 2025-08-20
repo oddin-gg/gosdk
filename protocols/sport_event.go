@@ -172,6 +172,13 @@ type Tournament interface {
 	LocalizedAbbreviation(locale Locale) (*string, error)
 	IconPath() (*string, error)
 	RiskTier() (int, error)
+	Category() (Category, error)
+}
+
+type Category interface {
+	ID() string
+	Name() string
+	CountryCode() *string
 }
 
 // SportSummary ...
