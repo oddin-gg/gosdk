@@ -6,17 +6,17 @@ type StatisticsPair struct {
 }
 
 func (p *StatisticsPair) ResolveHome() *uint32 {
-	if p != nil {
-		return &p.Home
+	if p == nil {
+		return nil
 	}
-	return nil
+	return &p.Home
 }
 
 func (p *StatisticsPair) ResolveAway() *uint32 {
-	if p != nil {
-		return &p.Away
+	if p == nil {
+		return nil
 	}
-	return nil
+	return &p.Away
 }
 
 type Statistics struct {
