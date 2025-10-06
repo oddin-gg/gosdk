@@ -1,8 +1,22 @@
 package xml
 
 type StatisticsPair struct {
-	Home *uint32 `xml:"home,attr,omitempty"`
-	Away *uint32 `xml:"away,attr,omitempty"`
+	Home uint32 `xml:"home,attr,omitempty"`
+	Away uint32 `xml:"away,attr,omitempty"`
+}
+
+func (p *StatisticsPair) ResolveHome() *uint32 {
+	if p != nil {
+		return &p.Home
+	}
+	return nil
+}
+
+func (p *StatisticsPair) ResolveAway() *uint32 {
+	if p != nil {
+		return &p.Away
+	}
+	return nil
 }
 
 type Statistics struct {

@@ -2,6 +2,7 @@ package cache
 
 import (
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/oddin-gg/gosdk/internal/api"
@@ -615,29 +616,20 @@ func (m MatchStatusCache) fromAPI(status apiXML.SportEventStatusType) protocols.
 	}
 }
 
-func (m MatchStatusCache) makeFeedStatistics(scoreboard *feedXML.Statistics) protocols.Statistics {
-	resolveHome := func(pair *feedXML.StatisticsPair) *uint32 {
-		if pair != nil {
-			return pair.Home
-		}
-		return nil
-	}
-	resolveAway := func(pair *feedXML.StatisticsPair) *uint32 {
-		if pair != nil {
-			return pair.Away
-		}
+func (m MatchStatusCache) makeFeedStatistics(statistics *feedXML.Statistics) protocols.Statistics {
+	if statistics == nil {
 		return nil
 	}
 
 	return &statisticsImpl{
-		homeYellowCards:    resolveHome(scoreboard.YellowCards),
-		awayYellowCards:    resolveAway(scoreboard.YellowCards),
-		homeRedCards:       resolveHome(scoreboard.RedCards),
-		awayRedCards:       resolveAway(scoreboard.RedCards),
-		homeYellowRedCards: resolveHome(scoreboard.YellowRedCards),
-		awayYellowRedCards: resolveAway(scoreboard.YellowRedCards),
-		homeCorners:        resolveHome(scoreboard.Corners),
-		awayCorners:        resolveAway(scoreboard.Corners),
+		homeYellowCards:    statistics.YellowCards.ResolveHome(),
+		awayYellowCards:    statistics.YellowCards.ResolveAway(),
+		homeRedCards:       statistics.RedCards.ResolveHome(),
+		awayRedCards:       statistics.RedCards.ResolveAway(),
+		homeYellowRedCards: statistics.YellowRedCards.ResolveHome(),
+		awayYellowRedCards: statistics.YellowRedCards.ResolveAway(),
+		homeCorners:        statistics.Corners.ResolveHome(),
+		awayCorners:        statistics.Corners.ResolveAway(),
 	}
 }
 
@@ -645,7 +637,7 @@ func newMatchStatusCache(client *api.Client, oddsFeedConfiguration protocols.Odd
 	matchStatusCache := &MatchStatusCache{
 		apiClient:             client,
 		oddsFeedConfiguration: oddsFeedConfiguration,
-		// Don't delete item => wait for match to expire
+		// Don't delete item => wait for the match to expire
 		internalCache: cache.New(20*time.Minute, 1*time.Minute),
 		logger:        logger,
 	}
@@ -802,7 +794,7 @@ func (m matchStatusImpl) IsScoreboardAvailable() (bool, error) {
 func (m matchStatusImpl) Statistics() (protocols.Statistics, error) {
 	item, err := m.matchStatusCache.MatchStatus(m.sportEventID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("matchStatusImpl.Statistics unable to get match status: %w", err)
 	}
 	return item.statistics, nil
 }
