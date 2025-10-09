@@ -123,6 +123,21 @@ type MatchStatus interface {
 	AwayScore() (*float64, error)
 	IsScoreboardAvailable() (bool, error)
 	Scoreboard() (Scoreboard, error)
+	Statistics() (Statistics, error)
+}
+
+type Statistics interface {
+	HomeYellowCards() *uint32
+	AwayYellowCards() *uint32
+
+	HomeRedCards() *uint32
+	AwayRedCards() *uint32
+
+	HomeYellowRedCards() *uint32
+	AwayYellowRedCards() *uint32
+
+	HomeCorners() *uint32
+	AwayCorners() *uint32
 }
 
 // Competition ...

@@ -2,6 +2,7 @@ package cache
 
 import (
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/oddin-gg/gosdk/internal/api"
@@ -395,6 +396,10 @@ func (m MatchStatusCache) refreshOrInsertFeedItem(id protocols.URN, data *feedXM
 		result.scoreboard = m.makeFeedScoreboard(data.Scoreboard)
 	}
 
+	if data.Statistics != nil {
+		result.statistics = m.makeFeedStatistics(data.Statistics)
+	}
+
 	m.internalCache.Set(id.ToString(), result, 0)
 }
 
@@ -611,11 +616,28 @@ func (m MatchStatusCache) fromAPI(status apiXML.SportEventStatusType) protocols.
 	}
 }
 
+func (m MatchStatusCache) makeFeedStatistics(statistics *feedXML.Statistics) protocols.Statistics {
+	if statistics == nil {
+		return nil
+	}
+
+	return &statisticsImpl{
+		homeYellowCards:    statistics.YellowCards.ResolveHome(),
+		awayYellowCards:    statistics.YellowCards.ResolveAway(),
+		homeRedCards:       statistics.RedCards.ResolveHome(),
+		awayRedCards:       statistics.RedCards.ResolveAway(),
+		homeYellowRedCards: statistics.YellowRedCards.ResolveHome(),
+		awayYellowRedCards: statistics.YellowRedCards.ResolveAway(),
+		homeCorners:        statistics.Corners.ResolveHome(),
+		awayCorners:        statistics.Corners.ResolveAway(),
+	}
+}
+
 func newMatchStatusCache(client *api.Client, oddsFeedConfiguration protocols.OddsFeedConfiguration, logger *log.Entry) *MatchStatusCache {
 	matchStatusCache := &MatchStatusCache{
 		apiClient:             client,
 		oddsFeedConfiguration: oddsFeedConfiguration,
-		// Don't delete item => wait for match to expire
+		// Don't delete item => wait for the match to expire
 		internalCache: cache.New(20*time.Minute, 1*time.Minute),
 		logger:        logger,
 	}
@@ -635,6 +657,50 @@ type LocalizedMatchStatus struct {
 	awayScore             float64
 	isScoreboardAvailable bool
 	scoreboard            protocols.Scoreboard
+	statistics            protocols.Statistics
+}
+
+type statisticsImpl struct {
+	homeYellowCards    *uint32
+	awayYellowCards    *uint32
+	homeRedCards       *uint32
+	awayRedCards       *uint32
+	homeYellowRedCards *uint32
+	awayYellowRedCards *uint32
+	homeCorners        *uint32
+	awayCorners        *uint32
+}
+
+func (s statisticsImpl) HomeYellowCards() *uint32 {
+	return s.homeYellowCards
+}
+
+func (s statisticsImpl) AwayYellowCards() *uint32 {
+	return s.awayYellowCards
+}
+
+func (s statisticsImpl) HomeRedCards() *uint32 {
+	return s.homeRedCards
+}
+
+func (s statisticsImpl) AwayRedCards() *uint32 {
+	return s.awayRedCards
+}
+
+func (s statisticsImpl) HomeYellowRedCards() *uint32 {
+	return s.homeYellowRedCards
+}
+
+func (s statisticsImpl) AwayYellowRedCards() *uint32 {
+	return s.awayYellowRedCards
+}
+
+func (s statisticsImpl) HomeCorners() *uint32 {
+	return s.homeCorners
+}
+
+func (s statisticsImpl) AwayCorners() *uint32 {
+	return s.awayCorners
 }
 
 type matchStatusImpl struct {
@@ -723,6 +789,14 @@ func (m matchStatusImpl) IsScoreboardAvailable() (bool, error) {
 	}
 
 	return item.isScoreboardAvailable, nil
+}
+
+func (m matchStatusImpl) Statistics() (protocols.Statistics, error) {
+	item, err := m.matchStatusCache.MatchStatus(m.sportEventID)
+	if err != nil {
+		return nil, fmt.Errorf("matchStatusImpl.Statistics unable to get match status: %w", err)
+	}
+	return item.statistics, nil
 }
 
 func (m matchStatusImpl) Scoreboard() (protocols.Scoreboard, error) {

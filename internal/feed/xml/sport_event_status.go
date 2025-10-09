@@ -61,6 +61,7 @@ type SportEventStatus struct {
 	PeriodScores        *PeriodScores `xml:"period_scores,omitempty"`
 	ScoreboardAvailable bool          `xml:"scoreboard_available,attr"`
 	Scoreboard          *Scoreboard   `xml:"scoreboard,omitempty"`
+	Statistics          *Statistics   `xml:"statistics,omitempty"`
 }
 
 // PeriodScores ...
