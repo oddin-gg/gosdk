@@ -24,6 +24,11 @@ func (cr CompetitorResponse) GetAbbreviation() string {
 	return cr.Competitor.Abbreviation
 }
 
+// GetUnderage ...
+func (cr CompetitorResponse) GetUnderage() string {
+	return cr.Competitor.Underage
+}
+
 // GetRefID ...
 // Deprecated: do not use this method, it will be removed in future
 func (cr CompetitorResponse) GetRefID() *string {
@@ -44,6 +49,7 @@ type Team struct {
 	Country      string  `xml:"country,attr,omitempty"`
 	CountryCode  string  `xml:"country_code,attr,omitempty"`
 	Virtual      bool    `xml:"virtual,attr,omitempty"`
+	Underage     string  `xml:"underage,attr,omitempty"`
 }
 
 // GetID ...
@@ -59,6 +65,11 @@ func (t Team) GetName() string {
 // GetAbbreviation ...
 func (t Team) GetAbbreviation() string {
 	return t.Abbreviation
+}
+
+// GetUnderage ...
+func (t Team) GetUnderage() string {
+	return t.Underage
 }
 
 // GetRefID ...

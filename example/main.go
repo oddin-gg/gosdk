@@ -304,6 +304,11 @@ func (e *Example) workWithSportsManager() error {
 	if err != nil {
 		return err
 	}
+	underage, err := competitor.Underage()
+	if err != nil {
+		return err
+	}
+	log.Println("Competitor Underage:", underage)
 	players, err := competitor.LocalizedPlayers(locale)
 	if err != nil {
 		return err
@@ -359,6 +364,12 @@ func (e *Example) workWithSportsManager() error {
 		if err != nil {
 			return err
 		}
+
+		homeUnderage, err := home.Underage()
+		if err != nil {
+			return err
+		}
+		log.Println("   Home underage:", homeUnderage)
 
 		log.Println("    Home players:")
 		homePlayers, err := home.Players()
