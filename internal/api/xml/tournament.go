@@ -79,7 +79,7 @@ func (t Tournament) GetSportID() string {
 
 // GetScheduledTime ...
 func (t Tournament) GetScheduledTime() *time.Time {
-	return (*time.Time)(t.ScheduledEnd)
+	return (*time.Time)(t.Scheduled)
 }
 
 // GetScheduledEndTime ...
