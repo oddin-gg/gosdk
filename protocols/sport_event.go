@@ -87,6 +87,7 @@ type Scoreboard interface {
 	AwayGoals() *uint32
 	Time() *uint32
 	GameTime() *uint32
+	ElapsedTime() *uint32
 	HomePoints() *uint32
 	AwayPoints() *uint32
 	RemainingGameTime() *uint32
