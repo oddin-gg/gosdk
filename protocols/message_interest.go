@@ -1,5 +1,7 @@
 package protocols
 
+import "slices"
+
 // MessageInterest ...
 type MessageInterest string
 
@@ -45,13 +47,7 @@ func (m MessageInterest) IsProducerInScope(producer Producer) bool {
 }
 
 func (m MessageInterest) isProducerInScope(producer Producer, scope ProducerScope) bool {
-	for _, pScope := range producer.ProducerScopes() {
-		if pScope == scope {
-			return true
-		}
-	}
-
-	return false
+	return slices.Contains(producer.ProducerScopes(), scope)
 }
 
 func (m MessageInterest) findProducerIDByScope(producers map[uint]Producer, scope ProducerScope) []uint {

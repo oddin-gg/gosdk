@@ -14,10 +14,16 @@ type configuration struct {
 	reportExtendedData          bool
 	forcedAPIURL                string
 	forcedMQURL                 string
+	exchangeName                string
 }
 
 func (o configuration) ExchangeName() string {
-	return "oddinfeed"
+	return o.exchangeName
+}
+
+func (o configuration) SetExchangeName(exchangeName string) protocols.OddsFeedConfiguration {
+	o.exchangeName = exchangeName
+	return o
 }
 
 func (o configuration) ReplayExchangeName() string {
@@ -108,5 +114,6 @@ func NewConfiguration(accessToken string, environment protocols.Environment, nod
 		selectedRegion:              protocols.DefaulRegion,
 		sdkNodeID:                   &nodeID,
 		reportExtendedData:          reportExtendedData,
+		exchangeName:                "oddinfeed",
 	}
 }

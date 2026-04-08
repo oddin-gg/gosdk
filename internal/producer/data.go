@@ -2,6 +2,7 @@ package producer
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/oddin-gg/gosdk/internal/api/xml"
@@ -135,14 +136,21 @@ func (p producerImpl) RecoveryInfo() *protocols.RecoveryInfo {
 }
 
 func buildProducerImpl(producerData *data) (*producerImpl, error) {
-	var producerScope protocols.ProducerScope
-	switch producerData.producerScope {
-	case xml.ScopeLive:
-		producerScope = protocols.LiveProducerScope
-	case xml.ScopePrematch:
-		producerScope = protocols.PrematchProducerScope
-	default:
-		return nil, fmt.Errorf("unknown producer scope %s", producerData.producerScope)
+	var producerScopes []protocols.ProducerScope
+
+	for _, scope := range strings.Split(string(producerData.producerScope), "|") {
+		switch xml.Scope(scope) {
+		case xml.ScopeLive:
+			producerScopes = append(producerScopes, protocols.LiveProducerScope)
+		case xml.ScopePrematch:
+			producerScopes = append(producerScopes, protocols.PrematchProducerScope)
+		default:
+			return nil, fmt.Errorf("unknown producer scope %s", producerData.producerScope)
+		}
+	}
+
+	if len(producerScopes) == 0 {
+		return nil, fmt.Errorf("unknown producer scopes %s", producerData.producerScope)
 	}
 
 	return &producerImpl{
@@ -152,7 +160,7 @@ func buildProducerImpl(producerData *data) (*producerImpl, error) {
 		description:                     producerData.description,
 		enabled:                         producerData.enabled,
 		apiEndpoint:                     producerData.apiEndpoint,
-		producerScopes:                  []protocols.ProducerScope{producerScope},
+		producerScopes:                  producerScopes,
 		statefulRecoveryWindowInMinutes: producerData.statefulRecoveryWindowInMinutes,
 		producerData:                    producerData,
 	}, nil
