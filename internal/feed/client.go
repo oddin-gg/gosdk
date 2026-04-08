@@ -94,7 +94,7 @@ func (c *Client) Open() error {
 		return err
 	}
 
-	vHost := fmt.Sprintf("%s", details.VirtualHost())
+	vHost := details.VirtualHost()
 	amqpURL := fmt.Sprintf(
 		"amqps://%s:%s@%s:%d",
 		*c.oddsFeedConfiguration.AccessToken(),
