@@ -75,6 +75,7 @@ type OddsFeedConfiguration interface {
 	SelectedRegion() Region
 	SetRegion(region Region) OddsFeedConfiguration
 	ExchangeName() string
+	SetExchangeName(exchangeName string) OddsFeedConfiguration
 	ReplayExchangeName() string
 	ReportExtendedData() bool
 	SetAPIURL(url string) OddsFeedConfiguration
