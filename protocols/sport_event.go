@@ -87,6 +87,7 @@ type Scoreboard interface {
 	AwayGoals() *uint32
 	Time() *uint32
 	GameTime() *uint32
+	ElapsedTime() *uint32
 	HomePoints() *uint32
 	AwayPoints() *uint32
 	RemainingGameTime() *uint32
@@ -123,6 +124,21 @@ type MatchStatus interface {
 	AwayScore() (*float64, error)
 	IsScoreboardAvailable() (bool, error)
 	Scoreboard() (Scoreboard, error)
+	Statistics() (Statistics, error)
+}
+
+type Statistics interface {
+	HomeYellowCards() *uint32
+	AwayYellowCards() *uint32
+
+	HomeRedCards() *uint32
+	AwayRedCards() *uint32
+
+	HomeYellowRedCards() *uint32
+	AwayYellowRedCards() *uint32
+
+	HomeCorners() *uint32
+	AwayCorners() *uint32
 }
 
 // Competition ...
@@ -172,6 +188,13 @@ type Tournament interface {
 	LocalizedAbbreviation(locale Locale) (*string, error)
 	IconPath() (*string, error)
 	RiskTier() (int, error)
+	Category() (Category, error)
+}
+
+type Category interface {
+	ID() string
+	Name() string
+	CountryCode() *string
 }
 
 // SportSummary ...

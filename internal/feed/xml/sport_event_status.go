@@ -61,6 +61,7 @@ type SportEventStatus struct {
 	PeriodScores        *PeriodScores `xml:"period_scores,omitempty"`
 	ScoreboardAvailable bool          `xml:"scoreboard_available,attr"`
 	Scoreboard          *Scoreboard   `xml:"scoreboard,omitempty"`
+	Statistics          *Statistics   `xml:"statistics,omitempty"`
 }
 
 // PeriodScores ...
@@ -86,6 +87,7 @@ type Scoreboard struct {
 	AwayGoals            *uint32 `xml:"away_goals,attr,omitempty"`
 	Time                 *uint32 `xml:"time,attr,omitempty"`
 	GameTime             *uint32 `xml:"game_time,attr,omitempty"`
+	ElapsedTime          *uint32 `xml:"elapsed_time,attr,omitempty"`
 	CurrentDefenderTeam  *uint32 `xml:"current_def_team,attr,omitempty"`
 
 	// VirtualBasketballScoreboard

@@ -20,6 +20,7 @@ type TeamWrapper interface {
 	GetRefID() *string
 	GetName() string
 	GetAbbreviation() string
+	GetUnderage() string
 }
 
 type TeamWithPlayers interface {
@@ -177,6 +178,19 @@ func (c *CompetitorCache) refreshOrInsertItem(id protocols.URN, locale protocols
 
 	result.name[locale] = team.GetName()
 	result.abbreviation[locale] = team.GetAbbreviation()
+
+	if u := team.GetUnderage(); u != "" {
+		var parsed protocols.UnderageStatus
+		switch u {
+		case "0":
+			parsed = protocols.UnderageNo
+		case "1":
+			parsed = protocols.UnderageYes
+		default:
+			parsed = protocols.UnderageUnknown
+		}
+		result.underage = &parsed
+	}
 	if teamWithPlayers, ok := team.(TeamWithPlayers); ok {
 		players := teamWithPlayers.GetPlayers()
 
@@ -242,8 +256,15 @@ type LocalizedCompetitor struct {
 	refID        *protocols.URN
 	name         map[protocols.Locale]string
 	abbreviation map[protocols.Locale]string
+	underage     *protocols.UnderageStatus
 	players      []protocols.URN
 	mux          sync.Mutex
+}
+
+func (l *LocalizedCompetitor) getUnderage() *protocols.UnderageStatus {
+	l.mux.Lock()
+	defer l.mux.Unlock()
+	return l.underage
 }
 
 func (l *LocalizedCompetitor) loadedLocales() map[protocols.Locale]struct{} {
@@ -421,6 +442,33 @@ func (c competitorImpl) LocalizedPlayers(locale protocols.Locale) ([]protocols.P
 	return players, nil
 }
 
+func (c competitorImpl) Underage() (protocols.UnderageStatus, error) {
+	item, err := c.competitorCache.Competitor(c.id, c.locales)
+	if err != nil {
+		return protocols.UnderageUnknown, err
+	}
+
+	underage := item.getUnderage()
+
+	if underage == nil {
+		_, err := c.competitorCache.loadAndCacheItem(c.id, c.locales)
+		if err != nil {
+			return protocols.UnderageUnknown, fmt.Errorf("loading competitor profile into cache: %w", err)
+		}
+		item, err = c.competitorCache.Competitor(c.id, c.locales)
+		if err != nil {
+			return protocols.UnderageUnknown, err
+		}
+		underage = item.getUnderage()
+	}
+
+	if underage == nil {
+		return protocols.UnderageUnknown, nil
+	}
+
+	return *underage, nil
+}
+
 type teamCompetitorImpl struct {
 	qualifier  *string
 	competitor protocols.Competitor
@@ -464,6 +512,10 @@ func (t teamCompetitorImpl) LocalizedPlayers(locale protocols.Locale) ([]protoco
 
 func (t teamCompetitorImpl) Qualifier() *string {
 	return t.qualifier
+}
+
+func (t teamCompetitorImpl) Underage() (protocols.UnderageStatus, error) {
+	return t.competitor.Underage()
 }
 
 // NewCompetitor ...

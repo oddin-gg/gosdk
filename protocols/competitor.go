@@ -12,6 +12,7 @@ type Competitor interface {
 	LocalizedAbbreviation(locale Locale) (*string, error)
 	Players() (map[Locale][]Player, error)
 	LocalizedPlayers(locale Locale) ([]Player, error)
+	Underage() (UnderageStatus, error)
 }
 
 // TeamCompetitor ...

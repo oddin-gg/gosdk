@@ -27,6 +27,7 @@ type TournamentWrapper interface {
 	GetName() string
 	GetAbbreviation() string
 	GetRiskTier() int
+	GetCategory() *apiXML.Category
 }
 
 // TournamentExtendedWrapper ...
@@ -263,6 +264,7 @@ func (t *TournamentCache) refreshOrInsertItem(id protocols.URN, locale protocols
 			name:             make(map[protocols.Locale]string),
 			abbreviation:     make(map[protocols.Locale]string),
 			riskTier:         tournament.GetRiskTier(),
+			category:         tournament.GetCategory(),
 		}
 	}
 
@@ -310,6 +312,7 @@ type LocalizedTournament struct {
 	scheduledTime    *time.Time
 	scheduledEndTime *time.Time
 	riskTier         int
+	category         *apiXML.Category
 	name             map[protocols.Locale]string
 	abbreviation     map[protocols.Locale]string
 	competitorIDs    map[protocols.URN]struct{}
@@ -323,7 +326,6 @@ type tournamentImpl struct {
 	tournamentCache *TournamentCache
 	entityFactory   protocols.EntityFactory
 	locales         []protocols.Locale
-	riskTier        int
 }
 
 func (t tournamentImpl) IconPath() (*string, error) {
@@ -463,6 +465,42 @@ func (t tournamentImpl) RiskTier() (int, error) {
 	}
 
 	return item.riskTier, nil
+}
+
+type categoryImpl struct {
+	id          string
+	name        string
+	countryCode *string
+}
+
+func (c *categoryImpl) ID() string {
+	return c.id
+}
+
+func (c *categoryImpl) Name() string {
+	return c.name
+}
+
+func (c *categoryImpl) CountryCode() *string {
+	return c.countryCode
+}
+
+func (t tournamentImpl) Category() (protocols.Category, error) {
+	item, err := t.tournamentCache.Tournament(t.id, t.locales)
+	if err != nil {
+		return nil, err
+	}
+
+	category := item.category
+	if category == nil {
+		return nil, errors.New("category not found")
+	}
+
+	return &categoryImpl{
+		id:          category.ID,
+		name:        category.Name,
+		countryCode: category.CountryCode,
+	}, nil
 }
 
 // NewTournament ...
