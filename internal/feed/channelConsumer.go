@@ -14,7 +14,6 @@ import (
 )
 
 const (
-	sportIDPrefix = "od:sport:"
 	emptyPosition = "-"
 )
 
@@ -37,13 +36,14 @@ type ChannelConsumer struct {
 	feedMessageFactory *factory.FeedMessageFactory
 	logger             *log.Entry
 	exchangeName       string
+	sportIDPrefix      string
 	messageInterest    *protocols.MessageInterest
 	routingKeys        []string
 	closed             bool
 }
 
 // Open ...
-func (c *ChannelConsumer) Open(routingKeys []string, messageInterest *protocols.MessageInterest, exchangeName string) (chan *protocols.QueueMessage, error) {
+func (c *ChannelConsumer) Open(routingKeys []string, messageInterest *protocols.MessageInterest, exchangeName string, sportIDPrefix string) (chan *protocols.QueueMessage, error) {
 	ch, err := c.client.CreateChannel(routingKeys, exchangeName)
 	if err != nil {
 		return nil, err
@@ -52,6 +52,7 @@ func (c *ChannelConsumer) Open(routingKeys []string, messageInterest *protocols.
 	c.routingKeys = routingKeys
 	c.messageInterest = messageInterest
 	c.exchangeName = exchangeName
+	c.sportIDPrefix = sportIDPrefix
 
 	c.outgoing = make(chan *protocols.QueueMessage)
 
@@ -228,7 +229,7 @@ func (c *ChannelConsumer) parseRoute(route string) (*protocols.RoutingKeyInfo, e
 
 	var sportURN *protocols.URN
 	if sportID != emptyPosition {
-		sportURN, err = protocols.ParseURN(sportIDPrefix + sportID)
+		sportURN, err = protocols.ParseURN(c.sportIDPrefix + sportID)
 		if err != nil {
 			return nil, err
 		}
@@ -252,10 +253,11 @@ func (c *ChannelConsumer) parseRoute(route string) (*protocols.RoutingKeyInfo, e
 }
 
 // NewChannelConsumer ...
-func NewChannelConsumer(client *Client, feedMessageFactory *factory.FeedMessageFactory, logger *log.Entry) *ChannelConsumer {
+func NewChannelConsumer(client *Client, feedMessageFactory *factory.FeedMessageFactory, logger *log.Entry, sportIDPrefix string) *ChannelConsumer {
 	return &ChannelConsumer{
 		client:             client,
 		feedMessageFactory: feedMessageFactory,
 		logger:             logger,
+		sportIDPrefix:      sportIDPrefix,
 	}
 }

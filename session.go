@@ -32,6 +32,7 @@ type oddsFeedSessionImpl struct {
 	feedMessageFactory       *factory.FeedMessageFactory
 	recoveryMessageProcessor protocols.RecoveryMessageProcessor
 	exchangeName             string
+	sportIDPrefix            string
 	sessionID                uuid.UUID
 	logger                   *log.Entry
 	closeCh                  chan bool
@@ -55,7 +56,7 @@ func (o *oddsFeedSessionImpl) Open(
 		return errors.New("session is already opened")
 	}
 
-	ch, err := o.channelConsumer.Open(routingKeys, messageInterest, o.exchangeName)
+	ch, err := o.channelConsumer.Open(routingKeys, messageInterest, o.exchangeName, o.sportIDPrefix)
 	if err != nil {
 		return err
 	}
@@ -208,15 +209,18 @@ func newSession(
 	feedMessageFactory *factory.FeedMessageFactory,
 	recoverMessageProcessor protocols.RecoveryMessageProcessor,
 	exchangeName string,
+	sportIDPrefix string,
 	isReplay bool,
-	logger *log.Entry) sdkOddsFeedSession {
+	logger *log.Entry,
+) sdkOddsFeedSession {
 	return &oddsFeedSessionImpl{
-		channelConsumer:          feed.NewChannelConsumer(rabbitMQClient, feedMessageFactory, logger),
+		channelConsumer:          feed.NewChannelConsumer(rabbitMQClient, feedMessageFactory, logger, sportIDPrefix),
 		producerManager:          producerManager,
 		cacheManager:             cacheManager,
 		feedMessageFactory:       feedMessageFactory,
 		recoveryMessageProcessor: recoverMessageProcessor,
 		exchangeName:             exchangeName,
+		sportIDPrefix:            sportIDPrefix,
 		sessionID:                uuid.New(),
 		isReplay:                 isReplay,
 		logger:                   logger,

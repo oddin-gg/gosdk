@@ -15,6 +15,7 @@ type configuration struct {
 	forcedAPIURL                string
 	forcedMQURL                 string
 	exchangeName                string
+	sportIDPrefix               string
 }
 
 func (o configuration) ExchangeName() string {
@@ -102,6 +103,15 @@ func (o configuration) MQURL() (string, error) {
 	return o.forcedMQURL, nil
 }
 
+func (o configuration) SportIDPrefix() string {
+	return o.sportIDPrefix
+}
+
+func (o configuration) SetSportIDPrefix(prefix string) protocols.OddsFeedConfiguration {
+	o.sportIDPrefix = prefix
+	return o
+}
+
 // NewConfiguration ...
 func NewConfiguration(accessToken string, environment protocols.Environment, nodeID int, reportExtendedData bool) protocols.OddsFeedConfiguration {
 	return &configuration{
@@ -115,5 +125,6 @@ func NewConfiguration(accessToken string, environment protocols.Environment, nod
 		sdkNodeID:                   &nodeID,
 		reportExtendedData:          reportExtendedData,
 		exchangeName:                "oddinfeed",
+		sportIDPrefix:               "od:sport:",
 	}
 }

@@ -59,6 +59,7 @@ func (b *builderImpl) Build() (protocols.SessionMessageDelivery, error) {
 		b.feedMessageFactory,
 		b.recoveryMessageProcessor,
 		b.oddsFeedConfiguration.ExchangeName(),
+		b.oddsFeedConfiguration.SportIDPrefix(),
 		false,
 		b.logger,
 	)
@@ -80,6 +81,7 @@ func (b *builderImpl) BuildReplay() (protocols.SessionMessageDelivery, error) {
 		b.feedMessageFactory,
 		&recovery.DummyManager{},
 		b.oddsFeedConfiguration.ReplayExchangeName(),
+		b.oddsFeedConfiguration.SportIDPrefix(),
 		true,
 		b.logger,
 	)
