@@ -43,17 +43,14 @@ type ChannelConsumer struct {
 }
 
 // Open ...
-func (c *ChannelConsumer) Open(routingKeys []string, messageInterest *protocols.MessageInterest, exchangeName string, sportIDPrefix string) (chan *protocols.QueueMessage, error) {
-	ch, err := c.client.CreateChannel(routingKeys, exchangeName)
+func (c *ChannelConsumer) Open(routingKeys []string, messageInterest *protocols.MessageInterest) (chan *protocols.QueueMessage, error) {
+	ch, err := c.client.CreateChannel(routingKeys, c.exchangeName)
 	if err != nil {
 		return nil, err
 	}
 
 	c.routingKeys = routingKeys
 	c.messageInterest = messageInterest
-	c.exchangeName = exchangeName
-	c.sportIDPrefix = sportIDPrefix
-
 	c.outgoing = make(chan *protocols.QueueMessage)
 
 	c.consumeMessage(ch)
@@ -253,11 +250,18 @@ func (c *ChannelConsumer) parseRoute(route string) (*protocols.RoutingKeyInfo, e
 }
 
 // NewChannelConsumer ...
-func NewChannelConsumer(client *Client, feedMessageFactory *factory.FeedMessageFactory, logger *log.Entry, sportIDPrefix string) *ChannelConsumer {
+func NewChannelConsumer(
+	client *Client,
+	feedMessageFactory *factory.FeedMessageFactory,
+	logger *log.Entry,
+	exchangeName string,
+	sportIDPrefix string,
+) *ChannelConsumer {
 	return &ChannelConsumer{
 		client:             client,
 		feedMessageFactory: feedMessageFactory,
 		logger:             logger,
+		exchangeName:       exchangeName,
 		sportIDPrefix:      sportIDPrefix,
 	}
 }

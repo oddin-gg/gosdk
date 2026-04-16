@@ -56,7 +56,7 @@ func (o *oddsFeedSessionImpl) Open(
 		return errors.New("session is already opened")
 	}
 
-	ch, err := o.channelConsumer.Open(routingKeys, messageInterest, o.exchangeName, o.sportIDPrefix)
+	ch, err := o.channelConsumer.Open(routingKeys, messageInterest)
 	if err != nil {
 		return err
 	}
@@ -214,7 +214,13 @@ func newSession(
 	logger *log.Entry,
 ) sdkOddsFeedSession {
 	return &oddsFeedSessionImpl{
-		channelConsumer:          feed.NewChannelConsumer(rabbitMQClient, feedMessageFactory, logger, sportIDPrefix),
+		channelConsumer: feed.NewChannelConsumer(
+			rabbitMQClient,
+			feedMessageFactory,
+			logger,
+			exchangeName,
+			sportIDPrefix,
+		),
 		producerManager:          producerManager,
 		cacheManager:             cacheManager,
 		feedMessageFactory:       feedMessageFactory,
