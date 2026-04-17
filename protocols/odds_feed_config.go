@@ -83,4 +83,6 @@ type OddsFeedConfiguration interface {
 	SetMessagingPort(port int) OddsFeedConfiguration
 	APIURL() (string, error)
 	MQURL() (string, error)
+	SportIDPrefix() string
+	SetSportIDPrefix(prefix string) OddsFeedConfiguration
 }

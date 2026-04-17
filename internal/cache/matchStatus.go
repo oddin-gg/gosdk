@@ -430,7 +430,9 @@ func (m MatchStatusCache) refreshOrInsertAPIItem(id protocols.URN, data apiXML.S
 	result.matchStatusID = &data.MatchStatusCode
 	result.homeScore = data.HomeScore
 	result.awayScore = data.AwayScore
-	result.periodScores = m.mapAPIPeriodScores(data.PeriodScores.List)
+	if data.PeriodScores != nil {
+		result.periodScores = m.mapAPIPeriodScores(data.PeriodScores.List)
+	}
 	result.isScoreboardAvailable = data.ScoreboardAvailable
 	if data.Scoreboard != nil {
 		result.scoreboard = m.makeAPIScoreboard(data.Scoreboard)

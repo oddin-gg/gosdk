@@ -218,6 +218,7 @@ func (o *oddsFeedImpl) Open() (protocols.GlobalMessageDelivery, error) {
 			o.feedMessageFactory,
 			o.recoveryManager,
 			o.cfg.ExchangeName(),
+			o.cfg.SportIDPrefix(),
 			false,
 			o.logger,
 		)
