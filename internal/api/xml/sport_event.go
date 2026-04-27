@@ -18,6 +18,7 @@ type SportEvent struct {
 	Tournament  Tournament             `xml:"tournament,omitempty"`
 	Competitors *SportEventCompetitors `xml:"competitors,omitempty"`
 	ExtraInfo   *ExtraInfoWrapper      `xml:"extra_info,omitempty"`
+	ExternalID  string                 `xml:"external_id,attr"`
 }
 
 // LiveOdds ...
