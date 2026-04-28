@@ -171,7 +171,7 @@ type Match interface {
 	Fixture() Fixture
 	SportFormat() (SportFormat, error)
 	ExtraInfo() (map[string]string, error)
-	OriginalID() (*string, error)
+	ReferenceIDs() (map[string]string, error)
 }
 
 // LongTermEvent ...
