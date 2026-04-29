@@ -311,14 +311,16 @@ func (o *oddsFeedImpl) init() error {
 
 	o.apiClient = api.New(o.cfg)
 
-	o.whoAmIManager = whoami.NewManager(o.cfg, o.apiClient)
+	o.logger = log.NewEntry(log.New())
+
+	o.whoAmIManager = whoami.NewManager(o.cfg, o.apiClient, o.logger)
 	// Try to fetch bookmaker details
 	details, err := o.whoAmIManager.BookmakerDetails()
 	if err != nil {
 		return err
 	}
 
-	o.logger = log.New().WithField("client_id", details.BookmakerID())
+	o.logger = o.logger.WithField("client_id", details.BookmakerID())
 
 	o.producerManager = producer.NewManager(o.cfg, o.apiClient, o.logger)
 
