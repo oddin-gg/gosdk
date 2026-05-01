@@ -225,15 +225,16 @@ func (m *MatchCache) refreshOrInsertItem(id protocols.URN, locale protocols.Loca
 	}
 	result.scheduledEndTime = scheduledEndTime
 
-	result.mux.Lock()
-	defer result.mux.Unlock()
-
-	result.referenceIDs = make(map[string]string)
 	if match.ReferenceIDs != nil {
+		result.referenceIDs = make(map[string]string)
 		for _, ref := range match.ReferenceIDs.ReferenceID {
 			result.referenceIDs[ref.Name] = ref.Value
 		}
 	}
+
+	result.mux.Lock()
+	defer result.mux.Unlock()
+
 	result.name[locale] = match.Name
 
 	m.internalCache.Set(id.ToString(), result, 0)
