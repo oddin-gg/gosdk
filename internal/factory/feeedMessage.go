@@ -1,6 +1,7 @@
 package factory
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
@@ -34,7 +35,7 @@ func (f *FeedMessageFactory) BuildMessage(feedMessage *protocols.FeedMessage) (i
 		event = f.entityFactory.BuildMatch(*feedMessage.RoutingKey.EventID, []protocols.Locale{f.oddsFeedConfiguration.DefaultLocale()}, feedMessage.RoutingKey.SportID)
 	}
 
-	producer, err := f.producerManager.GetProducer(feedMessage.Message.Product())
+	producer, err := f.producerManager.GetProducer(context.Background(), feedMessage.Message.Product())
 	if err != nil {
 		return nil, err
 	}
@@ -128,7 +129,7 @@ func (f *FeedMessageFactory) BuildUnparsableMessage(feedMessage *protocols.FeedM
 
 // BuildProducerStatus ...
 func (f *FeedMessageFactory) BuildProducerStatus(producerID uint, producerStatusReason protocols.ProducerStatusReason, isDown bool, isDelayed bool, timestamp time.Time) (protocols.ProducerStatus, error) {
-	producer, err := f.producerManager.GetProducer(producerID)
+	producer, err := f.producerManager.GetProducer(context.Background(), producerID)
 	if err != nil {
 		return nil, err
 	}

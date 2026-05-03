@@ -1,6 +1,9 @@
 package protocols
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 // ProducerScope ...
 type ProducerScope int
@@ -40,12 +43,12 @@ type Producer interface {
 
 // ProducerManager ...
 type ProducerManager interface {
-	AvailableProducers() (map[uint]Producer, error)
-	ActiveProducers() (map[uint]Producer, error)
-	ActiveProducersInScope(scope ProducerScope) (map[uint]Producer, error)
-	GetProducer(id uint) (Producer, error)
-	SetProducerState(id uint, enabled bool) error
-	SetProducerRecoveryFromTimestamp(producerID uint, timestamp time.Time) error
-	IsProducerEnabled(id uint) (bool, error)
-	IsProducerDown(id uint) (bool, error)
+	AvailableProducers(ctx context.Context) (map[uint]Producer, error)
+	ActiveProducers(ctx context.Context) (map[uint]Producer, error)
+	ActiveProducersInScope(ctx context.Context, scope ProducerScope) (map[uint]Producer, error)
+	GetProducer(ctx context.Context, id uint) (Producer, error)
+	SetProducerState(ctx context.Context, id uint, enabled bool) error
+	SetProducerRecoveryFromTimestamp(ctx context.Context, producerID uint, timestamp time.Time) error
+	IsProducerEnabled(ctx context.Context, id uint) (bool, error)
+	IsProducerDown(ctx context.Context, id uint) (bool, error)
 }

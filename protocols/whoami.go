@@ -1,6 +1,7 @@
 package protocols
 
 import (
+	"context"
 	"time"
 )
 
@@ -13,5 +14,5 @@ type BookmakerDetail interface {
 
 // WhoAmIManager ...
 type WhoAmIManager interface {
-	BookmakerDetails() (BookmakerDetail, error)
+	BookmakerDetails(ctx context.Context) (BookmakerDetail, error)
 }

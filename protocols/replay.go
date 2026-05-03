@@ -1,5 +1,7 @@
 package protocols
 
+import "context"
+
 // ReplayPlayParams ...
 type ReplayPlayParams struct {
 	Speed             *int
@@ -11,16 +13,16 @@ type ReplayPlayParams struct {
 
 // ReplayManager ...
 type ReplayManager interface {
-	ReplayList() ([]SportEvent, error)
+	ReplayList(ctx context.Context) ([]SportEvent, error)
 
-	AddSportEvent(event SportEvent) (bool, error)
-	AddSportEventID(id URN) (bool, error)
+	AddSportEvent(ctx context.Context, event SportEvent) (bool, error)
+	AddSportEventID(ctx context.Context, id URN) (bool, error)
 
-	RemoveSportEvent(event SportEvent) (bool, error)
-	RemoveSportEventID(id URN) (bool, error)
+	RemoveSportEvent(ctx context.Context, event SportEvent) (bool, error)
+	RemoveSportEventID(ctx context.Context, id URN) (bool, error)
 
-	Play(params ReplayPlayParams) (bool, error)
+	Play(ctx context.Context, params ReplayPlayParams) (bool, error)
 
-	Stop() (bool, error)
-	Clear() (bool, error)
+	Stop(ctx context.Context) (bool, error)
+	Clear(ctx context.Context) (bool, error)
 }

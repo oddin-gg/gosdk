@@ -1,6 +1,7 @@
 package gosdk
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -41,6 +42,13 @@ type oddsFeedImpl struct {
 	sessionMap               map[uuid.UUID]*sessionData
 	msgCh                    chan protocols.GlobalMessage
 	closeCh                  chan bool
+
+	// ctx is the manager-scoped context used by all internal calls that
+	// don't have a user-supplied ctx (the public OddsFeed interface predates
+	// ctx propagation; Phase 6 replaces the interface with a flat Client
+	// whose methods take ctx). cancelCtx cancels everything on Close.
+	ctx       context.Context
+	cancelCtx context.CancelFunc
 }
 
 func (o *oddsFeedImpl) SessionBuilder() (protocols.OddsFeedSessionBuilder, error) {
@@ -65,7 +73,7 @@ func (o *oddsFeedImpl) BookmakerDetails() (protocols.BookmakerDetail, error) {
 		return nil, err
 	}
 
-	return o.whoAmIManager.BookmakerDetails()
+	return o.whoAmIManager.BookmakerDetails(o.ctx)
 }
 
 func (o *oddsFeedImpl) ProducerManager() (protocols.ProducerManager, error) {
@@ -110,6 +118,9 @@ func (o *oddsFeedImpl) ReplayManager() (protocols.ReplayManager, error) {
 
 func (o *oddsFeedImpl) Close() error {
 	o.opened = false
+	if o.cancelCtx != nil {
+		o.cancelCtx()
+	}
 	if o.recoveryManager != nil {
 		o.recoveryManager.Close()
 	}
@@ -150,16 +161,16 @@ func (o *oddsFeedImpl) Open() (protocols.GlobalMessageDelivery, error) {
 
 	o.opened = true
 
-	err := o.producerManager.Open()
+	err := o.producerManager.Open(o.ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	if o.sessionMap == nil || len(o.sessionMap) == 0 {
+	if len(o.sessionMap) == 0 {
 		return nil, errors.New("cannot open feed without sessions")
 	}
 
-	availableProducers, err := o.producerManager.AvailableProducers()
+	availableProducers, err := o.producerManager.AvailableProducers(o.ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -179,7 +190,7 @@ func (o *oddsFeedImpl) Open() (protocols.GlobalMessageDelivery, error) {
 		}
 
 		// Producer is not requested - disable
-		err := o.producerManager.SetProducerState(key, false)
+		err := o.producerManager.SetProducerState(o.ctx, key, false)
 		if err != nil {
 			return nil, err
 		}
@@ -235,7 +246,7 @@ func (o *oddsFeedImpl) Open() (protocols.GlobalMessageDelivery, error) {
 		}()
 	}
 
-	err = o.rabbitMQClient.Open()
+	err = o.rabbitMQClient.Open(o.ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -313,7 +324,7 @@ func (o *oddsFeedImpl) init() error {
 
 	o.whoAmIManager = whoami.NewManager(o.cfg, o.apiClient)
 	// Try to fetch bookmaker details
-	details, err := o.whoAmIManager.BookmakerDetails()
+	details, err := o.whoAmIManager.BookmakerDetails(o.ctx)
 	if err != nil {
 		return err
 	}
@@ -471,9 +482,12 @@ func (o *oddsFeedImpl) validateInterestCombination(sessionsData map[uuid.UUID]ke
 
 // NewOddsFeed ...
 func NewOddsFeed(configuration protocols.OddsFeedConfiguration) protocols.OddsFeed {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &oddsFeedImpl{
 		cfg:        configuration,
 		sessionMap: make(map[uuid.UUID]*sessionData),
+		ctx:        ctx,
+		cancelCtx:  cancel,
 	}
 }
 

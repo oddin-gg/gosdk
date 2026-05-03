@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -189,7 +190,7 @@ func (t *TournamentCache) TournamentIcon(id protocols.URN, locale protocols.Loca
 		return icon.(*string), nil
 	}
 
-	data, err := t.apiClient.FetchTournament(id, locale)
+	data, err := t.apiClient.FetchTournament(context.Background(), id, locale)
 	if err != nil {
 		return nil, err
 	}
@@ -201,7 +202,7 @@ func (t *TournamentCache) TournamentIcon(id protocols.URN, locale protocols.Loca
 func (t *TournamentCache) loadAndCacheItem(id protocols.URN, locales []protocols.Locale) error {
 	for i := range locales {
 		locale := locales[i]
-		data, err := t.apiClient.FetchTournament(id, locale)
+		data, err := t.apiClient.FetchTournament(context.Background(), id, locale)
 		if err != nil {
 			return err
 		}

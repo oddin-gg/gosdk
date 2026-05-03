@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strconv"
@@ -146,13 +147,13 @@ func (m *MarketDescriptionCache) loadAndCacheItem(
 		var descriptions []data.MarketDescription
 		var err error
 		if marketID != nil && variant != nil && utils.IsMarketVariantWithDynamicOutcomes(*variant) {
-			descriptions, err = m.apiClient.FetchMarketDescriptionsWithDynamicOutcomes(*marketID, *variant, locale)
+			descriptions, err = m.apiClient.FetchMarketDescriptionsWithDynamicOutcomes(context.Background(), *marketID, *variant, locale)
 			if err != nil {
 				return err
 			}
 		} else {
 			// fetch all descriptions
-			descriptions, err = m.apiClient.FetchMarketDescriptions(locale)
+			descriptions, err = m.apiClient.FetchMarketDescriptions(context.Background(), locale)
 			if err != nil {
 				return err
 			}

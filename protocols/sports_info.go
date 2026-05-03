@@ -1,38 +1,45 @@
 package protocols
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 // SportsInfoManager ...
+//
+// All "fetch"-style methods take a context.Context for cancellation. The
+// in-memory cache invalidation methods (Clear*) do not — they are pure-state
+// operations.
 type SportsInfoManager interface {
-	Sports() ([]Sport, error)
-	LocalizedSports(locale Locale) ([]Sport, error)
+	Sports(ctx context.Context) ([]Sport, error)
+	LocalizedSports(ctx context.Context, locale Locale) ([]Sport, error)
 
-	ActiveTournaments() ([]Tournament, error)
-	LocalizedActiveTournaments(locale Locale) ([]Tournament, error)
+	ActiveTournaments(ctx context.Context) ([]Tournament, error)
+	LocalizedActiveTournaments(ctx context.Context, locale Locale) ([]Tournament, error)
 
-	SportActiveTournaments(sportName string) ([]Tournament, error)
-	LocalizedSportActiveTournaments(sportName string, locale Locale) ([]Tournament, error)
+	SportActiveTournaments(ctx context.Context, sportName string) ([]Tournament, error)
+	LocalizedSportActiveTournaments(ctx context.Context, sportName string, locale Locale) ([]Tournament, error)
 
-	MatchesFor(date time.Time) ([]Match, error)
-	LocalizedMatchesFor(date time.Time, locale Locale) ([]Match, error)
+	MatchesFor(ctx context.Context, date time.Time) ([]Match, error)
+	LocalizedMatchesFor(ctx context.Context, date time.Time, locale Locale) ([]Match, error)
 
-	LiveMatches() ([]Match, error)
-	LocalizedLiveMatches(locale Locale) ([]Match, error)
+	LiveMatches(ctx context.Context) ([]Match, error)
+	LocalizedLiveMatches(ctx context.Context, locale Locale) ([]Match, error)
 
-	Match(id URN) (Match, error)
-	LocalizedMatch(id URN, locale Locale) (Match, error)
+	Match(ctx context.Context, id URN) (Match, error)
+	LocalizedMatch(ctx context.Context, id URN, locale Locale) (Match, error)
 
-	Competitor(id URN) (Competitor, error)
-	LocalizedCompetitor(id URN, locale Locale) (Competitor, error)
+	Competitor(ctx context.Context, id URN) (Competitor, error)
+	LocalizedCompetitor(ctx context.Context, id URN, locale Locale) (Competitor, error)
 
-	FixtureChanges(after time.Time) ([]FixtureChange, error)
-	LocalizedFixtureChanges(locale Locale, after time.Time) ([]FixtureChange, error)
+	FixtureChanges(ctx context.Context, after time.Time) ([]FixtureChange, error)
+	LocalizedFixtureChanges(ctx context.Context, locale Locale, after time.Time) ([]FixtureChange, error)
 
-	ListOfMatches(startIndex uint, limit uint) ([]Match, error)
-	LocalizedListOfMatches(startIndex uint, limit uint, locale Locale) ([]Match, error)
+	ListOfMatches(ctx context.Context, startIndex uint, limit uint) ([]Match, error)
+	LocalizedListOfMatches(ctx context.Context, startIndex uint, limit uint, locale Locale) ([]Match, error)
 
-	AvailableTournaments(sportID URN) ([]Tournament, error)
-	LocalizedAvailableTournaments(sportID URN, locale Locale) ([]Tournament, error)
+	AvailableTournaments(ctx context.Context, sportID URN) ([]Tournament, error)
+	LocalizedAvailableTournaments(ctx context.Context, sportID URN, locale Locale) ([]Tournament, error)
 
 	ClearMatch(id URN)
 	ClearTournament(id URN)

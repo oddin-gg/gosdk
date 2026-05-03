@@ -1,6 +1,7 @@
 package gosdk
 
 import (
+	"context"
 	"errors"
 	"time"
 
@@ -114,12 +115,16 @@ func (o *oddsFeedSessionImpl) processMessage(msg *protocols.QueueMessage, messag
 	}
 
 	producerID := msg.FeedMessage.Message.Product()
-	producerData, err := o.producerManager.GetProducer(producerID)
+	// Hot path: producers map is populated at SDK startup; these calls are
+	// in-memory cache reads after init. context.Background() is acceptable
+	// here because the call paths cannot block on I/O at message-processing time.
+	bg := context.Background()
+	producerData, err := o.producerManager.GetProducer(bg, producerID)
 	if err != nil {
 		o.logger.WithError(err).Errorf("failed to get producer %d", producerID)
 	}
 
-	isProducerEnabled, err := o.producerManager.IsProducerEnabled(producerID)
+	isProducerEnabled, err := o.producerManager.IsProducerEnabled(bg, producerID)
 	switch {
 	case err != nil:
 		o.logger.WithError(err).Errorf("failed to check if producer is enabled %d", producerID)

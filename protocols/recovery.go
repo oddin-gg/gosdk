@@ -1,7 +1,11 @@
 package protocols
 
-import "time"
-import "github.com/google/uuid"
+import (
+	"context"
+	"time"
+
+	"github.com/google/uuid"
+)
 
 // RecoveryMessage ...
 type RecoveryMessage struct {
@@ -11,8 +15,8 @@ type RecoveryMessage struct {
 
 // RecoveryManager ...
 type RecoveryManager interface {
-	InitiateEventOddsMessagesRecovery(producerID uint, eventID URN) (uint, error)
-	InitiateEventStatefulMessagesRecovery(producerID uint, eventID URN) (uint, error)
+	InitiateEventOddsMessagesRecovery(ctx context.Context, producerID uint, eventID URN) (uint, error)
+	InitiateEventStatefulMessagesRecovery(ctx context.Context, producerID uint, eventID URN) (uint, error)
 }
 
 // RecoveryMessageProcessor ...

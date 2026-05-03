@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -108,7 +109,7 @@ func (s *SportCache) SportTournaments(sportID protocols.URN, locale protocols.Lo
 		return result.makeTournamentIDsList(), nil
 	}
 
-	tournaments, err := s.apiClient.FetchTournaments(sportID, locale)
+	tournaments, err := s.apiClient.FetchTournaments(context.Background(), sportID, locale)
 	if err != nil {
 		return nil, err
 	}
@@ -148,7 +149,7 @@ func (s *SportCache) findMissingLocales(locales []protocols.Locale) []protocols.
 func (s *SportCache) loadAndCacheItems(locales []protocols.Locale) error {
 	for i := range locales {
 		locale := locales[i]
-		data, err := s.apiClient.FetchSports(locale)
+		data, err := s.apiClient.FetchSports(context.Background(), locale)
 		if err != nil {
 			return err
 		}

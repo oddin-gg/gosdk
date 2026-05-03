@@ -1,6 +1,7 @@
 package recovery
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -40,7 +41,7 @@ func (p *producerRecoveryData) isPerformingRecovery() bool {
 }
 
 func (p *producerRecoveryData) isFlaggedDown() bool {
-	down, err := p.producerManager.IsProducerDown(p.producerID)
+	down, err := p.producerManager.IsProducerDown(context.Background(), p.producerID)
 	if err != nil {
 		return true
 	}
@@ -49,7 +50,7 @@ func (p *producerRecoveryData) isFlaggedDown() bool {
 }
 
 func (p *producerRecoveryData) isDisabled() bool {
-	enabled, err := p.producerManager.IsProducerEnabled(p.producerID)
+	enabled, err := p.producerManager.IsProducerEnabled(context.Background(), p.producerID)
 	if err != nil {
 		return true
 	}
@@ -131,7 +132,7 @@ func (p *producerRecoveryData) isKnownRecovery(requestID uint) bool {
 }
 
 func (p *producerRecoveryData) validateProducerSnapshotCompletes(receivedSnapshotCompletes []protocols.MessageInterest) (bool, error) {
-	prod, err := p.producerManager.GetProducer(p.producerID)
+	prod, err := p.producerManager.GetProducer(context.Background(), p.producerID)
 	if err != nil {
 		return false, err
 	}
@@ -180,7 +181,7 @@ func (p *producerRecoveryData) lastRecoveryStartedAt() time.Time {
 }
 
 func (p *producerRecoveryData) timestampForRecovery() (time.Time, error) {
-	prod, err := p.producerManager.GetProducer(p.producerID)
+	prod, err := p.producerManager.GetProducer(context.Background(), p.producerID)
 	if err != nil {
 		return time.Time{}, err
 	}
@@ -197,7 +198,7 @@ func (p *producerRecoveryData) setLastMessageReceivedTimestamp(timestamp time.Ti
 }
 
 func (p *producerRecoveryData) lastProcessedMessageGenTimestamp() (time.Time, error) {
-	prod, err := p.producerManager.GetProducer(p.producerID)
+	prod, err := p.producerManager.GetProducer(context.Background(), p.producerID)
 	if err != nil {
 		return time.Time{}, err
 	}
@@ -214,7 +215,7 @@ func (p *producerRecoveryData) setLastProcessedMessageGenTimestamp(timestamp tim
 }
 
 func (p *producerRecoveryData) producerName() (string, error) {
-	prod, err := p.producerManager.GetProducer(p.producerID)
+	prod, err := p.producerManager.GetProducer(context.Background(), p.producerID)
 	if err != nil {
 		return "", err
 	}

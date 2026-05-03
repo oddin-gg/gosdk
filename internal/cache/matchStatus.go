@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
@@ -365,7 +366,7 @@ func (m MatchStatusCache) MatchStatus(id protocols.URN) (*LocalizedMatchStatus, 
 	}
 
 	// This will trigger OnAPIResponse callback
-	_, err := m.apiClient.FetchMatchSummary(id, m.oddsFeedConfiguration.DefaultLocale())
+	_, err := m.apiClient.FetchMatchSummary(context.Background(), id, m.oddsFeedConfiguration.DefaultLocale())
 	if err != nil {
 		return nil, err
 	}

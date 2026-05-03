@@ -1,5 +1,7 @@
 package protocols
 
+import "context"
+
 // MarketData ...
 type MarketData interface {
 	MarketName(locale Locale) (*string, error)
@@ -90,13 +92,16 @@ type MarketVoidReason interface {
 }
 
 // MarketDescriptionManager ...
+//
+// I/O-bearing methods take context.Context. ClearMarketDescription is
+// pure-state cache invalidation and does not.
 type MarketDescriptionManager interface {
-	MarketDescriptions() ([]MarketDescription, error)
-	MarketDescriptionByIDAndVariant(marketID uint, variant *string) (MarketDescription, error)
-	LocalizedMarketDescriptions(locale Locale) ([]MarketDescription, error)
+	MarketDescriptions(ctx context.Context) ([]MarketDescription, error)
+	MarketDescriptionByIDAndVariant(ctx context.Context, marketID uint, variant *string) (MarketDescription, error)
+	LocalizedMarketDescriptions(ctx context.Context, locale Locale) ([]MarketDescription, error)
 	ClearMarketDescription(marketID uint, variant *string)
-	MarketVoidReasons() ([]MarketVoidReason, error)
-	ReloadMarketVoidReasons() ([]MarketVoidReason, error)
+	MarketVoidReasons(ctx context.Context) ([]MarketVoidReason, error)
+	ReloadMarketVoidReasons(ctx context.Context) ([]MarketVoidReason, error)
 }
 
 const (

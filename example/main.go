@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -187,7 +188,7 @@ func (e *Example) apiExamples() {
 
 func (e *Example) workWithMarketManager() error {
 	// display markets
-	markets, err := e.marketManager.MarketDescriptions()
+	markets, err := e.marketManager.MarketDescriptions(context.Background())
 	if err != nil {
 		return err
 	}
@@ -207,7 +208,7 @@ func (e *Example) workWithMarketManager() error {
 	}
 
 	// display void reasons
-	voidReasons, err := e.marketManager.MarketVoidReasons()
+	voidReasons, err := e.marketManager.MarketVoidReasons(context.Background())
 	if err != nil {
 		return err
 	}
@@ -229,7 +230,7 @@ func (e *Example) workWithMarketManager() error {
 
 func (e *Example) workWithSportsManager() error {
 	// sports
-	sports, err := e.sportsManager.Sports()
+	sports, err := e.sportsManager.Sports(context.Background())
 	switch {
 	case err != nil:
 		return err
@@ -248,7 +249,7 @@ func (e *Example) workWithSportsManager() error {
 	}
 
 	// active tournaments
-	tournaments, err := e.sportsManager.ActiveTournaments()
+	tournaments, err := e.sportsManager.ActiveTournaments(context.Background())
 	switch {
 	case err != nil:
 		return err
@@ -300,7 +301,7 @@ func (e *Example) workWithSportsManager() error {
 	if err != nil {
 		return err
 	}
-	competitor, err := e.sportsManager.Competitor(*competitorURN)
+	competitor, err := e.sportsManager.Competitor(context.Background(), *competitorURN)
 	if err != nil {
 		return err
 	}
@@ -328,7 +329,7 @@ func (e *Example) workWithSportsManager() error {
 	}
 
 	// fixture changes
-	changes, err := e.sportsManager.FixtureChanges(time.Now().Add(-1 * time.Hour))
+	changes, err := e.sportsManager.FixtureChanges(context.Background(), time.Now().Add(-1*time.Hour))
 	if err != nil {
 		return err
 	}
@@ -337,7 +338,7 @@ func (e *Example) workWithSportsManager() error {
 	}
 
 	// matches
-	matches, err := e.sportsManager.ListOfMatches(0, 2)
+	matches, err := e.sportsManager.ListOfMatches(context.Background(), 0, 2)
 	if err != nil {
 		return err
 	}
@@ -401,7 +402,7 @@ func (e *Example) workWithRaceSports() error {
 		return err
 	}
 
-	m, err := e.sportsManager.Match(*raceURN)
+	m, err := e.sportsManager.Match(context.Background(), *raceURN)
 	if err != nil {
 		return err
 	}
@@ -443,7 +444,7 @@ func (e *Example) workWithRecovery() error {
 		return err
 	}
 
-	producers, err := e.producerManager.ActiveProducersInScope(protocols.LiveProducerScope)
+	producers, err := e.producerManager.ActiveProducersInScope(context.Background(), protocols.LiveProducerScope)
 	switch {
 	case err != nil:
 		return err
@@ -461,13 +462,13 @@ func (e *Example) workWithRecovery() error {
 	}
 
 	// explicitly call for a recovery of a match
-	requestID, err := e.recoveryManager.InitiateEventOddsMessagesRecovery(liveProducer.ID(), *matchURN)
+	requestID, err := e.recoveryManager.InitiateEventOddsMessagesRecovery(context.Background(), liveProducer.ID(), *matchURN)
 	if err != nil {
 		log.Println(err)
 	}
 	log.Println("EventOddsMessagesRecovery initiated: ", requestID)
 
-	requestID, err = e.recoveryManager.InitiateEventStatefulMessagesRecovery(liveProducer.ID(), *matchURN)
+	requestID, err = e.recoveryManager.InitiateEventStatefulMessagesRecovery(context.Background(), liveProducer.ID(), *matchURN)
 	if err != nil {
 		log.Println(err)
 	}

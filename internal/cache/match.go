@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -107,7 +108,7 @@ func (m *MatchCache) Match(id protocols.URN, locales []protocols.Locale) (*Local
 func (m *MatchCache) loadAndCacheItem(id protocols.URN, locales []protocols.Locale) error {
 	for i := range locales {
 		locale := locales[i]
-		data, err := m.apiClient.FetchMatchSummary(id, locale)
+		data, err := m.apiClient.FetchMatchSummary(context.Background(), id, locale)
 		if err != nil {
 			return err
 		}

@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -125,7 +126,7 @@ func (c *CompetitorCache) CompetitorIcon(id protocols.URN, locale protocols.Loca
 		return icon.(*string), nil
 	}
 
-	data, err := c.apiClient.FetchCompetitorProfile(id, locale)
+	data, err := c.apiClient.FetchCompetitorProfile(context.Background(), id, locale)
 	if err != nil {
 		return nil, err
 	}
@@ -215,7 +216,7 @@ func (c *CompetitorCache) refreshOrInsertItem(id protocols.URN, locale protocols
 func (c *CompetitorCache) loadAndCacheItem(id protocols.URN, locales []protocols.Locale) (*LocalizedCompetitor, error) {
 	for i := range locales {
 		locale := locales[i]
-		data, err := c.apiClient.FetchCompetitorProfileWithPlayers(id, locale)
+		data, err := c.apiClient.FetchCompetitorProfileWithPlayers(context.Background(), id, locale)
 		if err != nil {
 			return nil, err
 		}

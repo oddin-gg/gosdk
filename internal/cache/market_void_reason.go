@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"context"
 	"errors"
 	"time"
 
@@ -41,7 +42,7 @@ func (m *MarketVoidReasonsCache) ReloadMarketVoidReasons() error {
 }
 
 func (m *MarketVoidReasonsCache) loadAndCacheItem() error {
-	voidReasons, err := m.apiClient.FetchMarketVoidReasons()
+	voidReasons, err := m.apiClient.FetchMarketVoidReasons(context.Background())
 	if err != nil {
 		return err
 	}

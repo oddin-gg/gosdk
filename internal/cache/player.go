@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"time"
@@ -157,7 +158,7 @@ func (c *PlayersCache) fetchPlayersFromAPI(keys []PlayerCacheKey) (map[PlayerCac
 	res := make(map[PlayerCacheKey]xml.PlayerProfile, len(keys))
 
 	for _, key := range keys {
-		data, err := c.apiClient.FetchPlayerProfile(key.PlayerID, key.Locale)
+		data, err := c.apiClient.FetchPlayerProfile(context.Background(), key.PlayerID, key.Locale)
 
 		if err != nil {
 			return nil, fmt.Errorf("fetch player profiles failed: %w", err)

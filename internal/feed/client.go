@@ -1,6 +1,7 @@
 package feed
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
@@ -83,13 +84,18 @@ func (c *Client) Close() {
 }
 
 // Open ...
-func (c *Client) Open() error {
+//
+// NOTE: this implementation has known bugs (recursive reconnect pyramid,
+// no proper backpressure, races on c.connection) that are addressed by the
+// Phase 4 AMQP-feed-layer rewrite. For Phase 2 we only make Open ctx-aware
+// so cancellation propagates to the BookmakerDetails fetch.
+func (c *Client) Open(ctx context.Context) error {
 	mqURL, err := c.oddsFeedConfiguration.MQURL()
 	if err != nil {
 		return err
 	}
 
-	details, err := c.whoAmIManager.BookmakerDetails()
+	details, err := c.whoAmIManager.BookmakerDetails(ctx)
 	if err != nil {
 		return err
 	}
@@ -134,7 +140,10 @@ func (c *Client) Open() error {
 }
 
 func (c *Client) reconnect() {
-	err := c.Open()
+	// Phase 4 rewrites this with proper backoff + ctx-cancellation; for now
+	// we use a fresh context.Background() since this whole reconnect path is
+	// scheduled for replacement.
+	err := c.Open(context.Background())
 	if err != nil {
 		c.logger.WithError(err).Error("reconnect to rabbitmq failed, retrying...")
 		time.Sleep(5 * time.Second)

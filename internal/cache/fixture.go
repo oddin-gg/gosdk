@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"context"
 	"time"
 
 	"github.com/oddin-gg/gosdk/internal/api"
@@ -51,7 +52,7 @@ func (f *FixtureCache) ClearCacheItem(id protocols.URN) {
 }
 
 func (f *FixtureCache) loadAndCacheItem(id protocols.URN, locale protocols.Locale) (*LocalizedFixture, error) {
-	data, err := f.apiClient.FetchFixture(id, locale)
+	data, err := f.apiClient.FetchFixture(context.Background(), id, locale)
 	if err != nil {
 		return nil, err
 	}

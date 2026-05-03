@@ -1,6 +1,8 @@
 package cache
 
 import (
+	"context"
+
 	"github.com/oddin-gg/gosdk/internal/api"
 	"github.com/oddin-gg/gosdk/protocols"
 	log "github.com/sirupsen/logrus"
@@ -59,7 +61,7 @@ func NewManager(client *api.Client, oddsFeedConfiguration protocols.OddsFeedConf
 		PlayersCache:           newPlayersCache(client, logger),
 
 		LocalizedStaticMatchStatus: newLocalizedStaticDataCache(oddsFeedConfiguration, func(locale protocols.Locale) ([]protocols.StaticData, error) {
-			data, err := client.FetchMatchStatusDescriptions(locale)
+			data, err := client.FetchMatchStatusDescriptions(context.Background(), locale)
 			if err != nil {
 				return nil, err
 			}

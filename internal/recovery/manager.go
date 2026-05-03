@@ -1,6 +1,7 @@
 package recovery
 
 import (
+	"context"
 	"errors"
 	"math"
 	"sync"
@@ -126,13 +127,17 @@ func (m *Manager) OnSnapshotCompleteReceived(producerID uint, requestID uint, me
 }
 
 // InitiateEventOddsMessagesRecovery ...
-func (m *Manager) InitiateEventOddsMessagesRecovery(producerID uint, eventID protocols.URN) (uint, error) {
-	return m.makeEventRecovery(producerID, eventID, m.apiClient.PostEventOddsRecovery)
+func (m *Manager) InitiateEventOddsMessagesRecovery(ctx context.Context, producerID uint, eventID protocols.URN) (uint, error) {
+	return m.makeEventRecovery(producerID, eventID, func(name string, eid protocols.URN, rid uint, node *int) (bool, error) {
+		return m.apiClient.PostEventOddsRecovery(ctx, name, eid, rid, node)
+	})
 }
 
 // InitiateEventStatefulMessagesRecovery ...
-func (m *Manager) InitiateEventStatefulMessagesRecovery(producerID uint, eventID protocols.URN) (uint, error) {
-	return m.makeEventRecovery(producerID, eventID, m.apiClient.PostEventStatefulRecovery)
+func (m *Manager) InitiateEventStatefulMessagesRecovery(ctx context.Context, producerID uint, eventID protocols.URN) (uint, error) {
+	return m.makeEventRecovery(producerID, eventID, func(name string, eid protocols.URN, rid uint, node *int) (bool, error) {
+		return m.apiClient.PostEventStatefulRecovery(ctx, name, eid, rid, node)
+	})
 }
 
 // Open ...
@@ -141,7 +146,7 @@ func (m *Manager) Open() (<-chan protocols.RecoveryMessage, error) {
 		return nil, errors.New("already opened")
 	}
 
-	activeProducers, err := m.producerManager.ActiveProducers()
+	activeProducers, err := m.producerManager.ActiveProducers(context.Background())
 	switch {
 	case err != nil:
 		return nil, err
@@ -328,7 +333,7 @@ func (m *Manager) notifyProducerChangedState(data *producerRecoveryData, reason 
 
 	data.producerStatusReason = reason
 
-	producerData, err := m.producerManager.GetProducer(data.producerID)
+	producerData, err := m.producerManager.GetProducer(context.Background(), data.producerID)
 	if err != nil {
 		return err
 	}
@@ -459,7 +464,7 @@ func (m *Manager) eventRecoveryFinished(id uint, data *producerRecoveryData) err
 	finished := time.Now()
 	m.logger.Infof("event %s recovery finished for request %d in %d ms", eventRecovery.eventID.ToString(), id, finished.Sub(started).Milliseconds())
 
-	producerData, err := m.producerManager.GetProducer(data.producerID)
+	producerData, err := m.producerManager.GetProducer(context.Background(), data.producerID)
 	if err != nil {
 		return err
 	}
@@ -507,6 +512,7 @@ func (m *Manager) makeSnapshotRecovery(data *producerRecoveryData, timestamp tim
 	m.logger.Infof("recovery started for request %d", requestID)
 
 	success, err := m.apiClient.PostRecovery(
+		context.Background(),
 		producerName,
 		requestID,
 		m.cfg.SdkNodeID(),
