@@ -23,5 +23,6 @@ test/
 
 .idea
 .vscode
+.claude/
 
 *.iml
