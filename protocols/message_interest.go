@@ -51,7 +51,7 @@ func (m MessageInterest) isProducerInScope(producer Producer, scope ProducerScop
 }
 
 func (m MessageInterest) findProducerIDByScope(producers map[uint]Producer, scope ProducerScope) []uint {
-	possibleProducers := make(map[uint]struct{}, 0)
+	possibleProducers := make(map[uint]struct{})
 
 	for _, producer := range producers {
 		for _, pScope := range producer.ProducerScopes() {
@@ -61,7 +61,7 @@ func (m MessageInterest) findProducerIDByScope(producers map[uint]Producer, scop
 		}
 	}
 
-	result := make([]uint, len(possibleProducers))
+	result := make([]uint, 0, len(possibleProducers))
 	for id := range possibleProducers {
 		result = append(result, id)
 	}

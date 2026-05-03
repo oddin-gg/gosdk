@@ -1,7 +1,7 @@
 package feed
 
 import (
-	"encoding/xml"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -16,18 +16,6 @@ import (
 const (
 	emptyPosition = "-"
 )
-
-type envelope struct {
-	SnapshotComplete      *feedXML.SnapshotComplete      `xml:"snapshot_complete"`
-	Alive                 *feedXML.Alive                 `xml:"alive"`
-	BetCancel             *feedXML.BetCancel             `xml:"bet_cancel"`
-	BetStop               *feedXML.BetStop               `xml:"bet_stop"`
-	FixtureChange         *feedXML.FixtureChange         `xml:"fixture_change"`
-	OddsChange            *feedXML.OddsChange            `xml:"odds_change"`
-	BetSettlement         *feedXML.BetSettlement         `xml:"bet_settlement"`
-	RollbackBetSettlement *feedXML.RollbackBetSettlement `xml:"rollback_bet_settlement"`
-	RollbackBetCancel     *feedXML.RollbackBetCancel     `xml:"rollback_bet_cancel"`
-}
 
 // ChannelConsumer ...
 type ChannelConsumer struct {
@@ -126,12 +114,15 @@ func (c *ChannelConsumer) processMessage(msg amqp.Delivery) {
 		return
 	}
 
-	envelope := envelope{}
-	envelopeBytes := []byte(`<envelope>` + string(msg.Body) + `</envelope>`)
-	err = xml.Unmarshal(envelopeBytes, &envelope)
+	message, err := feedXML.Decode(msg.Body)
 	if err != nil {
-		c.logger.Errorf("failed to unmarshall %s", string(msg.Body))
-		message := protocols.FeedMessage{
+		switch {
+		case errors.Is(err, feedXML.ErrUnknownMessage):
+			c.logger.Errorf("unknown message - %s", string(msg.Body))
+		default:
+			c.logger.WithError(err).Errorf("failed to unmarshall %s", string(msg.Body))
+		}
+		fm := protocols.FeedMessage{
 			BasicFeedMessage: protocols.BasicFeedMessage{
 				RawMessage: msg.Body,
 				RoutingKey: routingKeyInfo,
@@ -139,7 +130,7 @@ func (c *ChannelConsumer) processMessage(msg amqp.Delivery) {
 			},
 			Message: nil,
 		}
-		queueMessage.UnparsableMessage = c.feedMessageFactory.BuildUnparsableMessage(&message)
+		queueMessage.UnparsableMessage = c.feedMessageFactory.BuildUnparsableMessage(&fm)
 		c.outgoing <- queueMessage
 		return
 	}
@@ -149,41 +140,6 @@ func (c *ChannelConsumer) processMessage(msg amqp.Delivery) {
 		RawMessage: msg.Body,
 		RoutingKey: routingKeyInfo,
 		Timestamp:  timestamp,
-	}
-
-	var message protocols.BasicMessage
-	switch {
-	case envelope.BetSettlement != nil:
-		message = envelope.BetSettlement
-	case envelope.OddsChange != nil:
-		message = envelope.OddsChange
-	case envelope.FixtureChange != nil:
-		message = envelope.FixtureChange
-	case envelope.BetStop != nil:
-		message = envelope.BetStop
-	case envelope.BetCancel != nil:
-		message = envelope.BetCancel
-	case envelope.Alive != nil:
-		message = envelope.Alive
-	case envelope.SnapshotComplete != nil:
-		message = envelope.SnapshotComplete
-	case envelope.RollbackBetSettlement != nil:
-		message = envelope.RollbackBetSettlement
-	case envelope.RollbackBetCancel != nil:
-		message = envelope.RollbackBetCancel
-	default:
-		c.logger.Errorf("unknown message - %s", string(msg.Body))
-		message := protocols.FeedMessage{
-			BasicFeedMessage: protocols.BasicFeedMessage{
-				RawMessage: msg.Body,
-				RoutingKey: routingKeyInfo,
-				Timestamp:  timestamp,
-			},
-			Message: nil,
-		}
-		queueMessage.UnparsableMessage = c.feedMessageFactory.BuildUnparsableMessage(&message)
-		c.outgoing <- queueMessage
-		return
 	}
 
 	queueMessage.RawFeedMessage = &protocols.RawFeedMessage{

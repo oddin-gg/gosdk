@@ -49,19 +49,41 @@ type Region string
 
 // Regions
 const (
-	DefaulRegion Region = ""
-	APSouthEast1 Region = "ap-southeast-1."
+	// RegionDefault is the canonical name for the default (EU) region.
+	RegionDefault Region = ""
+	APSouthEast1  Region = "ap-southeast-1."
+
+	// DefaulRegion is preserved for source compatibility.
+	//
+	// Deprecated: misspelling kept as an alias; use RegionDefault.
+	DefaulRegion Region = RegionDefault
 )
 
 // Locale ...
 type Locale string
 
-// Locales
+// Locales — full set matching .NET / Java SDKs.
 const (
 	EnLocale Locale = "en"
+	BrLocale Locale = "br"
+	DeLocale Locale = "de"
+	EsLocale Locale = "es"
+	FiLocale Locale = "fi"
+	FrLocale Locale = "fr"
+	PlLocale Locale = "pl"
+	PtLocale Locale = "pt"
 	RuLocale Locale = "ru"
+	ThLocale Locale = "th"
+	ViLocale Locale = "vi"
 	ZhLocale Locale = "zh"
 )
+
+// AllLocales lists every Locale constant exposed by the SDK.
+// Useful for callers that want to preload everything via WithPreloadLocales(...).
+var AllLocales = []Locale{
+	EnLocale, BrLocale, DeLocale, EsLocale, FiLocale, FrLocale,
+	PlLocale, PtLocale, RuLocale, ThLocale, ViLocale, ZhLocale,
+}
 
 // OddsFeedConfiguration ...
 type OddsFeedConfiguration interface {
