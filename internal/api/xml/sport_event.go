@@ -15,9 +15,19 @@ type SportEvent struct {
 	LiveOdds     LiveOdds             `xml:"liveodds,attr,omitempty"`
 	Status       SportEventStatusType `xml:"status,attr,omitempty"`
 	// Elements
-	Tournament  Tournament             `xml:"tournament,omitempty"`
-	Competitors *SportEventCompetitors `xml:"competitors,omitempty"`
-	ExtraInfo   *ExtraInfoWrapper      `xml:"extra_info,omitempty"`
+	Tournament   Tournament             `xml:"tournament,omitempty"`
+	Competitors  *SportEventCompetitors `xml:"competitors,omitempty"`
+	ReferenceIDs *ReferenceIDs          `xml:"reference_ids,omitempty"`
+	ExtraInfo    *ExtraInfoWrapper      `xml:"extra_info,omitempty"`
+}
+
+type ReferenceIDs struct {
+	ReferenceID []ReferenceID `xml:"reference_id"`
+}
+
+type ReferenceID struct {
+	Name  string `xml:"name,attr"`
+	Value string `xml:"value,attr"`
 }
 
 // LiveOdds ...

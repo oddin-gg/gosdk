@@ -225,6 +225,13 @@ func (m *MatchCache) refreshOrInsertItem(id protocols.URN, locale protocols.Loca
 	}
 	result.scheduledEndTime = scheduledEndTime
 
+	if match.ReferenceIDs != nil {
+		result.referenceIDs = make(map[string]string)
+		for _, ref := range match.ReferenceIDs.ReferenceID {
+			result.referenceIDs[ref.Name] = ref.Value
+		}
+	}
+
 	result.mux.Lock()
 	defer result.mux.Unlock()
 
@@ -277,6 +284,7 @@ type LocalizedMatch struct {
 	name                 map[protocols.Locale]string
 	sportFormat          protocols.SportFormat
 	extraInfo            map[string]string
+	referenceIDs         map[string]string
 
 	mux sync.Mutex
 }
@@ -355,6 +363,15 @@ func (m matchImpl) ScheduledEndTime() (*time.Time, error) {
 	}
 
 	return item.scheduledEndTime, nil
+}
+
+func (m matchImpl) ReferenceIDs() (map[string]string, error) {
+	item, err := m.matchCache.Match(m.id, m.locales)
+	if err != nil {
+		return nil, err
+	}
+
+	return item.referenceIDs, nil
 }
 
 func (m matchImpl) LiveOddsAvailability() (*protocols.LiveOddsAvailability, error) {
