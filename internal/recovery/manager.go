@@ -28,10 +28,16 @@ type Manager struct {
 	producerRecoveryData   map[uint]*producerRecoveryData
 	logger                 *log.Entry
 	ticker                 *time.Ticker
-	closeCh                chan bool
+	closeCh                chan struct{}
 	messageProcessingTimes map[uuid.UUID]time.Time
 	msgCh                  chan protocols.RecoveryMessage
 	sequence               *generator
+
+	// closeOnce guards a single shutdown sequence; further Close calls are no-ops.
+	// Phase 5b lite-fix replaces the prior `m.closeCh <- true` (unbuffered send
+	// that deadlocked when timerTick was blocked sending on msgCh) with a
+	// `close(m.closeCh)` broadcast, and protects msgCh close against double-close.
+	closeOnce sync.Once
 }
 
 // OnMessageProcessingStarted ...
@@ -91,7 +97,7 @@ func (m *Manager) OnAliveReceived(producerID uint, timestamp protocols.MessageTi
 		}
 
 	default:
-		data.lastUserSessionAliveReceivedTimestamp = timestamp.Created
+		data.setLastUserSessionAliveReceivedTimestamp(timestamp.Created)
 	}
 }
 
@@ -161,8 +167,8 @@ func (m *Manager) Open() (<-chan protocols.RecoveryMessage, error) {
 	}
 	m.lock.Unlock()
 
-	m.msgCh = make(chan protocols.RecoveryMessage)
-	m.closeCh = make(chan bool)
+	m.msgCh = make(chan protocols.RecoveryMessage, 1024)
+	m.closeCh = make(chan struct{})
 	go func() {
 		select {
 		case <-time.After(initialDelay):
@@ -185,20 +191,23 @@ func (m *Manager) Open() (<-chan protocols.RecoveryMessage, error) {
 	return m.msgCh, nil
 }
 
-// Close ...
+// Close terminates the recovery loop. Idempotent.
+//
+// Phase 5b lite-fix: replaces unbuffered `closeCh <- true` (which deadlocked
+// when timerTick was mid-send on msgCh) with a close-broadcast; protects
+// msgCh close via closeOnce.
 func (m *Manager) Close() {
-	if m.ticker != nil {
-		m.ticker.Stop()
-	}
-
-	if m.closeCh != nil {
-		// make sure we timerTick is not running
-		m.closeCh <- true
-	}
-
-	if m.msgCh != nil {
-		close(m.msgCh)
-	}
+	m.closeOnce.Do(func() {
+		if m.ticker != nil {
+			m.ticker.Stop()
+		}
+		if m.closeCh != nil {
+			close(m.closeCh)
+		}
+		if m.msgCh != nil {
+			close(m.msgCh)
+		}
+	})
 }
 
 func (m *Manager) makeEventRecovery(producerID uint, eventID protocols.URN, callback func(string, protocols.URN, uint, *int) (bool, error)) (uint, error) {
@@ -259,8 +268,8 @@ func (m *Manager) timerTick() {
 		}
 
 		var lastTimestamp time.Time
-		if rd.lastSystemAliveReceivedTimestamp != nil {
-			lastTimestamp = *rd.lastSystemAliveReceivedTimestamp
+		if t := rd.getLastSystemAliveReceivedTimestamp(); t != nil {
+			lastTimestamp = *t
 		}
 
 		aliveInterval := now.Sub(lastTimestamp)
@@ -286,7 +295,7 @@ func (m *Manager) calculateTiming(data *producerRecoveryData, now time.Time) boo
 		m.logger.WithError(err).Warn("failed to get last processed message gen timestamp")
 		return false
 	}
-	lastUserSessionAliveReceivedTimestamp := data.lastUserSessionAliveReceivedTimestamp
+	lastUserSessionAliveReceivedTimestamp := data.getLastUserSessionAliveReceivedTimestamp()
 
 	messageProcessingDelay := now.Sub(lastProcessedMessageGenTimestamp)
 	userAliveDelay := now.Sub(lastUserSessionAliveReceivedTimestamp)
@@ -299,20 +308,20 @@ func (m *Manager) producerDown(data *producerRecoveryData, reason protocols.Prod
 		return nil
 	}
 
-	if data.isFlaggedDown() && data.producerDownReason != reason {
+	if data.isFlaggedDown() && data.getProducerDownReason() != reason {
 		name, err := data.producerName()
 		if err != nil {
 			return err
 		}
 
-		m.logger.Infof("changing producer %s down reason from %d to %d", name, data.producerDownReason, reason)
+		m.logger.Infof("changing producer %s down reason from %d to %d", name, data.getProducerDownReason(), reason)
 		err = data.setProducerDown(reason)
 		if err != nil {
 			return err
 		}
 	}
 
-	if data.recoveryState == protocols.StartedRecoveryState && reason != protocols.ProcessingQueueDelayViolationProducerDownReason {
+	if data.getRecoveryState() == protocols.StartedRecoveryState && reason != protocols.ProcessingQueueDelayViolationProducerDownReason {
 		data.interruptProducerRecovery()
 	}
 
@@ -327,11 +336,11 @@ func (m *Manager) producerDown(data *producerRecoveryData, reason protocols.Prod
 }
 
 func (m *Manager) notifyProducerChangedState(data *producerRecoveryData, reason protocols.ProducerStatusReason) error {
-	if data.producerStatusReason == reason {
+	if data.getProducerStatusReason() == reason {
 		return nil
 	}
 
-	data.producerStatusReason = reason
+	data.setProducerStatusReason(reason)
 
 	producerData, err := m.producerManager.GetProducer(context.Background(), data.producerID)
 	if err != nil {
@@ -384,20 +393,22 @@ func (m *Manager) systemSessionAliveReceived(timestamp protocols.MessageTimestam
 	}
 
 	now := time.Now()
+	state := data.getRecoveryState()
+	downReason := data.getProducerDownReason()
 	isBackFromInactivity := data.isFlaggedDown() &&
 		!data.isPerformingRecovery() &&
-		data.producerDownReason == protocols.ProcessingQueueDelayViolationProducerDownReason &&
+		downReason == protocols.ProcessingQueueDelayViolationProducerDownReason &&
 		m.calculateTiming(data, now)
-	isInRecovery := data.recoveryState != protocols.NotStartedRecoveryState &&
-		data.recoveryState != protocols.ErrorRecoveryState &&
-		data.recoveryState != protocols.InterruptedRecoveryState
+	isInRecovery := state != protocols.NotStartedRecoveryState &&
+		state != protocols.ErrorRecoveryState &&
+		state != protocols.InterruptedRecoveryState
 
 	switch {
 	case isBackFromInactivity:
 		err = m.producerUp(data, protocols.ReturnedFromInactivityProducerUpReason)
 	case isInRecovery:
 
-		if data.isFlaggedDown() && !data.isPerformingRecovery() && data.producerDownReason != protocols.ProcessingQueueDelayViolationProducerDownReason {
+		if data.isFlaggedDown() && !data.isPerformingRecovery() && data.getProducerDownReason() != protocols.ProcessingQueueDelayViolationProducerDownReason {
 			err = m.makeSnapshotRecovery(data, recoveryTimestamp)
 			if err != nil {
 				return err
@@ -432,22 +443,22 @@ func (m *Manager) snapshotRecoveryFinished(requestID uint, data *producerRecover
 	finished := time.Now()
 	m.logger.Infof("recovery finished for request %d in %d ms", requestID, finished.Sub(started).Milliseconds())
 
-	if data.recoveryState == protocols.InterruptedRecoveryState {
-		err := m.makeSnapshotRecovery(data, data.lastValidAliveGenTimestampInRecovery)
+	if data.getRecoveryState() == protocols.InterruptedRecoveryState {
+		err := m.makeSnapshotRecovery(data, data.getLastValidAliveGenTimestampInRecovery())
 		if err != nil {
 			return err
 		}
 	}
 
 	var reason protocols.ProducerUpReason
-	if data.firstRecoveryCompleted {
+	if data.getFirstRecoveryCompleted() {
 		reason = protocols.ReturnedFromInactivityProducerUpReason
 	} else {
 		reason = protocols.FirstRecoveryCompletedProducerUpReason
 	}
 
-	if !data.firstRecoveryCompleted {
-		data.firstRecoveryCompleted = true
+	if !data.getFirstRecoveryCompleted() {
+		data.setFirstRecoveryCompleted(true)
 	}
 
 	data.setProducerRecoveryState(requestID, started, protocols.CompletedRecoveryState)
