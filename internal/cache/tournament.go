@@ -348,8 +348,16 @@ func (t tournamentImpl) LiveOddsAvailability() (*protocols.LiveOddsAvailability,
 	return &available, nil
 }
 
+// Sport returns the sport summary for this tournament. On fetch error
+// returns a zero-value SportSummary (callers can refetch via the
+// SportsCache directly). Errorless to keep the legacy Tournament
+// interface compiling until the Tournament reshape lands.
 func (t tournamentImpl) Sport() protocols.SportSummary {
-	return t.entityFactory.BuildSport(t.sportID, t.locales)
+	s, err := t.entityFactory.BuildSport(context.Background(), t.sportID, t.locales)
+	if err != nil || s == nil {
+		return protocols.SportSummary{ID: t.sportID}
+	}
+	return s.SportSummary
 }
 
 func (t tournamentImpl) Competitors() ([]protocols.Competitor, error) {

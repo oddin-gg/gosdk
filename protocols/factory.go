@@ -10,8 +10,8 @@ import "context"
 type EntityFactory interface {
 	BuildTournaments(tournamentIDs []URN, sportID URN, locales []Locale) []Tournament
 	BuildTournament(id URN, sportID URN, locales []Locale) Tournament
-	BuildSports(locales []Locale) ([]Sport, error)
-	BuildSport(id URN, locales []Locale) Sport
+	BuildSports(ctx context.Context, locales []Locale) ([]Sport, error)
+	BuildSport(ctx context.Context, id URN, locales []Locale) (*Sport, error)
 	BuildCompetitors(competitorIDs []URN, locales []Locale) []Competitor
 	BuildCompetitor(id URN, locales []Locale) Competitor
 	BuildPlayer(ctx context.Context, id URN, locale Locale) (*Player, error)

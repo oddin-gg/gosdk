@@ -260,71 +260,61 @@ func newSportDataCache(client *api.Client, logger *log.Logger) *SportCache {
 	}
 }
 
-// sportImpl satisfies protocols.Sport.
-type sportImpl struct {
-	id             protocols.URN
-	sportDataCache *SportCache
-	entityFactory  protocols.EntityFactory
-	locales        []protocols.Locale
-}
-
-func (s sportImpl) IconPath() (*string, error) {
-	item, err := s.sportDataCache.Sport(context.Background(), s.id, s.locales)
-	if err != nil {
-		return nil, err
+// abbreviations returns a copy of the per-locale abbreviation map.
+func (l *LocalizedSport) abbreviations() map[protocols.Locale]string {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	out := make(map[protocols.Locale]string, len(l.abbreviation))
+	for k, v := range l.abbreviation {
+		out[k] = v
 	}
-	return item.iconPathValue(), nil
+	return out
 }
 
-func (s sportImpl) ID() protocols.URN { return s.id }
-
-func (s sportImpl) Names() (map[protocols.Locale]string, error) {
-	item, err := s.sportDataCache.Sport(context.Background(), s.id, s.locales)
-	if err != nil {
-		return nil, err
+// summarySnapshot projects the cached entry into a protocols.SportSummary
+// value (data-copy under the entry's read lock).
+func (l *LocalizedSport) summarySnapshot() protocols.SportSummary {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	names := make(map[protocols.Locale]string, len(l.name))
+	for k, v := range l.name {
+		names[k] = v
 	}
-	return item.names(), nil
-}
-
-func (s sportImpl) LocalizedName(locale protocols.Locale) (*string, error) {
-	item, err := s.sportDataCache.Sport(context.Background(), s.id, s.locales)
-	if err != nil {
-		return nil, err
+	abbr := make(map[protocols.Locale]string, len(l.abbreviation))
+	for k, v := range l.abbreviation {
+		abbr[k] = v
 	}
-	return item.localizedName(locale)
-}
-
-func (s sportImpl) LocalizedAbbreviation(locale protocols.Locale) (*string, error) {
-	item, err := s.sportDataCache.Sport(context.Background(), s.id, s.locales)
-	if err != nil {
-		return nil, err
+	var iconPath *string
+	if l.iconPath != nil {
+		v := *l.iconPath
+		iconPath = &v
 	}
-	return item.localizedAbbreviation(locale)
+	return protocols.SportSummary{
+		ID:            l.id,
+		Names:         names,
+		Abbreviations: abbr,
+		IconPath:      iconPath,
+	}
 }
 
-func (s sportImpl) Tournaments() ([]protocols.Tournament, error) {
-	item, err := s.sportDataCache.Sport(context.Background(), s.id, s.locales)
+// BuildSport resolves a Sport snapshot from the cache, fetching missing
+// locales and tournament IDs as needed.
+func BuildSport(ctx context.Context, sc *SportCache, id protocols.URN, locales []protocols.Locale) (*protocols.Sport, error) {
+	item, err := sc.Sport(ctx, id, locales)
 	if err != nil {
 		return nil, err
 	}
 	tournamentIDs := item.makeTournamentIDsList()
-	if len(tournamentIDs) == 0 {
-		tournamentIDs, err = s.sportDataCache.SportTournaments(context.Background(), s.id, s.locales[0])
+	if len(tournamentIDs) == 0 && len(locales) > 0 {
+		tournamentIDs, err = sc.SportTournaments(ctx, id, locales[0])
 		if err != nil {
 			return nil, err
 		}
 	}
-	return s.entityFactory.BuildTournaments(tournamentIDs, s.id, s.locales), nil
-}
-
-// NewSport ...
-func NewSport(id protocols.URN, dataCache *SportCache, entityFactory protocols.EntityFactory, locales []protocols.Locale) protocols.Sport {
-	return &sportImpl{
-		id:             id,
-		sportDataCache: dataCache,
-		entityFactory:  entityFactory,
-		locales:        locales,
-	}
+	return &protocols.Sport{
+		SportSummary:  item.summarySnapshot(),
+		TournamentIDs: tournamentIDs,
+	}, nil
 }
 
 // Compile-time check.

@@ -40,25 +40,28 @@ func (e *EntityFactory) BuildTournament(id protocols.URN, sportID protocols.URN,
 	)
 }
 
-// BuildSports ...
-func (e *EntityFactory) BuildSports(locales []protocols.Locale) ([]protocols.Sport, error) {
-	localizedSportIDs, err := e.cacheManager.SportDataCache.Sports(context.Background(), locales)
+// BuildSports resolves the catalog of Sport snapshots for the given
+// locales. Each entry is a populated value; tournament IDs are filled
+// in but tournaments themselves are not eagerly resolved.
+func (e *EntityFactory) BuildSports(ctx context.Context, locales []protocols.Locale) ([]protocols.Sport, error) {
+	sportIDs, err := e.cacheManager.SportDataCache.Sports(ctx, locales)
 	if err != nil {
 		return nil, err
 	}
-
-	result := make([]protocols.Sport, len(localizedSportIDs))
-	for i := range localizedSportIDs {
-		id := localizedSportIDs[i]
-		result[i] = cache.NewSport(id, e.cacheManager.SportDataCache, e, locales)
+	result := make([]protocols.Sport, 0, len(sportIDs))
+	for _, id := range sportIDs {
+		s, err := cache.BuildSport(ctx, e.cacheManager.SportDataCache, id, locales)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, *s)
 	}
-
 	return result, nil
 }
 
-// BuildSport ...
-func (e *EntityFactory) BuildSport(id protocols.URN, locales []protocols.Locale) protocols.Sport {
-	return cache.NewSport(id, e.cacheManager.SportDataCache, e, locales)
+// BuildSport resolves a single Sport snapshot.
+func (e *EntityFactory) BuildSport(ctx context.Context, id protocols.URN, locales []protocols.Locale) (*protocols.Sport, error) {
+	return cache.BuildSport(ctx, e.cacheManager.SportDataCache, id, locales)
 }
 
 // BuildCompetitors ...

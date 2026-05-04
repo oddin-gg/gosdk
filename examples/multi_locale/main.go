@@ -49,10 +49,11 @@ func main() {
 	for _, s := range sports {
 		// Each cached entry now holds en, ru, de simultaneously.
 		// Per-locale lookups don't refetch.
-		en, _ := s.LocalizedName(protocols.EnLocale)
-		ru, _ := s.LocalizedName(protocols.RuLocale)
-		de, _ := s.LocalizedName(protocols.DeLocale)
-		log.Printf("%s | en=%s ru=%s de=%s", s.ID().ToString(), strOrNil(en), strOrNil(ru), strOrNil(de))
+		log.Printf("%s | en=%s ru=%s de=%s",
+			s.ID.ToString(),
+			s.Name(protocols.EnLocale),
+			s.Name(protocols.RuLocale),
+			s.Name(protocols.DeLocale))
 	}
 }
 
@@ -67,9 +68,3 @@ func parseEnv() protocols.Environment {
 	}
 }
 
-func strOrNil(s *string) string {
-	if s == nil {
-		return "<nil>"
-	}
-	return *s
-}

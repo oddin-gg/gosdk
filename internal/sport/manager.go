@@ -45,8 +45,7 @@ func (m *Manager) Sports(ctx context.Context) ([]protocols.Sport, error) {
 
 // LocalizedSports ...
 func (m *Manager) LocalizedSports(ctx context.Context, locale protocols.Locale) ([]protocols.Sport, error) {
-	_ = ctx
-	return m.entityFactory.BuildSports([]protocols.Locale{locale})
+	return m.entityFactory.BuildSports(ctx, []protocols.Locale{locale})
 }
 
 // ActiveTournaments ...
@@ -63,10 +62,7 @@ func (m *Manager) LocalizedActiveTournaments(ctx context.Context, locale protoco
 
 	var result []protocols.Tournament
 	for _, sport := range sports {
-		tournaments, err := sport.Tournaments()
-		if err != nil {
-			return nil, err
-		}
+		tournaments := m.entityFactory.BuildTournaments(sport.TournamentIDs, sport.ID, []protocols.Locale{locale})
 		result = append(result, tournaments...)
 	}
 
@@ -86,13 +82,12 @@ func (m *Manager) LocalizedSportActiveTournaments(ctx context.Context, sportName
 	}
 
 	for _, sport := range sports {
-		name, err := sport.LocalizedName(locale)
-		if err != nil {
-			return nil, err
+		name := sport.Name(locale)
+		if name == "" {
+			continue
 		}
-
-		if strings.EqualFold(*name, sportName) {
-			return sport.Tournaments()
+		if strings.EqualFold(name, sportName) {
+			return m.entityFactory.BuildTournaments(sport.TournamentIDs, sport.ID, []protocols.Locale{locale}), nil
 		}
 	}
 

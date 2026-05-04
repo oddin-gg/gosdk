@@ -202,19 +202,34 @@ type Category interface {
 	CountryCode() *string
 }
 
-// SportSummary ...
-type SportSummary interface {
-	ID() URN
-	Names() (map[Locale]string, error)
-	IconPath() (*string, error)
-	LocalizedName(locale Locale) (*string, error)
-	LocalizedAbbreviation(locale Locale) (*string, error)
+// SportSummary is a pure-data snapshot of a sport's per-locale labels.
+//
+// Phase 6 reshape: replaces the previous SportSummary interface (with
+// (value, error) accessors) with a value struct populated at
+// construction. Names and Abbreviations carry every locale that was
+// loaded for this sport.
+type SportSummary struct {
+	ID            URN
+	Names         map[Locale]string
+	Abbreviations map[Locale]string
+	IconPath      *string
 }
 
-// Sport ...
-type Sport interface {
+// Name returns the localized name for the given locale, or "" if the
+// sport hasn't been loaded for that locale.
+func (s SportSummary) Name(locale Locale) string { return s.Names[locale] }
+
+// Abbreviation returns the localized abbreviation for the given locale,
+// or "" if not loaded.
+func (s SportSummary) Abbreviation(locale Locale) string { return s.Abbreviations[locale] }
+
+// Sport extends SportSummary with the URNs of tournaments under this
+// sport. Tournaments are not eagerly resolved to keep Sport cheap to
+// construct; callers pass the URNs to Client.Tournament(...) when they
+// want a populated Tournament value.
+type Sport struct {
 	SportSummary
-	Tournaments() ([]Tournament, error)
+	TournamentIDs []URN
 }
 
 // EventStatus ...
