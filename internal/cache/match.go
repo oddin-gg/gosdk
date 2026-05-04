@@ -274,182 +274,143 @@ func (m *LocalizedMatch) merge(locale protocols.Locale, match apiXML.SportEvent)
 	return nil
 }
 
-// matchImpl implements protocols.Match. Accessors call MatchCache.Match
-// with context.Background() because protocols.Match accessors don't take
-// a ctx — Phase 6 reshapes accessors to be pure-data, eliminating these
-// hidden lazy loads.
-type matchImpl struct {
-	id            protocols.URN
-	localSportID  *protocols.URN
-	matchCache    *MatchCache
-	entityFactory protocols.EntityFactory
-	locales       []protocols.Locale
+// snapshot projects the cached match entry into the field shapes used
+// by protocols.Match (data-copy under the entry's read lock).
+func (m *LocalizedMatch) snapshot() (
+	names map[protocols.Locale]string,
+	extraInfo map[protocols.Locale]map[string]string,
+	scheduledTime, scheduledEndTime *time.Time,
+	sportID, tournamentID protocols.URN,
+	competitors []competitor,
+	liveOddsAvailability protocols.LiveOddsAvailability,
+	sportFormat protocols.SportFormat,
+) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	names = make(map[protocols.Locale]string, len(m.name))
+	for k, v := range m.name {
+		names[k] = v
+	}
+	extraInfo = make(map[protocols.Locale]map[string]string, len(m.extraInfo))
+	for locale, src := range m.extraInfo {
+		dst := make(map[string]string, len(src))
+		for k, v := range src {
+			dst[k] = v
+		}
+		extraInfo[locale] = dst
+	}
+	if m.scheduledTime != nil {
+		t := *m.scheduledTime
+		scheduledTime = &t
+	}
+	if m.scheduledEndTime != nil {
+		t := *m.scheduledEndTime
+		scheduledEndTime = &t
+	}
+	sportID = m.sportID
+	tournamentID = m.tournamentID
+	competitors = make([]competitor, len(m.competitors))
+	copy(competitors, m.competitors)
+	if m.liveOddsAvailability != nil {
+		liveOddsAvailability = *m.liveOddsAvailability
+	}
+	sportFormat = m.sportFormat
+	return
 }
 
-func (m matchImpl) ID() protocols.URN { return m.id }
-
-func (m matchImpl) LocalizedName(locale protocols.Locale) (*string, error) {
-	item, err := m.matchCache.Match(context.Background(), m.id, m.locales)
+// BuildMatch resolves a *protocols.Match snapshot. Eagerly loads:
+//   - the per-locale match summary (entry + name + extra-info)
+//   - the tournament (with its embedded sport summary)
+//   - per-competitor profiles (across the requested locales)
+//   - home/away team competitors when the sport format is "classic"
+//   - the fixture (in the primary locale)
+//   - the live status snapshot (with localized status-code description)
+//
+// sportID overrides the cached sportID when non-nil — used by feed
+// message decode where the routing key carries the sport.
+func BuildMatch(
+	ctx context.Context,
+	mc *MatchCache,
+	factory protocols.EntityFactory,
+	id protocols.URN,
+	sportID *protocols.URN,
+	locales []protocols.Locale,
+) (*protocols.Match, error) {
+	if len(locales) == 0 {
+		return nil, fmt.Errorf("BuildMatch: no locales supplied")
+	}
+	entry, err := mc.Match(ctx, id, locales)
 	if err != nil {
 		return nil, err
 	}
-	v, ok := item.Name(locale)
-	if !ok {
-		return nil, fmt.Errorf("missing locale %s", locale)
+	names, extraInfo, sched, schedEnd, cachedSport, tournID, comps, liveAvail, format := entry.snapshot()
+	resolvedSport := cachedSport
+	if sportID != nil {
+		resolvedSport = *sportID
 	}
-	return &v, nil
-}
 
-func (m matchImpl) SportID() (*protocols.URN, error) {
-	if m.localSportID != nil {
-		return m.localSportID, nil
-	}
-	item, err := m.matchCache.Match(context.Background(), m.id, m.locales)
+	// Tournament (eager).
+	tournament, err := factory.BuildTournament(ctx, tournID, resolvedSport, locales)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("build tournament %s: %w", tournID.ToString(), err)
 	}
-	id := item.SportID()
-	m.localSportID = &id
-	return m.localSportID, nil
-}
 
-func (m matchImpl) ScheduledTime() (*time.Time, error) {
-	item, err := m.matchCache.Match(context.Background(), m.id, m.locales)
-	if err != nil {
-		return nil, err
+	// Competitors (eager). For classic sports the home/away pair is
+	// projected into TeamCompetitor pointers as well.
+	competitors := make([]protocols.Competitor, 0, len(comps))
+	for _, t := range comps {
+		c, err := factory.BuildCompetitor(ctx, t.urn, locales)
+		if err != nil {
+			return nil, fmt.Errorf("build competitor %s: %w", t.urn.ToString(), err)
+		}
+		competitors = append(competitors, *c)
 	}
-	return item.ScheduledTime(), nil
-}
 
-func (m matchImpl) ScheduledEndTime() (*time.Time, error) {
-	item, err := m.matchCache.Match(context.Background(), m.id, m.locales)
-	if err != nil {
-		return nil, err
-	}
-	return item.ScheduledEndTime(), nil
-}
-
-func (m matchImpl) LiveOddsAvailability() (*protocols.LiveOddsAvailability, error) {
-	item, err := m.matchCache.Match(context.Background(), m.id, m.locales)
-	if err != nil {
-		return nil, err
-	}
-	return item.LiveOddsAvailability(), nil
-}
-
-func (m matchImpl) Competitors() ([]protocols.Competitor, error) {
-	item, err := m.matchCache.Match(context.Background(), m.id, m.locales)
-	if err != nil {
-		return nil, err
-	}
-	teams := item.Competitors()
-	if len(teams) < 2 {
-		return nil, fmt.Errorf("match %s has less than 2 competitors", m.id.ToString())
-	}
-	out := make([]protocols.Competitor, 0, len(teams))
-	for _, t := range teams {
-		c, err := m.entityFactory.BuildCompetitor(context.Background(), t.urn, m.locales)
+	var home, away *protocols.TeamCompetitor
+	if format == protocols.SportFormatClassic && len(comps) == 2 {
+		hq := comps[0].qualifier
+		aq := comps[1].qualifier
+		h, err := factory.BuildTeamCompetitor(ctx, comps[0].urn, &hq, locales)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, *c)
+		home = h
+		a, err := factory.BuildTeamCompetitor(ctx, comps[1].urn, &aq, locales)
+		if err != nil {
+			return nil, err
+		}
+		away = a
 	}
-	return out, nil
-}
 
-func (m matchImpl) SportFormat() (protocols.SportFormat, error) {
-	item, err := m.matchCache.Match(context.Background(), m.id, m.locales)
+	// Fixture (primary locale).
+	fixture, err := factory.BuildFixture(ctx, id, locales[0])
 	if err != nil {
-		return protocols.SportFormatUnknown, err
+		return nil, fmt.Errorf("build fixture %s: %w", id.ToString(), err)
 	}
-	return item.SportFormat(), nil
-}
 
-func (m matchImpl) ExtraInfo() (map[string]string, error) {
-	item, err := m.matchCache.Match(context.Background(), m.id, m.locales)
+	// Status (cache-fed; FetchMatchSummary already populated it as part
+	// of mc.Match above via the cache observer).
+	status, err := factory.BuildMatchStatus(ctx, id, locales)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("build match status %s: %w", id.ToString(), err)
 	}
-	return item.ExtraInfo(m.locales[0]), nil
-}
 
-func (m matchImpl) Status() protocols.MatchStatus {
-	s, err := m.entityFactory.BuildMatchStatus(context.Background(), m.id, m.locales)
-	if err != nil || s == nil {
-		return protocols.MatchStatus{}
-	}
-	return *s
-}
-
-func (m matchImpl) Tournament() (protocols.Tournament, error) {
-	zero := protocols.Tournament{}
-	sportID, err := m.SportID()
-	if err != nil {
-		return zero, err
-	}
-	item, err := m.matchCache.Match(context.Background(), m.id, m.locales)
-	if err != nil {
-		return zero, err
-	}
-	t, err := m.entityFactory.BuildTournament(context.Background(), item.TournamentID(), *sportID, m.locales)
-	if err != nil {
-		return zero, err
-	}
-	return *t, nil
-}
-
-func (m matchImpl) homeAwayCompetitor(home bool) (protocols.TeamCompetitor, error) {
-	zero := protocols.TeamCompetitor{}
-	item, err := m.matchCache.Match(context.Background(), m.id, m.locales)
-	if err != nil {
-		return zero, err
-	}
-	teams := item.Competitors()
-	switch {
-	case len(teams) < 2:
-		return zero, fmt.Errorf("match %s has less than 2 competitors", m.id.ToString())
-	case item.SportFormat() != protocols.SportFormatClassic:
-		return zero, fmt.Errorf("match %s is not a classic sport format", m.id.ToString())
-	case len(teams) > 2:
-		return zero, fmt.Errorf("classic sport match %s has more than 2 competitors", m.id.ToString())
-	}
-	team := teams[0]
-	if !home {
-		team = teams[1]
-	}
-	q := team.qualifier
-	tc, err := m.entityFactory.BuildTeamCompetitor(context.Background(), team.urn, &q, m.locales)
-	if err != nil {
-		return zero, err
-	}
-	return *tc, nil
-}
-
-func (m matchImpl) HomeCompetitor() (protocols.TeamCompetitor, error) { return m.homeAwayCompetitor(true) }
-func (m matchImpl) AwayCompetitor() (protocols.TeamCompetitor, error) { return m.homeAwayCompetitor(false) }
-
-// Fixture returns the fixture snapshot for this match in the default
-// locale. On fetch error returns a zero-value Fixture (callers can
-// inspect the err via FixtureWithError). The signature stays errorless
-// to match the protocols.Match interface; the reshaped Fixture type is
-// a value struct now.
-func (m matchImpl) Fixture() protocols.Fixture {
-	f, _ := m.entityFactory.BuildFixture(context.Background(), m.id, m.locales[0])
-	if f == nil {
-		return protocols.Fixture{}
-	}
-	return *f
-}
-
-// NewMatch ...
-func NewMatch(id protocols.URN, sportID *protocols.URN, matchCache *MatchCache, entityFactory protocols.EntityFactory, locales []protocols.Locale) protocols.Match {
-	return &matchImpl{
-		id:            id,
-		localSportID:  sportID,
-		matchCache:    matchCache,
-		entityFactory: entityFactory,
-		locales:       locales,
-	}
+	return &protocols.Match{
+		ID:                   id,
+		Names:                names,
+		SportID:              resolvedSport,
+		ScheduledTime:        sched,
+		ScheduledEndTime:     schedEnd,
+		LiveOddsAvailability: liveAvail,
+		SportFormat:          format,
+		ExtraInfo:            extraInfo,
+		Tournament:           *tournament,
+		Competitors:          competitors,
+		HomeCompetitor:       home,
+		AwayCompetitor:       away,
+		Fixture:              *fixture,
+		Status:               *status,
+	}, nil
 }
 
 // shared helpers used across this package's caches.

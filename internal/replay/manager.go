@@ -14,15 +14,15 @@ type Manager struct {
 	sportsInfoManager     protocols.SportsInfoManager
 }
 
-// ReplayList ...
-func (m *Manager) ReplayList(ctx context.Context) ([]protocols.SportEvent, error) {
+// ReplayList returns the queued replay events as Match value snapshots.
+func (m *Manager) ReplayList(ctx context.Context) ([]protocols.Match, error) {
 	events, err := m.apiClient.FetchReplaySetContent(ctx, m.oddsFeedConfiguration.SdkNodeID())
 	if err != nil {
 		return nil, err
 	}
 
-	result := make([]protocols.SportEvent, len(events))
-	for i, event := range events {
+	result := make([]protocols.Match, 0, len(events))
+	for _, event := range events {
 		id, err := protocols.ParseURN(event.ID)
 		if err != nil {
 			return nil, err
@@ -31,25 +31,15 @@ func (m *Manager) ReplayList(ctx context.Context) ([]protocols.SportEvent, error
 		if err != nil {
 			return nil, err
 		}
-		result[i] = match
+		result = append(result, match)
 	}
 
 	return result, nil
 }
 
-// AddSportEvent ...
-func (m *Manager) AddSportEvent(ctx context.Context, event protocols.SportEvent) (bool, error) {
-	return m.AddSportEventID(ctx, event.ID())
-}
-
 // AddSportEventID ...
 func (m *Manager) AddSportEventID(ctx context.Context, id protocols.URN) (bool, error) {
 	return m.apiClient.PutReplayEvent(ctx, id, m.oddsFeedConfiguration.SdkNodeID())
-}
-
-// RemoveSportEvent ...
-func (m *Manager) RemoveSportEvent(ctx context.Context, event protocols.SportEvent) (bool, error) {
-	return m.RemoveSportEventID(ctx, event.ID())
 }
 
 // RemoveSportEventID ...

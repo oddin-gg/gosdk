@@ -96,20 +96,24 @@ func (e *EntityFactory) BuildMatchStatus(ctx context.Context, id protocols.URN, 
 	return cache.BuildMatchStatus(ctx, e.cacheManager.MatchStatusCache, e.cacheManager.LocalizedStaticMatchStatus, id, locales)
 }
 
-// BuildMatches ...
-func (e *EntityFactory) BuildMatches(ids []protocols.URN, locales []protocols.Locale) []protocols.Match {
-	result := make([]protocols.Match, len(ids))
-	for i := range ids {
-		id := ids[i]
-		result[i] = cache.NewMatch(id, nil, e.cacheManager.MatchCache, e, locales)
+// BuildMatches resolves a slice of Match snapshots.
+func (e *EntityFactory) BuildMatches(ctx context.Context, ids []protocols.URN, locales []protocols.Locale) ([]protocols.Match, error) {
+	result := make([]protocols.Match, 0, len(ids))
+	for _, id := range ids {
+		m, err := cache.BuildMatch(ctx, e.cacheManager.MatchCache, e, id, nil, locales)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, *m)
 	}
-
-	return result
+	return result, nil
 }
 
-// BuildMatch ...
-func (e *EntityFactory) BuildMatch(id protocols.URN, locales []protocols.Locale, sportID *protocols.URN) protocols.Match {
-	return cache.NewMatch(id, sportID, e.cacheManager.MatchCache, e, locales)
+// BuildMatch resolves a single Match snapshot. sportID overrides the
+// cached sport when non-nil (used by feed-message decode where the
+// routing key carries the sport).
+func (e *EntityFactory) BuildMatch(ctx context.Context, id protocols.URN, locales []protocols.Locale, sportID *protocols.URN) (*protocols.Match, error) {
+	return cache.BuildMatch(ctx, e.cacheManager.MatchCache, e, id, sportID, locales)
 }
 
 // NewEntityFactory ...

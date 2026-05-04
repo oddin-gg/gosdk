@@ -109,13 +109,17 @@ func (m *Manager) LocalizedMatchesFor(ctx context.Context, date time.Time, local
 		return nil, err
 	}
 
-	result := make([]protocols.Match, len(data))
+	result := make([]protocols.Match, 0, len(data))
 	for i := range data {
 		id, err := protocols.ParseURN(data[i].ID)
 		if err != nil {
 			return nil, err
 		}
-		result[i] = m.entityFactory.BuildMatch(*id, []protocols.Locale{locale}, nil)
+		match, err := m.entityFactory.BuildMatch(ctx, *id, []protocols.Locale{locale}, nil)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, *match)
 	}
 
 	return result, nil
@@ -133,13 +137,17 @@ func (m *Manager) LocalizedLiveMatches(ctx context.Context, locale protocols.Loc
 		return nil, err
 	}
 
-	result := make([]protocols.Match, len(data))
+	result := make([]protocols.Match, 0, len(data))
 	for i := range data {
 		id, err := protocols.ParseURN(data[i].ID)
 		if err != nil {
 			return nil, err
 		}
-		result[i] = m.entityFactory.BuildMatch(*id, []protocols.Locale{locale}, nil)
+		match, err := m.entityFactory.BuildMatch(ctx, *id, []protocols.Locale{locale}, nil)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, *match)
 	}
 
 	return result, nil
@@ -152,8 +160,11 @@ func (m *Manager) Match(ctx context.Context, id protocols.URN) (protocols.Match,
 
 // LocalizedMatch ...
 func (m *Manager) LocalizedMatch(ctx context.Context, id protocols.URN, locale protocols.Locale) (protocols.Match, error) {
-	_ = ctx
-	return m.entityFactory.BuildMatch(id, []protocols.Locale{locale}, nil), nil
+	match, err := m.entityFactory.BuildMatch(ctx, id, []protocols.Locale{locale}, nil)
+	if err != nil {
+		return protocols.Match{}, err
+	}
+	return *match, nil
 }
 
 // Competitor ...
@@ -218,13 +229,17 @@ func (m *Manager) LocalizedListOfMatches(ctx context.Context, startIndex uint, l
 		return nil, err
 	}
 
-	result := make([]protocols.Match, len(data))
+	result := make([]protocols.Match, 0, len(data))
 	for i := range data {
 		id, err := protocols.ParseURN(data[i].ID)
 		if err != nil {
 			return nil, err
 		}
-		result[i] = m.entityFactory.BuildMatch(*id, []protocols.Locale{locale}, nil)
+		match, err := m.entityFactory.BuildMatch(ctx, *id, []protocols.Locale{locale}, nil)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, *match)
 	}
 
 	return result, nil

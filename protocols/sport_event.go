@@ -30,15 +30,9 @@ const (
 	SportFormatRace    = "race"
 )
 
-// SportEvent ...
-type SportEvent interface {
-	ID() URN
-	LocalizedName(locale Locale) (*string, error)
-	SportID() (*URN, error)
-	ScheduledTime() (*time.Time, error)
-	ScheduledEndTime() (*time.Time, error)
-	LiveOddsAvailability() (*LiveOddsAvailability, error)
-}
+// (SportEvent interface removed in Phase 6 reshape — entities like
+// Match and Tournament now expose ID, Names, ScheduledTime, etc. as
+// fields/helpers directly.)
 
 // PeriodScore is a pure-data per-period scoreline.
 //
@@ -159,11 +153,8 @@ type MatchStatus struct {
 	StatusDescription *LocalizedStaticData
 }
 
-// Competition ...
-type Competition interface {
-	SportEvent
-	Competitors() ([]Competitor, error)
-}
+// (Competition interface removed in Phase 6 reshape — Match exposes
+// Competitors as a field directly.)
 
 // TvChannel is a TV broadcast channel attached to a fixture, in one
 // locale.
@@ -186,16 +177,38 @@ type Fixture struct {
 	Locale     Locale
 }
 
-// Match ...
-type Match interface {
-	Competition
-	Status() MatchStatus
-	Tournament() (Tournament, error)
-	HomeCompetitor() (TeamCompetitor, error)
-	AwayCompetitor() (TeamCompetitor, error)
-	Fixture() Fixture
-	SportFormat() (SportFormat, error)
-	ExtraInfo() (map[string]string, error)
+// Match is a pure-data snapshot of a match populated across one or
+// more locales.
+//
+// Phase 6 reshape: replaces the previous Match interface (with 11
+// (value, error) lazy accessors) with a value struct populated at
+// construction. Linked entities (Tournament, Competitors, MatchStatus,
+// Fixture) are eager-loaded as direct fields. Per-locale name and
+// extra info are exposed as maps with helper methods.
+type Match struct {
+	ID                   URN
+	Names                map[Locale]string
+	SportID              URN
+	ScheduledTime        *time.Time
+	ScheduledEndTime     *time.Time
+	LiveOddsAvailability LiveOddsAvailability
+	SportFormat          SportFormat
+	ExtraInfo            map[Locale]map[string]string
+
+	Tournament     Tournament
+	Competitors    []Competitor
+	HomeCompetitor *TeamCompetitor // nil for non-classic sport formats
+	AwayCompetitor *TeamCompetitor // nil for non-classic sport formats
+	Fixture        Fixture
+	Status         MatchStatus
+}
+
+// Name returns the localized match name, or "" if not loaded.
+func (m Match) Name(locale Locale) string { return m.Names[locale] }
+
+// ExtraInfoFor returns the extra-info map for the given locale, or nil.
+func (m Match) ExtraInfoFor(locale Locale) map[string]string {
+	return m.ExtraInfo[locale]
 }
 
 // Category is a pure-data tournament category (e.g., a country grouping

@@ -44,7 +44,10 @@ func (f *FeedMessageFactory) BuildMessage(feedMessage *protocols.FeedMessage) (i
 			event = *t
 		}
 	case protocols.MatchEventType:
-		event = f.entityFactory.BuildMatch(*feedMessage.RoutingKey.EventID, []protocols.Locale{f.oddsFeedConfiguration.DefaultLocale()}, feedMessage.RoutingKey.SportID)
+		match, err := f.entityFactory.BuildMatch(context.Background(), *feedMessage.RoutingKey.EventID, []protocols.Locale{f.oddsFeedConfiguration.DefaultLocale()}, feedMessage.RoutingKey.SportID)
+		if err == nil && match != nil {
+			event = *match
+		}
 	}
 
 	producer, err := f.producerManager.GetProducerCached(feedMessage.Message.Product())
@@ -135,7 +138,10 @@ func (f *FeedMessageFactory) BuildUnparsableMessage(feedMessage *protocols.FeedM
 			event = *t
 		}
 	case protocols.MatchEventType:
-		event = f.entityFactory.BuildMatch(*feedMessage.RoutingKey.EventID, []protocols.Locale{f.oddsFeedConfiguration.DefaultLocale()}, feedMessage.RoutingKey.SportID)
+		match, err := f.entityFactory.BuildMatch(context.Background(), *feedMessage.RoutingKey.EventID, []protocols.Locale{f.oddsFeedConfiguration.DefaultLocale()}, feedMessage.RoutingKey.SportID)
+		if err == nil && match != nil {
+			event = *match
+		}
 	}
 
 	return unparsableMessageImpl{

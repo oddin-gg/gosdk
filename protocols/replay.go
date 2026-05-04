@@ -12,13 +12,14 @@ type ReplayPlayParams struct {
 }
 
 // ReplayManager ...
+//
+// Phase 6 reshape: ReplayList returns Match values directly (the
+// previous SportEvent interface is gone — replay queues are populated
+// from match URNs).
 type ReplayManager interface {
-	ReplayList(ctx context.Context) ([]SportEvent, error)
+	ReplayList(ctx context.Context) ([]Match, error)
 
-	AddSportEvent(ctx context.Context, event SportEvent) (bool, error)
 	AddSportEventID(ctx context.Context, id URN) (bool, error)
-
-	RemoveSportEvent(ctx context.Context, event SportEvent) (bool, error)
 	RemoveSportEventID(ctx context.Context, id URN) (bool, error)
 
 	Play(ctx context.Context, params ReplayPlayParams) (bool, error)

@@ -18,6 +18,6 @@ type EntityFactory interface {
 	BuildPlayer(ctx context.Context, id URN, locale Locale) (*Player, error)
 	BuildFixture(ctx context.Context, id URN, locale Locale) (*Fixture, error)
 	BuildMatchStatus(ctx context.Context, id URN, locales []Locale) (*MatchStatus, error)
-	BuildMatches(ids []URN, locales []Locale) []Match
-	BuildMatch(id URN, locales []Locale, sportID *URN) Match
+	BuildMatches(ctx context.Context, ids []URN, locales []Locale) ([]Match, error)
+	BuildMatch(ctx context.Context, id URN, locales []Locale, sportID *URN) (*Match, error)
 }

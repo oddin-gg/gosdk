@@ -805,8 +805,8 @@ type Replay struct {
 	client *Client
 }
 
-// List returns the replay queue contents.
-func (r *Replay) List(ctx context.Context) ([]protocols.SportEvent, error) {
+// List returns the replay queue contents as Match value snapshots.
+func (r *Replay) List(ctx context.Context) ([]protocols.Match, error) {
 	return r.client.replayManager.ReplayList(ctx)
 }
 

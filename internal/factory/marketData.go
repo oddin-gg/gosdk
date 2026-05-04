@@ -120,20 +120,12 @@ func (m marketDataImpl) makeOutcomeName(outcomeName *string, locale protocols.Lo
 
 	switch {
 	// @TODO this broke with different locale - need to use ID
-	case *outcomeName == "home" && isMatch:
-		home, err := match.HomeCompetitor()
-		if err != nil {
-			return nil, err
-		}
-		name := home.Name(locale)
+	case *outcomeName == "home" && isMatch && match.HomeCompetitor != nil:
+		name := match.HomeCompetitor.Name(locale)
 		return &name, nil
 		// @TODO this broke with different locale - need to use ID
-	case *outcomeName == "away" && isMatch:
-		away, err := match.AwayCompetitor()
-		if err != nil {
-			return nil, err
-		}
-		name := away.Name(locale)
+	case *outcomeName == "away" && isMatch && match.AwayCompetitor != nil:
+		name := match.AwayCompetitor.Name(locale)
 		return &name, nil
 	default:
 		return outcomeName, nil
@@ -163,18 +155,10 @@ func (m marketDataImpl) makeMarketName(marketName string, locale protocols.Local
 		}
 
 		switch {
-		case value == "home" && isMatch:
-			home, err := match.HomeCompetitor()
-			if err != nil {
-				return nil, err
-			}
-			value = home.Name(locale)
-		case value == "away" && isMatch:
-			away, err := match.AwayCompetitor()
-			if err != nil {
-				return nil, err
-			}
-			value = away.Name(locale)
+		case value == "home" && isMatch && match.HomeCompetitor != nil:
+			value = match.HomeCompetitor.Name(locale)
+		case value == "away" && isMatch && match.AwayCompetitor != nil:
+			value = match.AwayCompetitor.Name(locale)
 		}
 
 		// handle props markets
