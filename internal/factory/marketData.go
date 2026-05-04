@@ -66,7 +66,7 @@ func (m marketDataImpl) OutcomeName(outcomeID string, locale protocols.Locale) (
 	if !found && marketDescription.OutcomeType() != nil {
 		switch outcomeType(*marketDescription.OutcomeType()) {
 		case playerOutcomeType:
-			player, err := m.marketDescriptionFactory.playerCache.GetPlayer(cache.PlayerCacheKey{PlayerID: outcomeID, Locale: locale})
+			player, err := m.marketDescriptionFactory.playerCache.GetPlayer(context.Background(), cache.PlayerCacheKey{PlayerID: outcomeID, Locale: locale})
 			if err != nil {
 				return nil, fmt.Errorf("derivation of outcome name for dynamic player outcome failed for id [%s]: %w", outcomeID, err)
 			}
@@ -208,6 +208,7 @@ func (m marketDataImpl) getPropsName(entityID string, groups []string, locale pr
 	switch urn.Type {
 	case string(protocols.PlayerEventType):
 		player, err := m.marketDescriptionFactory.playerCache.GetPlayer(
+			context.Background(),
 			cache.PlayerCacheKey{
 				PlayerID: entityID,
 				Locale:   locale,

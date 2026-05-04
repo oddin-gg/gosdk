@@ -1,6 +1,8 @@
 package factory
 
 import (
+	"context"
+
 	"github.com/oddin-gg/gosdk/internal/cache"
 	"github.com/oddin-gg/gosdk/protocols"
 )
@@ -40,7 +42,7 @@ func (e *EntityFactory) BuildTournament(id protocols.URN, sportID protocols.URN,
 
 // BuildSports ...
 func (e *EntityFactory) BuildSports(locales []protocols.Locale) ([]protocols.Sport, error) {
-	localizedSportIDs, err := e.cacheManager.SportDataCache.Sports(locales)
+	localizedSportIDs, err := e.cacheManager.SportDataCache.Sports(context.Background(), locales)
 	if err != nil {
 		return nil, err
 	}

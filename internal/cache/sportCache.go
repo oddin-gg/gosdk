@@ -9,268 +9,272 @@ import (
 	"github.com/oddin-gg/gosdk/internal/api"
 	"github.com/oddin-gg/gosdk/internal/api/xml"
 	"github.com/oddin-gg/gosdk/protocols"
-	"github.com/patrickmn/go-cache"
 	log "github.com/sirupsen/logrus"
 )
 
-// SportCache ...
+// SportCache caches the (small, bounded) sport list and per-sport tournament
+// IDs that get filled in lazily as tournaments are looked up.
+//
+// Phase 3 rewrite: replaces patrickmn/go-cache + global mutex with a
+// sync.RWMutex-protected map. No LRU; the sport list is small (≲50). Locale
+// tracking is per-cache; once a locale is loaded the data covers every
+// known sport for that locale.
 type SportCache struct {
-	apiClient     *api.Client
-	internalCache *cache.Cache
+	apiClient *api.Client
+	logger    *log.Entry
+
+	mu            sync.RWMutex
 	loadedLocales map[protocols.Locale]struct{}
-	mux           sync.Mutex
-	logger        *log.Entry
+	sports        map[protocols.URN]*LocalizedSport
 }
 
-// OnAPIResponse ...
-func (s *SportCache) OnAPIResponse(apiResponse protocols.Response) {
-	if apiResponse.Locale == nil || apiResponse.Data == nil {
-		return
-	}
+// LocalizedSport holds per-sport data; mu guards every field.
+type LocalizedSport struct {
+	mu sync.RWMutex
 
-	result := make(map[string]*xml.Sport)
-	switch data := apiResponse.Data.(type) {
-	case *xml.TournamentScheduleResponse:
-		result[data.Tournament.ID] = &data.Tournament.Sport
-	case *xml.TournamentResponse:
-		result[data.Tournament.ID] = &data.Tournament.Sport
-	}
-
-	err := s.handleTournamentData(*apiResponse.Locale, result)
-	if err != nil {
-		s.logger.WithError(err).Errorf("failed to process api response %v", apiResponse)
-	}
+	id            protocols.URN
+	tournamentIDs map[protocols.URN]struct{}
+	name          map[protocols.Locale]string
+	abbreviation  map[protocols.Locale]string
+	iconPath      *string
+	refID         *protocols.URN
 }
 
-// Sport ...
-func (s *SportCache) Sport(id protocols.URN, locales []protocols.Locale) (*LocalizedSport, error) {
-	item, _ := s.internalCache.Get(id.ToString())
-	result, ok := item.(*LocalizedSport)
+func (l *LocalizedSport) makeTournamentIDsList() []protocols.URN {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	out := make([]protocols.URN, 0, len(l.tournamentIDs))
+	for k := range l.tournamentIDs {
+		out = append(out, k)
+	}
+	return out
+}
 
-	var missingLocales []protocols.Locale
+func (l *LocalizedSport) names() map[protocols.Locale]string {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	out := make(map[protocols.Locale]string, len(l.name))
+	for k, v := range l.name {
+		out[k] = v
+	}
+	return out
+}
+
+func (l *LocalizedSport) localizedName(locale protocols.Locale) (*string, error) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	v, ok := l.name[locale]
 	if !ok {
-		missingLocales = locales
-	} else {
-		missingLocales = s.findMissingLocales(locales)
-		if len(missingLocales) != 0 {
-			err := s.loadAndCacheItems(missingLocales)
-			if err != nil {
-				return nil, err
-			}
-		}
+		return nil, fmt.Errorf("missing locale %s", locale)
 	}
-
-	if len(missingLocales) != 0 {
-		err := s.loadAndCacheItems(missingLocales)
-		if err != nil {
-			return nil, err
-		}
-		item, _ = s.internalCache.Get(id.ToString())
-		result, ok = item.(*LocalizedSport)
-		if !ok {
-			return nil, errors.New("item missing")
-		}
-	}
-
-	return result, nil
+	return &v, nil
 }
 
-// Sports ...
-func (s *SportCache) Sports(locales []protocols.Locale) ([]protocols.URN, error) {
-	missingLocales := s.findMissingLocales(locales)
-	if len(missingLocales) != 0 {
-		err := s.loadAndCacheItems(missingLocales)
-		if err != nil {
-			return nil, err
-		}
+func (l *LocalizedSport) localizedAbbreviation(locale protocols.Locale) (*string, error) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	v, ok := l.abbreviation[locale]
+	if !ok {
+		return nil, fmt.Errorf("missing locale %s", locale)
 	}
-
-	items := s.internalCache.Items()
-	result := make([]protocols.URN, len(items))
-	index := 0
-	for _, value := range items {
-		obj := value.Object
-		item, ok := obj.(*LocalizedSport)
-		if !ok {
-			return nil, errors.New("wrong item type in sports cache")
-		}
-		result[index] = item.id
-		index++
-	}
-
-	return result, nil
+	return &v, nil
 }
 
-// SportTournaments ...
-func (s *SportCache) SportTournaments(sportID protocols.URN, locale protocols.Locale) ([]protocols.URN, error) {
-	item, _ := s.internalCache.Get(sportID.ToString())
-	result, ok := item.(*LocalizedSport)
-	if ok && len(result.tournamentIDs) != 0 {
-		return result.makeTournamentIDsList(), nil
+func (l *LocalizedSport) iconPathValue() *string {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.iconPath
+}
+
+func (l *LocalizedSport) refIDValue() *protocols.URN {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.refID
+}
+
+// Sport returns a sport entry, loading missing locales as needed.
+func (s *SportCache) Sport(ctx context.Context, id protocols.URN, locales []protocols.Locale) (*LocalizedSport, error) {
+	if err := s.ensureLocalesLoaded(ctx, locales); err != nil {
+		return nil, err
 	}
 
-	tournaments, err := s.apiClient.FetchTournaments(context.Background(), sportID, locale)
+	s.mu.RLock()
+	entry, ok := s.sports[id]
+	s.mu.RUnlock()
+
+	if !ok {
+		return nil, fmt.Errorf("sport %s not found", id.ToString())
+	}
+	return entry, nil
+}
+
+// Sports returns the URN list, loading missing locales as needed.
+func (s *SportCache) Sports(ctx context.Context, locales []protocols.Locale) ([]protocols.URN, error) {
+	if err := s.ensureLocalesLoaded(ctx, locales); err != nil {
+		return nil, err
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]protocols.URN, 0, len(s.sports))
+	for id := range s.sports {
+		out = append(out, id)
+	}
+	return out, nil
+}
+
+// SportTournaments returns the tournament URN list for the sport, fetching
+// from the API and merging into the cached entry.
+func (s *SportCache) SportTournaments(ctx context.Context, sportID protocols.URN, locale protocols.Locale) ([]protocols.URN, error) {
+	s.mu.RLock()
+	entry, ok := s.sports[sportID]
+	s.mu.RUnlock()
+
+	if ok {
+		ids := entry.makeTournamentIDsList()
+		if len(ids) > 0 {
+			return ids, nil
+		}
+	}
+
+	tournaments, err := s.apiClient.FetchTournaments(ctx, sportID, locale)
 	if err != nil {
 		return nil, err
 	}
 
-	tournamentIDs := make([]protocols.URN, len(tournaments))
+	tournamentIDs := make([]protocols.URN, 0, len(tournaments))
 	for i := range tournaments {
 		id, err := protocols.ParseURN(tournaments[i].ID)
 		if err != nil {
 			return nil, err
 		}
-		tournamentIDs[i] = *id
-		err = s.refreshOrInsertItem(sportID, locale, nil, id)
-		if err != nil {
+		tournamentIDs = append(tournamentIDs, *id)
+		if err := s.recordTournament(sportID, *id); err != nil {
 			return nil, err
 		}
 	}
-
 	return tournamentIDs, nil
 }
 
-func (s *SportCache) findMissingLocales(locales []protocols.Locale) []protocols.Locale {
-	var missingLocales []protocols.Locale
-	for i := range locales {
-		locale := locales[i]
-		s.mux.Lock()
-		_, ok := s.loadedLocales[locale]
-		s.mux.Unlock()
-
-		if !ok {
-			missingLocales = append(missingLocales, locale)
-		}
+// ensureLocalesLoaded fetches the sport list for any locale not already loaded.
+// Locale-load failure does NOT poison the cache (the locale stays unmarked).
+func (s *SportCache) ensureLocalesLoaded(ctx context.Context, locales []protocols.Locale) error {
+	missing := s.findMissingLocales(locales)
+	if len(missing) == 0 {
+		return nil
 	}
-
-	return missingLocales
-}
-
-func (s *SportCache) loadAndCacheItems(locales []protocols.Locale) error {
-	for i := range locales {
-		locale := locales[i]
-		data, err := s.apiClient.FetchSports(context.Background(), locale)
+	for _, locale := range missing {
+		data, err := s.apiClient.FetchSports(ctx, locale)
 		if err != nil {
 			return err
 		}
-
 		for k := range data {
 			sport := data[k]
 			id, err := protocols.ParseURN(sport.ID)
 			if err != nil {
 				return err
 			}
-
-			err = s.refreshOrInsertItem(*id, locale, &sport, nil)
-			if err != nil {
+			if err := s.upsertSport(*id, locale, &sport); err != nil {
 				return err
 			}
 		}
-
-		s.mux.Lock()
-		s.loadedLocales[locale] = struct{}{}
-		s.mux.Unlock()
+		s.markLocaleLoaded(locale)
 	}
-
 	return nil
 }
 
-func (s *SportCache) refreshOrInsertItem(id protocols.URN, locale protocols.Locale, sport *xml.Sport, tournamentID *protocols.URN) error {
-	item, _ := s.internalCache.Get(id.ToString())
-	result, ok := item.(*LocalizedSport)
+func (s *SportCache) findMissingLocales(locales []protocols.Locale) []protocols.Locale {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var missing []protocols.Locale
+	for _, l := range locales {
+		if _, ok := s.loadedLocales[l]; !ok {
+			missing = append(missing, l)
+		}
+	}
+	return missing
+}
+
+func (s *SportCache) markLocaleLoaded(locale protocols.Locale) {
+	s.mu.Lock()
+	s.loadedLocales[locale] = struct{}{}
+	s.mu.Unlock()
+}
+
+func (s *SportCache) upsertSport(id protocols.URN, locale protocols.Locale, sport *xml.Sport) error {
+	s.mu.Lock()
+	entry, ok := s.sports[id]
 	if !ok {
-		result = &LocalizedSport{
+		entry = &LocalizedSport{
 			id:            id,
-			name:          make(map[protocols.Locale]string),
 			tournamentIDs: make(map[protocols.URN]struct{}),
+			name:          make(map[protocols.Locale]string),
 			abbreviation:  make(map[protocols.Locale]string),
 		}
+		s.sports[id] = entry
 	}
+	s.mu.Unlock()
 
-	result.mux.Lock()
-	defer result.mux.Unlock()
-
-	if sport != nil {
-		result.name[locale] = sport.Name
-		result.abbreviation[locale] = sport.Abbreviation
-		result.iconPath = sport.IconPath
-
-		if sport.RefID != nil {
-			refID, err := protocols.ParseURN(*sport.RefID)
-			if err != nil {
-				return err
-			}
-			result.refID = refID
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	entry.name[locale] = sport.Name
+	entry.abbreviation[locale] = sport.Abbreviation
+	entry.iconPath = sport.IconPath
+	if sport.RefID != nil {
+		refID, err := protocols.ParseURN(*sport.RefID)
+		if err != nil {
+			return err
 		}
+		entry.refID = refID
 	}
-
-	if tournamentID != nil {
-		result.tournamentIDs[*tournamentID] = struct{}{}
-	}
-
-	s.internalCache.Set(id.ToString(), result, 0)
 	return nil
 }
 
-func (s *SportCache) handleTournamentData(locale protocols.Locale, tournamentData map[string]*xml.Sport) error {
-	for key, value := range tournamentData {
-		tournamentID, err := protocols.ParseURN(key)
-		if err != nil {
-			return err
+func (s *SportCache) recordTournament(sportID protocols.URN, tournamentID protocols.URN) error {
+	s.mu.Lock()
+	entry, ok := s.sports[sportID]
+	if !ok {
+		entry = &LocalizedSport{
+			id:            sportID,
+			tournamentIDs: make(map[protocols.URN]struct{}),
+			name:          make(map[protocols.Locale]string),
+			abbreviation:  make(map[protocols.Locale]string),
 		}
-
-		sportID, err := protocols.ParseURN(value.ID)
-		if err != nil {
-			return err
-		}
-
-		err = s.refreshOrInsertItem(*sportID, locale, tournamentData[key], tournamentID)
-		if err != nil {
-			return err
-		}
+		s.sports[sportID] = entry
 	}
+	s.mu.Unlock()
 
+	entry.mu.Lock()
+	entry.tournamentIDs[tournamentID] = struct{}{}
+	entry.mu.Unlock()
 	return nil
+}
+
+// Clear evicts a single sport.
+func (s *SportCache) Clear(id protocols.URN) {
+	s.mu.Lock()
+	delete(s.sports, id)
+	s.mu.Unlock()
+}
+
+// Purge clears the entire cache.
+func (s *SportCache) Purge() {
+	s.mu.Lock()
+	s.sports = make(map[protocols.URN]*LocalizedSport)
+	s.loadedLocales = make(map[protocols.Locale]struct{})
+	s.mu.Unlock()
 }
 
 func newSportDataCache(client *api.Client, logger *log.Entry) *SportCache {
-	sportDataCache := &SportCache{
+	return &SportCache{
 		apiClient:     client,
-		internalCache: cache.New(cache.NoExpiration, cache.NoExpiration),
 		logger:        logger,
 		loadedLocales: make(map[protocols.Locale]struct{}),
+		sports:        make(map[protocols.URN]*LocalizedSport),
 	}
-
-	client.SubscribeWithAPIObserver(sportDataCache)
-
-	return sportDataCache
 }
 
-// LocalizedSport ...
-type LocalizedSport struct {
-	id            protocols.URN
-	tournamentIDs map[protocols.URN]struct{}
-	name          map[protocols.Locale]string
-	abbreviation  map[protocols.Locale]string
-	iconPath      *string
-	mux           sync.Mutex
-	refID         *protocols.URN
-}
-
-func (l *LocalizedSport) makeTournamentIDsList() []protocols.URN {
-	l.mux.Lock()
-	defer l.mux.Unlock()
-
-	result := make([]protocols.URN, len(l.tournamentIDs))
-	index := 0
-	for key := range l.tournamentIDs {
-		result[index] = key
-		index++
-	}
-
-	return result
-}
-
+// sportImpl satisfies protocols.Sport.
 type sportImpl struct {
 	id             protocols.URN
 	sportDataCache *SportCache
@@ -279,94 +283,60 @@ type sportImpl struct {
 }
 
 func (s sportImpl) IconPath() (*string, error) {
-	item, err := s.sportDataCache.Sport(s.id, s.locales)
+	item, err := s.sportDataCache.Sport(context.Background(), s.id, s.locales)
 	if err != nil {
 		return nil, err
 	}
-
-	return item.iconPath, nil
+	return item.iconPathValue(), nil
 }
 
-func (s sportImpl) ID() protocols.URN {
-	return s.id
-}
+func (s sportImpl) ID() protocols.URN { return s.id }
 
 // Deprecated: do not use this method, it will be removed in future
 func (s sportImpl) RefID() (*protocols.URN, error) {
-	item, err := s.sportDataCache.Sport(s.id, s.locales)
+	item, err := s.sportDataCache.Sport(context.Background(), s.id, s.locales)
 	if err != nil {
 		return nil, err
 	}
-
-	return item.refID, nil
+	return item.refIDValue(), nil
 }
 
 func (s sportImpl) Names() (map[protocols.Locale]string, error) {
-	item, err := s.sportDataCache.Sport(s.id, s.locales)
+	item, err := s.sportDataCache.Sport(context.Background(), s.id, s.locales)
 	if err != nil {
 		return nil, err
 	}
-
-	item.mux.Lock()
-	defer item.mux.Unlock()
-
-	// Return copy of map
-	result := make(map[protocols.Locale]string, len(item.name))
-	for key, value := range item.name {
-		result[key] = value
-	}
-
-	return result, nil
+	return item.names(), nil
 }
 
 func (s sportImpl) LocalizedName(locale protocols.Locale) (*string, error) {
-	item, err := s.sportDataCache.Sport(s.id, s.locales)
+	item, err := s.sportDataCache.Sport(context.Background(), s.id, s.locales)
 	if err != nil {
 		return nil, err
 	}
-
-	item.mux.Lock()
-	defer item.mux.Unlock()
-
-	result, ok := item.name[locale]
-	if !ok {
-		return nil, fmt.Errorf("missing locale %s", locale)
-	}
-
-	return &result, nil
+	return item.localizedName(locale)
 }
 
 func (s sportImpl) LocalizedAbbreviation(locale protocols.Locale) (*string, error) {
-	item, err := s.sportDataCache.Sport(s.id, s.locales)
+	item, err := s.sportDataCache.Sport(context.Background(), s.id, s.locales)
 	if err != nil {
 		return nil, err
 	}
-
-	item.mux.Lock()
-	defer item.mux.Unlock()
-
-	result, ok := item.abbreviation[locale]
-	if !ok {
-		return nil, fmt.Errorf("missing locale %s", locale)
-	}
-
-	return &result, nil
+	return item.localizedAbbreviation(locale)
 }
 
 func (s sportImpl) Tournaments() ([]protocols.Tournament, error) {
-	item, err := s.sportDataCache.Sport(s.id, s.locales)
+	item, err := s.sportDataCache.Sport(context.Background(), s.id, s.locales)
 	if err != nil {
 		return nil, err
 	}
-
 	tournamentIDs := item.makeTournamentIDsList()
 	if len(tournamentIDs) == 0 {
-		tournamentIDs, err = s.sportDataCache.SportTournaments(s.id, s.locales[0])
+		tournamentIDs, err = s.sportDataCache.SportTournaments(context.Background(), s.id, s.locales[0])
 		if err != nil {
 			return nil, err
 		}
 	}
-
 	return s.entityFactory.BuildTournaments(tournamentIDs, s.id, s.locales), nil
 }
 
@@ -379,3 +349,6 @@ func NewSport(id protocols.URN, dataCache *SportCache, entityFactory protocols.E
 		locales:        locales,
 	}
 }
+
+// Compile-time check.
+var _ = errors.New

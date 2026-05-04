@@ -1,6 +1,7 @@
 package factory
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -38,7 +39,7 @@ func (m MarketDescriptionFactory) MarketDescriptionByIDAndVariant(
 	variant *string,
 	locales []protocols.Locale,
 ) (protocols.MarketDescription, error) {
-	mds, err := m.marketDescriptionCache.MarketDescriptionByID(marketID, variant, locales)
+	mds, err := m.marketDescriptionCache.MarketDescriptionByID(context.Background(), marketID, variant, locales)
 	if err != nil {
 		return nil, fmt.Errorf("get market description by id failed: %w", err)
 	}
@@ -51,7 +52,7 @@ func (m MarketDescriptionFactory) MarketDescriptionByIDAndVariant(
 
 // MarketVoidReasons ...
 func (m MarketDescriptionFactory) MarketVoidReasons() ([]protocols.MarketVoidReason, error) {
-	data, err := m.marketVoidReasonsCache.MarketVoidReasons()
+	data, err := m.marketVoidReasonsCache.MarketVoidReasons(context.Background())
 	if err != nil {
 		return nil, err
 	}
@@ -79,7 +80,7 @@ func (m MarketDescriptionFactory) MarketVoidReasons() ([]protocols.MarketVoidRea
 
 // ReloadMarketVoidReasons ...
 func (m MarketDescriptionFactory) ReloadMarketVoidReasons() ([]protocols.MarketVoidReason, error) {
-	if err := m.marketVoidReasonsCache.ReloadMarketVoidReasons(); err != nil {
+	if err := m.marketVoidReasonsCache.ReloadMarketVoidReasons(context.Background()); err != nil {
 		return nil, err
 	}
 
@@ -88,7 +89,7 @@ func (m MarketDescriptionFactory) ReloadMarketVoidReasons() ([]protocols.MarketV
 
 // MarketDescriptions ...
 func (m MarketDescriptionFactory) MarketDescriptions(locale protocols.Locale) ([]protocols.MarketDescription, error) {
-	marketDescriptions, err := m.marketDescriptionCache.LocalizedMarketDescriptions(locale)
+	marketDescriptions, err := m.marketDescriptionCache.LocalizedMarketDescriptions(context.Background(), locale)
 	if err != nil {
 		return nil, err
 	}

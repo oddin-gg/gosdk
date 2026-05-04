@@ -2,61 +2,65 @@ package cache
 
 import (
 	"context"
-	"errors"
-	"time"
+	"sync"
 
 	"github.com/oddin-gg/gosdk/internal/api"
 	data "github.com/oddin-gg/gosdk/internal/api/xml"
 	"github.com/oddin-gg/gosdk/protocols"
-	"github.com/patrickmn/go-cache"
 )
 
-const MarketVoidReasonCacheKey = "market_void_reasons"
-
-// MarketVoidReasonsCache ...
+// MarketVoidReasonsCache caches the singleton list of market void reasons.
+//
+// Phase 3 rewrite: replaces patrickmn/go-cache with a small sync.RWMutex-
+// guarded slice. Single key, no locale; LRU/TTL adds nothing here. A failed
+// load doesn't poison the cache (loaded resets to false on error).
 type MarketVoidReasonsCache struct {
-	apiClient     *api.Client
-	internalCache *cache.Cache
+	apiClient *api.Client
+
+	mu     sync.Mutex // guards loaded + voidReasons; serializes loads
+	loaded bool
+	void   []data.MarketVoidReasons
 }
 
-// MarketVoidReasons ...
-func (m *MarketVoidReasonsCache) MarketVoidReasons() ([]data.MarketVoidReasons, error) {
-	d, ok := m.internalCache.Get(MarketVoidReasonCacheKey)
-	if !ok {
-		if err := m.loadAndCacheItem(); err != nil {
-			return nil, err
-		}
-		d, ok = m.internalCache.Get(MarketVoidReasonCacheKey)
+// MarketVoidReasons returns the cached list, fetching on first access.
+func (m *MarketVoidReasonsCache) MarketVoidReasons(ctx context.Context) ([]data.MarketVoidReasons, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.loaded {
+		return m.void, nil
 	}
-
-	if !ok {
-		return nil, errors.New("unable to load market void reasons")
-	}
-
-	return d.([]data.MarketVoidReasons), nil
-}
-
-// ReloadMarketVoidReasons ...
-func (m *MarketVoidReasonsCache) ReloadMarketVoidReasons() error {
-	return m.loadAndCacheItem()
-}
-
-func (m *MarketVoidReasonsCache) loadAndCacheItem() error {
-	voidReasons, err := m.apiClient.FetchMarketVoidReasons(context.Background())
+	v, err := m.apiClient.FetchMarketVoidReasons(ctx)
 	if err != nil {
-		return err
+		// loaded stays false → next call retries. No poisoning.
+		return nil, err
 	}
-	m.internalCache.Set(MarketVoidReasonCacheKey, voidReasons, 0)
-	return nil
+	m.void = v
+	m.loaded = true
+	return m.void, nil
+}
+
+// ReloadMarketVoidReasons forces a refresh on next access.
+func (m *MarketVoidReasonsCache) ReloadMarketVoidReasons(ctx context.Context) error {
+	m.mu.Lock()
+	m.loaded = false
+	m.mu.Unlock()
+	_, err := m.MarketVoidReasons(ctx)
+	return err
+}
+
+// Clear marks the cache as un-loaded; next access will re-fetch.
+func (m *MarketVoidReasonsCache) Clear() {
+	m.mu.Lock()
+	m.loaded = false
+	m.void = nil
+	m.mu.Unlock()
 }
 
 func newMarketVoidReasonsCache(client *api.Client) *MarketVoidReasonsCache {
-	return &MarketVoidReasonsCache{
-		internalCache: cache.New(24*time.Hour, 1*time.Hour),
-		apiClient:     client,
-	}
+	return &MarketVoidReasonsCache{apiClient: client}
 }
 
+// marketVoidReasonImpl satisfies protocols.MarketVoidReason.
 type marketVoidReasonImpl struct {
 	id          uint
 	name        string
@@ -65,25 +69,11 @@ type marketVoidReasonImpl struct {
 	params      []string
 }
 
-func (m marketVoidReasonImpl) ID() uint {
-	return m.id
-}
-
-func (m marketVoidReasonImpl) Name() string {
-	return m.name
-}
-
-func (m marketVoidReasonImpl) Description() *string {
-	return m.description
-}
-
-func (m marketVoidReasonImpl) Template() *string {
-	return m.template
-}
-
-func (m marketVoidReasonImpl) Params() []string {
-	return m.params
-}
+func (m marketVoidReasonImpl) ID() uint           { return m.id }
+func (m marketVoidReasonImpl) Name() string       { return m.name }
+func (m marketVoidReasonImpl) Description() *string { return m.description }
+func (m marketVoidReasonImpl) Template() *string    { return m.template }
+func (m marketVoidReasonImpl) Params() []string     { return m.params }
 
 // NewMarketVoidReason ...
 func NewMarketVoidReason(

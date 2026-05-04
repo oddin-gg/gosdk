@@ -4,12 +4,10 @@ import (
 	"context"
 	"fmt"
 	"sync"
-	"time"
 
 	"github.com/oddin-gg/gosdk/internal/api"
 	"github.com/oddin-gg/gosdk/internal/api/xml"
 	"github.com/oddin-gg/gosdk/protocols"
-	"github.com/patrickmn/go-cache"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -19,187 +17,23 @@ type PlayerCacheKey struct {
 	Locale   protocols.Locale
 }
 
+// PlayersCache stores player profiles keyed by (playerID, locale).
+//
+// Phase 3 rewrite: replaces patrickmn/go-cache with a sync.RWMutex map.
+// Player data is flat per (id, locale) — no per-locale subfields, so the
+// EventCache-with-fill-in primitive isn't a fit; a simple map with a
+// per-key load mutex is enough. Loader takes ctx; previously synthesized
+// context.Background() at the boundary.
 type PlayersCache struct {
-	internalCache *cache.Cache
-	apiClient     *api.Client
-	mux           sync.Mutex
-	logger        *log.Entry
+	apiClient *api.Client
+	logger    *log.Entry
+
+	mu      sync.RWMutex
+	players map[PlayerCacheKey]LocalizedPlayer
+	loadMu  sync.Mutex // serializes API fetches across concurrent GetPlayers callers
 }
 
-// OnAPIResponse ...
-func (c *PlayersCache) OnAPIResponse(apiResponse protocols.Response) {
-	if apiResponse.Locale == nil || apiResponse.Data == nil {
-		return
-	}
-
-	players := make([]xml.Player, 0)
-	if data, ok := apiResponse.Data.(*xml.CompetitorResponse); ok {
-		players = append(players, data.Players...)
-	}
-
-	if len(players) == 0 {
-		return
-	}
-
-	err := c.handlePlayerData(*apiResponse.Locale, players)
-	if err != nil {
-		c.logger.WithError(err).Errorf("failed to process api data %v", apiResponse)
-	}
-}
-
-// GetPlayer returns cached LocalizedPlayer if is in cache, if it is not then the team is fetched via api and stored in cache.
-// If Player does not exist then ErrItemNotFoundInCache error is returned
-func (c *PlayersCache) GetPlayer(id PlayerCacheKey) (*LocalizedPlayer, error) {
-	players, err := c.GetPlayers([]PlayerCacheKey{id})
-	switch {
-	case err != nil:
-		return nil, fmt.Errorf("get player from cache failed: %w", err)
-	case len(players) == 0:
-		return nil, fmt.Errorf("player %s not found: %w", id, ErrItemNotFoundInCache)
-	case len(players) > 1:
-		return nil, fmt.Errorf("get player from cache failed - more than one player found for id: %s", id)
-	}
-
-	player, found := players[id]
-	if !found {
-		return nil, fmt.Errorf("get player from cache - player found for id %q in player hash map: %w", id, ErrItemNotFoundInCache)
-	}
-	return &player, nil
-}
-
-// GetPlayers returns map of cached LocalizedPlayer if they are in cache, if any Player is missing then it is fetched via
-// api and stored in cache.
-func (c *PlayersCache) GetPlayers(ids []PlayerCacheKey) (map[PlayerCacheKey]LocalizedPlayer, error) {
-	resultPlayers, missingPlayersIDs := c.getPlayersFromCache(ids)
-	if len(missingPlayersIDs) == 0 {
-		return resultPlayers, nil
-	}
-
-	// run just one api fetch
-	c.mux.Lock()
-	defer c.mux.Unlock()
-
-	resultPlayers, missingPlayersIDs = c.getPlayersFromCache(ids)
-	if len(missingPlayersIDs) == 0 {
-		return resultPlayers, nil
-	}
-
-	dbPlayers, err := c.fetchPlayersFromAPI(missingPlayersIDs)
-	if err != nil {
-		return nil, fmt.Errorf("GetPlayers failed: %w", err)
-	}
-
-	for key, playerProfile := range dbPlayers {
-		convertedPlayer := LocalizedPlayer{
-			ID:            playerProfile.Player.ID,
-			LocalizedName: playerProfile.Player.Name,
-			FullName:      playerProfile.Player.FullName,
-			SportID:       playerProfile.Player.SportID,
-			locale:        key.Locale,
-		}
-		c.setPlayer(key, convertedPlayer)
-	}
-
-	resultPlayers, missingPlayersIDs = c.getPlayersFromCache(ids)
-	if len(missingPlayersIDs) == 0 {
-		return resultPlayers, nil
-	}
-
-	return nil, fmt.Errorf("get player from cache - some players %v not found in db: %w", missingPlayersIDs, ErrItemNotFoundInCache)
-}
-
-func (c *PlayersCache) handlePlayerData(locale protocols.Locale, players []xml.Player) error {
-	for i := range players {
-		err := c.refreshOrInsertItem(players[i], locale)
-		if err != nil {
-			return fmt.Errorf("refreshing or inserting player: %w", err)
-		}
-	}
-
-	return nil
-}
-
-func (c *PlayersCache) refreshOrInsertItem(player xml.Player, locale protocols.Locale) error {
-	key := PlayerCacheKey{PlayerID: player.ID, Locale: locale}
-
-	result, ok := c.getPlayer(key)
-	if !ok {
-		result = LocalizedPlayer{}
-	}
-
-	result.ID = player.ID
-	result.LocalizedName = player.Name
-	result.FullName = player.FullName
-	result.SportID = player.SportID
-	result.locale = locale
-
-	c.setPlayer(key, result)
-
-	return nil
-}
-
-func (c *PlayersCache) getPlayersFromCache(
-	ids []PlayerCacheKey,
-) (map[PlayerCacheKey]LocalizedPlayer, []PlayerCacheKey) {
-	var missingPlayersIDs []PlayerCacheKey
-	foundPlayers := make(map[PlayerCacheKey]LocalizedPlayer, len(ids))
-
-	for _, id := range ids {
-		if res, found := c.getPlayer(id); found {
-			foundPlayers[id] = res
-		} else {
-			missingPlayersIDs = append(missingPlayersIDs, id)
-		}
-	}
-	return foundPlayers, missingPlayersIDs
-}
-
-func (c *PlayersCache) fetchPlayersFromAPI(keys []PlayerCacheKey) (map[PlayerCacheKey]xml.PlayerProfile, error) {
-	res := make(map[PlayerCacheKey]xml.PlayerProfile, len(keys))
-
-	for _, key := range keys {
-		data, err := c.apiClient.FetchPlayerProfile(context.Background(), key.PlayerID, key.Locale)
-
-		if err != nil {
-			return nil, fmt.Errorf("fetch player profiles failed: %w", err)
-		}
-		if data == nil {
-			continue
-		}
-		res[key] = *data
-	}
-
-	return res, nil
-}
-
-func (c *PlayersCache) key(id PlayerCacheKey) string {
-	return id.PlayerID + ":" + string(id.Locale)
-}
-
-func (c *PlayersCache) getPlayer(id PlayerCacheKey) (LocalizedPlayer, bool) {
-	res, found := c.internalCache.Get(c.key(id))
-	if !found {
-		return LocalizedPlayer{}, found
-	}
-	return res.(LocalizedPlayer), found
-}
-
-func (c *PlayersCache) setPlayer(id PlayerCacheKey, obj LocalizedPlayer) {
-	c.internalCache.Set(c.key(id), obj, cache.DefaultExpiration)
-}
-
-func newPlayersCache(apiClient *api.Client, logger *log.Entry) *PlayersCache {
-	playersCache := &PlayersCache{
-		internalCache: cache.New(12*time.Hour, 1*time.Hour),
-		apiClient:     apiClient,
-		logger:        logger,
-	}
-
-	apiClient.SubscribeWithAPIObserver(playersCache)
-
-	return playersCache
-}
-
+// LocalizedPlayer is the cached player profile.
 type LocalizedPlayer struct {
 	ID            string
 	LocalizedName string
@@ -208,48 +42,166 @@ type LocalizedPlayer struct {
 	locale        protocols.Locale
 }
 
+// GetPlayer returns a single cached LocalizedPlayer, fetching if missing.
+func (c *PlayersCache) GetPlayer(ctx context.Context, id PlayerCacheKey) (*LocalizedPlayer, error) {
+	players, err := c.GetPlayers(ctx, []PlayerCacheKey{id})
+	if err != nil {
+		return nil, fmt.Errorf("get player from cache failed: %w", err)
+	}
+	p, ok := players[id]
+	if !ok {
+		return nil, fmt.Errorf("player %s not found: %w", id, ErrItemNotFoundInCache)
+	}
+	return &p, nil
+}
+
+// GetPlayers returns a map of cached LocalizedPlayer values, fetching any
+// missing ones from the API. Concurrent callers serialize on loadMu so
+// duplicate fetches for the same key are avoided.
+func (c *PlayersCache) GetPlayers(ctx context.Context, ids []PlayerCacheKey) (map[PlayerCacheKey]LocalizedPlayer, error) {
+	result, missing := c.snapshot(ids)
+	if len(missing) == 0 {
+		return result, nil
+	}
+
+	c.loadMu.Lock()
+	defer c.loadMu.Unlock()
+
+	// Re-snapshot inside the load lock — another goroutine may have just filled.
+	result, missing = c.snapshot(ids)
+	if len(missing) == 0 {
+		return result, nil
+	}
+
+	for _, key := range missing {
+		data, err := c.apiClient.FetchPlayerProfile(ctx, key.PlayerID, key.Locale)
+		if err != nil {
+			return nil, fmt.Errorf("fetch player profile %s/%s: %w", key.PlayerID, key.Locale, err)
+		}
+		if data == nil {
+			continue
+		}
+		c.set(key, LocalizedPlayer{
+			ID:            data.Player.ID,
+			LocalizedName: data.Player.Name,
+			FullName:      data.Player.FullName,
+			SportID:       data.Player.SportID,
+			locale:        key.Locale,
+		})
+	}
+
+	result, missing = c.snapshot(ids)
+	if len(missing) == 0 {
+		return result, nil
+	}
+	return nil, fmt.Errorf("get player from cache - some players %v not found: %w", missing, ErrItemNotFoundInCache)
+}
+
+// Clear evicts the cache entry for the given (id, locale).
+func (c *PlayersCache) Clear(id PlayerCacheKey) {
+	c.mu.Lock()
+	delete(c.players, id)
+	c.mu.Unlock()
+}
+
+// ClearByID evicts every entry for the player ID across all locales.
+func (c *PlayersCache) ClearByID(playerID string) {
+	c.mu.Lock()
+	for k := range c.players {
+		if k.PlayerID == playerID {
+			delete(c.players, k)
+		}
+	}
+	c.mu.Unlock()
+}
+
+// Purge clears the entire cache.
+func (c *PlayersCache) Purge() {
+	c.mu.Lock()
+	c.players = make(map[PlayerCacheKey]LocalizedPlayer)
+	c.mu.Unlock()
+}
+
+func (c *PlayersCache) snapshot(ids []PlayerCacheKey) (map[PlayerCacheKey]LocalizedPlayer, []PlayerCacheKey) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	found := make(map[PlayerCacheKey]LocalizedPlayer, len(ids))
+	var missing []PlayerCacheKey
+	for _, id := range ids {
+		if v, ok := c.players[id]; ok {
+			found[id] = v
+		} else {
+			missing = append(missing, id)
+		}
+	}
+	return found, missing
+}
+
+func (c *PlayersCache) set(id PlayerCacheKey, p LocalizedPlayer) {
+	c.mu.Lock()
+	c.players[id] = p
+	c.mu.Unlock()
+}
+
+// MergePlayers folds an XML.Player slice into the cache (used by code paths
+// that already fetched a parent entity and want to pre-populate players).
+func (c *PlayersCache) MergePlayers(locale protocols.Locale, players []xml.Player) {
+	for _, p := range players {
+		key := PlayerCacheKey{PlayerID: p.ID, Locale: locale}
+		c.set(key, LocalizedPlayer{
+			ID:            p.ID,
+			LocalizedName: p.Name,
+			FullName:      p.FullName,
+			SportID:       p.SportID,
+			locale:        locale,
+		})
+	}
+}
+
+func newPlayersCache(apiClient *api.Client, logger *log.Entry) *PlayersCache {
+	return &PlayersCache{
+		apiClient: apiClient,
+		logger:    logger,
+		players:   make(map[PlayerCacheKey]LocalizedPlayer),
+	}
+}
+
+// playerImpl satisfies protocols.Player.
 type playerImpl struct {
 	key         PlayerCacheKey
 	playerCache *PlayersCache
 }
 
-func (p playerImpl) ID() string {
-	return p.key.PlayerID
-}
+func (p playerImpl) ID() string { return p.key.PlayerID }
 
 func (p playerImpl) LocalizedName() (string, error) {
-	item, err := p.playerCache.GetPlayer(p.key)
+	item, err := p.playerCache.GetPlayer(context.Background(), p.key)
 	if err != nil {
 		return "", fmt.Errorf("getting player from cache: %w", err)
 	}
-
 	return item.LocalizedName, nil
 }
 
 func (p playerImpl) FullName() (string, error) {
-	item, err := p.playerCache.GetPlayer(p.key)
+	item, err := p.playerCache.GetPlayer(context.Background(), p.key)
 	if err != nil {
 		return "", fmt.Errorf("getting player from cache: %w", err)
 	}
-
 	return item.FullName, nil
 }
 
 func (p playerImpl) SportID() (string, error) {
-	item, err := p.playerCache.GetPlayer(p.key)
+	item, err := p.playerCache.GetPlayer(context.Background(), p.key)
 	if err != nil {
 		return "", fmt.Errorf("getting player from cache: %w", err)
 	}
-
 	return item.SportID, nil
 }
 
 // NewPlayer ...
 func NewPlayer(id protocols.URN, playerCache *PlayersCache, locale protocols.Locale) protocols.Player {
-	key := PlayerCacheKey{PlayerID: id.ToString(), Locale: locale}
-
 	return &playerImpl{
-		key:         key,
+		key:         PlayerCacheKey{PlayerID: id.ToString(), Locale: locale},
 		playerCache: playerCache,
 	}
 }

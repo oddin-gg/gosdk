@@ -4,13 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
+	"sync"
 
 	"github.com/oddin-gg/gosdk/internal/api"
 	apiXML "github.com/oddin-gg/gosdk/internal/api/xml"
 	feedXML "github.com/oddin-gg/gosdk/internal/feed/xml"
 	"github.com/oddin-gg/gosdk/protocols"
-	"github.com/patrickmn/go-cache"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -315,85 +314,108 @@ func (s scoreboardImpl) AwayGames() *uint32 {
 	return s.awayGames
 }
 
-// MatchStatusCache ...
+// MatchStatusCache stores per-event status snapshots, fed by both AMQP
+// OddsChange messages (live updates) and API MatchSummary responses (initial
+// load + on-demand fetch).
+//
+// Phase 3 rewrite: replaces patrickmn/go-cache with a sync.RWMutex map.
+// Updates use copy-on-write semantics: refresh* builds a fresh
+// *LocalizedMatchStatus, copies the prior entry's fields into it, mutates
+// the copy, and atomic-swaps it into the map. Readers holding a pointer
+// see a stable snapshot — no partial-update tears.
 type MatchStatusCache struct {
 	apiClient             *api.Client
-	internalCache         *cache.Cache
 	logger                *log.Entry
 	oddsFeedConfiguration protocols.OddsFeedConfiguration
+
+	mu      sync.RWMutex
+	entries map[protocols.URN]*LocalizedMatchStatus
 }
 
 // OnFeedMessage ...
-func (m MatchStatusCache) OnFeedMessage(id protocols.URN, feedMessage *protocols.FeedMessage) {
+func (m *MatchStatusCache) OnFeedMessage(id protocols.URN, feedMessage *protocols.FeedMessage) {
 	if feedMessage.Message == nil {
 		return
 	}
-
 	message, ok := feedMessage.Message.(*feedXML.OddsChange)
 	if !ok || message.SportEventStatus == nil {
 		return
 	}
-
 	m.refreshOrInsertFeedItem(id, message.SportEventStatus)
 }
 
 // OnAPIResponse ...
-func (m MatchStatusCache) OnAPIResponse(apiResponse protocols.Response) {
+func (m *MatchStatusCache) OnAPIResponse(apiResponse protocols.Response) {
 	if msg, ok := apiResponse.Data.(*apiXML.MatchSummaryResponse); ok {
 		id, err := protocols.ParseURN(msg.SportEvent.ID)
 		if err != nil {
 			m.logger.WithError(err).Errorf("failed to parse urn %s", msg.SportEvent.ID)
+			return
 		}
-
-		err = m.refreshOrInsertAPIItem(*id, msg.SportEventStatus)
-		if err != nil {
+		if err := m.refreshOrInsertAPIItem(*id, msg.SportEventStatus); err != nil {
 			m.logger.WithError(err).Errorf("failed to refresh api item %v", *id)
 		}
 	}
 }
 
 // ClearCacheItem ...
-func (m MatchStatusCache) ClearCacheItem(id protocols.URN) {
-	m.internalCache.Delete(id.ToString())
+func (m *MatchStatusCache) ClearCacheItem(id protocols.URN) {
+	m.mu.Lock()
+	delete(m.entries, id)
+	m.mu.Unlock()
 }
 
-// MatchStatus ...
-func (m MatchStatusCache) MatchStatus(id protocols.URN) (*LocalizedMatchStatus, error) {
-	item, _ := m.internalCache.Get(id.ToString())
-	result, ok := item.(*LocalizedMatchStatus)
+// Purge clears the entire cache.
+func (m *MatchStatusCache) Purge() {
+	m.mu.Lock()
+	m.entries = make(map[protocols.URN]*LocalizedMatchStatus)
+	m.mu.Unlock()
+}
+
+// MatchStatus returns a cached status, fetching from the API on miss.
+// The fetch triggers OnAPIResponse via the api.Client observer hook, which
+// populates the cache; we then re-read.
+func (m *MatchStatusCache) MatchStatus(id protocols.URN) (*LocalizedMatchStatus, error) {
+	m.mu.RLock()
+	entry, ok := m.entries[id]
+	m.mu.RUnlock()
 	if ok {
-		return result, nil
+		return entry, nil
 	}
 
-	// This will trigger OnAPIResponse callback
-	_, err := m.apiClient.FetchMatchSummary(context.Background(), id, m.oddsFeedConfiguration.DefaultLocale())
-	if err != nil {
+	if _, err := m.apiClient.FetchMatchSummary(context.Background(), id, m.oddsFeedConfiguration.DefaultLocale()); err != nil {
 		return nil, err
 	}
 
-	item, _ = m.internalCache.Get(id.ToString())
-	result, ok = item.(*LocalizedMatchStatus)
+	m.mu.RLock()
+	entry, ok = m.entries[id]
+	m.mu.RUnlock()
 	if !ok {
 		return nil, errors.New("item missing")
 	}
-
-	return result, nil
+	return entry, nil
 }
 
-func (m MatchStatusCache) refreshOrInsertFeedItem(id protocols.URN, data *feedXML.SportEventStatus) {
-	item, _ := m.internalCache.Get(id.ToString())
-	result, ok := item.(*LocalizedMatchStatus)
-
-	if !ok {
-		result = &LocalizedMatchStatus{}
+// shallowClone returns a fresh struct with all fields copied from src, or a
+// zero-value if src is nil.
+func (m *MatchStatusCache) shallowClone(src *LocalizedMatchStatus) *LocalizedMatchStatus {
+	if src == nil {
+		return &LocalizedMatchStatus{}
 	}
+	c := *src
+	return &c
+}
 
+func (m *MatchStatusCache) refreshOrInsertFeedItem(id protocols.URN, data *feedXML.SportEventStatus) {
+	m.mu.RLock()
+	prev := m.entries[id]
+	m.mu.RUnlock()
+
+	result := m.shallowClone(prev)
 	result.status = m.fromFeedEventStatus(data.Status)
-
 	if data.PeriodScores != nil {
 		result.periodScores = m.mapFeedPeriodScores(data.PeriodScores.List)
 	}
-
 	result.matchStatusID = &data.MatchStatus
 	result.homeScore = data.HomeScore
 	result.awayScore = data.AwayScore
@@ -401,31 +423,30 @@ func (m MatchStatusCache) refreshOrInsertFeedItem(id protocols.URN, data *feedXM
 	if data.Scoreboard != nil {
 		result.scoreboard = m.makeFeedScoreboard(data.Scoreboard)
 	}
-
 	if data.Statistics != nil {
 		result.statistics = m.makeFeedStatistics(data.Statistics)
 	}
 
-	m.internalCache.Set(id.ToString(), result, 0)
+	m.mu.Lock()
+	m.entries[id] = result
+	m.mu.Unlock()
 }
 
-func (m MatchStatusCache) refreshOrInsertAPIItem(id protocols.URN, data apiXML.SportEventStatus) error {
-	item, _ := m.internalCache.Get(id.ToString())
-	result, ok := item.(*LocalizedMatchStatus)
-
-	if !ok {
-		result = &LocalizedMatchStatus{}
-	}
-
+func (m *MatchStatusCache) refreshOrInsertAPIItem(id protocols.URN, data apiXML.SportEventStatus) error {
 	var winnerID *protocols.URN
-	var err error
 	if data.WinnerID != nil {
+		var err error
 		winnerID, err = protocols.ParseURN(*data.WinnerID)
 		if err != nil {
 			return err
 		}
 	}
 
+	m.mu.RLock()
+	prev := m.entries[id]
+	m.mu.RUnlock()
+
+	result := m.shallowClone(prev)
 	result.status = m.fromAPI(data.Status)
 	result.winnerID = winnerID
 	result.matchStatusID = &data.MatchStatusCode
@@ -439,11 +460,13 @@ func (m MatchStatusCache) refreshOrInsertAPIItem(id protocols.URN, data apiXML.S
 		result.scoreboard = m.makeAPIScoreboard(data.Scoreboard)
 	}
 
-	m.internalCache.Set(id.ToString(), result, 0)
+	m.mu.Lock()
+	m.entries[id] = result
+	m.mu.Unlock()
 	return nil
 }
 
-func (m MatchStatusCache) mapAPIPeriodScores(periodScores []*apiXML.PeriodScore) []protocols.PeriodScore {
+func (m *MatchStatusCache) mapAPIPeriodScores(periodScores []*apiXML.PeriodScore) []protocols.PeriodScore {
 	result := make([]protocols.PeriodScore, len(periodScores))
 	for i := range periodScores {
 		periodScore := periodScores[i]
@@ -476,7 +499,7 @@ func (m MatchStatusCache) mapAPIPeriodScores(periodScores []*apiXML.PeriodScore)
 	return result
 }
 
-func (m MatchStatusCache) mapFeedPeriodScores(periodScores []*feedXML.PeriodScore) []protocols.PeriodScore {
+func (m *MatchStatusCache) mapFeedPeriodScores(periodScores []*feedXML.PeriodScore) []protocols.PeriodScore {
 	result := make([]protocols.PeriodScore, len(periodScores))
 	for i := range periodScores {
 		periodScore := periodScores[i]
@@ -509,7 +532,7 @@ func (m MatchStatusCache) mapFeedPeriodScores(periodScores []*feedXML.PeriodScor
 	return result
 }
 
-func (m MatchStatusCache) makeFeedScoreboard(scoreboard *feedXML.Scoreboard) protocols.Scoreboard {
+func (m *MatchStatusCache) makeFeedScoreboard(scoreboard *feedXML.Scoreboard) protocols.Scoreboard {
 	return &scoreboardImpl{
 		currentCTTeam:        scoreboard.CurrentCTTeam,
 		homeWonRounds:        scoreboard.HomeWonRounds,
@@ -549,7 +572,7 @@ func (m MatchStatusCache) makeFeedScoreboard(scoreboard *feedXML.Scoreboard) pro
 	}
 }
 
-func (m MatchStatusCache) makeAPIScoreboard(scoreboard *apiXML.Scoreboard) protocols.Scoreboard {
+func (m *MatchStatusCache) makeAPIScoreboard(scoreboard *apiXML.Scoreboard) protocols.Scoreboard {
 	return &scoreboardImpl{
 		currentCTTeam:        scoreboard.CurrentCTTeam,
 		homeWonRounds:        scoreboard.HomeWonRounds,
@@ -589,7 +612,7 @@ func (m MatchStatusCache) makeAPIScoreboard(scoreboard *apiXML.Scoreboard) proto
 	}
 }
 
-func (m MatchStatusCache) fromFeedEventStatus(status int) protocols.EventStatus {
+func (m *MatchStatusCache) fromFeedEventStatus(status int) protocols.EventStatus {
 	switch status {
 	case 0:
 		return protocols.NotStartedEventStatus
@@ -608,7 +631,7 @@ func (m MatchStatusCache) fromFeedEventStatus(status int) protocols.EventStatus 
 	}
 }
 
-func (m MatchStatusCache) fromAPI(status apiXML.SportEventStatusType) protocols.EventStatus {
+func (m *MatchStatusCache) fromAPI(status apiXML.SportEventStatusType) protocols.EventStatus {
 	switch s := protocols.EventStatus(status); s {
 	case protocols.NotStartedEventStatus,
 		protocols.LiveEventStatus,
@@ -626,7 +649,7 @@ func (m MatchStatusCache) fromAPI(status apiXML.SportEventStatusType) protocols.
 	}
 }
 
-func (m MatchStatusCache) makeFeedStatistics(statistics *feedXML.Statistics) protocols.Statistics {
+func (m *MatchStatusCache) makeFeedStatistics(statistics *feedXML.Statistics) protocols.Statistics {
 	if statistics == nil {
 		return nil
 	}
@@ -647,9 +670,8 @@ func newMatchStatusCache(client *api.Client, oddsFeedConfiguration protocols.Odd
 	matchStatusCache := &MatchStatusCache{
 		apiClient:             client,
 		oddsFeedConfiguration: oddsFeedConfiguration,
-		// Don't delete item => wait for the match to expire
-		internalCache: cache.New(20*time.Minute, 1*time.Minute),
-		logger:        logger,
+		logger:                logger,
+		entries:               make(map[protocols.URN]*LocalizedMatchStatus),
 	}
 
 	client.SubscribeWithAPIObserver(matchStatusCache)
