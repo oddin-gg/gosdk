@@ -30,7 +30,7 @@ func (m Manager) MarketDescriptionByIDAndVariant(
 	ctx context.Context,
 	marketID uint,
 	variant *string,
-) (protocols.MarketDescription, error) {
+) (*protocols.MarketDescription, error) {
 	_ = ctx // Phase 3 plumbs through the cache loader.
 	locale := []protocols.Locale{m.oddsFeedConfiguration.DefaultLocale()}
 	return m.marketDescriptionFactory.MarketDescriptionByIDAndVariant(marketID, variant, locale)

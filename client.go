@@ -774,7 +774,7 @@ func (c *Client) MarketDescriptions(ctx context.Context, locales ...protocols.Lo
 // MarketDescription returns the description for a (marketID, variant)
 // tuple. variant=nil selects the base (non-variant) description; pass a
 // non-nil pointer for the dynamic variant catalog.
-func (c *Client) MarketDescription(ctx context.Context, id uint, variant *string) (protocols.MarketDescription, error) {
+func (c *Client) MarketDescription(ctx context.Context, id uint, variant *string) (*protocols.MarketDescription, error) {
 	return c.marketDescriptionManager.MarketDescriptionByIDAndVariant(ctx, id, variant)
 }
 

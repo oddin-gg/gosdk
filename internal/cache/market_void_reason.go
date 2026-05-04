@@ -60,22 +60,9 @@ func newMarketVoidReasonsCache(client *api.Client) *MarketVoidReasonsCache {
 	return &MarketVoidReasonsCache{apiClient: client}
 }
 
-// marketVoidReasonImpl satisfies protocols.MarketVoidReason.
-type marketVoidReasonImpl struct {
-	id          uint
-	name        string
-	description *string
-	template    *string
-	params      []string
-}
-
-func (m marketVoidReasonImpl) ID() uint           { return m.id }
-func (m marketVoidReasonImpl) Name() string       { return m.name }
-func (m marketVoidReasonImpl) Description() *string { return m.description }
-func (m marketVoidReasonImpl) Template() *string    { return m.template }
-func (m marketVoidReasonImpl) Params() []string     { return m.params }
-
-// NewMarketVoidReason ...
+// NewMarketVoidReason constructs a value-typed protocols.MarketVoidReason.
+// Phase 6.1 reshape: returns the value struct directly (the
+// marketVoidReasonImpl wrapper is gone).
 func NewMarketVoidReason(
 	id uint,
 	name string,
@@ -83,11 +70,11 @@ func NewMarketVoidReason(
 	template *string,
 	params []string,
 ) protocols.MarketVoidReason {
-	return &marketVoidReasonImpl{
-		id:          id,
-		name:        name,
-		description: description,
-		template:    template,
-		params:      params,
+	return protocols.MarketVoidReason{
+		ID:          id,
+		Name:        name,
+		Description: description,
+		Template:    template,
+		Params:      params,
 	}
 }

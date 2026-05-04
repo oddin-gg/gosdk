@@ -182,6 +182,8 @@ func (m *MarketDescriptionCache) upsert(description data.MarketDescription, loca
 			}
 		}
 		entry = &LocalizedMarketDescription{
+			id:                     description.ID,
+			variant:                description.Variant,
 			IncludesOutcomesOfType: description.IncludesOutcomesOfType,
 			OutcomeType:            description.OutcomeType,
 			outcomes:               outcomes,
@@ -209,6 +211,8 @@ func newMarketDescriptionCache(client *api.Client) *MarketDescriptionCache {
 type LocalizedMarketDescription struct {
 	mu sync.RWMutex
 
+	id                     uint
+	variant                *string
 	IncludesOutcomesOfType *string
 	OutcomeType            *string
 	outcomes               map[string]*LocalizedOutcomeDescription
@@ -264,7 +268,7 @@ func (d *LocalizedMarketDescription) merge(description data.MarketDescription, l
 	if description.Specifiers != nil {
 		var specifiers []protocols.Specifier
 		for _, s := range description.Specifiers.Specifier {
-			specifiers = append(specifiers, specifierImpl{name: s.Name, kind: s.Type})
+			specifiers = append(specifiers, protocols.Specifier{Name: s.Name, Type: s.Type})
 		}
 		if len(specifiers) > 0 {
 			d.specifiers = specifiers
@@ -272,40 +276,52 @@ func (d *LocalizedMarketDescription) merge(description data.MarketDescription, l
 	}
 }
 
-func (d *LocalizedMarketDescription) localizedName(locale protocols.Locale) (*string, error) {
+// Snapshot projects the cached entry into a protocols.MarketDescription
+// value (data-copy under the entry's read lock).
+func (d *LocalizedMarketDescription) Snapshot() protocols.MarketDescription {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
-	v, ok := d.name[locale]
-	if !ok {
-		return nil, fmt.Errorf("missing locale %s", locale)
-	}
-	return &v, nil
-}
 
-func (d *LocalizedMarketDescription) outcomeList() []protocols.OutcomeDescription {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	out := make([]protocols.OutcomeDescription, 0, len(d.outcomes))
+	names := make(map[protocols.Locale]string, len(d.name))
+	for k, v := range d.name {
+		names[k] = v
+	}
+
+	outcomes := make([]protocols.OutcomeDescription, 0, len(d.outcomes))
 	for id, oc := range d.outcomes {
-		out = append(out, outcomeDescriptionImpl{id: id, localizedOutcomeDescription: oc})
+		oc.mu.RLock()
+		ocNames := make(map[protocols.Locale]string, len(oc.name))
+		for k, v := range oc.name {
+			ocNames[k] = v
+		}
+		ocDesc := make(map[protocols.Locale]string, len(oc.description))
+		for k, v := range oc.description {
+			ocDesc[k] = v
+		}
+		oc.mu.RUnlock()
+		outcomes = append(outcomes, protocols.OutcomeDescription{
+			ID:           id,
+			Names:        ocNames,
+			Descriptions: ocDesc,
+		})
 	}
-	return out
-}
 
-func (d *LocalizedMarketDescription) specifierList() []protocols.Specifier {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	out := make([]protocols.Specifier, len(d.specifiers))
-	copy(out, d.specifiers)
-	return out
-}
+	specifiers := make([]protocols.Specifier, len(d.specifiers))
+	copy(specifiers, d.specifiers)
 
-func (d *LocalizedMarketDescription) groupList() []string {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	out := make([]string, len(d.groups))
-	copy(out, d.groups)
-	return out
+	groups := make([]string, len(d.groups))
+	copy(groups, d.groups)
+
+	return protocols.MarketDescription{
+		ID:                     d.id,
+		Names:                  names,
+		Variant:                d.variant,
+		IncludesOutcomesOfType: d.IncludesOutcomesOfType,
+		OutcomeType:            d.OutcomeType,
+		Outcomes:               outcomes,
+		Specifiers:             specifiers,
+		Groups:                 groups,
+	}
 }
 
 // LocalizedOutcomeDescription holds per-locale outcome data.
@@ -315,104 +331,13 @@ type LocalizedOutcomeDescription struct {
 	description map[protocols.Locale]string
 }
 
-type specifierImpl struct {
-	name string
-	kind string
-}
-
-func (s specifierImpl) Name() string { return s.name }
-func (s specifierImpl) Type() string { return s.kind }
-
-type outcomeDescriptionImpl struct {
-	id                          string
-	localizedOutcomeDescription *LocalizedOutcomeDescription
-}
-
-func (o outcomeDescriptionImpl) ID() string { return o.id }
-
-func (o outcomeDescriptionImpl) LocalizedName(locale protocols.Locale) *string {
-	o.localizedOutcomeDescription.mu.RLock()
-	defer o.localizedOutcomeDescription.mu.RUnlock()
-	v, ok := o.localizedOutcomeDescription.name[locale]
+// LocalizedName returns the cached outcome name for a locale.
+func (l *LocalizedOutcomeDescription) LocalizedName(locale protocols.Locale) *string {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	v, ok := l.name[locale]
 	if !ok {
 		return nil
 	}
 	return &v
-}
-
-func (o outcomeDescriptionImpl) Description(locale protocols.Locale) *string {
-	o.localizedOutcomeDescription.mu.RLock()
-	defer o.localizedOutcomeDescription.mu.RUnlock()
-	v, ok := o.localizedOutcomeDescription.description[locale]
-	if !ok {
-		return nil
-	}
-	return &v
-}
-
-type marketDescriptionImpl struct {
-	id                     uint
-	includesOutcomesOfType *string
-	outcomeType            *string
-	variant                *string
-	marketDescriptionCache *MarketDescriptionCache
-	locales                []protocols.Locale
-}
-
-func (m marketDescriptionImpl) ID() (uint, error) { return m.id, nil }
-
-func (m marketDescriptionImpl) LocalizedName(locale protocols.Locale) (*string, error) {
-	item, err := m.marketDescriptionCache.MarketDescriptionByID(context.Background(), m.id, m.variant, m.locales)
-	if err != nil {
-		return nil, err
-	}
-	return item.localizedName(locale)
-}
-
-func (m marketDescriptionImpl) IncludesOutcomesOfType() *string { return m.includesOutcomesOfType }
-func (m marketDescriptionImpl) OutcomeType() *string            { return m.outcomeType }
-
-func (m marketDescriptionImpl) Outcomes() ([]protocols.OutcomeDescription, error) {
-	item, err := m.marketDescriptionCache.MarketDescriptionByID(context.Background(), m.id, m.variant, m.locales)
-	if err != nil {
-		return nil, err
-	}
-	return item.outcomeList(), nil
-}
-
-func (m marketDescriptionImpl) Variant() (*string, error) { return m.variant, nil }
-
-func (m marketDescriptionImpl) Specifiers() ([]protocols.Specifier, error) {
-	item, err := m.marketDescriptionCache.MarketDescriptionByID(context.Background(), m.id, m.variant, m.locales)
-	if err != nil {
-		return nil, err
-	}
-	return item.specifierList(), nil
-}
-
-func (m marketDescriptionImpl) Groups() ([]string, error) {
-	item, err := m.marketDescriptionCache.MarketDescriptionByID(context.Background(), m.id, m.variant, m.locales)
-	if err != nil {
-		return nil, err
-	}
-	return item.groupList(), nil
-}
-
-// NewMarketDescription ...
-func NewMarketDescription(
-	id uint,
-	includesOutcomesOfType *string,
-	outcomeType *string,
-	variant *string,
-	marketDescriptionCache *MarketDescriptionCache,
-	locales []protocols.Locale,
-) protocols.MarketDescription {
-	return &marketDescriptionImpl{
-		id:                     id,
-		includesOutcomesOfType: includesOutcomesOfType,
-		outcomeType:            outcomeType,
-		variant:                variant,
-		marketDescriptionCache: marketDescriptionCache,
-		locales:                locales,
-	}
 }

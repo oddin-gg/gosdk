@@ -47,15 +47,10 @@ func (m marketDataImpl) OutcomeName(outcomeID string, locale protocols.Locale) (
 		return nil, err
 	}
 
-	outcomes, err := marketDescription.Outcomes()
-	if err != nil {
-		return nil, err
-	}
-
 	found := false
 	var outcomeName *string
-	for _, outcome := range outcomes {
-		if outcome.ID() == outcomeID {
+	for _, outcome := range marketDescription.Outcomes {
+		if outcome.ID == outcomeID {
 			outcomeName = outcome.LocalizedName(locale)
 			found = true
 			break
@@ -63,8 +58,8 @@ func (m marketDataImpl) OutcomeName(outcomeID string, locale protocols.Locale) (
 	}
 
 	// market with dynamic outcomes can have also non-dynamic outcome, that's reason why outcome with outcomeID exists at first
-	if !found && marketDescription.OutcomeType() != nil {
-		switch outcomeType(*marketDescription.OutcomeType()) {
+	if !found && marketDescription.OutcomeType != nil {
+		switch outcomeType(*marketDescription.OutcomeType) {
 		case playerOutcomeType:
 			player, err := m.marketDescriptionFactory.playerCache.GetPlayer(context.Background(), cache.PlayerCacheKey{PlayerID: outcomeID, Locale: locale})
 			if err != nil {
@@ -86,11 +81,10 @@ func (m marketDataImpl) OutcomeName(outcomeID string, locale protocols.Locale) (
 			if err != nil {
 				return nil, fmt.Errorf("missing locale %s: %w", locale, err)
 			}
-
 			outcomeName = name
 
 		default:
-			return nil, fmt.Errorf("unsupported outcome type [%s]", *marketDescription.OutcomeType())
+			return nil, fmt.Errorf("unsupported outcome type [%s]", *marketDescription.OutcomeType)
 		}
 	}
 
@@ -103,9 +97,9 @@ func (m marketDataImpl) MarketName(locale protocols.Locale) (*string, error) {
 		return nil, err
 	}
 
-	name, err := marketDescription.LocalizedName(locale)
-	if err != nil {
-		return nil, err
+	name := marketDescription.LocalizedName(locale)
+	if name == nil {
+		return nil, fmt.Errorf("missing locale %s for market %d", locale, m.marketID)
 	}
 
 	return m.makeMarketName(*name, locale)
@@ -142,10 +136,7 @@ func (m marketDataImpl) makeMarketName(marketName string, locale protocols.Local
 	if err != nil {
 		return nil, err
 	}
-	groups, err := marketDescription.Groups()
-	if err != nil {
-		return nil, err
-	}
+	groups := marketDescription.Groups
 
 	template := marketName
 	for key, value := range m.specifiers {

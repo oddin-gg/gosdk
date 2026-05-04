@@ -17,28 +17,28 @@ type MarketDescriptionFactory struct {
 	competitorCache        *cache.CompetitorCache
 }
 
-// MarketDescriptionByIDAndSpecifiers returns market description from cache based on marketID, specifiers and locales
+// MarketDescriptionByIDAndSpecifiers returns the cached market
+// description by marketID, specifiers, and locales.
 func (m MarketDescriptionFactory) MarketDescriptionByIDAndSpecifiers(
 	marketID uint,
 	specifiers map[string]string,
 	locales []protocols.Locale,
-) (protocols.MarketDescription, error) {
+) (*protocols.MarketDescription, error) {
 	var variant *string
-	specifier, ok := specifiers["variant"]
-	if ok {
+	if specifier, ok := specifiers["variant"]; ok {
 		variant = &specifier
 	}
-
 	return m.MarketDescriptionByIDAndVariant(marketID, variant, locales)
 }
 
-// MarketDescriptionByIDAndVariant returns market description from cache based on marketID, optional market variant
-// and locales
+// MarketDescriptionByIDAndVariant returns the cached market description
+// by (marketID, variant, locales). Always returns a populated value or
+// an error.
 func (m MarketDescriptionFactory) MarketDescriptionByIDAndVariant(
 	marketID uint,
 	variant *string,
 	locales []protocols.Locale,
-) (protocols.MarketDescription, error) {
+) (*protocols.MarketDescription, error) {
 	mds, err := m.marketDescriptionCache.MarketDescriptionByID(context.Background(), marketID, variant, locales)
 	if err != nil {
 		return nil, fmt.Errorf("get market description by id failed: %w", err)
@@ -46,67 +46,51 @@ func (m MarketDescriptionFactory) MarketDescriptionByIDAndVariant(
 	if mds == nil {
 		return nil, errors.New("get market description by id failed - cannot be nil")
 	}
-
-	return cache.NewMarketDescription(marketID, mds.IncludesOutcomesOfType, mds.OutcomeType, variant, m.marketDescriptionCache, locales), nil
+	desc := mds.Snapshot()
+	return &desc, nil
 }
 
-// MarketVoidReasons ...
+// MarketVoidReasons returns the void-reasons catalog.
 func (m MarketDescriptionFactory) MarketVoidReasons() ([]protocols.MarketVoidReason, error) {
 	data, err := m.marketVoidReasonsCache.MarketVoidReasons(context.Background())
 	if err != nil {
 		return nil, err
 	}
-
-	result := make([]protocols.MarketVoidReason, len(data))
-	for i, d := range data {
-
+	result := make([]protocols.MarketVoidReason, 0, len(data))
+	for _, d := range data {
 		params := make([]string, len(d.VoidReasonParams))
 		for i, p := range d.VoidReasonParams {
 			params[i] = p.Name
 		}
-
-		description := cache.NewMarketVoidReason(
+		result = append(result, cache.NewMarketVoidReason(
 			d.ID,
 			d.Name,
 			d.Description,
 			d.Template,
 			params,
-		)
-		result[i] = description
+		))
 	}
-
 	return result, nil
 }
 
-// ReloadMarketVoidReasons ...
+// ReloadMarketVoidReasons forces a refresh and returns the new list.
 func (m MarketDescriptionFactory) ReloadMarketVoidReasons() ([]protocols.MarketVoidReason, error) {
 	if err := m.marketVoidReasonsCache.ReloadMarketVoidReasons(context.Background()); err != nil {
 		return nil, err
 	}
-
 	return m.MarketVoidReasons()
 }
 
-// MarketDescriptions ...
+// MarketDescriptions returns every market description for the locale.
 func (m MarketDescriptionFactory) MarketDescriptions(locale protocols.Locale) ([]protocols.MarketDescription, error) {
-	marketDescriptions, err := m.marketDescriptionCache.LocalizedMarketDescriptions(context.Background(), locale)
+	mds, err := m.marketDescriptionCache.LocalizedMarketDescriptions(context.Background(), locale)
 	if err != nil {
 		return nil, err
 	}
-
-	result := make([]protocols.MarketDescription, 0, len(marketDescriptions))
-	for key, value := range marketDescriptions {
-		description := cache.NewMarketDescription(
-			key.MarketID,
-			value.IncludesOutcomesOfType,
-			value.OutcomeType,
-			key.Variant,
-			m.marketDescriptionCache,
-			[]protocols.Locale{locale},
-		)
-		result = append(result, description)
+	result := make([]protocols.MarketDescription, 0, len(mds))
+	for _, value := range mds {
+		result = append(result, value.Snapshot())
 	}
-
 	return result, nil
 }
 
