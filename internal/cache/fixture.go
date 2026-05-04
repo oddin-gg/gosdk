@@ -141,10 +141,10 @@ func newFixtureCache(client *api.Client) *FixtureCache {
 				ch := make([]protocols.TvChannel, len(data.TVChannels.List))
 				for i := range data.TVChannels.List {
 					tv := data.TVChannels.List[i]
-					ch[i] = tvChannelImpl{
-						name:      tv.Name,
-						streamURL: tv.StreamURL,
-						language:  tv.Language,
+					ch[i] = protocols.TvChannel{
+						Name:      tv.Name,
+						Language:  tv.Language,
+						StreamURL: tv.StreamURL,
 					}
 				}
 				entry.tvChannels[locale] = ch
@@ -160,54 +160,23 @@ func newFixtureCache(client *api.Client) *FixtureCache {
 	return fc
 }
 
-// fixtureImpl satisfies protocols.Fixture. Its accessors are pure data —
-// they read from the cached *LocalizedFixture but do not perform I/O. The
-// public API queries this with the SDK's default locale (locales[0]).
-type fixtureImpl struct {
-	id           protocols.URN
-	fixtureCache *FixtureCache
-	locales      []protocols.Locale
-}
-
-func (f fixtureImpl) StartTime() (*time.Time, error) {
-	item, err := f.fixtureCache.Fixture(context.Background(), f.id, f.locales)
+// BuildFixture resolves a per-locale Fixture snapshot from the cache,
+// fetching missing locales as needed, and returns the populated value.
+// `locale` is the locale to project on the returned struct (extra info
+// and tv channels are pulled from that locale; startTime is locale-
+// independent).
+func BuildFixture(ctx context.Context, fc *FixtureCache, id protocols.URN, locale protocols.Locale) (*protocols.Fixture, error) {
+	item, err := fc.Fixture(ctx, id, []protocols.Locale{locale})
 	if err != nil {
 		return nil, err
 	}
-	return item.StartTime(), nil
-}
-
-func (f fixtureImpl) ExtraInfo() (map[string]string, error) {
-	item, err := f.fixtureCache.Fixture(context.Background(), f.id, f.locales)
-	if err != nil {
-		return nil, err
+	out := &protocols.Fixture{
+		StartTime: item.StartTime(),
+		ExtraInfo: item.ExtraInfo(locale),
+		Locale:    locale,
 	}
-	return item.ExtraInfo(f.locales[0]), nil
-}
-
-func (f fixtureImpl) TvChannels() ([]protocols.TvChannel, error) {
-	item, err := f.fixtureCache.Fixture(context.Background(), f.id, f.locales)
-	if err != nil {
-		return nil, err
+	if ch := item.TvChannels(locale); len(ch) > 0 {
+		out.TvChannels = append([]protocols.TvChannel(nil), ch...)
 	}
-	return item.TvChannels(f.locales[0]), nil
-}
-
-type tvChannelImpl struct {
-	name      string
-	language  string
-	streamURL string
-}
-
-func (t tvChannelImpl) Name() string      { return t.name }
-func (t tvChannelImpl) StreamURL() string { return t.streamURL }
-func (t tvChannelImpl) Language() string  { return t.language }
-
-// NewFixture ...
-func NewFixture(id protocols.URN, fixtureCache *FixtureCache, locales []protocols.Locale) protocols.Fixture {
-	return &fixtureImpl{
-		id:           id,
-		fixtureCache: fixtureCache,
-		locales:      locales,
-	}
+	return out, nil
 }

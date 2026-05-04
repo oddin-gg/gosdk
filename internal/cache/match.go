@@ -415,8 +415,18 @@ func (m matchImpl) homeAwayCompetitor(home bool) (protocols.TeamCompetitor, erro
 
 func (m matchImpl) HomeCompetitor() (protocols.TeamCompetitor, error) { return m.homeAwayCompetitor(true) }
 func (m matchImpl) AwayCompetitor() (protocols.TeamCompetitor, error) { return m.homeAwayCompetitor(false) }
+
+// Fixture returns the fixture snapshot for this match in the default
+// locale. On fetch error returns a zero-value Fixture (callers can
+// inspect the err via FixtureWithError). The signature stays errorless
+// to match the protocols.Match interface; the reshaped Fixture type is
+// a value struct now.
 func (m matchImpl) Fixture() protocols.Fixture {
-	return m.entityFactory.BuildFixture(m.id, m.locales)
+	f, _ := m.entityFactory.BuildFixture(context.Background(), m.id, m.locales[0])
+	if f == nil {
+		return protocols.Fixture{}
+	}
+	return *f
 }
 
 // NewMatch ...

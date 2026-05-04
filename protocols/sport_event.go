@@ -145,18 +145,25 @@ type Competition interface {
 	Competitors() ([]Competitor, error)
 }
 
-// TvChannel ...
-type TvChannel interface {
-	Name() string
-	Language() string
-	StreamURL() string
+// TvChannel is a TV broadcast channel attached to a fixture, in one
+// locale.
+type TvChannel struct {
+	Name      string
+	Language  string
+	StreamURL string
 }
 
-// Fixture ...
-type Fixture interface {
-	StartTime() (*time.Time, error)
-	ExtraInfo() (map[string]string, error)
-	TvChannels() ([]TvChannel, error)
+// Fixture is a pure-data snapshot of a sport-event fixture in one locale.
+//
+// Phase 6 reshape: replaces the previous Fixture interface (with lazy
+// (value, error) accessors) with a value struct populated at construction.
+// StartTime is a pointer because the upstream API can omit it; ExtraInfo
+// and TvChannels are nil/empty when the fixture has no such data.
+type Fixture struct {
+	StartTime  *time.Time
+	ExtraInfo  map[string]string
+	TvChannels []TvChannel
+	Locale     Locale
 }
 
 // Match ...

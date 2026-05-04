@@ -84,9 +84,10 @@ func (e *EntityFactory) BuildPlayer(ctx context.Context, id protocols.URN, local
 	return cache.BuildPlayer(ctx, e.cacheManager.PlayersCache, id, locale)
 }
 
-// BuildFixture ...
-func (e *EntityFactory) BuildFixture(id protocols.URN, locales []protocols.Locale) protocols.Fixture {
-	return cache.NewFixture(id, e.cacheManager.FixtureCache, locales)
+// BuildFixture resolves a per-locale Fixture snapshot from the cache,
+// fetching if missing. Returns a populated value or an error.
+func (e *EntityFactory) BuildFixture(ctx context.Context, id protocols.URN, locale protocols.Locale) (*protocols.Fixture, error) {
+	return cache.BuildFixture(ctx, e.cacheManager.FixtureCache, id, locale)
 }
 
 // BuildMatchStatus ...
