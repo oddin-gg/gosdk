@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/oddin-gg/gosdk/internal/api"
@@ -144,7 +145,10 @@ func (o *oddsFeedImpl) Close() error {
 	}
 
 	if o.rabbitMQClient != nil {
-		o.rabbitMQClient.Close()
+		// Best-effort: cap shutdown wait at 5s. Phase 6 plumbs a real ctx.
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = o.rabbitMQClient.Close(shutdownCtx)
+		cancel()
 	}
 
 	if o.msgCh != nil {

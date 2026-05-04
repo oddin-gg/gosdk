@@ -57,7 +57,7 @@ func (o *oddsFeedSessionImpl) Open(
 		return errors.New("session is already opened")
 	}
 
-	ch, err := o.channelConsumer.Open(routingKeys, messageInterest)
+	ch, err := o.channelConsumer.Open(context.Background(), routingKeys, messageInterest)
 	if err != nil {
 		return err
 	}
@@ -80,7 +80,9 @@ func (o *oddsFeedSessionImpl) Open(
 
 func (o *oddsFeedSessionImpl) Close() {
 	o.cacheManager.Close()
-	o.channelConsumer.Close()
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	_ = o.channelConsumer.Close(shutdownCtx)
+	cancel()
 	if o.msgCh != nil {
 		close(o.msgCh)
 	}
