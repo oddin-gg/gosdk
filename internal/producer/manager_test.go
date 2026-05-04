@@ -1,7 +1,6 @@
 package producer
 
 import (
-	"context"
 	"crypto/tls"
 	"io"
 	"net/http"
@@ -91,11 +90,11 @@ func TestManager_Open_Populates(t *testing.T) {
 	defer srv.Close()
 
 	mgr := NewManager(&minimalCfg{}, newAPIClient(t, srv), log.New(nil))
-	if err := mgr.Open(context.Background()); err != nil {
+	if err := mgr.Open(t.Context()); err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 
-	available, err := mgr.AvailableProducers(context.Background())
+	available, err := mgr.AvailableProducers(t.Context())
 	if err != nil {
 		t.Fatalf("AvailableProducers: %v", err)
 	}
@@ -103,7 +102,7 @@ func TestManager_Open_Populates(t *testing.T) {
 		t.Errorf("got %d producers, want 4", len(available))
 	}
 
-	active, err := mgr.ActiveProducers(context.Background())
+	active, err := mgr.ActiveProducers(t.Context())
 	if err != nil {
 		t.Fatalf("ActiveProducers: %v", err)
 	}
@@ -123,7 +122,7 @@ func TestManager_LazyOpen(t *testing.T) {
 
 	mgr := NewManager(&minimalCfg{}, newAPIClient(t, srv), log.New(nil))
 	// Don't call Open — let GetProducer trigger lazy open.
-	p, err := mgr.GetProducer(context.Background(), 1)
+	p, err := mgr.GetProducer(t.Context(), 1)
 	if err != nil {
 		t.Fatalf("GetProducer: %v", err)
 	}
@@ -143,11 +142,11 @@ func TestManager_GetProducer_UnknownProducerReturnsPlaceholder(t *testing.T) {
 	defer srv.Close()
 
 	mgr := NewManager(&minimalCfg{apiURL: "api.test"}, newAPIClient(t, srv), log.New(nil))
-	if err := mgr.Open(context.Background()); err != nil {
+	if err := mgr.Open(t.Context()); err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 
-	p, err := mgr.GetProducer(context.Background(), 999)
+	p, err := mgr.GetProducer(t.Context(), 999)
 	if err != nil {
 		t.Fatalf("GetProducer(unknown): %v", err)
 	}
@@ -164,11 +163,11 @@ func TestManager_ActiveProducersInScope(t *testing.T) {
 	defer srv.Close()
 
 	mgr := NewManager(&minimalCfg{}, newAPIClient(t, srv), log.New(nil))
-	if err := mgr.Open(context.Background()); err != nil {
+	if err := mgr.Open(t.Context()); err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 
-	live, err := mgr.ActiveProducersInScope(context.Background(), types.LiveProducerScope)
+	live, err := mgr.ActiveProducersInScope(t.Context(), types.LiveProducerScope)
 	if err != nil {
 		t.Fatalf("ActiveProducersInScope live: %v", err)
 	}
@@ -177,7 +176,7 @@ func TestManager_ActiveProducersInScope(t *testing.T) {
 		t.Errorf("live count = %d, want 2", len(live))
 	}
 
-	prematch, err := mgr.ActiveProducersInScope(context.Background(), types.PrematchProducerScope)
+	prematch, err := mgr.ActiveProducersInScope(t.Context(), types.PrematchProducerScope)
 	if err != nil {
 		t.Fatalf("ActiveProducersInScope prematch: %v", err)
 	}
@@ -195,12 +194,12 @@ func TestManager_StateMutators(t *testing.T) {
 	defer srv.Close()
 
 	mgr := NewManager(&minimalCfg{}, newAPIClient(t, srv), log.New(nil))
-	if err := mgr.Open(context.Background()); err != nil {
+	if err := mgr.Open(t.Context()); err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 
 	// IsProducerEnabled defaults to true (matches active).
-	enabled, err := mgr.IsProducerEnabled(context.Background(), 1)
+	enabled, err := mgr.IsProducerEnabled(t.Context(), 1)
 	if err != nil {
 		t.Fatalf("IsProducerEnabled: %v", err)
 	}
@@ -209,16 +208,16 @@ func TestManager_StateMutators(t *testing.T) {
 	}
 
 	// Disable producer 1.
-	if err := mgr.SetProducerState(context.Background(), 1, false); err != nil {
+	if err := mgr.SetProducerState(t.Context(), 1, false); err != nil {
 		t.Fatalf("SetProducerState: %v", err)
 	}
-	enabled, _ = mgr.IsProducerEnabled(context.Background(), 1)
+	enabled, _ = mgr.IsProducerEnabled(t.Context(), 1)
 	if enabled {
 		t.Error("producer 1 should be disabled after SetProducerState(false)")
 	}
 
 	// IsProducerDown defaults to true (initial state in newData).
-	down, err := mgr.IsProducerDown(context.Background(), 1)
+	down, err := mgr.IsProducerDown(t.Context(), 1)
 	if err != nil {
 		t.Fatalf("IsProducerDown: %v", err)
 	}
@@ -230,7 +229,7 @@ func TestManager_StateMutators(t *testing.T) {
 	if err := mgr.SetProducerDown(1, false); err != nil {
 		t.Fatalf("SetProducerDown(false): %v", err)
 	}
-	down, _ = mgr.IsProducerDown(context.Background(), 1)
+	down, _ = mgr.IsProducerDown(t.Context(), 1)
 	if down {
 		t.Error("producer 1 should not be down after SetProducerDown(false)")
 	}
@@ -244,7 +243,7 @@ func TestManager_TimestampSetters(t *testing.T) {
 	defer srv.Close()
 
 	mgr := NewManager(&minimalCfg{}, newAPIClient(t, srv), log.New(nil))
-	if err := mgr.Open(context.Background()); err != nil {
+	if err := mgr.Open(t.Context()); err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 
@@ -265,7 +264,7 @@ func TestManager_TimestampSetters(t *testing.T) {
 	}
 
 	// Validate via GetProducer.
-	p, _ := mgr.GetProducer(context.Background(), 1)
+	p, _ := mgr.GetProducer(t.Context(), 1)
 	if !p.LastMessageTimestamp().Equal(t1) {
 		t.Errorf("LastMessageTimestamp = %v, want %v", p.LastMessageTimestamp(), t1)
 	}
@@ -299,7 +298,7 @@ func TestManager_GetProducerCached_AfterOpen(t *testing.T) {
 	defer srv.Close()
 
 	mgr := NewManager(&minimalCfg{}, newAPIClient(t, srv), log.New(nil))
-	if err := mgr.Open(context.Background()); err != nil {
+	if err := mgr.Open(t.Context()); err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 	p, err := mgr.GetProducerCached(1)
@@ -322,10 +321,10 @@ func TestProducerImpl_Accessors(t *testing.T) {
 	defer srv.Close()
 
 	mgr := NewManager(&minimalCfg{}, newAPIClient(t, srv), log.New(nil))
-	if err := mgr.Open(context.Background()); err != nil {
+	if err := mgr.Open(t.Context()); err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	p, err := mgr.GetProducer(context.Background(), 3) // mixed scope
+	p, err := mgr.GetProducer(t.Context(), 3) // mixed scope
 	if err != nil {
 		t.Fatalf("GetProducer: %v", err)
 	}
@@ -399,24 +398,24 @@ func TestSetProducerRecoveryFromTimestamp_RoundTrips(t *testing.T) {
 	defer srv.Close()
 
 	mgr := NewManager(&minimalCfg{}, newAPIClient(t, srv), log.New(nil))
-	if err := mgr.Open(context.Background()); err != nil {
+	if err := mgr.Open(t.Context()); err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 
 	// Within the producer's stateful_recovery_window_in_minutes (60 minutes
 	// per the test fixture). Older than the window would be rejected.
 	t0 := time.Now().Add(-30 * time.Minute)
-	if err := mgr.SetProducerRecoveryFromTimestamp(context.Background(), 1, t0); err != nil {
+	if err := mgr.SetProducerRecoveryFromTimestamp(t.Context(), 1, t0); err != nil {
 		t.Fatalf("SetProducerRecoveryFromTimestamp: %v", err)
 	}
-	p, _ := mgr.GetProducer(context.Background(), 1)
+	p, _ := mgr.GetProducer(t.Context(), 1)
 	if !p.TimestampForRecovery().Equal(t0) {
 		t.Errorf("TimestampForRecovery = %v, want %v", p.TimestampForRecovery(), t0)
 	}
 
 	// Out-of-range timestamps should error.
 	tooOld := time.Now().Add(-2 * time.Hour)
-	if err := mgr.SetProducerRecoveryFromTimestamp(context.Background(), 1, tooOld); err == nil {
+	if err := mgr.SetProducerRecoveryFromTimestamp(t.Context(), 1, tooOld); err == nil {
 		t.Error("expected error for too-old timestamp")
 	}
 }

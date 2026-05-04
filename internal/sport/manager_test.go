@@ -1,7 +1,6 @@
 package sport
 
 import (
-	"context"
 	"crypto/tls"
 	"io"
 	"net/http"
@@ -172,7 +171,7 @@ func TestSport_LocalizedSports(t *testing.T) {
 	defer srv.Close()
 
 	mgr := newSportManager(t, srv)
-	got, err := mgr.LocalizedSports(context.Background(), types.EnLocale)
+	got, err := mgr.LocalizedSports(t.Context(), types.EnLocale)
 	if err != nil {
 		t.Fatalf("LocalizedSports: %v", err)
 	}
@@ -189,7 +188,7 @@ func TestSport_Sports_DefaultLocale(t *testing.T) {
 	defer srv.Close()
 
 	mgr := newSportManager(t, srv)
-	if _, err := mgr.Sports(context.Background()); err != nil {
+	if _, err := mgr.Sports(t.Context()); err != nil {
 		t.Errorf("Sports: %v", err)
 	}
 }
@@ -207,7 +206,7 @@ func TestSport_LocalizedAvailableTournaments(t *testing.T) {
 
 	mgr := newSportManager(t, srv)
 	urn, _ := types.ParseURN("od:sport:1")
-	got, err := mgr.LocalizedAvailableTournaments(context.Background(), *urn, types.EnLocale)
+	got, err := mgr.LocalizedAvailableTournaments(t.Context(), *urn, types.EnLocale)
 	if err != nil {
 		t.Fatalf("LocalizedAvailableTournaments: %v", err)
 	}
@@ -229,7 +228,7 @@ func TestSport_AvailableTournaments_DefaultLocale(t *testing.T) {
 
 	mgr := newSportManager(t, srv)
 	urn, _ := types.ParseURN("od:sport:1")
-	if _, err := mgr.AvailableTournaments(context.Background(), *urn); err != nil {
+	if _, err := mgr.AvailableTournaments(t.Context(), *urn); err != nil {
 		t.Errorf("AvailableTournaments: %v", err)
 	}
 }
@@ -244,7 +243,7 @@ func TestSport_LocalizedFixtureChanges(t *testing.T) {
 	defer srv.Close()
 
 	mgr := newSportManager(t, srv)
-	got, err := mgr.LocalizedFixtureChanges(context.Background(), types.EnLocale, time.Now().Add(-time.Hour))
+	got, err := mgr.LocalizedFixtureChanges(t.Context(), types.EnLocale, time.Now().Add(-time.Hour))
 	if err != nil {
 		t.Fatalf("LocalizedFixtureChanges: %v", err)
 	}
@@ -266,7 +265,7 @@ func TestSport_FixtureChanges_DefaultLocale(t *testing.T) {
 	defer srv.Close()
 
 	mgr := newSportManager(t, srv)
-	if _, err := mgr.FixtureChanges(context.Background(), time.Now().Add(-time.Hour)); err != nil {
+	if _, err := mgr.FixtureChanges(t.Context(), time.Now().Add(-time.Hour)); err != nil {
 		t.Errorf("FixtureChanges: %v", err)
 	}
 }
@@ -276,10 +275,10 @@ func TestSport_LocalizedListOfMatches_LimitChecks(t *testing.T) {
 	defer srv.Close()
 
 	mgr := newSportManager(t, srv)
-	if _, err := mgr.LocalizedListOfMatches(context.Background(), 0, 1001, types.EnLocale); err == nil {
+	if _, err := mgr.LocalizedListOfMatches(t.Context(), 0, 1001, types.EnLocale); err == nil {
 		t.Error("limit > 1000 should error")
 	}
-	if _, err := mgr.LocalizedListOfMatches(context.Background(), 0, 0, types.EnLocale); err == nil {
+	if _, err := mgr.LocalizedListOfMatches(t.Context(), 0, 0, types.EnLocale); err == nil {
 		t.Error("limit < 1 should error")
 	}
 }
@@ -292,7 +291,7 @@ func TestSport_LocalizedSportActiveTournaments_NotFoundError(t *testing.T) {
 	defer srv.Close()
 
 	mgr := newSportManager(t, srv)
-	if _, err := mgr.LocalizedSportActiveTournaments(context.Background(), "nonexistent-sport", types.EnLocale); err == nil {
+	if _, err := mgr.LocalizedSportActiveTournaments(t.Context(), "nonexistent-sport", types.EnLocale); err == nil {
 		t.Error("expected error when sport name doesn't match")
 	}
 }
@@ -332,7 +331,7 @@ func TestSport_SportActiveTournaments_DefaultLocale(t *testing.T) {
 	defer srv.Close()
 
 	mgr := newSportManager(t, srv)
-	if _, err := mgr.SportActiveTournaments(context.Background(), "nonexistent"); err == nil {
+	if _, err := mgr.SportActiveTournaments(t.Context(), "nonexistent"); err == nil {
 		t.Error("expected error")
 	}
 }

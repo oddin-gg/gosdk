@@ -1,7 +1,6 @@
 package recovery
 
 import (
-	"context"
 	"crypto/tls"
 	"io"
 	"net/http"
@@ -112,7 +111,7 @@ func newProducerManagerFor(t *testing.T, srv *httptest.Server) *producer.Manager
 		Timeout: 2 * time.Second,
 	})
 	mgr := producer.NewManager(cfg, apiClient, newDiscardLogger())
-	if err := mgr.Open(context.Background()); err != nil {
+	if err := mgr.Open(t.Context()); err != nil {
 		t.Fatalf("producer manager Open: %v", err)
 	}
 	return mgr
@@ -133,7 +132,7 @@ func newWiredActor(t *testing.T, srv *httptest.Server, fake *fakeManagerOps) *re
 		},
 		Timeout: 2 * time.Second,
 	})
-	a := newRecoveryActor(context.Background(), 1, cfg, apiClient, pm, fake, newDiscardLogger(), 32)
+	a := newRecoveryActor(t.Context(), 1, cfg, apiClient, pm, fake, newDiscardLogger(), 32)
 	return a
 }
 
@@ -147,7 +146,7 @@ func TestActor_OnMessageProcessingStarted_Records(t *testing.T) {
 	now := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
 	a.onMessageProcessingStarted(now)
 
-	prod, _ := a.pm.GetProducer(context.Background(), 1)
+	prod, _ := a.pm.GetProducer(t.Context(), 1)
 	if !prod.LastMessageTimestamp().Equal(now) {
 		t.Errorf("LastMessageTimestamp = %v, want %v", prod.LastMessageTimestamp(), now)
 	}
@@ -159,7 +158,7 @@ func TestActor_OnMessageProcessingStarted_IgnoresZero(t *testing.T) {
 	a := newWiredActor(t, srv, newFakeManagerOps())
 
 	a.onMessageProcessingStarted(time.Time{})
-	prod, _ := a.pm.GetProducer(context.Background(), 1)
+	prod, _ := a.pm.GetProducer(t.Context(), 1)
 	if !prod.LastMessageTimestamp().IsZero() {
 		t.Errorf("zero-timestamp call should be a no-op")
 	}
@@ -172,14 +171,14 @@ func TestActor_OnMessageProcessingEnded(t *testing.T) {
 
 	now := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
 	a.onMessageProcessingEnded(now)
-	prod, _ := a.pm.GetProducer(context.Background(), 1)
+	prod, _ := a.pm.GetProducer(t.Context(), 1)
 	if !prod.LastProcessedMessageGenTimestamp().Equal(now) {
 		t.Errorf("LastProcessedMessageGenTimestamp = %v", prod.LastProcessedMessageGenTimestamp())
 	}
 	// Zero-timestamp is a no-op.
 	prev := prod.LastProcessedMessageGenTimestamp()
 	a.onMessageProcessingEnded(time.Time{})
-	prod, _ = a.pm.GetProducer(context.Background(), 1)
+	prod, _ = a.pm.GetProducer(t.Context(), 1)
 	if !prod.LastProcessedMessageGenTimestamp().Equal(prev) {
 		t.Errorf("zero-timestamp shouldn't update")
 	}
@@ -207,7 +206,7 @@ func TestActor_OnAlive_DisabledProducerNoOp(t *testing.T) {
 	srv, _ := fixtureSrv(t)
 	defer srv.Close()
 	a := newWiredActor(t, srv, newFakeManagerOps())
-	if err := a.pm.SetProducerState(context.Background(), 1, false); err != nil {
+	if err := a.pm.SetProducerState(t.Context(), 1, false); err != nil {
 		t.Fatalf("SetProducerState: %v", err)
 	}
 
@@ -241,7 +240,7 @@ func TestActor_OnSnapshotComplete_DisabledProducerLogsAndReturns(t *testing.T) {
 	defer srv.Close()
 	fake := newFakeManagerOps()
 	a := newWiredActor(t, srv, fake)
-	if err := a.pm.SetProducerState(context.Background(), 1, false); err != nil {
+	if err := a.pm.SetProducerState(t.Context(), 1, false); err != nil {
 		t.Fatalf("SetProducerState: %v", err)
 	}
 	a.onSnapshotComplete(evSnapshotComplete{requestID: 7})
@@ -291,7 +290,7 @@ func TestActor_ProducerDown_AndUp(t *testing.T) {
 	if len(fake.emittedMsgs) == 0 {
 		t.Error("producerUp should emit a status message")
 	}
-	prod, _ := a.pm.GetProducer(context.Background(), 1)
+	prod, _ := a.pm.GetProducer(t.Context(), 1)
 	if prod.IsFlaggedDown() {
 		t.Error("after producerUp, IsFlaggedDown should be false")
 	}
@@ -304,7 +303,7 @@ func TestActor_ProducerDown_AndUp(t *testing.T) {
 	if len(fake.emittedMsgs) == prevEmissions {
 		t.Error("producerDown should emit a new status (different reason)")
 	}
-	prod, _ = a.pm.GetProducer(context.Background(), 1)
+	prod, _ = a.pm.GetProducer(t.Context(), 1)
 	if !prod.IsFlaggedDown() {
 		t.Error("after producerDown, IsFlaggedDown should be true")
 	}
@@ -315,7 +314,7 @@ func TestActor_ProducerDown_DisabledIsNoOp(t *testing.T) {
 	defer srv.Close()
 	fake := newFakeManagerOps()
 	a := newWiredActor(t, srv, fake)
-	if err := a.pm.SetProducerState(context.Background(), 1, false); err != nil {
+	if err := a.pm.SetProducerState(t.Context(), 1, false); err != nil {
 		t.Fatalf("SetProducerState: %v", err)
 	}
 	if err := a.producerDown(types.OtherProducerDownReason); err != nil {
@@ -355,7 +354,7 @@ func TestActor_OnTick_DisabledIsNoOp(t *testing.T) {
 	defer srv.Close()
 	fake := newFakeManagerOps()
 	a := newWiredActor(t, srv, fake)
-	if err := a.pm.SetProducerState(context.Background(), 1, false); err != nil {
+	if err := a.pm.SetProducerState(t.Context(), 1, false); err != nil {
 		t.Fatalf("SetProducerState: %v", err)
 	}
 
@@ -374,7 +373,7 @@ func TestActor_OnTick_NoLastSystemAliveFlagsDown(t *testing.T) {
 	// lastSystemAlive is nil → aliveInterval is huge → flagged down via
 	// AliveInternalViolation.
 	a.onTick(time.Now())
-	prod, _ := a.pm.GetProducer(context.Background(), 1)
+	prod, _ := a.pm.GetProducer(t.Context(), 1)
 	if !prod.IsFlaggedDown() {
 		t.Error("tick with no alive should flag the producer down")
 	}
@@ -391,7 +390,7 @@ func TestActor_OnRecoverEvent_HappyPath(t *testing.T) {
 	urn, _ := types.ParseURN("od:match:1")
 	reply := make(chan recoverEventReply, 1)
 	a.onRecoverEvent(evRecoverEvent{
-		ctx:              context.Background(),
+		ctx:              t.Context(),
 		eventID:          *urn,
 		statefulRecovery: false,
 		reply:            reply,
@@ -422,7 +421,7 @@ func TestActor_OnRecoverEvent_StatefulFlagSetsCorrectEndpoint(t *testing.T) {
 	urn, _ := types.ParseURN("od:match:1")
 	reply := make(chan recoverEventReply, 1)
 	a.onRecoverEvent(evRecoverEvent{
-		ctx:              context.Background(),
+		ctx:              t.Context(),
 		eventID:          *urn,
 		statefulRecovery: true,
 		reply:            reply,

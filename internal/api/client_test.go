@@ -112,7 +112,7 @@ func TestClient_FetchProducers_Success(t *testing.T) {
 	defer srv.Close()
 
 	c := newTestClient(t, srv)
-	prods, err := c.FetchProducers(context.Background())
+	prods, err := c.FetchProducers(t.Context())
 	if err != nil {
 		t.Fatalf("FetchProducers: %v", err)
 	}
@@ -143,7 +143,7 @@ func TestClient_HeaderCanonicalization(t *testing.T) {
 	defer srv.Close()
 
 	c := newTestClient(t, srv)
-	_, _ = c.FetchProducers(context.Background())
+	_, _ = c.FetchProducers(t.Context())
 	if !seenCanonical.Load() {
 		t.Fatal("X-Access-Token (canonical) not seen on the request")
 	}
@@ -167,7 +167,7 @@ func TestClient_RetriesOn5xx(t *testing.T) {
 	defer srv.Close()
 
 	c := newTestClient(t, srv)
-	if _, err := c.FetchProducers(context.Background()); err != nil {
+	if _, err := c.FetchProducers(t.Context()); err != nil {
 		t.Fatalf("expected success after retries, got %v", err)
 	}
 	if got := attempts.Load(); got != 3 {
@@ -192,7 +192,7 @@ func TestClient_BodyClosedOnRetry(t *testing.T) {
 	defer srv.Close()
 
 	c := newTestClient(t, srv)
-	if _, err := c.FetchProducers(context.Background()); err != nil {
+	if _, err := c.FetchProducers(t.Context()); err != nil {
 		t.Fatalf("expected success, got %v", err)
 	}
 	// If the previous attempt's body wasn't closed, the test server will hold
@@ -213,7 +213,7 @@ func TestClient_NoRetryOn4xx(t *testing.T) {
 	defer srv.Close()
 
 	c := newTestClient(t, srv)
-	_, err := c.FetchProducers(context.Background())
+	_, err := c.FetchProducers(t.Context())
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -248,7 +248,7 @@ func TestClient_RetriesOnNetworkError(t *testing.T) {
 	defer srv.Close()
 
 	c := newTestClient(t, srv)
-	if _, err := c.FetchProducers(context.Background()); err != nil {
+	if _, err := c.FetchProducers(t.Context()); err != nil {
 		t.Fatalf("expected success after network-error retry, got %v", err)
 	}
 	if got := attempts.Load(); got < 2 {
@@ -264,7 +264,7 @@ func TestClient_ContextCancellation(t *testing.T) {
 	defer srv.Close()
 
 	c := newTestClient(t, srv)
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	go func() {
 		time.Sleep(50 * time.Millisecond)
 		cancel()
@@ -301,7 +301,7 @@ func TestClient_PostReplayStart_AllParams(t *testing.T) {
 	parallel := false
 	node := 7
 
-	if _, err := c.PostReplayStart(context.Background(),
+	if _, err := c.PostReplayStart(t.Context(),
 		&node, &speed, &maxDelay, &useTs, &product, &parallel,
 	); err != nil {
 		t.Fatalf("PostReplayStart: %v", err)
@@ -340,7 +340,7 @@ func TestClient_PostEventOddsRecovery(t *testing.T) {
 	c := newTestClient(t, srv)
 	node := 5
 	urn, _ := types.ParseURN("od:match:42")
-	ok, err := c.PostEventOddsRecovery(context.Background(), "live", *urn, 1234, &node)
+	ok, err := c.PostEventOddsRecovery(t.Context(), "live", *urn, 1234, &node)
 	if err != nil {
 		t.Fatalf("PostEventOddsRecovery: %v", err)
 	}

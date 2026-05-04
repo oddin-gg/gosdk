@@ -113,7 +113,7 @@ func TestMatchCache_FetchesAndPopulates(t *testing.T) {
 	defer srv.Close()
 
 	mc := newMatchCache(newAPIClientForTest(t, srv), log.New(nil))
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 
 	got, err := mc.Match(ctx, *urn, []types.Locale{types.EnLocale})
@@ -162,7 +162,7 @@ func TestMatchCache_MultiLocaleFillIn(t *testing.T) {
 	defer srv.Close()
 
 	mc := newMatchCache(newAPIClientForTest(t, srv), log.New(nil))
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// First call: en only.
 	if _, err := mc.Match(ctx, *urn, []types.Locale{types.EnLocale}); err != nil {
@@ -207,7 +207,7 @@ func TestMatchCache_ClearForcesRefetch(t *testing.T) {
 	defer srv.Close()
 
 	mc := newMatchCache(newAPIClientForTest(t, srv), log.New(nil))
-	ctx := context.Background()
+	ctx := t.Context()
 
 	if _, err := mc.Match(ctx, *urn, []types.Locale{types.EnLocale}); err != nil {
 		t.Fatalf("Match: %v", err)

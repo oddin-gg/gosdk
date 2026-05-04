@@ -1,7 +1,6 @@
 package recovery
 
 import (
-	"context"
 	"io"
 	"log/slog"
 	"sync"
@@ -167,11 +166,12 @@ func (f *fakeManagerOps) emitRecoveryMessage(msg types.RecoveryMessage) {
 // newTestActor builds an actor with nil pm/api so tests can drive
 // pure-state methods. Methods that would dereference pm/api are
 // avoided in these tests.
-func newTestActor(mgr actorManagerOps) *recoveryActor {
+func newTestActor(t *testing.T, mgr actorManagerOps) *recoveryActor {
+	t.Helper()
 	return &recoveryActor{
 		producerID:      1,
 		mgr:             mgr,
-		ctx:             context.Background(),
+		ctx:             t.Context(),
 		inbox:           make(chan actorEvent, 32),
 		shutdown:        make(chan struct{}),
 		done:            make(chan struct{}),
@@ -180,7 +180,7 @@ func newTestActor(mgr actorManagerOps) *recoveryActor {
 }
 
 func TestActor_RecoveryStateTransitions(t *testing.T) {
-	a := newTestActor(newFakeManagerOps())
+	a := newTestActor(t, newFakeManagerOps())
 
 	if a.recoveryState != types.DefaultRecoveryState {
 		t.Errorf("initial state = %v, want Default", a.recoveryState)
@@ -211,7 +211,7 @@ func TestActor_RecoveryStateTransitions(t *testing.T) {
 }
 
 func TestActor_IsKnownRecovery(t *testing.T) {
-	a := newTestActor(newFakeManagerOps())
+	a := newTestActor(t, newFakeManagerOps())
 	urn, _ := types.ParseURN("od:match:1")
 
 	if a.isKnownRecovery(7) {
@@ -234,7 +234,7 @@ func TestActor_IsKnownRecovery(t *testing.T) {
 }
 
 func TestActor_SnapshotValidationNeeded(t *testing.T) {
-	a := newTestActor(newFakeManagerOps())
+	a := newTestActor(t, newFakeManagerOps())
 	cases := map[types.MessageInterest]bool{
 		types.LiveOnlyMessageInterest:             true,
 		types.PrematchOnlyMessageInterest:         true,
@@ -256,7 +256,7 @@ func TestActor_SnapshotValidationNeeded(t *testing.T) {
 // performing recovery (Started OR Interrupted state) AND the request
 // id matches the current recovery.
 func TestActor_ValidateSnapshotComplete(t *testing.T) {
-	a := newTestActor(newFakeManagerOps())
+	a := newTestActor(t, newFakeManagerOps())
 
 	// No current recovery → false.
 	if a.validateSnapshotComplete(7, types.AllMessageInterest) {
@@ -291,7 +291,7 @@ func TestActor_ValidateSnapshotComplete(t *testing.T) {
 // TestActor_RunLoopStartsAndStops verifies the actor's run loop
 // processes events from its inbox and stops cleanly.
 func TestActor_RunLoopStartsAndStops(t *testing.T) {
-	a := newTestActor(newFakeManagerOps())
+	a := newTestActor(t, newFakeManagerOps())
 	go a.run()
 
 	// Stop should return promptly.
@@ -309,7 +309,7 @@ func TestActor_RunLoopStartsAndStops(t *testing.T) {
 
 // TestActor_StopIsIdempotent verifies multiple stop() calls don't panic.
 func TestActor_StopIsIdempotent(t *testing.T) {
-	a := newTestActor(newFakeManagerOps())
+	a := newTestActor(t, newFakeManagerOps())
 	go a.run()
 	a.stop()
 	a.stop() // second stop must not panic
@@ -319,7 +319,7 @@ func TestActor_StopIsIdempotent(t *testing.T) {
 // TestActor_SendNonBlocking verifies that a full inbox returns false
 // from send() rather than blocking.
 func TestActor_SendNonBlocking(t *testing.T) {
-	a := newTestActor(newFakeManagerOps())
+	a := newTestActor(t, newFakeManagerOps())
 	// Don't run() — leave events queued so we can test inbox capacity.
 	for i := 0; i < cap(a.inbox); i++ {
 		if !a.send(evTick{now: time.Now()}) {
@@ -340,7 +340,7 @@ func TestActor_DispatchHandlesUnknownEvent(t *testing.T) {
 			t.Errorf("dispatch panicked on unknown event: %v", r)
 		}
 	}()
-	a := newTestActor(newFakeManagerOps())
+	a := newTestActor(t, newFakeManagerOps())
 	a.logger = newDiscardLogger()
 	a.dispatch(unknownTestEvent{})
 }

@@ -166,7 +166,7 @@ func TestReplay_AddSportEventID(t *testing.T) {
 	mgr := NewManager(newAPIClient(t, srv), cfg, &fakeSportsInfo{})
 
 	urn, _ := types.ParseURN("od:match:42")
-	ok, err := mgr.AddSportEventID(context.Background(), *urn)
+	ok, err := mgr.AddSportEventID(t.Context(), *urn)
 	if err != nil {
 		t.Fatalf("AddSportEventID: %v", err)
 	}
@@ -192,7 +192,7 @@ func TestReplay_AddSportEventID_WithNodeID(t *testing.T) {
 	mgr := NewManager(newAPIClient(t, srv), cfg, &fakeSportsInfo{})
 
 	urn, _ := types.ParseURN("od:match:42")
-	if _, err := mgr.AddSportEventID(context.Background(), *urn); err != nil {
+	if _, err := mgr.AddSportEventID(t.Context(), *urn); err != nil {
 		t.Fatalf("AddSportEventID: %v", err)
 	}
 	if query != "node_id=7" {
@@ -213,7 +213,7 @@ func TestReplay_RemoveSportEventID(t *testing.T) {
 	mgr := NewManager(newAPIClient(t, srv), cfg, &fakeSportsInfo{})
 
 	urn, _ := types.ParseURN("od:match:42")
-	if _, err := mgr.RemoveSportEventID(context.Background(), *urn); err != nil {
+	if _, err := mgr.RemoveSportEventID(t.Context(), *urn); err != nil {
 		t.Fatalf("RemoveSportEventID: %v", err)
 	}
 	if method != http.MethodDelete {
@@ -236,7 +236,7 @@ func TestReplay_Play(t *testing.T) {
 	speed := 10
 	maxDelay := 50
 	rewrite := true
-	if _, err := mgr.Play(context.Background(), types.ReplayPlayParams{
+	if _, err := mgr.Play(t.Context(), types.ReplayPlayParams{
 		Speed:             &speed,
 		MaxDelayInMs:      &maxDelay,
 		RewriteTimestamps: &rewrite,
@@ -266,10 +266,10 @@ func TestReplay_StopAndClear(t *testing.T) {
 
 	cfg := &minimalCfg{}
 	mgr := NewManager(newAPIClient(t, srv), cfg, &fakeSportsInfo{})
-	if _, err := mgr.Stop(context.Background()); err != nil {
+	if _, err := mgr.Stop(t.Context()); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
-	if _, err := mgr.Clear(context.Background()); err != nil {
+	if _, err := mgr.Clear(t.Context()); err != nil {
 		t.Fatalf("Clear: %v", err)
 	}
 	if !stopHit || !clearHit {
@@ -293,7 +293,7 @@ func TestReplay_ReplayList_PopulatesMatches(t *testing.T) {
 	si := &fakeSportsInfo{}
 	mgr := NewManager(newAPIClient(t, srv), cfg, si)
 
-	matches, err := mgr.ReplayList(context.Background())
+	matches, err := mgr.ReplayList(t.Context())
 	if err != nil {
 		t.Fatalf("ReplayList: %v", err)
 	}
@@ -323,7 +323,7 @@ func TestReplay_ReplayList_PropagatesSportsInfoError(t *testing.T) {
 	si := &fakeSportsInfo{err: errors.New("boom")}
 	mgr := NewManager(newAPIClient(t, srv), cfg, si)
 
-	if _, err := mgr.ReplayList(context.Background()); err == nil {
+	if _, err := mgr.ReplayList(t.Context()); err == nil {
 		t.Fatal("expected SportsInfoManager error to propagate")
 	}
 }

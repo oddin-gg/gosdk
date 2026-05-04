@@ -73,7 +73,7 @@ func TestClient_New_EagerWhoAmI(t *testing.T) {
 		WithHTTPClient(newTestHTTPClient(srv)),
 	)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 
 	c, err := New(ctx, cfg)
@@ -81,7 +81,7 @@ func TestClient_New_EagerWhoAmI(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	defer func() {
-		closeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		closeCtx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 		defer cancel()
 		_ = c.Close(closeCtx)
 	}()
@@ -126,7 +126,7 @@ func TestClient_New_BookmakerProbeError(t *testing.T) {
 		WithAPIURL("api.example.test"),
 		WithHTTPClient(newTestHTTPClient(srv)),
 	)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 
 	if _, err := New(ctx, cfg); err == nil {
@@ -148,7 +148,7 @@ func TestClient_APIEvents_OffByDefault(t *testing.T) {
 		WithAPIURL("api.example.test"),
 		WithHTTPClient(newTestHTTPClient(srv)),
 	)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 
 	c, err := New(ctx, cfg)
@@ -180,7 +180,7 @@ func TestClient_APIEvents_MetadataLevel(t *testing.T) {
 		WithHTTPClient(newTestHTTPClient(srv)),
 		WithAPICallLogging(APILogMetadata),
 	)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 
 	c, err := New(ctx, cfg)
@@ -226,7 +226,7 @@ func TestClient_APIEvents_ResponsesLevel(t *testing.T) {
 		WithAPICallLogging(APILogResponses),
 		WithAPICallBodyLimit(1024),
 	)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 
 	c, err := New(ctx, cfg)
@@ -262,7 +262,7 @@ func TestClient_APIEvents_BodyTruncation(t *testing.T) {
 		WithAPICallLogging(APILogResponses),
 		WithAPICallBodyLimit(16), // shorter than whoAmIBody
 	)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 
 	c, err := New(ctx, cfg)
@@ -298,7 +298,7 @@ func TestClient_ConnectionEvents_TranslatesFeedEvents(t *testing.T) {
 		WithAPIURL("api.example.test"),
 		WithHTTPClient(newTestHTTPClient(srv)),
 	)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 
 	c, err := New(ctx, cfg)
@@ -420,14 +420,14 @@ func newTestClient(t *testing.T) *Client {
 		WithAPIURL("api.example.test"),
 		WithHTTPClient(newTestHTTPClient(srv)),
 	)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 	c, err := New(ctx, cfg)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 		defer cancel()
 		_ = c.Close(ctx)
 	})
@@ -438,7 +438,7 @@ func newTestClient(t *testing.T) *Client {
 // delegations.
 func TestClient_Producers_Methods(t *testing.T) {
 	c := newTestClient(t)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	all, err := c.Producers(ctx)
 	if err != nil {
@@ -477,7 +477,7 @@ func TestClient_Producers_Methods(t *testing.T) {
 // state mutators.
 func TestClient_SetProducerState_AndRecoveryTimestamp(t *testing.T) {
 	c := newTestClient(t)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	if err := c.SetProducerEnabled(ctx, 1, false); err != nil {
 		t.Fatalf("SetProducerEnabled: %v", err)
@@ -492,7 +492,7 @@ func TestClient_SetProducerState_AndRecoveryTimestamp(t *testing.T) {
 // AvailableTournaments.
 func TestClient_Sports_Methods(t *testing.T) {
 	c := newTestClient(t)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	if _, err := c.Sports(ctx); err != nil {
 		t.Errorf("Sports: %v", err)
@@ -509,7 +509,7 @@ func TestClient_Sports_Methods(t *testing.T) {
 // TestClient_FixtureChanges exercises the fixture-changes path.
 func TestClient_FixtureChanges(t *testing.T) {
 	c := newTestClient(t)
-	ctx := context.Background()
+	ctx := t.Context()
 	got, err := c.FixtureChanges(ctx, time.Now().Add(-time.Hour))
 	if err != nil {
 		t.Fatalf("FixtureChanges: %v", err)
@@ -523,7 +523,7 @@ func TestClient_FixtureChanges(t *testing.T) {
 // reason delegation paths.
 func TestClient_MarketDescriptions(t *testing.T) {
 	c := newTestClient(t)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	descs, err := c.MarketDescriptions(ctx)
 	if err != nil {
@@ -587,7 +587,7 @@ func TestClient_EventRecoveryStatus_UnknownID(t *testing.T) {
 		WithAPIURL("api.example.test"),
 		WithHTTPClient(newTestHTTPClient(srv)),
 	)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 
 	c, err := New(ctx, cfg)
@@ -613,7 +613,7 @@ func TestClient_Close_Idempotent(t *testing.T) {
 		WithAPIURL("api.example.test"),
 		WithHTTPClient(newTestHTTPClient(srv)),
 	)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 
 	c, err := New(ctx, cfg)

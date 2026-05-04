@@ -52,7 +52,7 @@ func TestEventCache_Get_FreshLoad(t *testing.T) {
 	var calls atomic.Int32
 	c := NewEventCache[string, string, *localizedFoo](Config{}, recordingLoader(&calls, false))
 
-	v, ok, err := c.Get(context.Background(), "match-1", []string{"en"})
+	v, ok, err := c.Get(t.Context(), "match-1", []string{"en"})
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -72,7 +72,7 @@ func TestEventCache_Get_HitsCache(t *testing.T) {
 	c := NewEventCache[string, string, *localizedFoo](Config{}, recordingLoader(&calls, false))
 
 	for i := 0; i < 5; i++ {
-		_, _, err := c.Get(context.Background(), "match-1", []string{"en"})
+		_, _, err := c.Get(t.Context(), "match-1", []string{"en"})
 		if err != nil {
 			t.Fatalf("Get %d: %v", i, err)
 		}
@@ -100,7 +100,7 @@ func TestEventCache_SingleflightDedup(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, _, err := c.Get(context.Background(), "match-1", []string{"en"})
+			_, _, err := c.Get(t.Context(), "match-1", []string{"en"})
 			if err != nil {
 				t.Errorf("Get: %v", err)
 			}
@@ -133,13 +133,13 @@ func TestEventCache_FetchOnlyMissingLocales(t *testing.T) {
 	}
 	c := NewEventCache[string, string, *localizedFoo](Config{}, loader)
 
-	if _, _, err := c.Get(context.Background(), "k", []string{"en"}); err != nil {
+	if _, _, err := c.Get(t.Context(), "k", []string{"en"}); err != nil {
 		t.Fatalf("Get en: %v", err)
 	}
-	if _, _, err := c.Get(context.Background(), "k", []string{"en", "ru"}); err != nil {
+	if _, _, err := c.Get(t.Context(), "k", []string{"en", "ru"}); err != nil {
 		t.Fatalf("Get en+ru: %v", err)
 	}
-	if _, _, err := c.Get(context.Background(), "k", []string{"de"}); err != nil {
+	if _, _, err := c.Get(t.Context(), "k", []string{"de"}); err != nil {
 		t.Fatalf("Get de: %v", err)
 	}
 
@@ -170,11 +170,11 @@ func TestEventCache_LoaderError_NoPoison(t *testing.T) {
 	}
 	c := NewEventCache[string, string, *localizedFoo](Config{}, loader)
 
-	if _, _, err := c.Get(context.Background(), "k", []string{"en"}); err == nil {
+	if _, _, err := c.Get(t.Context(), "k", []string{"en"}); err == nil {
 		t.Fatal("expected error on first call")
 	}
 	failing = false
-	v, ok, err := c.Get(context.Background(), "k", []string{"en"})
+	v, ok, err := c.Get(t.Context(), "k", []string{"en"})
 	if err != nil {
 		t.Fatalf("Get retry: %v", err)
 	}
@@ -192,11 +192,11 @@ func TestEventCache_TTLExpiry(t *testing.T) {
 		Config{TTL: 50 * time.Millisecond},
 		recordingLoader(&calls, false),
 	)
-	if _, _, err := c.Get(context.Background(), "k", []string{"en"}); err != nil {
+	if _, _, err := c.Get(t.Context(), "k", []string{"en"}); err != nil {
 		t.Fatalf("Get 1: %v", err)
 	}
 	time.Sleep(120 * time.Millisecond) // > TTL
-	if _, _, err := c.Get(context.Background(), "k", []string{"en"}); err != nil {
+	if _, _, err := c.Get(t.Context(), "k", []string{"en"}); err != nil {
 		t.Fatalf("Get 2: %v", err)
 	}
 	if got := calls.Load(); got != 2 {
@@ -211,12 +211,12 @@ func TestEventCache_LRUEviction(t *testing.T) {
 		recordingLoader(&calls, false),
 	)
 	for _, k := range []string{"a", "b", "c"} { // 3rd entry evicts oldest
-		if _, _, err := c.Get(context.Background(), k, []string{"en"}); err != nil {
+		if _, _, err := c.Get(t.Context(), k, []string{"en"}); err != nil {
 			t.Fatalf("Get %s: %v", k, err)
 		}
 	}
 	// "a" should be evicted; reading it again triggers loader.
-	if _, _, err := c.Get(context.Background(), "a", []string{"en"}); err != nil {
+	if _, _, err := c.Get(t.Context(), "a", []string{"en"}); err != nil {
 		t.Fatalf("Get a (re-load): %v", err)
 	}
 	if got := calls.Load(); got != 4 {
@@ -227,9 +227,9 @@ func TestEventCache_LRUEviction(t *testing.T) {
 func TestEventCache_Clear(t *testing.T) {
 	var calls atomic.Int32
 	c := NewEventCache[string, string, *localizedFoo](Config{}, recordingLoader(&calls, false))
-	_, _, _ = c.Get(context.Background(), "k", []string{"en"})
+	_, _, _ = c.Get(t.Context(), "k", []string{"en"})
 	c.Clear("k")
-	_, _, _ = c.Get(context.Background(), "k", []string{"en"})
+	_, _, _ = c.Get(t.Context(), "k", []string{"en"})
 	if got := calls.Load(); got != 2 {
 		t.Fatalf("loader calls = %d, want 2 after Clear+Get", got)
 	}
@@ -241,7 +241,7 @@ func TestEventCache_Purge(t *testing.T) {
 		recordingLoader(new(atomic.Int32), false),
 	)
 	for _, k := range []string{"a", "b", "c"} {
-		_, _, _ = c.Get(context.Background(), k, []string{"en"})
+		_, _, _ = c.Get(t.Context(), k, []string{"en"})
 	}
 	if c.Len() != 3 {
 		t.Fatalf("Len = %d, want 3", c.Len())
@@ -264,7 +264,7 @@ func TestEventCache_ContextCancellation(t *testing.T) {
 	}
 	c := NewEventCache[string, string, *localizedFoo](Config{}, loader)
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	go func() {
 		time.Sleep(20 * time.Millisecond)
 		cancel()

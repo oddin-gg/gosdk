@@ -99,7 +99,7 @@ func TestManager_BookmakerDetails_FetchesAndCaches(t *testing.T) {
 	cfg := &minimalCfg{}
 	mgr := NewManager(cfg, newAPIClient(t, srv))
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 
 	bd1, err := mgr.BookmakerDetails(ctx)
@@ -140,7 +140,7 @@ func TestManager_BookmakerDetails_PropagatesError(t *testing.T) {
 	cfg := &minimalCfg{}
 	mgr := NewManager(cfg, newAPIClient(t, srv))
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 
 	if _, err := mgr.BookmakerDetails(ctx); err == nil {
@@ -162,7 +162,7 @@ func TestManager_LogsWhenTokenExpiresSoon(t *testing.T) {
 	cfg := &minimalCfg{}
 	mgr := NewManagerWithLogger(cfg, newAPIClient(t, srv), logger)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 	if _, err := mgr.BookmakerDetails(ctx); err != nil {
 		t.Fatalf("BookmakerDetails: %v", err)

@@ -16,7 +16,7 @@ func TestStaticCache_All_LoadOnce(t *testing.T) {
 	c := NewStaticCache[int, string, string](loader)
 
 	for i := 0; i < 5; i++ {
-		got, err := c.All(context.Background(), "en")
+		got, err := c.All(t.Context(), "en")
 		if err != nil {
 			t.Fatalf("All: %v", err)
 		}
@@ -37,10 +37,10 @@ func TestStaticCache_PerLocaleIsolation(t *testing.T) {
 	}
 	c := NewStaticCache[int, string, string](loader)
 
-	if _, err := c.All(context.Background(), "en"); err != nil {
+	if _, err := c.All(t.Context(), "en"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.All(context.Background(), "ru"); err != nil {
+	if _, err := c.All(t.Context(), "ru"); err != nil {
 		t.Fatal(err)
 	}
 	if got := calls.Load(); got != 2 {
@@ -54,14 +54,14 @@ func TestStaticCache_Get(t *testing.T) {
 	}
 	c := NewStaticCache[int, string, string](loader)
 
-	v, ok, err := c.Get(context.Background(), "en", 42)
+	v, ok, err := c.Get(t.Context(), "en", 42)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !ok || v != "answer" {
 		t.Fatalf("Get(42) = %q, ok=%v", v, ok)
 	}
-	_, ok, err = c.Get(context.Background(), "en", 99)
+	_, ok, err = c.Get(t.Context(), "en", 99)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,11 +84,11 @@ func TestStaticCache_ErrorDoesNotPoison(t *testing.T) {
 	}
 	c := NewStaticCache[int, string, string](loader)
 
-	if _, err := c.All(context.Background(), "en"); err == nil {
+	if _, err := c.All(t.Context(), "en"); err == nil {
 		t.Fatal("expected error on first call")
 	}
 	failing = false
-	got, err := c.All(context.Background(), "en")
+	got, err := c.All(t.Context(), "en")
 	if err != nil {
 		t.Fatalf("retry: %v", err)
 	}
@@ -108,9 +108,9 @@ func TestStaticCache_Clear(t *testing.T) {
 	}
 	c := NewStaticCache[int, string, string](loader)
 
-	_, _ = c.All(context.Background(), "en")
+	_, _ = c.All(t.Context(), "en")
 	c.Clear("en")
-	_, _ = c.All(context.Background(), "en")
+	_, _ = c.All(t.Context(), "en")
 	if calls.Load() != 2 {
 		t.Fatalf("calls = %d, want 2 (load, clear, reload)", calls.Load())
 	}
@@ -124,11 +124,11 @@ func TestStaticCache_Purge(t *testing.T) {
 	}
 	c := NewStaticCache[int, string, string](loader)
 
-	_, _ = c.All(context.Background(), "en")
-	_, _ = c.All(context.Background(), "ru")
+	_, _ = c.All(t.Context(), "en")
+	_, _ = c.All(t.Context(), "ru")
 	c.Purge()
-	_, _ = c.All(context.Background(), "en")
-	_, _ = c.All(context.Background(), "ru")
+	_, _ = c.All(t.Context(), "en")
+	_, _ = c.All(t.Context(), "ru")
 	if calls.Load() != 4 {
 		t.Fatalf("calls = %d, want 4 (en, ru, en-after-purge, ru-after-purge)", calls.Load())
 	}
@@ -140,7 +140,7 @@ func TestStaticCache_ContextPropagation(t *testing.T) {
 	}
 	c := NewStaticCache[int, string, string](loader)
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	_, err := c.All(ctx, "en")
 	if !errors.Is(err, context.Canceled) {

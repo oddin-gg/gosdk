@@ -1,7 +1,6 @@
 package market
 
 import (
-	"context"
 	"crypto/tls"
 	"io"
 	"net/http"
@@ -132,7 +131,7 @@ func TestMarketManager_LocalizedMarketDescriptions(t *testing.T) {
 	defer srv.Close()
 
 	mgr := newMarketManager(t, srv)
-	descs, err := mgr.LocalizedMarketDescriptions(context.Background(), types.EnLocale)
+	descs, err := mgr.LocalizedMarketDescriptions(t.Context(), types.EnLocale)
 	if err != nil {
 		t.Fatalf("LocalizedMarketDescriptions: %v", err)
 	}
@@ -149,7 +148,7 @@ func TestMarketManager_MarketDescriptionByIDAndVariant(t *testing.T) {
 	defer srv.Close()
 
 	mgr := newMarketManager(t, srv)
-	desc, err := mgr.MarketDescriptionByIDAndVariant(context.Background(), 1, nil)
+	desc, err := mgr.MarketDescriptionByIDAndVariant(t.Context(), 1, nil)
 	if err != nil {
 		t.Fatalf("MarketDescriptionByIDAndVariant: %v", err)
 	}
@@ -169,7 +168,7 @@ func TestMarketManager_MarketDescriptions_DefaultLocale(t *testing.T) {
 	defer srv.Close()
 
 	mgr := newMarketManager(t, srv)
-	descs, err := mgr.MarketDescriptions(context.Background())
+	descs, err := mgr.MarketDescriptions(t.Context())
 	if err != nil {
 		t.Fatalf("MarketDescriptions: %v", err)
 	}
@@ -186,7 +185,7 @@ func TestMarketManager_VoidReasons(t *testing.T) {
 	defer srv.Close()
 
 	mgr := newMarketManager(t, srv)
-	reasons, err := mgr.MarketVoidReasons(context.Background())
+	reasons, err := mgr.MarketVoidReasons(t.Context())
 	if err != nil {
 		t.Fatalf("MarketVoidReasons: %v", err)
 	}
@@ -215,13 +214,13 @@ func TestMarketManager_ReloadVoidReasons(t *testing.T) {
 	defer srv.Close()
 
 	mgr := newMarketManager(t, srv)
-	if _, err := mgr.MarketVoidReasons(context.Background()); err != nil {
+	if _, err := mgr.MarketVoidReasons(t.Context()); err != nil {
 		t.Fatalf("first MarketVoidReasons: %v", err)
 	}
 	if hits != 1 {
 		t.Errorf("expected 1 hit, got %d", hits)
 	}
-	if _, err := mgr.ReloadMarketVoidReasons(context.Background()); err != nil {
+	if _, err := mgr.ReloadMarketVoidReasons(t.Context()); err != nil {
 		t.Fatalf("ReloadMarketVoidReasons: %v", err)
 	}
 	if hits != 2 {
@@ -238,12 +237,12 @@ func TestMarketManager_ClearMarketDescription(t *testing.T) {
 
 	mgr := newMarketManager(t, srv)
 	// Populate cache.
-	if _, err := mgr.MarketDescriptions(context.Background()); err != nil {
+	if _, err := mgr.MarketDescriptions(t.Context()); err != nil {
 		t.Fatalf("MarketDescriptions: %v", err)
 	}
 	// Clear should not panic; subsequent calls still work.
 	mgr.ClearMarketDescription(1, nil)
-	if _, err := mgr.MarketDescriptionByIDAndVariant(context.Background(), 1, nil); err != nil {
+	if _, err := mgr.MarketDescriptionByIDAndVariant(t.Context(), 1, nil); err != nil {
 		t.Errorf("after clear: %v", err)
 	}
 }
