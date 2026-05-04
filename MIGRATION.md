@@ -398,6 +398,122 @@ internal consumer:
 If you discover a method call site that no longer compiles and isn't
 listed above, file an issue — it likely got pruned in the same pass.
 
+## 10. Entity reshape — interfaces → value structs
+
+The largest behavior shift in v1.0.0. Every entity returned by SDK
+catalog methods (Match / Tournament / Competitor / Sport / Fixture /
+Player / MatchStatus and their helpers PeriodScore / Scoreboard /
+Statistics / Category / TvChannel / LocalizedStaticData / StaticData)
+went from **interface-with-lazy-loads** to **plain value struct**.
+
+### Before — lazy-loading interfaces
+
+```go
+match, err := client.Match(ctx, urn)
+// match is a protocols.Match interface — every accessor returns
+// (value, error) and re-enters the cache to fetch on demand.
+name, err := match.LocalizedName(protocols.EnLocale) // *string, error
+ts,   err := match.ScheduledTime()                   // *time.Time, error
+status      := match.Status()                        // protocols.MatchStatus interface
+home,  err := match.HomeCompetitor()                 // protocols.TeamCompetitor, error
+hname, err := home.LocalizedName(protocols.EnLocale) // *string, error
+```
+
+Every accessor took a cache lock + map walk + nil/locale check. Every
+accessor could return an error. Hidden lazy fetches via
+`context.Background()` because interface methods didn't take ctx.
+
+### After — value structs
+
+```go
+match, err := client.Match(ctx, urn)
+// match is a protocols.Match value — fully populated at construction.
+name := match.Names[protocols.EnLocale]              // map lookup
+ts   := match.ScheduledTime                          // *time.Time field
+status := match.Status                               // value struct
+home := match.HomeCompetitor                         // *TeamCompetitor field (nil for non-classic)
+hname := home.Name(protocols.EnLocale)               // pure helper, no error
+```
+
+Field access is allocation-free, never errors, never locks. Eager
+loading at construction means **one** cache lookup per entity — not
+one per accessor.
+
+### Per-entity migration
+
+| Pre-v1 idiom | v1.0.0 equivalent |
+|---|---|
+| `match.ID()` | `match.ID` |
+| `match.LocalizedName(loc)` | `match.Names[loc]` or `match.Name(loc)` |
+| `match.SportID()` (returns `(*URN, error)`) | `match.SportID` |
+| `match.ScheduledTime()` | `match.ScheduledTime` |
+| `match.LiveOddsAvailability()` | `match.LiveOddsAvailability` |
+| `match.SportFormat()` | `match.SportFormat` |
+| `match.ExtraInfo()` | `match.ExtraInfoFor(loc)` (per-locale) |
+| `match.Status()` | `match.Status` (value, not interface) |
+| `match.Tournament()` | `match.Tournament` |
+| `match.HomeCompetitor()` / `AwayCompetitor()` | `match.HomeCompetitor` / `match.AwayCompetitor` (`*TeamCompetitor`, nil-check) |
+| `match.Competitors()` | `match.Competitors` |
+| `match.Fixture()` | `match.Fixture` |
+| `tournament.Sport()` | `tournament.Sport` |
+| `tournament.Competitors()` | `client.Competitor(ctx, urn)` for each `urn` in `tournament.CompetitorIDs` (kept lazy — multiple tournaments share competitors) |
+| `tournament.RiskTier()` | `tournament.RiskTier` |
+| `tournament.Category()` | `tournament.Category` (`*Category`, nil-check) |
+| `tournament.StartDate()` | `tournament.StartDate` |
+| `competitor.Names()` | `competitor.Names` |
+| `competitor.LocalizedName(loc)` | `competitor.Name(loc)` |
+| `competitor.Players()` | `competitor.Players` (a `map[Locale][]Player`) |
+| `competitor.LocalizedPlayers(loc)` | `competitor.PlayersFor(loc)` |
+| `competitor.Underage()` | `competitor.Underage` |
+| `competitor.IconPath()` | `competitor.IconPath` |
+| `sport.Names()` | `sport.Names` |
+| `sport.LocalizedName(loc)` | `sport.Name(loc)` |
+| `sport.Tournaments()` | `client.Tournament(ctx, urn)` for each `urn` in `sport.TournamentIDs` |
+| `player.LocalizedName()` | `player.Name` |
+| `player.FullName()` | `player.FullName` |
+| `fixture.StartTime()` | `fixture.StartTime` |
+| `fixture.TvChannels()` | `fixture.TvChannels` |
+| `tvChannel.Name()` | `tvChannel.Name` |
+| `status.WinnerID()` | `status.WinnerID` |
+| `status.Status()` | `status.Status` |
+| `status.MatchStatus()` (returns `LocalizedStaticData`) | `status.StatusDescription` (`*LocalizedStaticData`, nil-check) |
+| `status.HomeScore()` / `AwayScore()` | `status.HomeScore` / `AwayScore` (`*float64`) |
+| `status.Scoreboard()` | `status.Scoreboard` (`*Scoreboard`, nil-check) |
+| `status.Statistics()` | `status.Statistics` (`*Statistics`, nil-check) |
+| `status.PeriodScores()` | `status.PeriodScores` |
+| `periodScore.HomeWonRounds()` | `periodScore.HomeWonRounds` |
+| `scoreboard.HomeGoals()` | `scoreboard.HomeGoals` |
+| `statistics.HomeYellowCards()` | `statistics.HomeYellowCards` |
+| `localizedStaticData.LocalizedDescription(loc)` | unchanged — kept as a helper method (`*string`) |
+
+### Performance
+
+- **Per-accessor**: ~5 ns field read vs ~100–500 ns lazy cache lookup
+  + locks. Several orders of magnitude faster on the hot path.
+- **Per-entity construction**: one eager fetch chain (match → tournament
+  → competitors → fixture → status). For typical access patterns
+  (consumers read most fields), this is the same total work — just
+  shifted from "first accessor" to "construction." For listings
+  (`MatchesFor`, `LiveMatches`, `ListMatches`) the API endpoints
+  already return enough to populate without per-entry fan-out.
+- **Concurrency**: value structs are immutable post-construction. No
+  locks per accessor.
+
+### What did NOT change
+
+- **Message types** (`OddsChange`, `BetStop`, `BetSettlement`,
+  `BetCancel`, `RollbackBetSettlement`, `RollbackBetCancel`,
+  `FixtureChangeMessage`, `Unparsable`) — still interfaces. They're
+  decoded fully at construction and don't carry lazy loads, so the
+  reshape isn't needed.
+- **Market** / `MarketDescription` / `OutcomeDescription` — still
+  interfaces in v1.0.0. The market description tree is more
+  deeply locale-and-variant-bound and didn't carry the same volume
+  of `context.Background()` leaks. May be reshaped in v1.1+.
+- **`ProducerStatus`**, `EventRecoveryMessage` — still interfaces.
+  Deferred for the same reason — they're message-shaped, not
+  entity-shaped.
+
 ---
 
 ## 10. Mechanical migration script
