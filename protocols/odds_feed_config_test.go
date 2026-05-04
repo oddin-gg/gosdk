@@ -71,14 +71,6 @@ func TestEnvironment_MQEndpoint(t *testing.T) {
 	}
 }
 
-// TestRegion_DeprecatedAlias verifies DefaulRegion still equals RegionDefault.
-// Source-compat guarantee — old name kept as deprecated alias.
-func TestRegion_DeprecatedAlias(t *testing.T) {
-	if DefaulRegion != RegionDefault {
-		t.Fatalf("DefaulRegion (%q) must alias RegionDefault (%q) for source compat", DefaulRegion, RegionDefault)
-	}
-}
-
 func TestAllLocales_Coverage(t *testing.T) {
 	want := []Locale{
 		EnLocale, BrLocale, DeLocale, EsLocale, FiLocale, FrLocale,

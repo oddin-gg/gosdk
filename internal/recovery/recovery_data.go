@@ -61,12 +61,6 @@ func (p *producerRecoveryData) getRecoveryState() protocols.RecoveryState {
 	return p.recoveryState
 }
 
-func (p *producerRecoveryData) getCurrentRecovery() *recoveryData {
-	p.lock.RLock()
-	defer p.lock.RUnlock()
-	return p.currentRecovery
-}
-
 func (p *producerRecoveryData) getLastSystemAliveReceivedTimestamp() *time.Time {
 	p.lock.RLock()
 	defer p.lock.RUnlock()

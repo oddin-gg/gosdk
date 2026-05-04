@@ -9,7 +9,6 @@ import (
 
 type outcomeOddsImpl struct {
 	id          string
-	refID       *uint
 	probability *float32
 	marketData  protocols.MarketData
 	locale      protocols.Locale
@@ -19,11 +18,6 @@ type outcomeOddsImpl struct {
 
 func (o outcomeOddsImpl) ID() string {
 	return o.id
-}
-
-// Deprecated: do not use this method, it will be removed in future
-func (o outcomeOddsImpl) RefID() *uint {
-	return o.refID
 }
 
 func (o outcomeOddsImpl) Name() (*string, error) {
@@ -70,7 +64,6 @@ func (o outcomeOddsImpl) convertToAmericanOdds(odds *float32) *float32 {
 
 type outcomeSettlementImpl struct {
 	id         string
-	refID      *uint
 	marketData protocols.MarketData
 	locale     protocols.Locale
 	result     *feedXML.OutcomeResult
@@ -79,11 +72,6 @@ type outcomeSettlementImpl struct {
 
 func (o outcomeSettlementImpl) ID() string {
 	return o.id
-}
-
-// Deprecated: do not use this method, it will be removed in future
-func (o outcomeSettlementImpl) RefID() *uint {
-	return o.refID
 }
 
 func (o outcomeSettlementImpl) Name() (*string, error) {
@@ -122,7 +110,6 @@ func (o outcomeSettlementImpl) VoidFactor() *protocols.VoidFactor {
 
 type marketWithOddsImpl struct {
 	id               uint
-	refID            *uint
 	specifiers       map[string]string
 	marketData       protocols.MarketData
 	locale           protocols.Locale
@@ -133,11 +120,6 @@ type marketWithOddsImpl struct {
 
 func (m marketWithOddsImpl) ID() uint {
 	return m.id
-}
-
-// Deprecated: do not use this method, it will be removed in future
-func (m marketWithOddsImpl) RefID() *uint {
-	return m.refID
 }
 
 func (m marketWithOddsImpl) Specifiers() map[string]string {
@@ -186,7 +168,6 @@ func ConvertFeedMarketStatus(marketStatus *feedXML.MarketStatus) protocols.Marke
 
 type marketWithSettlementImpl struct {
 	id                 uint
-	refID              *uint
 	specifiers         map[string]string
 	marketData         protocols.MarketData
 	locale             protocols.Locale
@@ -195,11 +176,6 @@ type marketWithSettlementImpl struct {
 
 func (m marketWithSettlementImpl) ID() uint {
 	return m.id
-}
-
-// Deprecated: do not use this method, it will be removed in future
-func (m marketWithSettlementImpl) RefID() *uint {
-	return m.refID
 }
 
 func (m marketWithSettlementImpl) Specifiers() map[string]string {
@@ -220,7 +196,6 @@ func (m marketWithSettlementImpl) OutcomeSettlements() []protocols.OutcomeSettle
 
 type marketCancelImpl struct {
 	id               uint
-	refID            *uint
 	specifiers       map[string]string
 	marketData       protocols.MarketData
 	locale           protocols.Locale
@@ -230,11 +205,6 @@ type marketCancelImpl struct {
 
 func (m marketCancelImpl) ID() uint {
 	return m.id
-}
-
-// Deprecated: do not use this method, it will be removed in future
-func (m marketCancelImpl) RefID() *uint {
-	return m.refID
 }
 
 func (m marketCancelImpl) Specifiers() map[string]string {
@@ -258,9 +228,7 @@ func (m marketCancelImpl) VoidReasonParams() *string {
 }
 
 type marketImpl struct {
-	id uint
-	// Deprecated: do not use this property, it will be removed in future
-	refID      *uint
+	id         uint
 	specifiers map[string]string
 	marketData protocols.MarketData
 	locale     protocols.Locale
@@ -268,11 +236,6 @@ type marketImpl struct {
 
 func (m marketImpl) ID() uint {
 	return m.id
-}
-
-// Deprecated: do not use this method, it will be removed in future
-func (m marketImpl) RefID() *uint {
-	return m.refID
 }
 
 func (m marketImpl) Specifiers() map[string]string {

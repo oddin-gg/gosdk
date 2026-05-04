@@ -137,11 +137,6 @@ func (c *Client) Close(ctx context.Context) error {
 	}
 }
 
-// Close (no-arg, for old callers) — uses background ctx with no deadline.
-//
-// Deprecated: prefer Close(ctx).
-func (c *Client) CloseNoCtx() { _ = c.Close(context.Background()) }
-
 func (c *Client) runShutdown() {
 	c.mu.Lock()
 	cancel := c.closeFn

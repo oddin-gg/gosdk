@@ -32,8 +32,7 @@ type MatchCache struct {
 type LocalizedMatch struct {
 	mu sync.RWMutex
 
-	id    protocols.URN
-	refID *protocols.URN
+	id protocols.URN
 
 	// Locale-independent fields (set on first load; later loads re-set them).
 	scheduledTime        *time.Time
@@ -68,12 +67,6 @@ func (m *LocalizedMatch) Locales() []protocols.Locale {
 // Accessors are pure-data reads under RLock — no I/O.
 
 func (m *LocalizedMatch) ID() protocols.URN { return m.id }
-
-func (m *LocalizedMatch) RefID() *protocols.URN {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.refID
-}
 
 func (m *LocalizedMatch) Name(locale protocols.Locale) (string, bool) {
 	m.mu.RLock()
@@ -202,10 +195,6 @@ func newMatchCache(client *api.Client, logger *log.Entry) *MatchCache {
 
 // merge folds a freshly fetched match summary into the entry under mu.
 func (m *LocalizedMatch) merge(locale protocols.Locale, match apiXML.SportEvent) error {
-	refID, err := unwrapURN(match.RefID)
-	if err != nil {
-		return err
-	}
 	tournamentID, err := unwrapURN(&match.Tournament.ID)
 	if err != nil {
 		return err
@@ -273,7 +262,6 @@ func (m *LocalizedMatch) merge(locale protocols.Locale, match apiXML.SportEvent)
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.refID = refID
 	m.sportID = *sportID
 	m.tournamentID = *tournamentID
 	m.competitors = competitors
@@ -299,15 +287,6 @@ type matchImpl struct {
 }
 
 func (m matchImpl) ID() protocols.URN { return m.id }
-
-// Deprecated: do not use this method, it will be removed in future
-func (m matchImpl) RefID() (*protocols.URN, error) {
-	item, err := m.matchCache.Match(context.Background(), m.id, m.locales)
-	if err != nil {
-		return nil, err
-	}
-	return item.RefID(), nil
-}
 
 func (m matchImpl) LocalizedName(locale protocols.Locale) (*string, error) {
 	item, err := m.matchCache.Match(context.Background(), m.id, m.locales)

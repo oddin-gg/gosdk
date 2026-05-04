@@ -52,11 +52,6 @@ const (
 	// RegionDefault is the canonical name for the default (EU) region.
 	RegionDefault Region = ""
 	APSouthEast1  Region = "ap-southeast-1."
-
-	// DefaulRegion is preserved for source compatibility.
-	//
-	// Deprecated: misspelling kept as an alias; use RegionDefault.
-	DefaulRegion Region = RegionDefault
 )
 
 // Locale ...

@@ -11,8 +11,6 @@ type MarketData interface {
 // Market ...
 type Market interface {
 	ID() uint
-	// Deprecated: do not use this method, it will be removed in future
-	RefID() *uint
 	Specifiers() map[string]string
 	Name() (*string, error)
 	LocalizedName(locale Locale) (*string, error)
@@ -56,8 +54,6 @@ type MarketCancel interface {
 // OutcomeDescription ...
 type OutcomeDescription interface {
 	ID() string
-	// Deprecated: do not use this method, it will be removed in future
-	RefID() *uint
 	LocalizedName(locale Locale) *string
 	Description(locale Locale) *string
 }
@@ -71,8 +67,6 @@ type Specifier interface {
 // MarketDescription ...
 type MarketDescription interface {
 	ID() (uint, error)
-	// Deprecated: do not use this method, it will be removed in future
-	RefID() (*uint, error)
 	LocalizedName(locale Locale) (*string, error)
 	IncludesOutcomesOfType() *string
 	OutcomeType() *string

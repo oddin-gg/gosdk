@@ -22,7 +22,7 @@ const defaultNodeID = 1
 var (
 	token  = "YOUR TOKEN"
 	env    = protocols.IntegrationEnvironment
-	region = protocols.DefaulRegion
+	region = protocols.RegionDefault
 	nodeID = defaultNodeID
 	locale = protocols.EnLocale
 )
@@ -79,7 +79,7 @@ func initEnv() {
 		case "ap":
 			region = protocols.APSouthEast1
 		case "eu":
-			region = protocols.DefaulRegion
+			region = protocols.RegionDefault
 		default:
 			log.Printf("REGION environment variable has invalid value %s, using default", v)
 		}

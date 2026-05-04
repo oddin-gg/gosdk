@@ -14,13 +14,7 @@ import (
 
 type fixtureChangeImpl struct {
 	id          protocols.URN
-	refID       *protocols.URN
 	updatedTime time.Time
-}
-
-// Deprecated: do not use this method, it will be removed in future
-func (f fixtureChangeImpl) SportEventRefID() *protocols.URN {
-	return f.refID
 }
 
 func (f fixtureChangeImpl) SportEventID() protocols.URN {
@@ -195,17 +189,8 @@ func (m *Manager) LocalizedFixtureChanges(ctx context.Context, locale protocols.
 			return nil, err
 		}
 
-		var refID *protocols.URN
-		if fixtureChange.SportEventRefID != nil {
-			refID, err = protocols.ParseURN(*fixtureChange.SportEventRefID)
-			if err != nil {
-				return nil, err
-			}
-		}
-
 		result[i] = &fixtureChangeImpl{
 			id:          *id,
-			refID:       refID,
 			updatedTime: (time.Time)(fixtureChange.UpdatedAt),
 		}
 	}

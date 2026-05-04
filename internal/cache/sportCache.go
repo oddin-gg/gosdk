@@ -37,7 +37,6 @@ type LocalizedSport struct {
 	name          map[protocols.Locale]string
 	abbreviation  map[protocols.Locale]string
 	iconPath      *string
-	refID         *protocols.URN
 }
 
 func (l *LocalizedSport) makeTournamentIDsList() []protocols.URN {
@@ -84,12 +83,6 @@ func (l *LocalizedSport) iconPathValue() *string {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	return l.iconPath
-}
-
-func (l *LocalizedSport) refIDValue() *protocols.URN {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	return l.refID
 }
 
 // Sport returns a sport entry, loading missing locales as needed.
@@ -220,13 +213,6 @@ func (s *SportCache) upsertSport(id protocols.URN, locale protocols.Locale, spor
 	entry.name[locale] = sport.Name
 	entry.abbreviation[locale] = sport.Abbreviation
 	entry.iconPath = sport.IconPath
-	if sport.RefID != nil {
-		refID, err := protocols.ParseURN(*sport.RefID)
-		if err != nil {
-			return err
-		}
-		entry.refID = refID
-	}
 	return nil
 }
 
@@ -291,15 +277,6 @@ func (s sportImpl) IconPath() (*string, error) {
 }
 
 func (s sportImpl) ID() protocols.URN { return s.id }
-
-// Deprecated: do not use this method, it will be removed in future
-func (s sportImpl) RefID() (*protocols.URN, error) {
-	item, err := s.sportDataCache.Sport(context.Background(), s.id, s.locales)
-	if err != nil {
-		return nil, err
-	}
-	return item.refIDValue(), nil
-}
 
 func (s sportImpl) Names() (map[protocols.Locale]string, error) {
 	item, err := s.sportDataCache.Sport(context.Background(), s.id, s.locales)

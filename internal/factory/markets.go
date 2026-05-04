@@ -21,7 +21,6 @@ func (m MarketFactory) BuildMarket(event interface{}, market *feedXML.MarketAttr
 	marketData := m.marketDataFactory.BuildMarketData(event, market.ID, specifiersMap)
 	return marketImpl{
 		id:         market.ID,
-		refID:      market.RefID,
 		specifiers: specifiersMap,
 		marketData: marketData,
 		locale:     m.locales[0],
@@ -40,7 +39,6 @@ func (m MarketFactory) BuildMarketWithOdds(event interface{}, market *feedXML.Ma
 
 	return marketWithOddsImpl{
 		id:               market.ID,
-		refID:            market.RefID,
 		specifiers:       specifiersMap,
 		marketData:       marketData,
 		locale:           m.locales[0],
@@ -62,7 +60,6 @@ func (m MarketFactory) BuildMarketWithSettlement(event interface{}, market *feed
 
 	return marketWithSettlementImpl{
 		id:                 market.ID,
-		refID:              market.RefID,
 		specifiers:         specifiersMap,
 		marketData:         marketData,
 		locale:             m.locales[0],
@@ -77,7 +74,6 @@ func (m MarketFactory) BuildMarketCancel(event interface{}, market *feedXML.Mark
 
 	return marketCancelImpl{
 		id:               market.ID,
-		refID:            market.RefID,
 		specifiers:       specifiersMap,
 		marketData:       marketData,
 		locale:           m.locales[0],
@@ -113,7 +109,6 @@ func (m MarketFactory) buildOutcomeOdds(outcome feedXML.Outcome, marketData prot
 
 	return outcomeOddsImpl{
 		id:          outcome.ID,
-		refID:       outcome.RefID,
 		probability: outcome.Probabilities,
 		marketData:  marketData,
 		locale:      locale,
@@ -125,7 +120,6 @@ func (m MarketFactory) buildOutcomeOdds(outcome feedXML.Outcome, marketData prot
 func (m MarketFactory) buildOutcomeSettlement(outcome feedXML.Outcome, marketData protocols.MarketData, locale protocols.Locale) protocols.OutcomeSettlement {
 	return outcomeSettlementImpl{
 		id:         outcome.ID,
-		refID:      outcome.RefID,
 		marketData: marketData,
 		locale:     locale,
 		result:     outcome.Result,

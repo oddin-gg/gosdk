@@ -33,8 +33,6 @@ const (
 // SportEvent ...
 type SportEvent interface {
 	ID() URN
-	// Deprecated: do not use this method, it will be removed in future
-	RefID() (*URN, error)
 	LocalizedName(locale Locale) (*string, error)
 	SportID() (*URN, error)
 	ScheduledTime() (*time.Time, error)
@@ -200,8 +198,6 @@ type Category interface {
 // SportSummary ...
 type SportSummary interface {
 	ID() URN
-	// Deprecated: do not use this method, it will be removed in future
-	RefID() (*URN, error)
 	Names() (map[Locale]string, error)
 	IconPath() (*string, error)
 	LocalizedName(locale Locale) (*string, error)
@@ -235,7 +231,5 @@ const (
 // FixtureChange ...
 type FixtureChange interface {
 	SportEventID() URN
-	// Deprecated: do not use this method, it will be removed in future
-	SportEventRefID() *URN
 	UpdateTime() time.Time
 }

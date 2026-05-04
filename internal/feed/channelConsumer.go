@@ -126,9 +126,6 @@ func (c *ChannelConsumer) Close(ctx context.Context) error {
 	}
 }
 
-// CloseNoCtx is the legacy no-arg shape. Deprecated: prefer Close(ctx).
-func (c *ChannelConsumer) CloseNoCtx() { _ = c.Close(context.Background()) }
-
 func (c *ChannelConsumer) runShutdown() {
 	c.mu.Lock()
 	cancel := c.closeFn

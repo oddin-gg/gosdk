@@ -182,7 +182,6 @@ func (m *MarketDescriptionCache) upsert(description data.MarketDescription, loca
 			}
 		}
 		entry = &LocalizedMarketDescription{
-			refID:                  description.RefID,
 			IncludesOutcomesOfType: description.IncludesOutcomesOfType,
 			OutcomeType:            description.OutcomeType,
 			outcomes:               outcomes,
@@ -210,7 +209,6 @@ func newMarketDescriptionCache(client *api.Client) *MarketDescriptionCache {
 type LocalizedMarketDescription struct {
 	mu sync.RWMutex
 
-	refID                  *uint
 	IncludesOutcomesOfType *string
 	OutcomeType            *string
 	outcomes               map[string]*LocalizedOutcomeDescription
@@ -255,7 +253,6 @@ func (d *LocalizedMarketDescription) merge(description data.MarketDescription, l
 			}
 			lo.mu.Lock()
 			lo.name[locale] = outcome.Name
-			lo.refID = outcome.RefID
 			if outcome.Description != nil {
 				lo.description[locale] = *outcome.Description
 			}
@@ -311,16 +308,9 @@ func (d *LocalizedMarketDescription) groupList() []string {
 	return out
 }
 
-func (d *LocalizedMarketDescription) refIDValue() *uint {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	return d.refID
-}
-
 // LocalizedOutcomeDescription holds per-locale outcome data.
 type LocalizedOutcomeDescription struct {
 	mu          sync.RWMutex
-	refID       *uint
 	name        map[protocols.Locale]string
 	description map[protocols.Locale]string
 }
@@ -339,13 +329,6 @@ type outcomeDescriptionImpl struct {
 }
 
 func (o outcomeDescriptionImpl) ID() string { return o.id }
-
-// Deprecated: do not use this property, it will be removed in future
-func (o outcomeDescriptionImpl) RefID() *uint {
-	o.localizedOutcomeDescription.mu.RLock()
-	defer o.localizedOutcomeDescription.mu.RUnlock()
-	return o.localizedOutcomeDescription.refID
-}
 
 func (o outcomeDescriptionImpl) LocalizedName(locale protocols.Locale) *string {
 	o.localizedOutcomeDescription.mu.RLock()
@@ -377,15 +360,6 @@ type marketDescriptionImpl struct {
 }
 
 func (m marketDescriptionImpl) ID() (uint, error) { return m.id, nil }
-
-// Deprecated: do not use this method, it will be removed in future
-func (m marketDescriptionImpl) RefID() (*uint, error) {
-	item, err := m.marketDescriptionCache.MarketDescriptionByID(context.Background(), m.id, m.variant, m.locales)
-	if err != nil {
-		return nil, err
-	}
-	return item.refIDValue(), nil
-}
 
 func (m marketDescriptionImpl) LocalizedName(locale protocols.Locale) (*string, error) {
 	item, err := m.marketDescriptionCache.MarketDescriptionByID(context.Background(), m.id, m.variant, m.locales)

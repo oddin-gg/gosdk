@@ -21,7 +21,6 @@ func (m MarketDescriptionResponse) Code() protocols.ResponseCode {
 // MarketDescription represents market type
 type MarketDescription struct {
 	ID uint `xml:"id,attr"`
-	// Deprecated: do not use this property, it will be removed in future
 	RefID                  *uint              `xml:"ref_id,attr,omitempty"`
 	Name                   string             `xml:"name,attr"`
 	IncludesOutcomesOfType *string            `xml:"includes_outcomes_of_type,attr"`
@@ -52,7 +51,6 @@ type OutcomesWrapper struct {
 // MarketDescriptionOutcome ...
 type MarketDescriptionOutcome struct {
 	ID string `xml:"id,attr"`
-	// Deprecated: do not use this property, it will be removed in future
 	RefID       *uint   `xml:"ref_id,attr,omitempty"`
 	Name        string  `xml:"name,attr"`
 	Description *string `xml:"description,attr,omitempty"`

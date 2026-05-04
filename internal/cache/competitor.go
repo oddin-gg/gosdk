@@ -16,8 +16,6 @@ import (
 // carries enough fields to populate a competitor entry.
 type TeamWrapper interface {
 	GetID() string
-	// Deprecated: do not use this method, it will be removed in future
-	GetRefID() *string
 	GetName() string
 	GetAbbreviation() string
 	GetUnderage() string
@@ -45,12 +43,11 @@ type CompetitorCache struct {
 }
 
 // LocalizedCompetitor carries per-locale name/abbreviation plus
-// locale-independent metadata (refID, players, underage).
+// locale-independent metadata (players, underage).
 type LocalizedCompetitor struct {
 	mu sync.RWMutex
 
-	id    protocols.URN
-	refID *protocols.URN
+	id protocols.URN
 
 	name         map[protocols.Locale]string
 	abbreviation map[protocols.Locale]string
@@ -125,23 +122,8 @@ func (l *LocalizedCompetitor) playerURNs() []protocols.URN {
 	return out
 }
 
-func (l *LocalizedCompetitor) refIDValue() *protocols.URN {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	return l.refID
-}
-
 // merge folds a TeamWrapper payload into the entry under mu.
 func (l *LocalizedCompetitor) merge(locale protocols.Locale, team TeamWrapper) error {
-	var refID *protocols.URN
-	if team.GetRefID() != nil {
-		var err error
-		refID, err = protocols.ParseURN(*team.GetRefID())
-		if err != nil {
-			return err
-		}
-	}
-
 	var underage *protocols.UnderageStatus
 	if u := team.GetUnderage(); u != "" {
 		var parsed protocols.UnderageStatus
@@ -171,9 +153,6 @@ func (l *LocalizedCompetitor) merge(locale protocols.Locale, team TeamWrapper) e
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if refID != nil {
-		l.refID = refID
-	}
 	l.name[locale] = team.GetName()
 	l.abbreviation[locale] = team.GetAbbreviation()
 	if underage != nil {
@@ -290,15 +269,6 @@ func (c competitorImpl) IconPath() (*string, error) {
 
 func (c competitorImpl) ID() protocols.URN { return c.id }
 
-// Deprecated: do not use this method, it will be removed in future
-func (c competitorImpl) RefID() (*protocols.URN, error) {
-	item, err := c.competitorCache.Competitor(context.Background(), c.id, c.locales)
-	if err != nil {
-		return nil, err
-	}
-	return item.refIDValue(), nil
-}
-
 func (c competitorImpl) Names() (map[protocols.Locale]string, error) {
 	item, err := c.competitorCache.Competitor(context.Background(), c.id, c.locales)
 	if err != nil {
@@ -403,9 +373,8 @@ type teamCompetitorImpl struct {
 	competitor protocols.Competitor
 }
 
-func (t teamCompetitorImpl) IconPath() (*string, error)        { return t.competitor.IconPath() }
-func (t teamCompetitorImpl) ID() protocols.URN                 { return t.competitor.ID() }
-func (t teamCompetitorImpl) RefID() (*protocols.URN, error)    { return t.competitor.RefID() }
+func (t teamCompetitorImpl) IconPath() (*string, error) { return t.competitor.IconPath() }
+func (t teamCompetitorImpl) ID() protocols.URN          { return t.competitor.ID() }
 func (t teamCompetitorImpl) Names() (map[protocols.Locale]string, error) {
 	return t.competitor.Names()
 }

@@ -19,8 +19,6 @@ import (
 // types that carry tournament metadata.
 type TournamentWrapper interface {
 	GetID() string
-	// Deprecated: do not use this method, it will be removed in future
-	GetRefID() *string
 	GetStartDate() *time.Time
 	GetEndDate() *time.Time
 	GetSportID() string
@@ -53,8 +51,7 @@ type TournamentCache struct {
 type LocalizedTournament struct {
 	mu sync.RWMutex
 
-	id    protocols.URN
-	refID *protocols.URN
+	id protocols.URN
 
 	startDate        *time.Time
 	endDate          *time.Time
@@ -78,12 +75,6 @@ func (l *LocalizedTournament) Locales() []protocols.Locale {
 		out = append(out, locale)
 	}
 	return out
-}
-
-func (l *LocalizedTournament) refIDValue() *protocols.URN {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	return l.refID
 }
 
 func (l *LocalizedTournament) localizedName(locale protocols.Locale) (*string, error) {
@@ -128,13 +119,6 @@ func (l *LocalizedTournament) merge(locale protocols.Locale, t TournamentWrapper
 	if err != nil {
 		return err
 	}
-	var refID *protocols.URN
-	if t.GetRefID() != nil {
-		refID, err = protocols.ParseURN(*t.GetRefID())
-		if err != nil {
-			return err
-		}
-	}
 
 	var competitorURNs []protocols.URN
 	if ext, ok := t.(TournamentExtendedWrapper); ok {
@@ -152,9 +136,6 @@ func (l *LocalizedTournament) merge(locale protocols.Locale, t TournamentWrapper
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.id = ifZeroURN(l.id, urnFromString(t.GetID()))
-	if refID != nil {
-		l.refID = refID
-	}
 	l.startDate = t.GetStartDate()
 	l.endDate = t.GetEndDate()
 	l.sportID = *sportID
@@ -325,14 +306,6 @@ func (t tournamentImpl) IconPath() (*string, error) {
 }
 
 func (t tournamentImpl) ID() protocols.URN { return t.id }
-
-func (t tournamentImpl) RefID() (*protocols.URN, error) {
-	item, err := t.tournamentCache.Tournament(context.Background(), t.id, t.locales)
-	if err != nil {
-		return nil, err
-	}
-	return item.refIDValue(), nil
-}
 
 func (t tournamentImpl) LocalizedAbbreviation(locale protocols.Locale) (*string, error) {
 	item, err := t.tournamentCache.Tournament(context.Background(), t.id, []protocols.Locale{locale})

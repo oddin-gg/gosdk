@@ -32,8 +32,6 @@ func (v VoidFactor) String() string {
 // Outcome ...
 type Outcome interface {
 	ID() string
-	// Deprecated: do not use this method, it will be removed in future
-	RefID() *uint
 	Name() (*string, error)
 	LocalizedName(locale Locale) (*string, error)
 }

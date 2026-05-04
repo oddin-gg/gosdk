@@ -29,21 +29,14 @@ func (cr CompetitorResponse) GetUnderage() string {
 	return cr.Competitor.Underage
 }
 
-// GetRefID ...
-// Deprecated: do not use this method, it will be removed in future
-func (cr CompetitorResponse) GetRefID() *string {
-	return cr.Competitor.RefID
-}
-
 func (cr CompetitorResponse) GetPlayers() []Player {
 	return cr.Players
 }
 
 // Team ...
 type Team struct {
-	ID string `xml:"id,attr"`
-	// Deprecated: do not use this property, it will be removed in future
-	RefID        *string `xml:"ref_id,attr,omitempty"`
+	ID           string  `xml:"id,attr"`
+	RefID        *string `xml:"ref_id,attr,omitempty"` // wire-format only; not exposed
 	Name         string  `xml:"name,attr"`
 	Abbreviation string  `xml:"abbreviation,attr"`
 	Country      string  `xml:"country,attr,omitempty"`
@@ -70,12 +63,6 @@ func (t Team) GetAbbreviation() string {
 // GetUnderage ...
 func (t Team) GetUnderage() string {
 	return t.Underage
-}
-
-// GetRefID ...
-// Deprecated: do not use this method, it will be removed in future
-func (t Team) GetRefID() *string {
-	return t.RefID
 }
 
 // TeamExtended ...

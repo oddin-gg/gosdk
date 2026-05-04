@@ -121,7 +121,7 @@ func NewConfiguration(accessToken string, environment protocols.Environment, nod
 		messagingPort:               5672,
 		accessToken:                 &accessToken,
 		selectedEnvironment:         &environment,
-		selectedRegion:              protocols.DefaulRegion,
+		selectedRegion:              protocols.RegionDefault,
 		sdkNodeID:                   &nodeID,
 		reportExtendedData:          reportExtendedData,
 		exchangeName:                "oddinfeed",

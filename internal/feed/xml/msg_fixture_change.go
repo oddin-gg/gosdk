@@ -23,7 +23,6 @@ type FixtureChange struct {
 	MessageWithTimestamp
 	XMLName xml.Name `xml:"fixture_change"`
 	EventID string   `xml:"event_id,attr"`
-	// Deprecated: do not use this property, it will be removed in future
 	EventRefID *string           `xml:"event_ref_id,attr,omitempty"`
 	ProductID  uint              `xml:"product,attr"`
 	ChangeType FixtureChangeType `xml:"change_type,attr,omitempty"`
