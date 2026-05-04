@@ -40,103 +40,123 @@ type SportEvent interface {
 	LiveOddsAvailability() (*LiveOddsAvailability, error)
 }
 
-// PeriodScore ...
-type PeriodScore interface {
-	Type() string
-	HomeScore() float64
-	AwayScore() float64
-	PeriodNumber() uint
-	MatchStatusCode() uint
-	HomeWonRounds() *uint32
-	AwayWonRounds() *uint32
-	HomeKills() *int32
-	AwayKills() *int32
-	HomeGoals() *uint32
-	AwayGoals() *uint32
-	HomePoints() *uint32
-	AwayPoints() *uint32
-	HomeRuns() *uint32
-	AwayRuns() *uint32
-	HomeWicketsFallen() *uint32
-	AwayWicketsFallen() *uint32
-	HomeOversPlayed() *uint32
-	HomeBallsPlayed() *uint32
-	AwayOversPlayed() *uint32
-	AwayBallsPlayed() *uint32
-	HomeWonCoinToss() *bool
+// PeriodScore is a pure-data per-period scoreline.
+//
+// Phase 6 reshape: replaces the previous PeriodScore interface (a
+// 22-method getter list) with a value struct. Optional sport-specific
+// fields are pointers — nil means "not reported."
+type PeriodScore struct {
+	Type            string
+	PeriodNumber    uint
+	MatchStatusCode uint
+	HomeScore       float64
+	AwayScore       float64
+
+	HomeWonRounds *uint32
+	AwayWonRounds *uint32
+
+	HomeKills *int32
+	AwayKills *int32
+
+	HomeGoals *uint32
+	AwayGoals *uint32
+
+	HomePoints *uint32
+	AwayPoints *uint32
+
+	HomeRuns          *uint32
+	AwayRuns          *uint32
+	HomeWicketsFallen *uint32
+	AwayWicketsFallen *uint32
+	HomeOversPlayed   *uint32
+	HomeBallsPlayed   *uint32
+	AwayOversPlayed   *uint32
+	AwayBallsPlayed   *uint32
+	HomeWonCoinToss   *bool
 }
 
-// Scoreboard ...
-type Scoreboard interface {
-	CurrentCTTeam() *uint32
-	CurrentDefenderTeam() *uint32
-	HomeWonRounds() *uint32
-	AwayWonRounds() *uint32
-	CurrentRound() *uint32
-	HomeKills() *int32
-	AwayKills() *int32
-	HomeDestroyedTurrets() *int32
-	AwayDestroyedTurrets() *int32
-	HomeGold() *uint32
-	AwayGold() *uint32
-	HomeDestroyedTowers() *int32
-	AwayDestroyedTowers() *int32
-	HomeGoals() *uint32
-	AwayGoals() *uint32
-	Time() *uint32
-	GameTime() *uint32
-	ElapsedTime() *uint32
-	HomePoints() *uint32
-	AwayPoints() *uint32
-	RemainingGameTime() *uint32
-	HomeRuns() *uint32
-	AwayRuns() *uint32
-	HomeWicketsFallen() *uint32
-	AwayWicketsFallen() *uint32
-	HomeOversPlayed() *uint32
-	HomeBallsPlayed() *uint32
-	AwayOversPlayed() *uint32
-	AwayBallsPlayed() *uint32
-	HomeWonCoinToss() *bool
-	HomeBatting() *bool
-	AwayBatting() *bool
-	Inning() *uint32
-	HomeGames() *uint32
-	AwayGames() *uint32
+// Scoreboard is a pure-data live scoreboard for an event.
+//
+// Phase 6 reshape: replaces the Scoreboard interface (a 35-method
+// getter list) with a value struct. Optional sport-specific fields
+// are pointers — nil means "not reported."
+type Scoreboard struct {
+	CurrentCTTeam       *uint32
+	CurrentDefenderTeam *uint32
+	HomeWonRounds       *uint32
+	AwayWonRounds       *uint32
+	CurrentRound        *uint32
+
+	HomeKills            *int32
+	AwayKills            *int32
+	HomeDestroyedTurrets *int32
+	AwayDestroyedTurrets *int32
+	HomeGold             *uint32
+	AwayGold             *uint32
+	HomeDestroyedTowers  *int32
+	AwayDestroyedTowers  *int32
+
+	HomeGoals *uint32
+	AwayGoals *uint32
+
+	Time              *uint32
+	GameTime          *uint32
+	ElapsedTime       *uint32
+	RemainingGameTime *uint32
+
+	HomePoints *uint32
+	AwayPoints *uint32
+
+	HomeRuns          *uint32
+	AwayRuns          *uint32
+	HomeWicketsFallen *uint32
+	AwayWicketsFallen *uint32
+	HomeOversPlayed   *uint32
+	HomeBallsPlayed   *uint32
+	AwayOversPlayed   *uint32
+	AwayBallsPlayed   *uint32
+	HomeWonCoinToss   *bool
+	HomeBatting       *bool
+	AwayBatting       *bool
+	Inning            *uint32
+
+	HomeGames *uint32
+	AwayGames *uint32
 }
 
-// CompetitionStatus ...
-type CompetitionStatus interface {
-	WinnerID() (*URN, error)
-	Status() (*EventStatus, error)
+// Statistics is a pure-data per-event statistics snapshot.
+type Statistics struct {
+	HomeYellowCards    *uint32
+	AwayYellowCards    *uint32
+	HomeRedCards       *uint32
+	AwayRedCards       *uint32
+	HomeYellowRedCards *uint32
+	AwayYellowRedCards *uint32
+	HomeCorners        *uint32
+	AwayCorners        *uint32
 }
 
-// MatchStatus ...
-type MatchStatus interface {
-	CompetitionStatus
-	PeriodScores() ([]PeriodScore, error)
-	MatchStatusID() (*uint, error)
-	MatchStatus() (LocalizedStaticData, error)
-	LocalizedMatchStatus(locale Locale) (LocalizedStaticData, error)
-	HomeScore() (*float64, error)
-	AwayScore() (*float64, error)
-	IsScoreboardAvailable() (bool, error)
-	Scoreboard() (Scoreboard, error)
-	Statistics() (Statistics, error)
-}
+// MatchStatus is a pure-data live status snapshot for a match.
+//
+// Phase 6 reshape: replaces the previous MatchStatus interface (with
+// (value, error) lazy accessors) with a value struct populated at
+// construction. StatusDescription / StatusDescriptions carry the
+// localized status-code description from the static catalog.
+type MatchStatus struct {
+	WinnerID              *URN
+	Status                EventStatus
+	MatchStatusID         *uint
+	HomeScore             *float64
+	AwayScore             *float64
+	IsScoreboardAvailable bool
+	PeriodScores          []PeriodScore
+	Scoreboard            *Scoreboard
+	Statistics            *Statistics
 
-type Statistics interface {
-	HomeYellowCards() *uint32
-	AwayYellowCards() *uint32
-
-	HomeRedCards() *uint32
-	AwayRedCards() *uint32
-
-	HomeYellowRedCards() *uint32
-	AwayYellowRedCards() *uint32
-
-	HomeCorners() *uint32
-	AwayCorners() *uint32
+	// StatusDescription is the localized status-code description in the
+	// primary locale this snapshot was constructed for. Nil when the
+	// match has no MatchStatusID or the static catalog wasn't loaded.
+	StatusDescription *LocalizedStaticData
 }
 
 // Competition ...

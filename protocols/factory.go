@@ -17,7 +17,7 @@ type EntityFactory interface {
 	BuildTeamCompetitor(ctx context.Context, id URN, qualifier *string, locales []Locale) (*TeamCompetitor, error)
 	BuildPlayer(ctx context.Context, id URN, locale Locale) (*Player, error)
 	BuildFixture(ctx context.Context, id URN, locale Locale) (*Fixture, error)
-	BuildMatchStatus(id URN, locales []Locale) MatchStatus
+	BuildMatchStatus(ctx context.Context, id URN, locales []Locale) (*MatchStatus, error)
 	BuildMatches(ids []URN, locales []Locale) []Match
 	BuildMatch(id URN, locales []Locale, sportID *URN) Match
 }

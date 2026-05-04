@@ -90,9 +90,10 @@ func (e *EntityFactory) BuildFixture(ctx context.Context, id protocols.URN, loca
 	return cache.BuildFixture(ctx, e.cacheManager.FixtureCache, id, locale)
 }
 
-// BuildMatchStatus ...
-func (e *EntityFactory) BuildMatchStatus(id protocols.URN, locales []protocols.Locale) protocols.MatchStatus {
-	return cache.NewMatchStatus(id, e.cacheManager.MatchStatusCache, e.cacheManager.LocalizedStaticMatchStatus, locales)
+// BuildMatchStatus resolves a *protocols.MatchStatus snapshot. Fetches
+// from the API via the cache observer if the entry is missing.
+func (e *EntityFactory) BuildMatchStatus(ctx context.Context, id protocols.URN, locales []protocols.Locale) (*protocols.MatchStatus, error) {
+	return cache.BuildMatchStatus(ctx, e.cacheManager.MatchStatusCache, e.cacheManager.LocalizedStaticMatchStatus, id, locales)
 }
 
 // BuildMatches ...

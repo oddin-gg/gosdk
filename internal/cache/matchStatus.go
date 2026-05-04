@@ -3,7 +3,6 @@ package cache
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sync"
 
 	"github.com/oddin-gg/gosdk/internal/api"
@@ -12,307 +11,6 @@ import (
 	"github.com/oddin-gg/gosdk/protocols"
 	log "github.com/oddin-gg/gosdk/internal/log"
 )
-
-var _ protocols.PeriodScore = (*periodScoreImpl)(nil)
-
-type periodScoreImpl struct {
-	periodType      string
-	homeScore       float64
-	awayScore       float64
-	periodNumber    uint
-	matchStatusCode uint
-	homeWonRounds   *uint32
-	awayWonRounds   *uint32
-	homeKills       *int32
-	awayKills       *int32
-	homeGoals       *uint32
-	awayGoals       *uint32
-	homePoints      *uint32
-	awayPoints      *uint32
-
-	// RushCricket
-	homeRuns          *uint32
-	awayRuns          *uint32
-	homeWicketsFallen *uint32
-	awayWicketsFallen *uint32
-	homeOversPlayed   *uint32
-	homeBallsPlayed   *uint32
-	awayOversPlayed   *uint32
-	awayBallsPlayed   *uint32
-	homeWonCoinToss   *bool
-}
-
-func (p periodScoreImpl) Type() string {
-	return p.periodType
-}
-
-func (p periodScoreImpl) HomeGoals() *uint32 {
-	return p.homeGoals
-}
-
-func (p periodScoreImpl) AwayGoals() *uint32 {
-	return p.awayGoals
-}
-
-func (p periodScoreImpl) HomeScore() float64 {
-	return p.homeScore
-}
-
-func (p periodScoreImpl) AwayScore() float64 {
-	return p.awayScore
-}
-
-func (p periodScoreImpl) PeriodNumber() uint {
-	return p.periodNumber
-}
-
-func (p periodScoreImpl) MatchStatusCode() uint {
-	return p.matchStatusCode
-}
-
-func (p periodScoreImpl) HomeWonRounds() *uint32 {
-	return p.homeWonRounds
-}
-
-func (p periodScoreImpl) AwayWonRounds() *uint32 {
-	return p.awayWonRounds
-}
-
-func (p periodScoreImpl) HomeKills() *int32 {
-	return p.homeKills
-}
-
-func (p periodScoreImpl) AwayKills() *int32 {
-	return p.awayKills
-}
-
-func (p periodScoreImpl) HomePoints() *uint32 {
-	return p.homePoints
-}
-
-func (p periodScoreImpl) AwayPoints() *uint32 {
-	return p.awayPoints
-}
-
-func (p periodScoreImpl) HomeRuns() *uint32 {
-	return p.homeRuns
-}
-
-func (p periodScoreImpl) AwayRuns() *uint32 {
-	return p.awayRuns
-}
-
-func (p periodScoreImpl) HomeWicketsFallen() *uint32 {
-	return p.homeWicketsFallen
-}
-
-func (p periodScoreImpl) AwayWicketsFallen() *uint32 {
-	return p.awayWicketsFallen
-}
-
-func (p periodScoreImpl) HomeOversPlayed() *uint32 {
-	return p.homeOversPlayed
-}
-
-func (p periodScoreImpl) AwayOversPlayed() *uint32 {
-	return p.awayOversPlayed
-}
-
-func (p periodScoreImpl) HomeBallsPlayed() *uint32 {
-	return p.homeBallsPlayed
-}
-
-func (p periodScoreImpl) AwayBallsPlayed() *uint32 {
-	return p.awayBallsPlayed
-}
-
-func (p periodScoreImpl) HomeWonCoinToss() *bool {
-	return p.homeWonCoinToss
-}
-
-type scoreboardImpl struct {
-	currentCTTeam        *uint32
-	homeWonRounds        *uint32
-	awayWonRounds        *uint32
-	currentRound         *uint32
-	homeKills            *int32
-	awayKills            *int32
-	homeDestroyedTurrets *int32
-	awayDestroyedTurrets *int32
-	homeGold             *uint32
-	awayGold             *uint32
-	homeDestroyedTowers  *int32
-	awayDestroyedTowers  *int32
-	homeGoals            *uint32
-	awayGoals            *uint32
-	time                 *uint32
-	gameTime             *uint32
-	elapsedTime          *uint32
-	currentDefenderTeam  *uint32
-
-	// VirtualBasketballScoreboard
-	homePoints        *uint32
-	awayPoints        *uint32
-	remainingGameTime *uint32
-
-	// RushCricketScoreboard
-	homeRuns          *uint32
-	awayRuns          *uint32
-	homeWicketsFallen *uint32
-	awayWicketsFallen *uint32
-	homeOversPlayed   *uint32
-	homeBallsPlayed   *uint32
-	awayOversPlayed   *uint32
-	awayBallsPlayed   *uint32
-	homeWonCoinToss   *bool
-	homeBatting       *bool
-	awayBatting       *bool
-	inning            *uint32
-
-	// TableTennisScoreboard
-	homeGames *uint32
-	awayGames *uint32
-}
-
-func (s scoreboardImpl) CurrentCTTeam() *uint32 {
-	return s.currentCTTeam
-}
-
-func (s scoreboardImpl) CurrentDefenderTeam() *uint32 {
-	return s.currentDefenderTeam
-}
-
-func (s scoreboardImpl) HomePoints() *uint32 {
-	return s.homePoints
-}
-
-func (s scoreboardImpl) AwayPoints() *uint32 {
-	return s.awayPoints
-}
-
-func (s scoreboardImpl) RemainingGameTime() *uint32 {
-	return s.remainingGameTime
-}
-
-func (s scoreboardImpl) HomeWonRounds() *uint32 {
-	return s.homeWonRounds
-}
-
-func (s scoreboardImpl) AwayWonRounds() *uint32 {
-	return s.awayWonRounds
-}
-
-func (s scoreboardImpl) CurrentRound() *uint32 {
-	return s.currentRound
-}
-
-func (s scoreboardImpl) HomeKills() *int32 {
-	return s.homeKills
-}
-
-func (s scoreboardImpl) AwayKills() *int32 {
-	return s.awayKills
-}
-
-func (s scoreboardImpl) HomeDestroyedTurrets() *int32 {
-	return s.homeDestroyedTurrets
-}
-
-func (s scoreboardImpl) AwayDestroyedTurrets() *int32 {
-	return s.awayDestroyedTurrets
-}
-
-func (s scoreboardImpl) HomeGold() *uint32 {
-	return s.homeGold
-}
-
-func (s scoreboardImpl) AwayGold() *uint32 {
-	return s.awayGold
-}
-
-func (s scoreboardImpl) HomeDestroyedTowers() *int32 {
-	return s.homeDestroyedTowers
-}
-
-func (s scoreboardImpl) AwayDestroyedTowers() *int32 {
-	return s.awayDestroyedTowers
-}
-
-func (s scoreboardImpl) HomeGoals() *uint32 {
-	return s.homeGoals
-}
-
-func (s scoreboardImpl) AwayGoals() *uint32 {
-	return s.awayGoals
-}
-
-func (s scoreboardImpl) Time() *uint32 {
-	return s.time
-}
-
-func (s scoreboardImpl) GameTime() *uint32 {
-	return s.gameTime
-}
-
-func (s scoreboardImpl) ElapsedTime() *uint32 {
-	return s.elapsedTime
-}
-
-func (s scoreboardImpl) HomeRuns() *uint32 {
-	return s.homeRuns
-}
-
-func (s scoreboardImpl) AwayRuns() *uint32 {
-	return s.awayRuns
-}
-
-func (s scoreboardImpl) HomeWicketsFallen() *uint32 {
-	return s.homeWicketsFallen
-}
-
-func (s scoreboardImpl) AwayWicketsFallen() *uint32 {
-	return s.awayWicketsFallen
-}
-
-func (s scoreboardImpl) HomeOversPlayed() *uint32 {
-	return s.homeOversPlayed
-}
-
-func (s scoreboardImpl) HomeBallsPlayed() *uint32 {
-	return s.homeBallsPlayed
-}
-
-func (s scoreboardImpl) AwayOversPlayed() *uint32 {
-	return s.awayOversPlayed
-}
-
-func (s scoreboardImpl) AwayBallsPlayed() *uint32 {
-	return s.awayBallsPlayed
-}
-
-func (s scoreboardImpl) HomeWonCoinToss() *bool {
-	return s.homeWonCoinToss
-}
-
-func (s scoreboardImpl) HomeBatting() *bool {
-	return s.homeBatting
-}
-
-func (s scoreboardImpl) AwayBatting() *bool {
-	return s.awayBatting
-}
-
-func (s scoreboardImpl) Inning() *uint32 {
-	return s.inning
-}
-
-func (s scoreboardImpl) HomeGames() *uint32 {
-	return s.homeGames
-}
-
-func (s scoreboardImpl) AwayGames() *uint32 {
-	return s.awayGames
-}
 
 // MatchStatusCache stores per-event status snapshots, fed by both AMQP
 // OddsChange messages (live updates) and API MatchSummary responses (initial
@@ -323,6 +21,11 @@ func (s scoreboardImpl) AwayGames() *uint32 {
 // *LocalizedMatchStatus, copies the prior entry's fields into it, mutates
 // the copy, and atomic-swaps it into the map. Readers holding a pointer
 // see a stable snapshot — no partial-update tears.
+//
+// Phase 6 reshape: cache stores value-typed PeriodScore/Scoreboard/
+// Statistics fields directly. BuildMatchStatus projects the entry into a
+// *protocols.MatchStatus value with the localized status-code description
+// resolved at construction.
 type MatchStatusCache struct {
 	apiClient             *api.Client
 	logger                *log.Logger
@@ -330,6 +33,21 @@ type MatchStatusCache struct {
 
 	mu      sync.RWMutex
 	entries map[protocols.URN]*LocalizedMatchStatus
+}
+
+// LocalizedMatchStatus is the cache entry. Fields are value-typed and
+// immutable per snapshot — refreshOrInsert* builds a fresh copy and
+// atomic-swaps it into the map.
+type LocalizedMatchStatus struct {
+	winnerID              *protocols.URN
+	status                protocols.EventStatus
+	periodScores          []protocols.PeriodScore
+	matchStatusID         *uint
+	homeScore             float64
+	awayScore             float64
+	isScoreboardAvailable bool
+	scoreboard            *protocols.Scoreboard
+	statistics            *protocols.Statistics
 }
 
 // OnFeedMessage ...
@@ -346,15 +64,17 @@ func (m *MatchStatusCache) OnFeedMessage(id protocols.URN, feedMessage *protocol
 
 // OnAPIResponse ...
 func (m *MatchStatusCache) OnAPIResponse(apiResponse protocols.Response) {
-	if msg, ok := apiResponse.Data.(*apiXML.MatchSummaryResponse); ok {
-		id, err := protocols.ParseURN(msg.SportEvent.ID)
-		if err != nil {
-			m.logger.WithError(err).Errorf("failed to parse urn %s", msg.SportEvent.ID)
-			return
-		}
-		if err := m.refreshOrInsertAPIItem(*id, msg.SportEventStatus); err != nil {
-			m.logger.WithError(err).Errorf("failed to refresh api item %v", *id)
-		}
+	msg, ok := apiResponse.Data.(*apiXML.MatchSummaryResponse)
+	if !ok {
+		return
+	}
+	id, err := protocols.ParseURN(msg.SportEvent.ID)
+	if err != nil {
+		m.logger.WithError(err).Errorf("failed to parse urn %s", msg.SportEvent.ID)
+		return
+	}
+	if err := m.refreshOrInsertAPIItem(*id, msg.SportEventStatus); err != nil {
+		m.logger.WithError(err).Errorf("failed to refresh api item %v", *id)
 	}
 }
 
@@ -373,9 +93,9 @@ func (m *MatchStatusCache) Purge() {
 }
 
 // MatchStatus returns a cached status, fetching from the API on miss.
-// The fetch triggers OnAPIResponse via the api.Client observer hook, which
-// populates the cache; we then re-read.
-func (m *MatchStatusCache) MatchStatus(id protocols.URN) (*LocalizedMatchStatus, error) {
+// The fetch triggers OnAPIResponse via the api.Client observer hook,
+// which populates the cache; we then re-read.
+func (m *MatchStatusCache) MatchStatus(ctx context.Context, id protocols.URN) (*LocalizedMatchStatus, error) {
 	m.mu.RLock()
 	entry, ok := m.entries[id]
 	m.mu.RUnlock()
@@ -383,7 +103,7 @@ func (m *MatchStatusCache) MatchStatus(id protocols.URN) (*LocalizedMatchStatus,
 		return entry, nil
 	}
 
-	if _, err := m.apiClient.FetchMatchSummary(context.Background(), id, m.oddsFeedConfiguration.DefaultLocale()); err != nil {
+	if _, err := m.apiClient.FetchMatchSummary(ctx, id, m.oddsFeedConfiguration.DefaultLocale()); err != nil {
 		return nil, err
 	}
 
@@ -396,8 +116,8 @@ func (m *MatchStatusCache) MatchStatus(id protocols.URN) (*LocalizedMatchStatus,
 	return entry, nil
 }
 
-// shallowClone returns a fresh struct with all fields copied from src, or a
-// zero-value if src is nil.
+// shallowClone returns a fresh struct with all fields copied from src,
+// or a zero-value if src is nil.
 func (m *MatchStatusCache) shallowClone(src *LocalizedMatchStatus) *LocalizedMatchStatus {
 	if src == nil {
 		return &LocalizedMatchStatus{}
@@ -421,10 +141,12 @@ func (m *MatchStatusCache) refreshOrInsertFeedItem(id protocols.URN, data *feedX
 	result.awayScore = data.AwayScore
 	result.isScoreboardAvailable = data.ScoreboardAvailable
 	if data.Scoreboard != nil {
-		result.scoreboard = m.makeFeedScoreboard(data.Scoreboard)
+		sb := makeFeedScoreboard(data.Scoreboard)
+		result.scoreboard = &sb
 	}
 	if data.Statistics != nil {
-		result.statistics = m.makeFeedStatistics(data.Statistics)
+		s := makeFeedStatistics(data.Statistics)
+		result.statistics = &s
 	}
 
 	m.mu.Lock()
@@ -457,7 +179,8 @@ func (m *MatchStatusCache) refreshOrInsertAPIItem(id protocols.URN, data apiXML.
 	}
 	result.isScoreboardAvailable = data.ScoreboardAvailable
 	if data.Scoreboard != nil {
-		result.scoreboard = m.makeAPIScoreboard(data.Scoreboard)
+		sb := makeAPIScoreboard(data.Scoreboard)
+		result.scoreboard = &sb
 	}
 
 	m.mu.Lock()
@@ -466,149 +189,165 @@ func (m *MatchStatusCache) refreshOrInsertAPIItem(id protocols.URN, data apiXML.
 	return nil
 }
 
+// --- mapping helpers ---
+
 func (m *MatchStatusCache) mapAPIPeriodScores(periodScores []*apiXML.PeriodScore) []protocols.PeriodScore {
 	result := make([]protocols.PeriodScore, len(periodScores))
 	for i := range periodScores {
-		periodScore := periodScores[i]
-		result[i] = periodScoreImpl{
-			periodType:        periodScore.Type,
-			homeScore:         periodScore.HomeScore,
-			awayScore:         periodScore.AwayScore,
-			periodNumber:      periodScore.Number,
-			matchStatusCode:   periodScore.MatchStatusCode,
-			homeWonRounds:     periodScore.HomeWonRounds,
-			awayWonRounds:     periodScore.AwayWonRounds,
-			homeKills:         periodScore.HomeKills,
-			awayKills:         periodScore.AwayKills,
-			homeGoals:         periodScore.HomeGoals,
-			awayGoals:         periodScore.AwayGoals,
-			homePoints:        periodScore.HomePoints,
-			awayPoints:        periodScore.AwayPoints,
-			homeRuns:          periodScore.HomeRuns,
-			awayRuns:          periodScore.AwayRuns,
-			homeWicketsFallen: periodScore.HomeWicketsFallen,
-			awayWicketsFallen: periodScore.AwayWicketsFallen,
-			homeOversPlayed:   periodScore.HomeOversPlayed,
-			homeBallsPlayed:   periodScore.HomeBallsPlayed,
-			awayOversPlayed:   periodScore.AwayOversPlayed,
-			awayBallsPlayed:   periodScore.AwayBallsPlayed,
-			homeWonCoinToss:   periodScore.HomeWonCoinToss,
+		ps := periodScores[i]
+		result[i] = protocols.PeriodScore{
+			Type:              ps.Type,
+			HomeScore:         ps.HomeScore,
+			AwayScore:         ps.AwayScore,
+			PeriodNumber:      ps.Number,
+			MatchStatusCode:   ps.MatchStatusCode,
+			HomeWonRounds:     ps.HomeWonRounds,
+			AwayWonRounds:     ps.AwayWonRounds,
+			HomeKills:         ps.HomeKills,
+			AwayKills:         ps.AwayKills,
+			HomeGoals:         ps.HomeGoals,
+			AwayGoals:         ps.AwayGoals,
+			HomePoints:        ps.HomePoints,
+			AwayPoints:        ps.AwayPoints,
+			HomeRuns:          ps.HomeRuns,
+			AwayRuns:          ps.AwayRuns,
+			HomeWicketsFallen: ps.HomeWicketsFallen,
+			AwayWicketsFallen: ps.AwayWicketsFallen,
+			HomeOversPlayed:   ps.HomeOversPlayed,
+			HomeBallsPlayed:   ps.HomeBallsPlayed,
+			AwayOversPlayed:   ps.AwayOversPlayed,
+			AwayBallsPlayed:   ps.AwayBallsPlayed,
+			HomeWonCoinToss:   ps.HomeWonCoinToss,
 		}
 	}
-
 	return result
 }
 
 func (m *MatchStatusCache) mapFeedPeriodScores(periodScores []*feedXML.PeriodScore) []protocols.PeriodScore {
 	result := make([]protocols.PeriodScore, len(periodScores))
 	for i := range periodScores {
-		periodScore := periodScores[i]
-		result[i] = periodScoreImpl{
-			periodType:        periodScore.Type,
-			homeScore:         periodScore.HomeScore,
-			awayScore:         periodScore.AwayScore,
-			periodNumber:      periodScore.Number,
-			matchStatusCode:   periodScore.MatchStatusCode,
-			homeWonRounds:     periodScore.HomeWonRounds,
-			awayWonRounds:     periodScore.AwayWonRounds,
-			homeKills:         periodScore.HomeKills,
-			awayKills:         periodScore.AwayKills,
-			homeGoals:         periodScore.HomeGoals,
-			awayGoals:         periodScore.AwayGoals,
-			homePoints:        periodScore.HomePoints,
-			awayPoints:        periodScore.AwayPoints,
-			homeRuns:          periodScore.HomeRuns,
-			awayRuns:          periodScore.AwayRuns,
-			homeWicketsFallen: periodScore.HomeWicketsFallen,
-			awayWicketsFallen: periodScore.AwayWicketsFallen,
-			homeOversPlayed:   periodScore.HomeOversPlayed,
-			homeBallsPlayed:   periodScore.HomeBallsPlayed,
-			awayOversPlayed:   periodScore.AwayOversPlayed,
-			awayBallsPlayed:   periodScore.AwayBallsPlayed,
-			homeWonCoinToss:   periodScore.HomeWonCoinToss,
+		ps := periodScores[i]
+		result[i] = protocols.PeriodScore{
+			Type:              ps.Type,
+			HomeScore:         ps.HomeScore,
+			AwayScore:         ps.AwayScore,
+			PeriodNumber:      ps.Number,
+			MatchStatusCode:   ps.MatchStatusCode,
+			HomeWonRounds:     ps.HomeWonRounds,
+			AwayWonRounds:     ps.AwayWonRounds,
+			HomeKills:         ps.HomeKills,
+			AwayKills:         ps.AwayKills,
+			HomeGoals:         ps.HomeGoals,
+			AwayGoals:         ps.AwayGoals,
+			HomePoints:        ps.HomePoints,
+			AwayPoints:        ps.AwayPoints,
+			HomeRuns:          ps.HomeRuns,
+			AwayRuns:          ps.AwayRuns,
+			HomeWicketsFallen: ps.HomeWicketsFallen,
+			AwayWicketsFallen: ps.AwayWicketsFallen,
+			HomeOversPlayed:   ps.HomeOversPlayed,
+			HomeBallsPlayed:   ps.HomeBallsPlayed,
+			AwayOversPlayed:   ps.AwayOversPlayed,
+			AwayBallsPlayed:   ps.AwayBallsPlayed,
+			HomeWonCoinToss:   ps.HomeWonCoinToss,
 		}
 	}
-
 	return result
 }
 
-func (m *MatchStatusCache) makeFeedScoreboard(scoreboard *feedXML.Scoreboard) protocols.Scoreboard {
-	return &scoreboardImpl{
-		currentCTTeam:        scoreboard.CurrentCTTeam,
-		homeWonRounds:        scoreboard.HomeWonRounds,
-		awayWonRounds:        scoreboard.AwayWonRounds,
-		currentRound:         scoreboard.CurrentRound,
-		homeKills:            scoreboard.HomeKills,
-		awayKills:            scoreboard.AwayKills,
-		homeDestroyedTurrets: scoreboard.HomeDestroyedTurrets,
-		awayDestroyedTurrets: scoreboard.AwayDestroyedTurrets,
-		homeGold:             scoreboard.HomeGold,
-		awayGold:             scoreboard.AwayGold,
-		homeDestroyedTowers:  scoreboard.HomeDestroyedTowers,
-		awayDestroyedTowers:  scoreboard.AwayDestroyedTowers,
-		homeGoals:            scoreboard.HomeGoals,
-		awayGoals:            scoreboard.AwayGoals,
-		time:                 scoreboard.Time,
-		gameTime:             scoreboard.GameTime,
-		elapsedTime:          scoreboard.ElapsedTime,
-		currentDefenderTeam:  scoreboard.CurrentDefenderTeam,
-		homePoints:           scoreboard.HomePoints,
-		awayPoints:           scoreboard.AwayPoints,
-		remainingGameTime:    scoreboard.RemainingGameTime,
-		homeRuns:             scoreboard.HomeRuns,
-		awayRuns:             scoreboard.AwayRuns,
-		homeWicketsFallen:    scoreboard.HomeWicketsFallen,
-		awayWicketsFallen:    scoreboard.AwayWicketsFallen,
-		homeOversPlayed:      scoreboard.HomeOversPlayed,
-		homeBallsPlayed:      scoreboard.HomeBallsPlayed,
-		awayOversPlayed:      scoreboard.AwayOversPlayed,
-		awayBallsPlayed:      scoreboard.AwayBallsPlayed,
-		homeWonCoinToss:      scoreboard.HomeWonCoinToss,
-		homeBatting:          scoreboard.HomeBatting,
-		awayBatting:          scoreboard.AwayBatting,
-		inning:               scoreboard.Inning,
-		homeGames:            scoreboard.HomeGames,
-		awayGames:            scoreboard.AwayGames,
+func makeFeedScoreboard(s *feedXML.Scoreboard) protocols.Scoreboard {
+	return protocols.Scoreboard{
+		CurrentCTTeam:        s.CurrentCTTeam,
+		CurrentDefenderTeam:  s.CurrentDefenderTeam,
+		HomeWonRounds:        s.HomeWonRounds,
+		AwayWonRounds:        s.AwayWonRounds,
+		CurrentRound:         s.CurrentRound,
+		HomeKills:            s.HomeKills,
+		AwayKills:            s.AwayKills,
+		HomeDestroyedTurrets: s.HomeDestroyedTurrets,
+		AwayDestroyedTurrets: s.AwayDestroyedTurrets,
+		HomeGold:             s.HomeGold,
+		AwayGold:             s.AwayGold,
+		HomeDestroyedTowers:  s.HomeDestroyedTowers,
+		AwayDestroyedTowers:  s.AwayDestroyedTowers,
+		HomeGoals:            s.HomeGoals,
+		AwayGoals:            s.AwayGoals,
+		Time:                 s.Time,
+		GameTime:             s.GameTime,
+		ElapsedTime:          s.ElapsedTime,
+		HomePoints:           s.HomePoints,
+		AwayPoints:           s.AwayPoints,
+		RemainingGameTime:    s.RemainingGameTime,
+		HomeRuns:             s.HomeRuns,
+		AwayRuns:             s.AwayRuns,
+		HomeWicketsFallen:    s.HomeWicketsFallen,
+		AwayWicketsFallen:    s.AwayWicketsFallen,
+		HomeOversPlayed:      s.HomeOversPlayed,
+		HomeBallsPlayed:      s.HomeBallsPlayed,
+		AwayOversPlayed:      s.AwayOversPlayed,
+		AwayBallsPlayed:      s.AwayBallsPlayed,
+		HomeWonCoinToss:      s.HomeWonCoinToss,
+		HomeBatting:          s.HomeBatting,
+		AwayBatting:          s.AwayBatting,
+		Inning:               s.Inning,
+		HomeGames:            s.HomeGames,
+		AwayGames:            s.AwayGames,
 	}
 }
 
-func (m *MatchStatusCache) makeAPIScoreboard(scoreboard *apiXML.Scoreboard) protocols.Scoreboard {
-	return &scoreboardImpl{
-		currentCTTeam:        scoreboard.CurrentCTTeam,
-		homeWonRounds:        scoreboard.HomeWonRounds,
-		awayWonRounds:        scoreboard.AwayWonRounds,
-		currentRound:         scoreboard.CurrentRound,
-		homeKills:            scoreboard.HomeKills,
-		awayKills:            scoreboard.AwayKills,
-		homeDestroyedTurrets: scoreboard.HomeDestroyedTurrets,
-		awayDestroyedTurrets: scoreboard.AwayDestroyedTurrets,
-		homeGold:             scoreboard.HomeGold,
-		awayGold:             scoreboard.AwayGold,
-		homeDestroyedTowers:  scoreboard.HomeDestroyedTowers,
-		awayDestroyedTowers:  scoreboard.AwayDestroyedTowers,
-		homeGoals:            scoreboard.HomeGoals,
-		awayGoals:            scoreboard.AwayGoals,
-		time:                 scoreboard.Time,
-		gameTime:             scoreboard.GameTime,
-		elapsedTime:          scoreboard.ElapsedTime,
-		currentDefenderTeam:  scoreboard.CurrentDefenderTeam,
-		homePoints:           scoreboard.HomePoints,
-		awayPoints:           scoreboard.AwayPoints,
-		remainingGameTime:    scoreboard.RemainingGameTime,
-		homeRuns:             scoreboard.HomeRuns,
-		awayRuns:             scoreboard.AwayRuns,
-		homeWicketsFallen:    scoreboard.HomeWicketsFallen,
-		awayWicketsFallen:    scoreboard.AwayWicketsFallen,
-		homeOversPlayed:      scoreboard.HomeOversPlayed,
-		homeBallsPlayed:      scoreboard.HomeBallsPlayed,
-		awayOversPlayed:      scoreboard.AwayOversPlayed,
-		awayBallsPlayed:      scoreboard.AwayBallsPlayed,
-		homeWonCoinToss:      scoreboard.HomeWonCoinToss,
-		homeBatting:          scoreboard.HomeBatting,
-		awayBatting:          scoreboard.AwayBatting,
-		inning:               scoreboard.Inning,
-		homeGames:            scoreboard.HomeGames,
-		awayGames:            scoreboard.AwayGames,
+func makeAPIScoreboard(s *apiXML.Scoreboard) protocols.Scoreboard {
+	return protocols.Scoreboard{
+		CurrentCTTeam:        s.CurrentCTTeam,
+		CurrentDefenderTeam:  s.CurrentDefenderTeam,
+		HomeWonRounds:        s.HomeWonRounds,
+		AwayWonRounds:        s.AwayWonRounds,
+		CurrentRound:         s.CurrentRound,
+		HomeKills:            s.HomeKills,
+		AwayKills:            s.AwayKills,
+		HomeDestroyedTurrets: s.HomeDestroyedTurrets,
+		AwayDestroyedTurrets: s.AwayDestroyedTurrets,
+		HomeGold:             s.HomeGold,
+		AwayGold:             s.AwayGold,
+		HomeDestroyedTowers:  s.HomeDestroyedTowers,
+		AwayDestroyedTowers:  s.AwayDestroyedTowers,
+		HomeGoals:            s.HomeGoals,
+		AwayGoals:            s.AwayGoals,
+		Time:                 s.Time,
+		GameTime:             s.GameTime,
+		ElapsedTime:          s.ElapsedTime,
+		HomePoints:           s.HomePoints,
+		AwayPoints:           s.AwayPoints,
+		RemainingGameTime:    s.RemainingGameTime,
+		HomeRuns:             s.HomeRuns,
+		AwayRuns:             s.AwayRuns,
+		HomeWicketsFallen:    s.HomeWicketsFallen,
+		AwayWicketsFallen:    s.AwayWicketsFallen,
+		HomeOversPlayed:      s.HomeOversPlayed,
+		HomeBallsPlayed:      s.HomeBallsPlayed,
+		AwayOversPlayed:      s.AwayOversPlayed,
+		AwayBallsPlayed:      s.AwayBallsPlayed,
+		HomeWonCoinToss:      s.HomeWonCoinToss,
+		HomeBatting:          s.HomeBatting,
+		AwayBatting:          s.AwayBatting,
+		Inning:               s.Inning,
+		HomeGames:            s.HomeGames,
+		AwayGames:            s.AwayGames,
+	}
+}
+
+func makeFeedStatistics(stats *feedXML.Statistics) protocols.Statistics {
+	if stats == nil {
+		return protocols.Statistics{}
+	}
+	return protocols.Statistics{
+		HomeYellowCards:    stats.YellowCards.ResolveHome(),
+		AwayYellowCards:    stats.YellowCards.ResolveAway(),
+		HomeRedCards:       stats.RedCards.ResolveHome(),
+		AwayRedCards:       stats.RedCards.ResolveAway(),
+		HomeYellowRedCards: stats.YellowRedCards.ResolveHome(),
+		AwayYellowRedCards: stats.YellowRedCards.ResolveAway(),
+		HomeCorners:        stats.Corners.ResolveHome(),
+		AwayCorners:        stats.Corners.ResolveAway(),
 	}
 }
 
@@ -649,203 +388,50 @@ func (m *MatchStatusCache) fromAPI(status apiXML.SportEventStatusType) protocols
 	}
 }
 
-func (m *MatchStatusCache) makeFeedStatistics(statistics *feedXML.Statistics) protocols.Statistics {
-	if statistics == nil {
-		return nil
-	}
-
-	return &statisticsImpl{
-		homeYellowCards:    statistics.YellowCards.ResolveHome(),
-		awayYellowCards:    statistics.YellowCards.ResolveAway(),
-		homeRedCards:       statistics.RedCards.ResolveHome(),
-		awayRedCards:       statistics.RedCards.ResolveAway(),
-		homeYellowRedCards: statistics.YellowRedCards.ResolveHome(),
-		awayYellowRedCards: statistics.YellowRedCards.ResolveAway(),
-		homeCorners:        statistics.Corners.ResolveHome(),
-		awayCorners:        statistics.Corners.ResolveAway(),
-	}
-}
-
 func newMatchStatusCache(client *api.Client, oddsFeedConfiguration protocols.OddsFeedConfiguration, logger *log.Logger) *MatchStatusCache {
-	matchStatusCache := &MatchStatusCache{
+	c := &MatchStatusCache{
 		apiClient:             client,
 		oddsFeedConfiguration: oddsFeedConfiguration,
 		logger:                logger,
 		entries:               make(map[protocols.URN]*LocalizedMatchStatus),
 	}
-
-	client.SubscribeWithAPIObserver(matchStatusCache)
-
-	return matchStatusCache
+	client.SubscribeWithAPIObserver(c)
+	return c
 }
 
-// LocalizedMatchStatus ...
-type LocalizedMatchStatus struct {
-	winnerID              *protocols.URN
-	status                protocols.EventStatus
-	periodScores          []protocols.PeriodScore
-	matchStatusID         *uint
-	homeScore             float64
-	awayScore             float64
-	isScoreboardAvailable bool
-	scoreboard            protocols.Scoreboard
-	statistics            protocols.Statistics
-}
-
-type statisticsImpl struct {
-	homeYellowCards    *uint32
-	awayYellowCards    *uint32
-	homeRedCards       *uint32
-	awayRedCards       *uint32
-	homeYellowRedCards *uint32
-	awayYellowRedCards *uint32
-	homeCorners        *uint32
-	awayCorners        *uint32
-}
-
-func (s statisticsImpl) HomeYellowCards() *uint32 {
-	return s.homeYellowCards
-}
-
-func (s statisticsImpl) AwayYellowCards() *uint32 {
-	return s.awayYellowCards
-}
-
-func (s statisticsImpl) HomeRedCards() *uint32 {
-	return s.homeRedCards
-}
-
-func (s statisticsImpl) AwayRedCards() *uint32 {
-	return s.awayRedCards
-}
-
-func (s statisticsImpl) HomeYellowRedCards() *uint32 {
-	return s.homeYellowRedCards
-}
-
-func (s statisticsImpl) AwayYellowRedCards() *uint32 {
-	return s.awayYellowRedCards
-}
-
-func (s statisticsImpl) HomeCorners() *uint32 {
-	return s.homeCorners
-}
-
-func (s statisticsImpl) AwayCorners() *uint32 {
-	return s.awayCorners
-}
-
-type matchStatusImpl struct {
-	sportEventID                    protocols.URN
-	matchStatusCache                *MatchStatusCache
-	localizedStaticMatchStatusCache *LocalizedStaticDataCache
-	locales                         []protocols.Locale
-}
-
-func (m matchStatusImpl) WinnerID() (*protocols.URN, error) {
-	item, err := m.matchStatusCache.MatchStatus(m.sportEventID)
+// BuildMatchStatus resolves a *protocols.MatchStatus snapshot. Fetches
+// from the API if the status isn't yet cached. The localized status-code
+// description is resolved through the static-data cache for the supplied
+// locales (primary locale = locales[0]).
+func BuildMatchStatus(
+	ctx context.Context,
+	cache *MatchStatusCache,
+	staticCache *LocalizedStaticDataCache,
+	id protocols.URN,
+	locales []protocols.Locale,
+) (*protocols.MatchStatus, error) {
+	entry, err := cache.MatchStatus(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-
-	return item.winnerID, nil
-}
-
-func (m matchStatusImpl) Status() (*protocols.EventStatus, error) {
-	item, err := m.matchStatusCache.MatchStatus(m.sportEventID)
-	if err != nil {
-		return nil, err
+	out := &protocols.MatchStatus{
+		WinnerID:              entry.winnerID,
+		Status:                entry.status,
+		MatchStatusID:         entry.matchStatusID,
+		IsScoreboardAvailable: entry.isScoreboardAvailable,
+		PeriodScores:          append([]protocols.PeriodScore(nil), entry.periodScores...),
+		Scoreboard:            entry.scoreboard,
+		Statistics:            entry.statistics,
 	}
-
-	return &item.status, nil
-}
-
-func (m matchStatusImpl) PeriodScores() ([]protocols.PeriodScore, error) {
-	item, err := m.matchStatusCache.MatchStatus(m.sportEventID)
-	if err != nil {
-		return nil, err
+	hs := entry.homeScore
+	as := entry.awayScore
+	out.HomeScore = &hs
+	out.AwayScore = &as
+	if entry.matchStatusID != nil && staticCache != nil {
+		desc, err := staticCache.LocalizedItem(*entry.matchStatusID, locales)
+		if err == nil {
+			out.StatusDescription = &desc
+		}
 	}
-
-	return item.periodScores, nil
-}
-
-func (m matchStatusImpl) MatchStatusID() (*uint, error) {
-	item, err := m.matchStatusCache.MatchStatus(m.sportEventID)
-	if err != nil {
-		return nil, err
-	}
-
-	return item.matchStatusID, nil
-}
-
-func (m matchStatusImpl) MatchStatus() (protocols.LocalizedStaticData, error) {
-	status, err := m.MatchStatusID()
-	if err != nil {
-		return nil, err
-	}
-
-	return m.localizedStaticMatchStatusCache.LocalizedItem(*status, m.locales)
-}
-
-func (m matchStatusImpl) LocalizedMatchStatus(locale protocols.Locale) (protocols.LocalizedStaticData, error) {
-	status, err := m.MatchStatusID()
-	if err != nil {
-		return nil, err
-	}
-
-	return m.localizedStaticMatchStatusCache.LocalizedItem(*status, []protocols.Locale{locale})
-}
-
-func (m matchStatusImpl) HomeScore() (*float64, error) {
-	item, err := m.matchStatusCache.MatchStatus(m.sportEventID)
-	if err != nil {
-		return nil, err
-	}
-
-	return &item.homeScore, nil
-}
-
-func (m matchStatusImpl) AwayScore() (*float64, error) {
-	item, err := m.matchStatusCache.MatchStatus(m.sportEventID)
-	if err != nil {
-		return nil, err
-	}
-
-	return &item.awayScore, nil
-}
-
-func (m matchStatusImpl) IsScoreboardAvailable() (bool, error) {
-	item, err := m.matchStatusCache.MatchStatus(m.sportEventID)
-	if err != nil {
-		return false, err
-	}
-
-	return item.isScoreboardAvailable, nil
-}
-
-func (m matchStatusImpl) Statistics() (protocols.Statistics, error) {
-	item, err := m.matchStatusCache.MatchStatus(m.sportEventID)
-	if err != nil {
-		return nil, fmt.Errorf("matchStatusImpl.Statistics unable to get match status: %w", err)
-	}
-	return item.statistics, nil
-}
-
-func (m matchStatusImpl) Scoreboard() (protocols.Scoreboard, error) {
-	item, err := m.matchStatusCache.MatchStatus(m.sportEventID)
-	if err != nil {
-		return nil, err
-	}
-
-	return item.scoreboard, nil
-}
-
-// NewMatchStatus ...
-func NewMatchStatus(sportEventID protocols.URN, matchStatusCache *MatchStatusCache, localizedStaticMatchStatusCache *LocalizedStaticDataCache, locales []protocols.Locale) protocols.MatchStatus {
-	return &matchStatusImpl{
-		sportEventID:                    sportEventID,
-		matchStatusCache:                matchStatusCache,
-		localizedStaticMatchStatusCache: localizedStaticMatchStatusCache,
-		locales:                         locales,
-	}
+	return out, nil
 }

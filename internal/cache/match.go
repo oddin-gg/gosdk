@@ -374,7 +374,11 @@ func (m matchImpl) ExtraInfo() (map[string]string, error) {
 }
 
 func (m matchImpl) Status() protocols.MatchStatus {
-	return m.entityFactory.BuildMatchStatus(m.id, m.locales)
+	s, err := m.entityFactory.BuildMatchStatus(context.Background(), m.id, m.locales)
+	if err != nil || s == nil {
+		return protocols.MatchStatus{}
+	}
+	return *s
 }
 
 func (m matchImpl) Tournament() (protocols.Tournament, error) {

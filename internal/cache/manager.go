@@ -68,7 +68,11 @@ func NewManager(client *api.Client, oddsFeedConfiguration protocols.OddsFeedConf
 
 			result := make([]protocols.StaticData, len(data))
 			for i := range data {
-				result[i] = data[i]
+				d := data[i].GetDescription()
+				result[i] = protocols.StaticData{
+					ID:          data[i].GetID(),
+					Description: d,
+				}
 			}
 
 			return result, nil
