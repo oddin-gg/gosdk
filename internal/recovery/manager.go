@@ -19,6 +19,12 @@ const (
 	tickPeriod   = 10 * time.Second
 )
 
+// HandleGCGracePeriod is the default time a completed *Handle stays
+// queryable via LookupHandle before being garbage-collected. NEXT.md
+// §0 left this as a guess; 5 minutes is generous enough for late
+// pollers without growing the map indefinitely.
+const HandleGCGracePeriod = 5 * time.Minute
+
 // Manager ...
 type Manager struct {
 	cfg                    protocols.OddsFeedConfiguration
@@ -33,6 +39,13 @@ type Manager struct {
 	msgCh                  chan protocols.RecoveryMessage
 	sequence               *generator
 
+	// handles tracks outstanding *Handle objects keyed by request id.
+	// Entries are inserted by InitiateEventX, transitioned to terminal
+	// by OnSnapshotCompleteReceived (or producer-down / timeout), and
+	// removed by the GC goroutine after HandleGCGracePeriod.
+	handlesMu sync.RWMutex
+	handles   map[uint]*Handle
+
 	// ctx is the manager-lifetime context, derived from the ctx supplied
 	// to Open. Internal sites that need to call API/producer methods use
 	// this so a Close() request cancels in-flight work. Cancelled by
@@ -45,6 +58,54 @@ type Manager struct {
 	// that deadlocked when timerTick was blocked sending on msgCh) with a
 	// `close(m.closeCh)` broadcast, and protects msgCh close against double-close.
 	closeOnce sync.Once
+}
+
+// LookupHandle returns the tracked handle for a request id. The second
+// return value is false when the id is unknown (never registered) or
+// has been GC'd after the grace period.
+func (m *Manager) LookupHandle(requestID uint) (*Handle, bool) {
+	m.handlesMu.RLock()
+	defer m.handlesMu.RUnlock()
+	h, ok := m.handles[requestID]
+	return h, ok
+}
+
+// registerHandle inserts a new pending handle into the map.
+func (m *Manager) registerHandle(h *Handle) {
+	m.handlesMu.Lock()
+	if m.handles == nil {
+		m.handles = make(map[uint]*Handle)
+	}
+	m.handles[h.requestID] = h
+	m.handlesMu.Unlock()
+}
+
+// completeHandle transitions a tracked handle to a terminal state.
+// Returns the handle (or nil if no handle was registered for this id).
+func (m *Manager) completeHandle(requestID uint, status protocols.RecoveryRequestStatus, err error) *Handle {
+	m.handlesMu.RLock()
+	h := m.handles[requestID]
+	m.handlesMu.RUnlock()
+	if h == nil {
+		return nil
+	}
+	h.complete(status, err, time.Now())
+	return h
+}
+
+// gcCompletedHandles is run periodically from the manager loop to
+// evict terminal handles older than the grace period.
+func (m *Manager) gcCompletedHandles(now time.Time) {
+	m.handlesMu.Lock()
+	defer m.handlesMu.Unlock()
+	for id, h := range m.handles {
+		if !h.IsTerminal() {
+			continue
+		}
+		if now.Sub(h.endedAt) > HandleGCGracePeriod {
+			delete(m.handles, id)
+		}
+	}
 }
 
 // OnMessageProcessingStarted ...
@@ -139,16 +200,36 @@ func (m *Manager) OnSnapshotCompleteReceived(producerID uint, requestID uint, me
 	}
 }
 
-// InitiateEventOddsMessagesRecovery ...
+// InitiateEventOddsMessagesRecovery returns the request id. The richer
+// *Handle is fetched via InitiateEventOddsRecoveryHandle; this method
+// is kept on the protocols.RecoveryManager interface for compatibility.
 func (m *Manager) InitiateEventOddsMessagesRecovery(ctx context.Context, producerID uint, eventID protocols.URN) (uint, error) {
-	return m.makeEventRecovery(producerID, eventID, func(name string, eid protocols.URN, rid uint, node *int) (bool, error) {
+	h, err := m.InitiateEventOddsRecoveryHandle(ctx, producerID, eventID)
+	if err != nil {
+		return 0, err
+	}
+	return h.RequestID(), nil
+}
+
+// InitiateEventStatefulMessagesRecovery returns the request id.
+func (m *Manager) InitiateEventStatefulMessagesRecovery(ctx context.Context, producerID uint, eventID protocols.URN) (uint, error) {
+	h, err := m.InitiateEventStatefulRecoveryHandle(ctx, producerID, eventID)
+	if err != nil {
+		return 0, err
+	}
+	return h.RequestID(), nil
+}
+
+// InitiateEventOddsRecoveryHandle is the handle-returning variant.
+func (m *Manager) InitiateEventOddsRecoveryHandle(ctx context.Context, producerID uint, eventID protocols.URN) (*Handle, error) {
+	return m.makeEventRecoveryHandle(producerID, eventID, func(name string, eid protocols.URN, rid uint, node *int) (bool, error) {
 		return m.apiClient.PostEventOddsRecovery(ctx, name, eid, rid, node)
 	})
 }
 
-// InitiateEventStatefulMessagesRecovery ...
-func (m *Manager) InitiateEventStatefulMessagesRecovery(ctx context.Context, producerID uint, eventID protocols.URN) (uint, error) {
-	return m.makeEventRecovery(producerID, eventID, func(name string, eid protocols.URN, rid uint, node *int) (bool, error) {
+// InitiateEventStatefulRecoveryHandle is the handle-returning variant.
+func (m *Manager) InitiateEventStatefulRecoveryHandle(ctx context.Context, producerID uint, eventID protocols.URN) (*Handle, error) {
+	return m.makeEventRecoveryHandle(producerID, eventID, func(name string, eid protocols.URN, rid uint, node *int) (bool, error) {
 		return m.apiClient.PostEventStatefulRecovery(ctx, name, eid, rid, node)
 	})
 }
@@ -200,6 +281,7 @@ func (m *Manager) Open(ctx context.Context) (<-chan protocols.RecoveryMessage, e
 			select {
 			case <-m.ticker.C:
 				m.timerTick()
+				m.gcCompletedHandles(time.Now())
 
 			case <-m.closeCh:
 				return
@@ -216,6 +298,9 @@ func (m *Manager) Open(ctx context.Context) (<-chan protocols.RecoveryMessage, e
 // when timerTick was mid-send on msgCh) with a close-broadcast; protects
 // msgCh close via closeOnce. Also cancels the manager-lifetime ctx so
 // in-flight producer/API calls fail fast instead of stranding goroutines.
+//
+// Phase 6.1: also unblocks any *Handle waiters by marking pending
+// handles as Failed with a manager-shutdown error.
 func (m *Manager) Close() {
 	m.closeOnce.Do(func() {
 		if m.cancelCtx != nil {
@@ -227,22 +312,43 @@ func (m *Manager) Close() {
 		if m.closeCh != nil {
 			close(m.closeCh)
 		}
+		// Fail any pending handles before closing msgCh so consumers
+		// blocked on handle.Done() unblock instead of waiting forever.
+		m.failPendingHandles(errors.New("recovery: manager closed"))
 		if m.msgCh != nil {
 			close(m.msgCh)
 		}
 	})
 }
 
-func (m *Manager) makeEventRecovery(producerID uint, eventID protocols.URN, callback func(string, protocols.URN, uint, *int) (bool, error)) (uint, error) {
+// failPendingHandles marks every still-Pending handle as Failed with the
+// supplied error. Used at Close to unblock any waiters.
+func (m *Manager) failPendingHandles(err error) {
+	m.handlesMu.RLock()
+	pending := make([]*Handle, 0, len(m.handles))
+	for _, h := range m.handles {
+		if !h.IsTerminal() {
+			pending = append(pending, h)
+		}
+	}
+	m.handlesMu.RUnlock()
+	for _, h := range pending {
+		h.complete(protocols.RecoveryStatusFailed, err, time.Now())
+	}
+}
+
+func (m *Manager) makeEventRecoveryHandle(producerID uint, eventID protocols.URN, callback func(string, protocols.URN, uint, *int) (bool, error)) (*Handle, error) {
 	now := time.Now()
 	data := m.findOrMakeProducerRecoveryData(producerID)
 
 	producerName, err := data.producerName()
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 
 	requestID := m.sequence.next()
+	handle := NewHandle(requestID, producerID, eventID, now)
+	m.registerHandle(handle)
 
 	data.setEventRecoveryState(eventID, requestID, now)
 	success, err := callback(producerName, eventID, requestID, m.cfg.SdkNodeID())
@@ -252,10 +358,12 @@ func (m *Manager) makeEventRecovery(producerID uint, eventID protocols.URN, call
 
 	if err != nil {
 		m.logger.WithError(err).Error("event recovery failed")
-		return 0, err
+		// Mark the handle terminal so callers blocked on Done() unblock.
+		m.completeHandle(requestID, protocols.RecoveryStatusFailed, err)
+		return nil, err
 	}
 
-	return requestID, nil
+	return handle, nil
 }
 
 func (m *Manager) findOrMakeProducerRecoveryData(producerID uint) *producerRecoveryData {
@@ -516,6 +624,11 @@ func (m *Manager) eventRecoveryFinished(id uint, data *producerRecoveryData) err
 			},
 		},
 	}
+
+	// Reliable per-request completion (NEXT.md §11): even if the
+	// channel event above is dropped (lossy channel + slow consumer),
+	// the handle is updated and unblocks any caller blocked on Done().
+	m.completeHandle(id, protocols.RecoveryStatusCompleted, nil)
 
 	data.eventRecoveryCompleted(id)
 	return nil

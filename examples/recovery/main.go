@@ -63,11 +63,21 @@ func main() {
 	live := prods[0]
 	log.Printf("requesting odds recovery on producer %d (%s) for %s", live.ID(), live.Name(), eventURN.ToString())
 
-	reqID, err := c.RecoverEventOdds(bootCtx, live.ID(), *eventURN)
+	handle, err := c.RecoverEventOdds(bootCtx, live.ID(), *eventURN)
 	if err != nil {
 		log.Fatalf("recover: %v", err)
 	}
-	log.Printf("recovery request id: %d", reqID)
+	log.Printf("recovery request id: %d", handle.RequestID())
+
+	// Reliable per-request completion: even if the lossy
+	// RecoveryEvents channel drops the event, handle.Done() unblocks
+	// when the corresponding SnapshotComplete arrives.
+	go func() {
+		<-handle.Done()
+		res := handle.Result()
+		log.Printf("recovery %d %s in %v (err=%v)",
+			res.RequestID, res.Status, res.EndedAt.Sub(res.StartedAt), res.Err)
+	}()
 
 	go func() {
 		for ev := range c.RecoveryEvents() {

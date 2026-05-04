@@ -681,19 +681,44 @@ func (c *Client) SetProducerRecoveryFromTimestamp(ctx context.Context, id uint, 
 
 // --- Recovery ---
 
-// RecoverEventOdds initiates an event-odds recovery for a single event.
-// Returns the request id assigned by the server.
+// RecoveryHandle is returned by RecoverEventOdds / RecoverEventStateful.
+// It exposes per-request semantics so callers can wait on a specific
+// recovery completing without scanning the lossy RecoveryEvents
+// channel. The handle is reliable — even if the channel event is
+// dropped, Done() / Result() / Status() reflect the terminal outcome.
+type RecoveryHandle = recovery.Handle
+
+// RecoverEventOdds initiates an event-odds recovery for a single event
+// and returns a *RecoveryHandle that tracks completion reliably.
 //
-// The full RecoveryHandle from NEXT.md §4 (with Done()/Result()) is
-// deferred to a follow-up — for now the request id lets callers
-// correlate against RecoveryEvents.
-func (c *Client) RecoverEventOdds(ctx context.Context, producerID uint, eventID protocols.URN) (uint, error) {
-	return c.recoveryManager.InitiateEventOddsMessagesRecovery(ctx, producerID, eventID)
+//	h, err := client.RecoverEventOdds(ctx, producerID, eventURN)
+//	if err != nil { ... }
+//	<-h.Done()
+//	res := h.Result()
+//	if res.Status == protocols.RecoveryStatusCompleted { ... }
+//
+// Handles remain queryable via Client.EventRecoveryStatus for a
+// configurable grace period (recovery.HandleGCGracePeriod, default
+// 5 minutes) after they reach a terminal state.
+func (c *Client) RecoverEventOdds(ctx context.Context, producerID uint, eventID protocols.URN) (*RecoveryHandle, error) {
+	return c.recoveryManager.InitiateEventOddsRecoveryHandle(ctx, producerID, eventID)
 }
 
 // RecoverEventStateful initiates a stateful-recovery for a single event.
-func (c *Client) RecoverEventStateful(ctx context.Context, producerID uint, eventID protocols.URN) (uint, error) {
-	return c.recoveryManager.InitiateEventStatefulMessagesRecovery(ctx, producerID, eventID)
+func (c *Client) RecoverEventStateful(ctx context.Context, producerID uint, eventID protocols.URN) (*RecoveryHandle, error) {
+	return c.recoveryManager.InitiateEventStatefulRecoveryHandle(ctx, producerID, eventID)
+}
+
+// EventRecoveryStatus looks up a recovery by request id. Useful for
+// callers that only kept the request id and want to check whether the
+// recovery has completed. The second return value is false when the
+// id is unknown — never registered or GC'd after the grace period.
+func (c *Client) EventRecoveryStatus(requestID uint) (protocols.RecoveryResult, bool) {
+	h, ok := c.recoveryManager.LookupHandle(requestID)
+	if !ok {
+		return protocols.RecoveryResult{}, false
+	}
+	return h.Snapshot(), true
 }
 
 // --- Sports info ---

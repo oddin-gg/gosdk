@@ -328,6 +328,33 @@ func TestClient_ConnectionEvents_TranslatesFeedEvents(t *testing.T) {
 	}
 }
 
+// TestClient_EventRecoveryStatus_UnknownID verifies that querying an
+// id that was never registered returns false.
+func TestClient_EventRecoveryStatus_UnknownID(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = io.WriteString(w, whoAmIBody)
+	}))
+	defer srv.Close()
+
+	cfg := NewConfig("t", protocols.IntegrationEnvironment,
+		WithAPIURL("api.example.test"),
+		WithHTTPClient(newTestHTTPClient(srv)),
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	c, err := New(ctx, cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close(ctx) })
+
+	if _, ok := c.EventRecoveryStatus(99999); ok {
+		t.Error("EventRecoveryStatus(99999) should be false for unknown id")
+	}
+}
+
 // TestClient_Close_Idempotent verifies Close can be called repeatedly.
 func TestClient_Close_Idempotent(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
