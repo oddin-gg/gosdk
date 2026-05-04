@@ -1,6 +1,7 @@
 package factory
 
 import (
+	"context"
 	"fmt"
 	"slices"
 	"strings"
@@ -76,7 +77,7 @@ func (m marketDataImpl) OutcomeName(outcomeID string, locale protocols.Locale) (
 			if err != nil {
 				return nil, fmt.Errorf("unsupported competitor id in outcome %s: %w", outcomeID, err)
 			}
-			competitor, err := m.marketDescriptionFactory.competitorCache.Competitor(*urn, []protocols.Locale{locale})
+			competitor, err := m.marketDescriptionFactory.competitorCache.Competitor(context.Background(), *urn, []protocols.Locale{locale})
 			if err != nil {
 				return nil, fmt.Errorf("derivation of outcome name for dynamic player outcome failed for id [%s]: %w", outcomeID, err)
 			}

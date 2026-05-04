@@ -9,13 +9,14 @@ import (
 
 	"github.com/oddin-gg/gosdk/internal/api"
 	apiXML "github.com/oddin-gg/gosdk/internal/api/xml"
+	"github.com/oddin-gg/gosdk/internal/cache/lru"
 	feedXML "github.com/oddin-gg/gosdk/internal/feed/xml"
 	"github.com/oddin-gg/gosdk/protocols"
-	"github.com/patrickmn/go-cache"
 	log "github.com/sirupsen/logrus"
 )
 
-// TournamentWrapper ...
+// TournamentWrapper is the small interface implemented by the various API XML
+// types that carry tournament metadata.
 type TournamentWrapper interface {
 	GetID() string
 	// Deprecated: do not use this method, it will be removed in future
@@ -31,282 +32,30 @@ type TournamentWrapper interface {
 	GetCategory() *apiXML.Category
 }
 
-// TournamentExtendedWrapper ...
+// TournamentExtendedWrapper extends TournamentWrapper with the optional
+// competitor list.
 type TournamentExtendedWrapper interface {
 	TournamentWrapper
 	GetCompetitors() []apiXML.Team
 }
 
-// TournamentCache ...
+// TournamentCache stores tournament data per (URN, locale).
 type TournamentCache struct {
-	apiClient     *api.Client
-	internalCache *cache.Cache
-	iconCache     *cache.Cache
-	logger        *log.Entry
+	apiClient *api.Client
+	logger    *log.Entry
+	lru       *lru.EventCache[protocols.URN, protocols.Locale, *LocalizedTournament]
+
+	iconMu sync.RWMutex
+	icons  map[protocols.URN]*string
 }
 
-// OnFeedMessage ...
-func (t *TournamentCache) OnFeedMessage(id protocols.URN, feedMessage *protocols.FeedMessage) {
-	if feedMessage.Message == nil {
-		return
-	}
-
-	message, ok := feedMessage.Message.(*feedXML.FixtureChange)
-	switch {
-	case !ok:
-		fallthrough
-	case id.Type != "tournament":
-		return
-	default:
-		id, err := protocols.ParseURN(message.EventID)
-		if err != nil {
-			t.logger.WithError(err).Errorf("failed to convert urn %s", message.EventID)
-		}
-
-		t.ClearCacheItem(*id)
-	}
-}
-
-// OnAPIResponse ...
-func (t *TournamentCache) OnAPIResponse(apiResponse protocols.Response) {
-	if apiResponse.Locale == nil || apiResponse.Data == nil {
-		return
-	}
-
-	var result []TournamentWrapper
-	switch data := apiResponse.Data.(type) {
-	case *apiXML.FixtureResponse:
-		result = append(result, data.Fixture.Tournament)
-	case *apiXML.TournamentsResponse:
-		for i := range data.Tournaments {
-			tournament := data.Tournaments[i]
-			result = append(result, tournament)
-		}
-	case *apiXML.MatchSummaryResponse:
-		result = append(result, data.SportEvent.Tournament)
-	case *apiXML.ScheduleResponse:
-		for i := range data.SportEvents {
-			tournament := data.SportEvents[i].Tournament
-			result = append(result, tournament)
-		}
-	case *apiXML.TournamentScheduleResponse:
-		result = append(result, data.Tournament)
-	case *apiXML.SportTournamentsResponse:
-		if data.Tournaments == nil {
-			return
-		}
-
-		for i := range data.Tournaments.Tournament {
-			tournament := data.Tournaments.Tournament[i]
-			result = append(result, tournament)
-		}
-	}
-
-	if len(result) == 0 {
-		return
-	}
-
-	err := t.handleTournamentsData(*apiResponse.Locale, result)
-	if err != nil {
-		t.logger.WithError(err).Errorf("failed to precess api data %v", apiResponse)
-	}
-}
-
-// ClearCacheItem ...
-func (t *TournamentCache) ClearCacheItem(id protocols.URN) {
-	t.internalCache.Delete(id.ToString())
-}
-
-// Tournament ...
-func (t *TournamentCache) Tournament(id protocols.URN, locales []protocols.Locale) (*LocalizedTournament, error) {
-	item, _ := t.internalCache.Get(id.ToString())
-	result, ok := item.(*LocalizedTournament)
-
-	var missingLocales []protocols.Locale
-	if !ok {
-		missingLocales = locales
-	} else {
-		for i := range locales {
-			locale := locales[i]
-			result.mux.Lock()
-			_, ok := result.name[locale]
-			result.mux.Unlock()
-
-			if !ok {
-				missingLocales = append(missingLocales, locale)
-			}
-		}
-	}
-
-	if len(missingLocales) != 0 {
-		err := t.loadAndCacheItem(id, locales)
-		if err != nil {
-			return nil, err
-		}
-
-		item, _ = t.internalCache.Get(id.ToString())
-		result, ok = item.(*LocalizedTournament)
-		if !ok {
-			return nil, errors.New("item missing")
-		}
-	}
-
-	return result, nil
-}
-
-// TournamentCompetitors ...
-func (t *TournamentCache) TournamentCompetitors(id protocols.URN, locale protocols.Locale) ([]protocols.URN, error) {
-	item, _ := t.internalCache.Get(id.ToString())
-	result, ok := item.(*LocalizedTournament)
-
-	var competitorIDs map[protocols.URN]struct{}
-	if ok && len(result.competitorIDs) != 0 {
-		competitorIDs = result.competitorIDs
-	} else {
-		err := t.loadAndCacheItem(id, []protocols.Locale{locale})
-		if err != nil {
-			return nil, err
-		}
-
-		item, _ = t.internalCache.Get(id.ToString())
-		result = item.(*LocalizedTournament)
-		competitorIDs = result.competitorIDs
-	}
-
-	listIDs := make([]protocols.URN, len(competitorIDs))
-	index := 0
-	for key := range competitorIDs {
-		listIDs[index] = key
-		index++
-	}
-
-	return listIDs, nil
-}
-
-// TournamentIcon ...
-func (t *TournamentCache) TournamentIcon(id protocols.URN, locale protocols.Locale) (*string, error) {
-	icon, ok := t.iconCache.Get(id.ToString())
-	if ok {
-		return icon.(*string), nil
-	}
-
-	data, err := t.apiClient.FetchTournament(context.Background(), id, locale)
-	if err != nil {
-		return nil, err
-	}
-
-	t.iconCache.Set(id.ToString(), data.IconPath, 0)
-	return data.IconPath, nil
-}
-
-func (t *TournamentCache) loadAndCacheItem(id protocols.URN, locales []protocols.Locale) error {
-	for i := range locales {
-		locale := locales[i]
-		data, err := t.apiClient.FetchTournament(context.Background(), id, locale)
-		if err != nil {
-			return err
-		}
-
-		// Set icon to cache
-		t.iconCache.Set(id.ToString(), data.IconPath, 0)
-
-		err = t.refreshOrInsertItem(id, locale, data)
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func (t *TournamentCache) handleTournamentsData(locale protocols.Locale, tournaments []TournamentWrapper) error {
-	for i := range tournaments {
-		tournament := tournaments[i]
-		id, err := protocols.ParseURN(tournament.GetID())
-		if err != nil {
-			return err
-		}
-
-		err = t.refreshOrInsertItem(*id, locale, tournament)
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func (t *TournamentCache) refreshOrInsertItem(id protocols.URN, locale protocols.Locale, tournament TournamentWrapper) error {
-	item, _ := t.internalCache.Get(id.ToString())
-	result, ok := item.(*LocalizedTournament)
-	if !ok {
-		sportID, err := protocols.ParseURN(tournament.GetSportID())
-		if err != nil {
-			return err
-		}
-
-		var refID *protocols.URN
-		if tournament.GetRefID() != nil {
-			refID, err = protocols.ParseURN(*tournament.GetRefID())
-			if err != nil {
-				return err
-			}
-		}
-
-		result = &LocalizedTournament{
-			id:               id,
-			refID:            refID,
-			startDate:        tournament.GetStartDate(),
-			endDate:          tournament.GetEndDate(),
-			sportID:          *sportID,
-			scheduledTime:    tournament.GetScheduledTime(),
-			scheduledEndTime: tournament.GetScheduledEndTime(),
-			competitorIDs:    make(map[protocols.URN]struct{}),
-			name:             make(map[protocols.Locale]string),
-			abbreviation:     make(map[protocols.Locale]string),
-			riskTier:         tournament.GetRiskTier(),
-			category:         tournament.GetCategory(),
-		}
-	}
-
-	result.mux.Lock()
-	defer result.mux.Unlock()
-
-	result.name[locale] = tournament.GetName()
-	result.abbreviation[locale] = tournament.GetAbbreviation()
-
-	extendedTournament, ok := tournament.(TournamentExtendedWrapper)
-	if ok {
-		for _, team := range extendedTournament.GetCompetitors() {
-			id, err := protocols.ParseURN(team.GetID())
-			if err != nil {
-				return err
-			}
-			result.competitorIDs[*id] = struct{}{}
-		}
-	}
-
-	t.internalCache.Set(id.ToString(), result, 0)
-	return nil
-}
-
-func newTournamentCache(client *api.Client, logger *log.Entry) *TournamentCache {
-	tournamentCache := &TournamentCache{
-		apiClient:     client,
-		internalCache: cache.New(12*time.Hour, 10*time.Minute),
-		iconCache:     cache.New(12*time.Hour, 10*time.Minute),
-		logger:        logger,
-	}
-
-	client.SubscribeWithAPIObserver(tournamentCache)
-
-	return tournamentCache
-}
-
-// LocalizedTournament ...
+// LocalizedTournament holds tournament data; mu guards every field.
 type LocalizedTournament struct {
-	id               protocols.URN
-	refID            *protocols.URN
+	mu sync.RWMutex
+
+	id    protocols.URN
+	refID *protocols.URN
+
 	startDate        *time.Time
 	endDate          *time.Time
 	sportID          protocols.URN
@@ -314,13 +63,252 @@ type LocalizedTournament struct {
 	scheduledEndTime *time.Time
 	riskTier         int
 	category         *apiXML.Category
-	name             map[protocols.Locale]string
-	abbreviation     map[protocols.Locale]string
 	competitorIDs    map[protocols.URN]struct{}
 
-	mux sync.Mutex
+	name         map[protocols.Locale]string
+	abbreviation map[protocols.Locale]string
 }
 
+// Locales implements lru.LocalizedEntry.
+func (l *LocalizedTournament) Locales() []protocols.Locale {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	out := make([]protocols.Locale, 0, len(l.name))
+	for locale := range l.name {
+		out = append(out, locale)
+	}
+	return out
+}
+
+func (l *LocalizedTournament) refIDValue() *protocols.URN {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.refID
+}
+
+func (l *LocalizedTournament) localizedName(locale protocols.Locale) (*string, error) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	v, ok := l.name[locale]
+	if !ok {
+		return nil, fmt.Errorf("missing locale %s", locale)
+	}
+	return &v, nil
+}
+
+func (l *LocalizedTournament) localizedAbbreviation(locale protocols.Locale) (*string, error) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	v, ok := l.abbreviation[locale]
+	if !ok {
+		return nil, fmt.Errorf("missing locale %s", locale)
+	}
+	return &v, nil
+}
+
+func (l *LocalizedTournament) snapshot() (start, end, sched, schedEnd *time.Time, riskTier int, cat *apiXML.Category) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.startDate, l.endDate, l.scheduledTime, l.scheduledEndTime, l.riskTier, l.category
+}
+
+func (l *LocalizedTournament) competitorIDList() []protocols.URN {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	out := make([]protocols.URN, 0, len(l.competitorIDs))
+	for k := range l.competitorIDs {
+		out = append(out, k)
+	}
+	return out
+}
+
+// merge folds a TournamentWrapper payload into the entry under mu.
+func (l *LocalizedTournament) merge(locale protocols.Locale, t TournamentWrapper) error {
+	sportID, err := protocols.ParseURN(t.GetSportID())
+	if err != nil {
+		return err
+	}
+	var refID *protocols.URN
+	if t.GetRefID() != nil {
+		refID, err = protocols.ParseURN(*t.GetRefID())
+		if err != nil {
+			return err
+		}
+	}
+
+	var competitorURNs []protocols.URN
+	if ext, ok := t.(TournamentExtendedWrapper); ok {
+		comps := ext.GetCompetitors()
+		competitorURNs = make([]protocols.URN, 0, len(comps))
+		for _, c := range comps {
+			urn, err := protocols.ParseURN(c.GetID())
+			if err != nil {
+				return err
+			}
+			competitorURNs = append(competitorURNs, *urn)
+		}
+	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.id = ifZeroURN(l.id, urnFromString(t.GetID()))
+	if refID != nil {
+		l.refID = refID
+	}
+	l.startDate = t.GetStartDate()
+	l.endDate = t.GetEndDate()
+	l.sportID = *sportID
+	l.scheduledTime = t.GetScheduledTime()
+	l.scheduledEndTime = t.GetScheduledEndTime()
+	l.riskTier = t.GetRiskTier()
+	l.category = t.GetCategory()
+	l.name[locale] = t.GetName()
+	l.abbreviation[locale] = t.GetAbbreviation()
+	if competitorURNs != nil {
+		l.competitorIDs = make(map[protocols.URN]struct{}, len(competitorURNs))
+		for _, urn := range competitorURNs {
+			l.competitorIDs[urn] = struct{}{}
+		}
+	}
+	return nil
+}
+
+// ifZeroURN returns `prefer` if `current` is the zero URN, else `current`.
+func ifZeroURN(current, prefer protocols.URN) protocols.URN {
+	if current == (protocols.URN{}) {
+		return prefer
+	}
+	return current
+}
+
+// urnFromString parses, ignoring errors (used as a defensive fallback).
+func urnFromString(s string) protocols.URN {
+	u, err := protocols.ParseURN(s)
+	if err != nil || u == nil {
+		return protocols.URN{}
+	}
+	return *u
+}
+
+// Tournament returns a populated LocalizedTournament.
+func (t *TournamentCache) Tournament(ctx context.Context, id protocols.URN, locales []protocols.Locale) (*LocalizedTournament, error) {
+	v, _, err := t.lru.Get(ctx, id, locales)
+	if err != nil {
+		return nil, err
+	}
+	return v, nil
+}
+
+// TournamentCompetitors returns the competitor URN list for the tournament.
+// If the entry was populated by a non-Tournament-info API path it may not
+// have the competitor list yet; in that case we force a fresh fetch.
+func (t *TournamentCache) TournamentCompetitors(ctx context.Context, id protocols.URN, locale protocols.Locale) ([]protocols.URN, error) {
+	v, err := t.Tournament(ctx, id, []protocols.Locale{locale})
+	if err != nil {
+		return nil, err
+	}
+	urns := v.competitorIDList()
+	if len(urns) > 0 {
+		return urns, nil
+	}
+	// Force re-fetch via the FetchTournament path which carries competitors.
+	t.lru.Clear(id)
+	v, err = t.Tournament(ctx, id, []protocols.Locale{locale})
+	if err != nil {
+		return nil, err
+	}
+	return v.competitorIDList(), nil
+}
+
+// TournamentIcon returns the cached icon path, fetching if needed.
+func (t *TournamentCache) TournamentIcon(ctx context.Context, id protocols.URN, locale protocols.Locale) (*string, error) {
+	t.iconMu.RLock()
+	if v, ok := t.icons[id]; ok {
+		t.iconMu.RUnlock()
+		return v, nil
+	}
+	t.iconMu.RUnlock()
+
+	data, err := t.apiClient.FetchTournament(ctx, id, locale)
+	if err != nil {
+		return nil, err
+	}
+	t.iconMu.Lock()
+	t.icons[id] = data.IconPath
+	t.iconMu.Unlock()
+	return data.IconPath, nil
+}
+
+// OnFeedMessage clears the cache for tournament-typed FixtureChange messages.
+func (t *TournamentCache) OnFeedMessage(id protocols.URN, feedMessage *protocols.FeedMessage) {
+	if feedMessage.Message == nil {
+		return
+	}
+	msg, ok := feedMessage.Message.(*feedXML.FixtureChange)
+	if !ok || id.Type != "tournament" {
+		return
+	}
+	parsed, err := protocols.ParseURN(msg.EventID)
+	if err != nil || parsed == nil {
+		t.logger.WithError(err).Errorf("failed to convert urn %s", msg.EventID)
+		return
+	}
+	t.ClearCacheItem(*parsed)
+}
+
+// ClearCacheItem is the public invalidation hook.
+func (t *TournamentCache) ClearCacheItem(id protocols.URN) {
+	t.lru.Clear(id)
+	t.iconMu.Lock()
+	delete(t.icons, id)
+	t.iconMu.Unlock()
+}
+
+func newTournamentCache(client *api.Client, logger *log.Entry) *TournamentCache {
+	tc := &TournamentCache{
+		apiClient: client,
+		logger:    logger,
+		icons:     make(map[protocols.URN]*string),
+	}
+	tc.lru = lru.NewEventCache[protocols.URN, protocols.Locale, *LocalizedTournament](
+		lru.Config{},
+		func(
+			ctx context.Context,
+			id protocols.URN,
+			missing []protocols.Locale,
+			existing *LocalizedTournament,
+			hasExisting bool,
+		) (*LocalizedTournament, error) {
+			var entry *LocalizedTournament
+			if hasExisting {
+				entry = existing
+			} else {
+				entry = &LocalizedTournament{
+					id:            id,
+					name:          make(map[protocols.Locale]string),
+					abbreviation:  make(map[protocols.Locale]string),
+					competitorIDs: make(map[protocols.URN]struct{}),
+				}
+			}
+			for _, locale := range missing {
+				data, err := client.FetchTournament(ctx, id, locale)
+				if err != nil {
+					return nil, err
+				}
+				tc.iconMu.Lock()
+				tc.icons[id] = data.IconPath
+				tc.iconMu.Unlock()
+				if err := entry.merge(locale, data); err != nil {
+					return nil, err
+				}
+			}
+			return entry, nil
+		},
+	)
+	return tc
+}
+
+// tournamentImpl implements protocols.Tournament.
 type tournamentImpl struct {
 	id              protocols.URN
 	sportID         protocols.URN
@@ -333,82 +321,53 @@ func (t tournamentImpl) IconPath() (*string, error) {
 	if len(t.locales) == 0 {
 		return nil, errors.New("missing locales")
 	}
-
-	item, err := t.tournamentCache.TournamentIcon(t.id, t.locales[0])
-	if err != nil {
-		return nil, err
-	}
-
-	return item, nil
+	return t.tournamentCache.TournamentIcon(context.Background(), t.id, t.locales[0])
 }
 
-func (t tournamentImpl) ID() protocols.URN {
-	return t.id
-}
+func (t tournamentImpl) ID() protocols.URN { return t.id }
 
 func (t tournamentImpl) RefID() (*protocols.URN, error) {
-	item, err := t.tournamentCache.Tournament(t.id, t.locales)
+	item, err := t.tournamentCache.Tournament(context.Background(), t.id, t.locales)
 	if err != nil {
 		return nil, err
 	}
-
-	return item.refID, nil
+	return item.refIDValue(), nil
 }
 
 func (t tournamentImpl) LocalizedAbbreviation(locale protocols.Locale) (*string, error) {
-	item, err := t.tournamentCache.Tournament(t.id, []protocols.Locale{locale})
+	item, err := t.tournamentCache.Tournament(context.Background(), t.id, []protocols.Locale{locale})
 	if err != nil {
 		return nil, err
 	}
-
-	item.mux.Lock()
-	defer item.mux.Unlock()
-
-	result, ok := item.abbreviation[locale]
-	if !ok {
-		return nil, fmt.Errorf("missing locale %s", locale)
-	}
-
-	return &result, nil
+	return item.localizedAbbreviation(locale)
 }
 
 func (t tournamentImpl) LocalizedName(locale protocols.Locale) (*string, error) {
-	item, err := t.tournamentCache.Tournament(t.id, []protocols.Locale{locale})
+	item, err := t.tournamentCache.Tournament(context.Background(), t.id, []protocols.Locale{locale})
 	if err != nil {
 		return nil, err
 	}
-
-	item.mux.Lock()
-	defer item.mux.Unlock()
-
-	result, ok := item.name[locale]
-	if !ok {
-		return nil, fmt.Errorf("missing locale %s", locale)
-	}
-
-	return &result, nil
+	return item.localizedName(locale)
 }
 
-func (t tournamentImpl) SportID() (*protocols.URN, error) {
-	return &t.sportID, nil
-}
+func (t tournamentImpl) SportID() (*protocols.URN, error) { return &t.sportID, nil }
 
 func (t tournamentImpl) ScheduledTime() (*time.Time, error) {
-	item, err := t.tournamentCache.Tournament(t.id, t.locales)
+	item, err := t.tournamentCache.Tournament(context.Background(), t.id, t.locales)
 	if err != nil {
 		return nil, err
 	}
-
-	return item.scheduledTime, nil
+	_, _, sched, _, _, _ := item.snapshot()
+	return sched, nil
 }
 
 func (t tournamentImpl) ScheduledEndTime() (*time.Time, error) {
-	item, err := t.tournamentCache.Tournament(t.id, t.locales)
+	item, err := t.tournamentCache.Tournament(context.Background(), t.id, t.locales)
 	if err != nil {
 		return nil, err
 	}
-
-	return item.scheduledEndTime, nil
+	_, _, _, schedEnd, _, _ := item.snapshot()
+	return schedEnd, nil
 }
 
 func (t tournamentImpl) LiveOddsAvailability() (*protocols.LiveOddsAvailability, error) {
@@ -421,51 +380,45 @@ func (t tournamentImpl) Sport() protocols.SportSummary {
 }
 
 func (t tournamentImpl) Competitors() ([]protocols.Competitor, error) {
-	item, err := t.tournamentCache.Tournament(t.id, t.locales)
+	item, err := t.tournamentCache.Tournament(context.Background(), t.id, t.locales)
 	if err != nil {
 		return nil, err
 	}
-
-	var competitors []protocols.URN
-	if len(item.competitorIDs) == 0 {
-		competitors, err = t.tournamentCache.TournamentCompetitors(t.id, t.locales[0])
+	urns := item.competitorIDList()
+	if len(urns) == 0 {
+		urns, err = t.tournamentCache.TournamentCompetitors(context.Background(), t.id, t.locales[0])
 		if err != nil {
 			return nil, err
 		}
-	} else {
-		for key := range item.competitorIDs {
-			competitors = append(competitors, key)
-		}
 	}
-
-	return t.entityFactory.BuildCompetitors(competitors, t.locales), nil
+	return t.entityFactory.BuildCompetitors(urns, t.locales), nil
 }
 
 func (t tournamentImpl) StartDate() (*time.Time, error) {
-	item, err := t.tournamentCache.Tournament(t.id, t.locales)
+	item, err := t.tournamentCache.Tournament(context.Background(), t.id, t.locales)
 	if err != nil {
 		return nil, err
 	}
-
-	return item.startDate, nil
+	start, _, _, _, _, _ := item.snapshot()
+	return start, nil
 }
 
 func (t tournamentImpl) EndDate() (*time.Time, error) {
-	item, err := t.tournamentCache.Tournament(t.id, t.locales)
+	item, err := t.tournamentCache.Tournament(context.Background(), t.id, t.locales)
 	if err != nil {
 		return nil, err
 	}
-
-	return item.endDate, nil
+	_, end, _, _, _, _ := item.snapshot()
+	return end, nil
 }
 
 func (t tournamentImpl) RiskTier() (int, error) {
-	item, err := t.tournamentCache.Tournament(t.id, t.locales)
+	item, err := t.tournamentCache.Tournament(context.Background(), t.id, t.locales)
 	if err != nil {
 		return 0, err
 	}
-
-	return item.riskTier, nil
+	_, _, _, _, riskTier, _ := item.snapshot()
+	return riskTier, nil
 }
 
 type categoryImpl struct {
@@ -474,33 +427,23 @@ type categoryImpl struct {
 	countryCode *string
 }
 
-func (c *categoryImpl) ID() string {
-	return c.id
-}
-
-func (c *categoryImpl) Name() string {
-	return c.name
-}
-
-func (c *categoryImpl) CountryCode() *string {
-	return c.countryCode
-}
+func (c *categoryImpl) ID() string           { return c.id }
+func (c *categoryImpl) Name() string         { return c.name }
+func (c *categoryImpl) CountryCode() *string { return c.countryCode }
 
 func (t tournamentImpl) Category() (protocols.Category, error) {
-	item, err := t.tournamentCache.Tournament(t.id, t.locales)
+	item, err := t.tournamentCache.Tournament(context.Background(), t.id, t.locales)
 	if err != nil {
 		return nil, err
 	}
-
-	category := item.category
-	if category == nil {
+	_, _, _, _, _, cat := item.snapshot()
+	if cat == nil {
 		return nil, errors.New("category not found")
 	}
-
 	return &categoryImpl{
-		id:          category.ID,
-		name:        category.Name,
-		countryCode: category.CountryCode,
+		id:          cat.ID,
+		name:        cat.Name,
+		countryCode: cat.CountryCode,
 	}, nil
 }
 
