@@ -15,6 +15,35 @@ import (
 	log "github.com/oddin-gg/gosdk/internal/log"
 )
 
+// EventKind enumerates AMQP-level lifecycle transitions emitted to
+// observers via the EventEmitter callback. Independent of the public
+// gosdk.ConnectionEventKind to keep internal/feed self-contained.
+type EventKind int
+
+const (
+	// EventConnected fires after a successful dial — both the first dial
+	// from Open and every successful reconnect.
+	EventConnected EventKind = iota
+	// EventDisconnected fires when the broker drops the connection.
+	// Err is populated.
+	EventDisconnected
+	// EventReconnecting fires once per drop, when the reconnect backoff
+	// loop begins.
+	EventReconnecting
+)
+
+// Event is delivered to the optional EventEmitter callback for each
+// connection-state transition observed by the reconnect loop.
+type Event struct {
+	Kind EventKind
+	Err  error
+}
+
+// EventEmitter is invoked synchronously from the reconnect goroutine.
+// It MUST NOT block — gosdk wraps the callback with a select+default
+// lossy push.
+type EventEmitter func(Event)
+
 // Client manages a single AMQP connection with automatic reconnection.
 //
 // Phase 4 rewrite: replaces the recursive-reconnect pyramid with a single
@@ -26,6 +55,7 @@ type Client struct {
 	cfg           protocols.OddsFeedConfiguration
 	whoAmIManager protocols.WhoAmIManager
 	logger        *log.Logger
+	emitter       EventEmitter
 
 	// conn holds the current *amqp.Connection. Nil while disconnected.
 	conn atomic.Pointer[amqp.Connection]
@@ -58,6 +88,26 @@ func NewClient(cfg protocols.OddsFeedConfiguration, whoAmIManager protocols.WhoA
 		connectedCh:   make(chan struct{}),
 		closed:        make(chan struct{}),
 	}
+}
+
+// SetEventEmitter installs the connection-event callback. Pass nil to
+// disable. Should be called before Open.
+func (c *Client) SetEventEmitter(e EventEmitter) {
+	c.mu.Lock()
+	c.emitter = e
+	c.mu.Unlock()
+}
+
+// emit invokes the event callback if set. Snapshots under RLock so a
+// concurrent SetEventEmitter doesn't tear the dispatch.
+func (c *Client) emit(kind EventKind, err error) {
+	c.mu.Lock()
+	emit := c.emitter
+	c.mu.Unlock()
+	if emit == nil {
+		return
+	}
+	emit(Event{Kind: kind, Err: err})
 }
 
 // Open establishes the AMQP connection and starts the reconnect goroutine.
@@ -97,6 +147,7 @@ func (c *Client) Open(ctx context.Context) error {
 	}
 	c.conn.Store(conn)
 	c.signalConnected()
+	c.emit(EventConnected, nil)
 
 	// Spawn reconnect goroutine for the lifetime of the connection.
 	loopCtx, cancel := context.WithCancel(context.Background())
@@ -244,6 +295,10 @@ func (c *Client) signalConnected() {
 // reconnectLoop runs for the lifetime of the client. It listens on the
 // connection's NotifyClose channel; on any drop, it dials a fresh
 // connection with exponential backoff (capped) and atomically swaps it.
+//
+// Emits Disconnected on each broker drop, Reconnecting once per drop
+// at the start of the backoff loop, and Connected after each
+// successful re-dial. Per-attempt detail goes to slog at debug.
 func (c *Client) reconnectLoop(ctx context.Context, initial *amqp.Connection) {
 	defer c.wg.Done()
 
@@ -251,16 +306,20 @@ func (c *Client) reconnectLoop(ctx context.Context, initial *amqp.Connection) {
 	for {
 		notify := conn.NotifyClose(make(chan *amqp.Error, 1))
 
+		var amqpErr *amqp.Error
 		select {
 		case <-ctx.Done():
 			return
-		case amqpErr := <-notify:
+		case amqpErr = <-notify:
 			if amqpErr == nil {
 				// Graceful close from us — exit.
 				return
 			}
 			c.logger.WithField("error", amqpErr.Error()).Warn("feed: connection lost; reconnecting")
 		}
+
+		c.emit(EventDisconnected, amqpErr)
+		c.emit(EventReconnecting, nil)
 
 		// Dial with exponential backoff until ctx cancels or we succeed.
 		exp := backoff.NewExponentialBackOff()
@@ -278,6 +337,7 @@ func (c *Client) reconnectLoop(ctx context.Context, initial *amqp.Connection) {
 		c.conn.Store(newConn)
 		conn = newConn
 		c.signalConnected()
+		c.emit(EventConnected, nil)
 		c.logger.Info("feed: reconnected")
 	}
 }

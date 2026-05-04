@@ -3,6 +3,7 @@ package gosdk
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/oddin-gg/gosdk/internal/feed"
 	"github.com/oddin-gg/gosdk/protocols"
 )
 
@@ -279,6 +281,50 @@ func TestClient_APIEvents_BodyTruncation(t *testing.T) {
 		}
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("no APIEvent fired")
+	}
+}
+
+// TestClient_ConnectionEvents_TranslatesFeedEvents drives the feed-layer
+// event-translation hook directly and verifies every kind reaches
+// ConnectionEvents() with the correct translated kind + err.
+func TestClient_ConnectionEvents_TranslatesFeedEvents(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = io.WriteString(w, whoAmIBody)
+	}))
+	defer srv.Close()
+
+	cfg := NewConfig("t", protocols.IntegrationEnvironment,
+		WithAPIURL("api.example.test"),
+		WithHTTPClient(newTestHTTPClient(srv)),
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	c, err := New(ctx, cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close(ctx) })
+
+	bang := errors.New("broker drop")
+	c.onFeedEvent(feed.Event{Kind: feed.EventConnected})
+	c.onFeedEvent(feed.Event{Kind: feed.EventDisconnected, Err: bang})
+	c.onFeedEvent(feed.Event{Kind: feed.EventReconnecting})
+
+	want := []ConnectionEventKind{ConnectionConnected, ConnectionDisconnected, ConnectionReconnecting}
+	for i, w := range want {
+		select {
+		case ev := <-c.ConnectionEvents():
+			if ev.Kind != w {
+				t.Errorf("event[%d].Kind = %v, want %v", i, ev.Kind, w)
+			}
+			if w == ConnectionDisconnected && ev.Err == nil {
+				t.Errorf("event[%d].Err = nil, want non-nil", i)
+			}
+		case <-time.After(200 * time.Millisecond):
+			t.Fatalf("no event %d", i)
+		}
 	}
 }
 

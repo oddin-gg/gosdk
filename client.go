@@ -157,8 +157,26 @@ func New(ctx context.Context, cfg Config) (*Client, error) {
 	c.replay = &Replay{client: c}
 
 	c.rabbitMQClient = feed.NewClient(c.cfgAdpt, c.whoAmIManager, c.logger)
+	c.rabbitMQClient.SetEventEmitter(c.onFeedEvent)
 
 	return c, nil
+}
+
+// onFeedEvent translates the internal feed-layer Event enum to the
+// public ConnectionEvent and lossy-pushes it onto ConnectionEvents().
+func (c *Client) onFeedEvent(ev feed.Event) {
+	var kind ConnectionEventKind
+	switch ev.Kind {
+	case feed.EventConnected:
+		kind = ConnectionConnected
+	case feed.EventDisconnected:
+		kind = ConnectionDisconnected
+	case feed.EventReconnecting:
+		kind = ConnectionReconnecting
+	default:
+		return
+	}
+	c.emitConn(kind, ev.Err)
 }
 
 // Connect opens the AMQP connection, loads the producers catalog, and
@@ -259,8 +277,9 @@ func (c *Client) Connect(ctx context.Context) error {
 	c.connectMu.Lock()
 	c.connectState.Store(int32(ConnectionStateConnected))
 	c.connectMu.Unlock()
-
-	c.emitConn(ConnectionConnected, nil)
+	// Note: ConnectionConnected is emitted by the feed-layer event
+	// callback (see onFeedEvent) — single source of truth across the
+	// first dial and all subsequent reconnects.
 	return nil
 }
 
