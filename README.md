@@ -1,119 +1,165 @@
 Oddin.gg Golang SDK
 -------------------
 
-Rest API and Streaming API for connecting to Oddin.gg services and odds Feed.
+Go SDK for Oddin.gg's REST API and streaming odds feed.
 
-### Installing 
+### Installing
 
 ```shell
 go get github.com/oddin-gg/gosdk
 ```
 
-### Example Feed client
+Requires Go 1.24+.
 
-see [example feed and api client](example/main.go) with full working demo of how to connect to Oddin.gg Feed
+### Quickstart
 
-### How to start
-
-Prepare your configuration:
 ```go
-const (
-	token  = "YOUR TOKEN"
-	env    = protocols.IntegrationEnvironment
-	nodeID = 2
+package main
+
+import (
+    "context"
+    "log"
+    "log/slog"
+    "os"
+    "os/signal"
+    "syscall"
+    "time"
+
+    "github.com/oddin-gg/gosdk"
+    "github.com/oddin-gg/gosdk/protocols"
+)
+
+func main() {
+    cfg := gosdk.NewConfig(os.Getenv("TOKEN"), protocols.IntegrationEnvironment,
+        gosdk.WithLogger(slog.Default()),
+        gosdk.WithDefaultLocale(protocols.EnLocale),
+    )
+
+    bootCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+    defer cancel()
+
+    client, err := gosdk.New(bootCtx, cfg)
+    if err != nil {
+        log.Fatalf("gosdk.New: %v", err)
+    }
+    defer func() {
+        ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+        defer cancel()
+        _ = client.Close(ctx)
+    }()
+
+    sub, err := client.Subscribe(context.Background(),
+        gosdk.WithMessageInterest(protocols.AllMessageInterest),
+    )
+    if err != nil {
+        log.Fatalf("subscribe: %v", err)
+    }
+
+    go func() {
+        for msg := range sub.Messages() {
+            switch m := msg.Message.(type) {
+            case protocols.OddsChange:
+                log.Printf("odds change: %d markets", len(m.Markets()))
+            case protocols.BetSettlement:
+                log.Printf("bet settlement: %d markets", len(m.Markets()))
+            }
+        }
+    }()
+
+    sigCh := make(chan os.Signal, 1)
+    signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+    <-sigCh
+}
+```
+
+### Configuration
+
+`gosdk.NewConfig` takes the access token, an `Environment`, and any
+number of functional options. Common options:
+
+```go
+gosdk.NewConfig(token, protocols.IntegrationEnvironment,
+    gosdk.WithRegion(protocols.RegionDefault),
+    gosdk.WithNodeID(1),
+    gosdk.WithDefaultLocale(protocols.EnLocale),
+    gosdk.WithPreloadLocales(protocols.EnLocale, protocols.RuLocale),
+    gosdk.WithMaxInactivity(20*time.Second),
+    gosdk.WithMaxRecoveryExecution(6*time.Hour),
+    gosdk.WithLogger(slog.Default()),
+    gosdk.WithAPICallLogging(gosdk.APILogMetadata),
 )
 ```
 
-Initialize Feed:
+The full option list is in [config.go](config.go).
+
+### Lifecycle
+
+- `gosdk.New(ctx, cfg)` validates credentials with a bookmaker-details
+  probe and sets up the API + cache + producer layer. **Does not** open
+  AMQP.
+- `client.Connect(ctx)` opens AMQP eagerly (optional).
+- `client.Subscribe(ctx, opts...)` returns a `*Subscription`. First
+  call lazy-connects if `Connect` wasn't called.
+- `client.Close(ctx)` is idempotent. ctx caps the drain wait.
+
+### Catalog API
+
+All entity types are pure-data value structs — methods are pure
+field reads, no errors:
+
 ```go
-cfg := gosdk.NewConfiguration(token, env, nodeID, false)
-feed := gosdk.NewOddsFeed(cfg)
-```
-
-Retrieve any manager you may need:
-```go
-producerManager, err := feed.ProducerManager()
-recoveryManager, err := feed.RecoveryManager()
-sportsManager, err := feed.SportsInfoManager()
-marketManager, err := feed.MarketDescriptionManager()
-replyManager, err := feed.ReplayManager()
-```
-
-Build session and open the Feed:
-```go
-sessionBuilder, err := feed.SessionBuilder()
-sessionChannel, err := sessionBuilder.SetMessageInterest(protocols.AllMessageInterest).Build()
-globalChannel, err := feed.Open()
-```
-
-Start listening to messages:
-```go
-for {
-    select {
-    case sessionMsg := <-sessionChannel:
-        if sessionMsg.UnparsableMessage != nil {
-            log.Println("unparsed message")
-            continue
-        }
-
-        requestMsg, ok := sessionMsg.Message.(protocols.RequestMessage)
-        if !ok {
-            log.Printf("failed to convert message to request message for client - message is %T", sessionMsg.Message)
-            continue
-        }
-
-        handleFeedMessage(sessionMsg, requestMsg.RequestID())
-
-    case feedMsg := <-feedChannel:
-        if feedMsg.Recovery == nil {
-            continue
-        }
-        handleRecoveryMessage(feedMsg.Recovery)
-
-    case <-closeCh:
-        return
-    }
+match, err := client.Match(ctx, eventURN)
+log.Println(match.Name(protocols.EnLocale))    // localized name
+log.Println(match.Tournament.Name(protocols.EnLocale))
+if match.HomeCompetitor != nil {
+    log.Println(match.HomeCompetitor.Name(protocols.EnLocale))
 }
+log.Println(match.Status.Status)                // EventStatus
 ```
 
-Handle Recovery messages:
+### Recovery
+
 ```go
-func handleRecoveryMessage(recoveryMsg *protocols.RecoveryMessage) {
-	if recoveryMsg.ProducerStatus != nil {
-		if recoveryMsg.ProducerStatus.IsDown() {
-			log.Printf("producer %d is down", recoveryMsg.ProducerStatus.Producer().ID())
-			return
-		}
-		log.Printf("producer %d is up", recoveryMsg.ProducerStatus.Producer().ID())
-	}
-}
+handle, err := client.RecoverEventOdds(ctx, producerID, eventURN)
+<-handle.Done()
+res := handle.Result()
+if res.Status == protocols.RecoveryStatusCompleted { ... }
 ```
 
-Handle Feed messages:
+The handle is reliable — even if the lossy `RecoveryEvents()` channel
+drops the event, `Done()` unblocks correctly.
+
+### Observability
+
+Three lossy event channels plus polling counterparts:
+
 ```go
-func handleFeedMessage(sessionMsg protocols.SessionMessage, requestID *uint) {
-    if requestID == nil {
-        // if producer is down, message is out of order - not recovered and no request id
-        log.Print("message out of order")
-    }
+for ev := range client.ConnectionEvents() { ... }   // Connected/Disconnected/Reconnecting/Closed
+for ev := range client.RecoveryEvents()  { ... }    // ProducerStatus + EventRecovery
+for ev := range client.APIEvents()       { ... }    // HTTP request/response (opt-in)
 
-    switch msg := sessionMsg.Message.(type) {
-    case protocols.OddsChange:
-        e.processOddsChange(msg)
-    case protocols.FixtureChangeMessage:
-        e.processFixtureChange(msg)
-    case protocols.BetCancel:
-        e.processBetCancel(msg)
-    case protocols.BetSettlement:
-        e.processBetSettlement(msg)
-    case protocols.RollbackBetSettlement:
-        e.processRollbackBetSettlement(msg)
-    case protocols.RollbackBetCancel:
-        e.processRollbackBetCancel(msg)
-    default:
-        log.Printf("unknown msg type %T", msg)
-    }
-}
+state := client.ConnectionState()                   // polling getter
 ```
 
-You should start receiving event odds via provided listeners.
+### Examples
+
+See [examples/](examples/) for working programs:
+
+- [examples/basic/](examples/basic/main.go) — minimal subscribe + consume
+- [examples/recovery/](examples/recovery/main.go) — RecoveryHandle usage
+- [examples/multi_locale/](examples/multi_locale/main.go) — locale fill-in
+- [examples/replay/](examples/replay/main.go) — replay API
+- [examples/graceful/](examples/graceful/main.go) — clean shutdown
+
+### Migration from pre-v1.0.0
+
+[MIGRATION.md](MIGRATION.md) covers the breaking changes from the
+pre-v1 SDK: configuration via functional options, the flat `*Client`
+shape (no manager-of-managers), the `Subscription` lifecycle, and the
+v1.0/v1.1 entity reshape from interfaces to value structs.
+
+### Design
+
+[NEXT.md](NEXT.md) is the source-of-truth design document covering
+the architecture, caching strategy, lifecycle, recovery state machine,
+and observability shape.
