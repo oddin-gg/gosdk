@@ -2,15 +2,24 @@ package recovery
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	log "github.com/oddin-gg/gosdk/internal/log"
 	"github.com/oddin-gg/gosdk/protocols"
 )
 
-// --- generator ---
+// newDiscardLogger builds a recovery logger that drops everything —
+// keeps test output clean.
+func newDiscardLogger() *log.Logger {
+	return log.New(slog.New(slog.NewTextHandler(io.Discard, nil)))
+}
+
+// --- generator (unchanged from Phase 5b) ---
 
 func TestGenerator_NextMonotonic(t *testing.T) {
 	g := newGenerator(1)
@@ -46,7 +55,7 @@ func TestGenerator_NextConcurrentUnique(t *testing.T) {
 	wg.Wait()
 }
 
-// --- recoveryData / eventRecovery ---
+// --- recoveryData / eventRecovery (unchanged from Phase 5b) ---
 
 func TestRecoveryData_SnapshotComplete_Accumulates(t *testing.T) {
 	rd := newRecoveryData(42, time.Now())
@@ -85,7 +94,6 @@ func TestRecoveryData_SnapshotComplete_RaceSafe(t *testing.T) {
 	}
 	wg.Wait()
 
-	// Final state: at most 2 distinct interests.
 	final := rd.snapshotComplete(protocols.LiveOnlyMessageInterest)
 	if len(final) > 2 {
 		t.Errorf("final size = %d, want <=2", len(final))
@@ -103,170 +111,240 @@ func TestEventRecovery_CarriesEventID(t *testing.T) {
 	}
 }
 
-// --- producerRecoveryData ---
+// --- recoveryActor (Phase 5 v2 actor model) ---
 //
-// These tests cover the post-Phase-5b mutex-hygiene rewrite: every
-// state field is read/written via locked accessors. We don't need a
-// real producer.Manager because the methods exercised here don't
-// dereference it.
+// These tests drive the actor through its inbox without a real
+// producer.Manager / api.Client. We construct an actor with nil
+// dependencies and exercise only the pure-state methods that don't
+// touch them. State-machine flows that would call into the producer
+// manager are tested via the dispatch path.
 
-func newTestPRD() *producerRecoveryData {
-	return newProducerRecoveryData(context.Background(), 1, nil)
+// fakeManagerOps captures actorManagerOps invocations so tests can
+// observe what the actor emitted.
+type fakeManagerOps struct {
+	mu          sync.Mutex
+	registered  []*Handle
+	completed   []completedHandle
+	nextID      atomic.Uint32
+	emittedMsgs []protocols.RecoveryMessage
 }
 
-func TestPRD_RecoveryStateRoundTrip(t *testing.T) {
-	p := newTestPRD()
-	if got := p.getRecoveryState(); got != protocols.DefaultRecoveryState {
-		t.Errorf("default state = %v, want Default", got)
-	}
+type completedHandle struct {
+	id     uint
+	status protocols.RecoveryRequestStatus
+	err    error
+}
 
-	p.setProducerRecoveryState(99, time.Now(), protocols.StartedRecoveryState)
-	if got := p.getRecoveryState(); got != protocols.StartedRecoveryState {
-		t.Errorf("after set = %v, want Started", got)
-	}
-	if !p.isPerformingRecovery() {
-		t.Errorf("isPerformingRecovery = false, want true while Started")
-	}
+func newFakeManagerOps() *fakeManagerOps {
+	f := &fakeManagerOps{}
+	f.nextID.Store(0)
+	return f
+}
 
-	p.interruptProducerRecovery()
-	if got := p.getRecoveryState(); got != protocols.InterruptedRecoveryState {
-		t.Errorf("after interrupt = %v, want Interrupted", got)
-	}
-	if !p.isPerformingRecovery() {
-		t.Errorf("isPerformingRecovery = false during Interrupted, want true")
+func (f *fakeManagerOps) registerHandle(h *Handle) {
+	f.mu.Lock()
+	f.registered = append(f.registered, h)
+	f.mu.Unlock()
+}
+
+func (f *fakeManagerOps) completeHandle(id uint, status protocols.RecoveryRequestStatus, err error) *Handle {
+	f.mu.Lock()
+	f.completed = append(f.completed, completedHandle{id: id, status: status, err: err})
+	f.mu.Unlock()
+	return nil
+}
+
+func (f *fakeManagerOps) nextRequestID() uint {
+	return uint(f.nextID.Add(1))
+}
+
+func (f *fakeManagerOps) emitRecoveryMessage(msg protocols.RecoveryMessage) {
+	f.mu.Lock()
+	f.emittedMsgs = append(f.emittedMsgs, msg)
+	f.mu.Unlock()
+}
+
+// newTestActor builds an actor with nil pm/api so tests can drive
+// pure-state methods. Methods that would dereference pm/api are
+// avoided in these tests.
+func newTestActor(mgr actorManagerOps) *recoveryActor {
+	return &recoveryActor{
+		producerID:      1,
+		mgr:             mgr,
+		ctx:             context.Background(),
+		inbox:           make(chan actorEvent, 32),
+		shutdown:        make(chan struct{}),
+		done:            make(chan struct{}),
+		eventRecoveries: make(map[uint]*eventRecovery),
 	}
 }
 
-func TestPRD_LastUserSessionAliveTimestampRoundTrip(t *testing.T) {
-	p := newTestPRD()
-	if !p.getLastUserSessionAliveReceivedTimestamp().IsZero() {
-		t.Errorf("default = non-zero")
+func TestActor_RecoveryStateTransitions(t *testing.T) {
+	a := newTestActor(newFakeManagerOps())
+
+	if a.recoveryState != protocols.DefaultRecoveryState {
+		t.Errorf("initial state = %v, want Default", a.recoveryState)
 	}
-	now := time.Now()
-	p.setLastUserSessionAliveReceivedTimestamp(now)
-	if got := p.getLastUserSessionAliveReceivedTimestamp(); !got.Equal(now) {
-		t.Errorf("got %v, want %v", got, now)
+	if a.isPerformingRecovery() {
+		t.Error("isPerformingRecovery should be false in Default state")
+	}
+
+	a.recoveryState = protocols.StartedRecoveryState
+	if !a.isPerformingRecovery() {
+		t.Error("isPerformingRecovery should be true in Started state")
+	}
+
+	a.recoveryState = protocols.InterruptedRecoveryState
+	if !a.isPerformingRecovery() {
+		t.Error("isPerformingRecovery should be true in Interrupted state")
+	}
+
+	a.recoveryState = protocols.CompletedRecoveryState
+	if a.isPerformingRecovery() {
+		t.Error("isPerformingRecovery should be false in Completed state")
+	}
+
+	a.recoveryState = protocols.ErrorRecoveryState
+	if a.isPerformingRecovery() {
+		t.Error("isPerformingRecovery should be false in Error state")
 	}
 }
 
-func TestPRD_FirstRecoveryCompleted(t *testing.T) {
-	p := newTestPRD()
-	if p.getFirstRecoveryCompleted() {
-		t.Error("default = true, want false")
-	}
-	p.setFirstRecoveryCompleted(true)
-	if !p.getFirstRecoveryCompleted() {
-		t.Error("after set = false")
-	}
-}
-
-func TestPRD_ProducerStatusReason(t *testing.T) {
-	p := newTestPRD()
-	if got := p.getProducerStatusReason(); got != protocols.ErrorProducerStatusReason {
-		t.Errorf("default = %v", got)
-	}
-	p.setProducerStatusReason(protocols.AliveIntervalViolationProducerStatusReason)
-	if got := p.getProducerStatusReason(); got != protocols.AliveIntervalViolationProducerStatusReason {
-		t.Errorf("after set = %v", got)
-	}
-}
-
-// TestPRD_EventRecoveriesLifecycle round-trips a recovery through the
-// event-recoveries map (set → known → completed → forgotten).
-func TestPRD_EventRecoveriesLifecycle(t *testing.T) {
-	p := newTestPRD()
+func TestActor_IsKnownRecovery(t *testing.T) {
+	a := newTestActor(newFakeManagerOps())
 	urn, _ := protocols.ParseURN("od:match:1")
 
-	if p.isKnownRecovery(7) {
+	if a.isKnownRecovery(7) {
 		t.Error("unknown id reported as known")
 	}
 
-	p.setEventRecoveryState(*urn, 7, time.Now())
-	if !p.isKnownRecovery(7) {
-		t.Error("just-set recovery not known")
-	}
-	if er := p.eventRecovery(7); er == nil || er.eventID != *urn {
-		t.Errorf("eventRecovery(7) = %v", er)
+	a.currentRecovery = newRecoveryData(7, time.Now())
+	if !a.isKnownRecovery(7) {
+		t.Error("current recovery id not known")
 	}
 
-	p.eventRecoveryCompleted(7)
-	if p.isKnownRecovery(7) {
-		t.Error("completed recovery still known")
+	a.eventRecoveries[9] = newEventRecovery(*urn, 9, time.Now())
+	if !a.isKnownRecovery(9) {
+		t.Error("event recovery id not known")
 	}
-	if er := p.eventRecovery(7); er != nil {
-		t.Errorf("eventRecovery(7) after complete = %v, want nil", er)
+
+	if a.isKnownRecovery(99) {
+		t.Error("unrelated id reported as known")
 	}
 }
 
-// TestPRD_SnapshotValidationNeeded confirms the helper logic that
-// gates whether multi-scope snapshot validation is required.
-func TestPRD_SnapshotValidationNeeded(t *testing.T) {
-	p := newTestPRD()
+func TestActor_SnapshotValidationNeeded(t *testing.T) {
+	a := newTestActor(newFakeManagerOps())
 	cases := map[protocols.MessageInterest]bool{
-		protocols.LiveOnlyMessageInterest:               true,
-		protocols.PrematchOnlyMessageInterest:           true,
-		protocols.AllMessageInterest:                    false,
-		protocols.HiPriorityOnlyMessageInterest:         false,
-		protocols.LowPriorityOnlyMessageInterest:        false,
-		protocols.SystemAliveOnly:                       false,
-		protocols.SpecifiedMatchesOnlyMessageInterest:   false,
+		protocols.LiveOnlyMessageInterest:             true,
+		protocols.PrematchOnlyMessageInterest:         true,
+		protocols.AllMessageInterest:                  false,
+		protocols.HiPriorityOnlyMessageInterest:       false,
+		protocols.LowPriorityOnlyMessageInterest:      false,
+		protocols.SystemAliveOnly:                     false,
+		protocols.SpecifiedMatchesOnlyMessageInterest: false,
 	}
 	for interest, want := range cases {
-		if got := p.snapshotValidationNeeded(interest); got != want {
+		if got := a.snapshotValidationNeeded(interest); got != want {
 			t.Errorf("interest %s: got %v, want %v", interest, got, want)
 		}
 	}
 }
 
-// TestPRD_RaceFreeAccessors exercises all read+write accessors
-// concurrently with the race detector enabled. The Phase 5b mutex
-// hygiene means no field should race; pre-rewrite this test would
-// have tripped on the partial-locking pattern.
-func TestPRD_RaceFreeAccessors(t *testing.T) {
-	p := newTestPRD()
-	urn, _ := protocols.ParseURN("od:match:1")
+// TestActor_ValidateSnapshotComplete confirms the gating logic matches
+// Java/.NET: snapshot completes are only accepted when the actor is
+// performing recovery (Started OR Interrupted state) AND the request
+// id matches the current recovery.
+func TestActor_ValidateSnapshotComplete(t *testing.T) {
+	a := newTestActor(newFakeManagerOps())
 
-	var done atomic.Bool
-	var wg sync.WaitGroup
-
-	writers := []func(){
-		func() { p.setLastUserSessionAliveReceivedTimestamp(time.Now()) },
-		func() { p.setFirstRecoveryCompleted(true) },
-		func() { p.setProducerStatusReason(protocols.OtherProducerStatusReason) },
-		func() { p.setProducerRecoveryState(uint(time.Now().UnixNano()), time.Now(), protocols.StartedRecoveryState) },
-		func() { p.interruptProducerRecovery() },
-		func() { p.setEventRecoveryState(*urn, uint(time.Now().UnixNano()), time.Now()) },
+	// No current recovery → false.
+	if a.validateSnapshotComplete(7, protocols.AllMessageInterest) {
+		t.Error("should be false when not performing recovery")
 	}
 
-	readers := []func(){
-		func() { _ = p.getRecoveryState() },
-		func() { _ = p.getLastSystemAliveReceivedTimestamp() },
-		func() { _ = p.getLastUserSessionAliveReceivedTimestamp() },
-		func() { _ = p.getLastValidAliveGenTimestampInRecovery() },
-		func() { _ = p.getFirstRecoveryCompleted() },
-		func() { _ = p.getProducerDownReason() },
-		func() { _ = p.getProducerStatusReason() },
-		func() { _ = p.isPerformingRecovery() },
-		func() { _ = p.isKnownRecovery(123) },
-		func() { _ = p.lastRecoveryStartedAt() },
+	// Started + matching request id + non-validating interest → true.
+	a.recoveryState = protocols.StartedRecoveryState
+	a.currentRecovery = newRecoveryData(7, time.Now())
+	if !a.validateSnapshotComplete(7, protocols.AllMessageInterest) {
+		t.Error("Started + matching request id + AllMessageInterest should validate")
 	}
 
-	spawn := func(fns []func()) {
-		for _, f := range fns {
-			f := f
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				for !done.Load() {
-					f()
-				}
-			}()
+	// Mismatched request id → false.
+	if a.validateSnapshotComplete(99, protocols.AllMessageInterest) {
+		t.Error("mismatched request id should not validate")
+	}
+
+	// Interrupted state is also accepted (matches Java/.NET).
+	a.recoveryState = protocols.InterruptedRecoveryState
+	if !a.validateSnapshotComplete(7, protocols.AllMessageInterest) {
+		t.Error("Interrupted + matching id should validate (matches Java/.NET)")
+	}
+
+	// Default state → false.
+	a.recoveryState = protocols.DefaultRecoveryState
+	if a.validateSnapshotComplete(7, protocols.AllMessageInterest) {
+		t.Error("Default state should not validate")
+	}
+}
+
+// TestActor_RunLoopStartsAndStops verifies the actor's run loop
+// processes events from its inbox and stops cleanly.
+func TestActor_RunLoopStartsAndStops(t *testing.T) {
+	a := newTestActor(newFakeManagerOps())
+	go a.run()
+
+	// Stop should return promptly.
+	doneCh := make(chan struct{})
+	go func() {
+		a.stop()
+		close(doneCh)
+	}()
+	select {
+	case <-doneCh:
+	case <-time.After(time.Second):
+		t.Fatal("actor.stop() did not return within 1s")
+	}
+}
+
+// TestActor_StopIsIdempotent verifies multiple stop() calls don't panic.
+func TestActor_StopIsIdempotent(t *testing.T) {
+	a := newTestActor(newFakeManagerOps())
+	go a.run()
+	a.stop()
+	a.stop() // second stop must not panic
+	a.stop() // third either
+}
+
+// TestActor_SendNonBlocking verifies that a full inbox returns false
+// from send() rather than blocking.
+func TestActor_SendNonBlocking(t *testing.T) {
+	a := newTestActor(newFakeManagerOps())
+	// Don't run() — leave events queued so we can test inbox capacity.
+	for i := 0; i < cap(a.inbox); i++ {
+		if !a.send(evTick{now: time.Now()}) {
+			t.Fatalf("send %d should succeed (inbox not full)", i)
 		}
 	}
-	spawn(writers)
-	spawn(readers)
-
-	time.Sleep(40 * time.Millisecond)
-	done.Store(true)
-	wg.Wait()
+	// Next send should fail (inbox full).
+	if a.send(evTick{now: time.Now()}) {
+		t.Error("send to full inbox should return false")
+	}
 }
+
+// TestActor_DispatchHandlesUnknownEvent verifies the default case in
+// dispatch logs but doesn't panic on an unrecognized event type.
+func TestActor_DispatchHandlesUnknownEvent(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Errorf("dispatch panicked on unknown event: %v", r)
+		}
+	}()
+	a := newTestActor(newFakeManagerOps())
+	a.logger = newDiscardLogger()
+	a.dispatch(unknownTestEvent{})
+}
+
+type unknownTestEvent struct{}
+
+func (unknownTestEvent) isActorEvent() {}

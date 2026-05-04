@@ -3,15 +3,14 @@ package recovery
 import (
 	"context"
 	"errors"
-	"math"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/oddin-gg/gosdk/internal/api"
 	"github.com/oddin-gg/gosdk/internal/producer"
-	"github.com/oddin-gg/gosdk/protocols"
 	log "github.com/oddin-gg/gosdk/internal/log"
+	"github.com/oddin-gg/gosdk/protocols"
 )
 
 const (
@@ -25,40 +24,291 @@ const (
 // pollers without growing the map indefinitely.
 const HandleGCGracePeriod = 5 * time.Minute
 
-// Manager ...
+// Manager is the dispatcher that owns the per-producer actor goroutines
+// and the cross-actor singletons (output channel, request id generator,
+// handles registry).
+//
+// Phase 5 v2 actor model (NEXT.md §11): per-producer state lives inside
+// recoveryActor goroutines. Manager methods are thin — they look up
+// the actor and push events to its inbox. The previous mutex-guarded
+// producerRecoveryData + central manager-locks are gone.
 type Manager struct {
-	cfg                    protocols.OddsFeedConfiguration
-	producerManager        *producer.Manager
-	apiClient              *api.Client
-	lock                   sync.RWMutex
-	producerRecoveryData   map[uint]*producerRecoveryData
-	logger                 *log.Logger
-	ticker                 *time.Ticker
-	closeCh                chan struct{}
-	messageProcessingTimes map[uuid.UUID]time.Time
-	msgCh                  chan protocols.RecoveryMessage
-	sequence               *generator
+	cfg             protocols.OddsFeedConfiguration
+	producerManager *producer.Manager
+	apiClient       *api.Client
+	logger          *log.Logger
+	sequence        *generator
+
+	// actors holds one recoveryActor per known producer. Populated at
+	// Open from ActiveProducers and lazily on first message for
+	// previously-unknown producers.
+	actorsMu sync.RWMutex
+	actors   map[uint]*recoveryActor
+
+	// out is the public RecoveryEvents stream (closed on Close).
+	out chan protocols.RecoveryMessage
 
 	// handles tracks outstanding *Handle objects keyed by request id.
-	// Entries are inserted by InitiateEventX, transitioned to terminal
-	// by OnSnapshotCompleteReceived (or producer-down / timeout), and
-	// removed by the GC goroutine after HandleGCGracePeriod.
+	// Inserted by registerHandle, transitioned to terminal by
+	// completeHandle, GC'd by gcCompletedHandles.
 	handlesMu sync.RWMutex
 	handles   map[uint]*Handle
 
-	// ctx is the manager-lifetime context, derived from the ctx supplied
-	// to Open. Internal sites that need to call API/producer methods use
-	// this so a Close() request cancels in-flight work. Cancelled by
-	// runShutdown via cancelCtx.
+	// messageProcessingTimes maps sessionID → processing start time so
+	// OnMessageProcessingEnded can warn on >1s processing.
+	processingMu      sync.Mutex
+	processingTimes   map[uuid.UUID]time.Time
+
+	// Manager-lifetime ctx + cancel (set in Open).
 	ctx       context.Context
 	cancelCtx context.CancelFunc
 
-	// closeOnce guards a single shutdown sequence; further Close calls are no-ops.
-	// Phase 5b lite-fix replaces the prior `m.closeCh <- true` (unbuffered send
-	// that deadlocked when timerTick was blocked sending on msgCh) with a
-	// `close(m.closeCh)` broadcast, and protects msgCh close against double-close.
+	// closeOnce guards a single shutdown.
 	closeOnce sync.Once
+	closeCh   chan struct{}
+	ticker    *time.Ticker
 }
+
+// NewManager constructs the recovery manager. Open(ctx) must be called
+// before any actors are spawned.
+func NewManager(cfg protocols.OddsFeedConfiguration, producerManager *producer.Manager, apiClient *api.Client, logger *log.Logger) *Manager {
+	return &Manager{
+		cfg:             cfg,
+		producerManager: producerManager,
+		apiClient:       apiClient,
+		logger:          logger,
+		sequence:        newGenerator(1),
+		actors:          make(map[uint]*recoveryActor),
+		handles:         make(map[uint]*Handle),
+		processingTimes: make(map[uuid.UUID]time.Time),
+	}
+}
+
+// Open spawns one actor per active producer and starts the periodic
+// inactivity tick. Returns the recovery-events channel.
+func (m *Manager) Open(ctx context.Context) (<-chan protocols.RecoveryMessage, error) {
+	if m.out != nil {
+		return nil, errors.New("already opened")
+	}
+	mgrCtx, cancel := context.WithCancel(ctx)
+	m.ctx = mgrCtx
+	m.cancelCtx = cancel
+
+	activeProducers, err := m.producerManager.ActiveProducers(mgrCtx)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	if len(activeProducers) == 0 {
+		m.logger.Warn("no active producers")
+	}
+
+	m.out = make(chan protocols.RecoveryMessage, 1024)
+	m.closeCh = make(chan struct{})
+
+	m.actorsMu.Lock()
+	for id := range activeProducers {
+		a := newRecoveryActor(mgrCtx, id, m.cfg, m.apiClient, m.producerManager, m, m.logger, 256)
+		m.actors[id] = a
+		go a.run()
+	}
+	m.actorsMu.Unlock()
+
+	go m.runTickLoop()
+	return m.out, nil
+}
+
+// Close terminates all actors and the tick loop. Idempotent. Pending
+// handles are failed so callers blocked on Done() unblock.
+func (m *Manager) Close() {
+	m.closeOnce.Do(func() {
+		if m.cancelCtx != nil {
+			m.cancelCtx()
+		}
+		if m.ticker != nil {
+			m.ticker.Stop()
+		}
+		if m.closeCh != nil {
+			close(m.closeCh)
+		}
+
+		// Stop every actor first so they don't push to a closed out chan.
+		m.actorsMu.Lock()
+		actors := make([]*recoveryActor, 0, len(m.actors))
+		for _, a := range m.actors {
+			actors = append(actors, a)
+		}
+		m.actorsMu.Unlock()
+		for _, a := range actors {
+			a.stop()
+		}
+
+		// Unblock any pending handle waiters.
+		m.failPendingHandles(errors.New("recovery: manager closed"))
+
+		if m.out != nil {
+			close(m.out)
+		}
+	})
+}
+
+// runTickLoop drives the periodic inactivity check by fanning out
+// evTick events to every actor. Lossy: if an actor's inbox is full
+// (which would only happen if it's blocked on the API), the tick is
+// dropped — the next tick arrives in tickPeriod.
+func (m *Manager) runTickLoop() {
+	select {
+	case <-time.After(initialDelay):
+	case <-m.closeCh:
+		return
+	}
+	m.ticker = time.NewTicker(tickPeriod)
+	for {
+		select {
+		case <-m.ticker.C:
+			now := time.Now()
+			m.actorsMu.RLock()
+			actors := make([]*recoveryActor, 0, len(m.actors))
+			for _, a := range m.actors {
+				actors = append(actors, a)
+			}
+			m.actorsMu.RUnlock()
+			for _, a := range actors {
+				_ = a.send(evTick{now: now})
+			}
+			m.gcCompletedHandles(now)
+		case <-m.closeCh:
+			return
+		}
+	}
+}
+
+// findOrSpawn returns the actor for producerID, lazily spawning one
+// if a message arrives for a producer not in the initial set. This
+// preserves the legacy findOrMakeProducerRecoveryData semantics.
+func (m *Manager) findOrSpawn(producerID uint) *recoveryActor {
+	m.actorsMu.RLock()
+	a, ok := m.actors[producerID]
+	m.actorsMu.RUnlock()
+	if ok {
+		return a
+	}
+	m.actorsMu.Lock()
+	defer m.actorsMu.Unlock()
+	if a, ok = m.actors[producerID]; ok {
+		return a
+	}
+	a = newRecoveryActor(m.ctx, producerID, m.cfg, m.apiClient, m.producerManager, m, m.logger, 256)
+	m.actors[producerID] = a
+	go a.run()
+	return a
+}
+
+// --- Inbound feed events (called from session.go on the AMQP path) ---
+
+// OnMessageProcessingStarted records the per-session start time and
+// dispatches to the actor.
+func (m *Manager) OnMessageProcessingStarted(sessionID uuid.UUID, producerID uint, timestamp time.Time) {
+	m.processingMu.Lock()
+	m.processingTimes[sessionID] = timestamp
+	m.processingMu.Unlock()
+
+	a := m.findOrSpawn(producerID)
+	_ = a.send(evMsgProcessingStarted{timestamp: timestamp})
+}
+
+// OnMessageProcessingEnded warns on >1s processing and dispatches the
+// gen timestamp to the actor.
+func (m *Manager) OnMessageProcessingEnded(sessionID uuid.UUID, producerID uint, timestamp time.Time) {
+	if !timestamp.IsZero() {
+		a := m.findOrSpawn(producerID)
+		_ = a.send(evMsgProcessingEnded{timestamp: timestamp})
+	}
+
+	m.processingMu.Lock()
+	start, ok := m.processingTimes[sessionID]
+	delete(m.processingTimes, sessionID)
+	m.processingMu.Unlock()
+
+	switch {
+	case !ok || start.IsZero():
+		m.logger.Warn("message processing ended, but was not started")
+	case time.Since(start).Milliseconds() > 1000:
+		m.logger.Warnf("processing message took more than 1s - %d ms", time.Since(start).Milliseconds())
+	}
+}
+
+// OnAliveReceived dispatches to the producer's actor.
+func (m *Manager) OnAliveReceived(producerID uint, timestamp protocols.MessageTimestamp, isSubscribed bool, messageInterest protocols.MessageInterest) {
+	a := m.findOrSpawn(producerID)
+	_ = a.send(evAlive{
+		timestamp:       timestamp,
+		isSubscribed:    isSubscribed,
+		messageInterest: messageInterest,
+	})
+}
+
+// OnSnapshotCompleteReceived dispatches to the producer's actor.
+func (m *Manager) OnSnapshotCompleteReceived(producerID uint, requestID uint, messageInterest protocols.MessageInterest) {
+	m.actorsMu.RLock()
+	a, ok := m.actors[producerID]
+	m.actorsMu.RUnlock()
+	if !ok {
+		return // unknown producer; nothing to validate
+	}
+	_ = a.send(evSnapshotComplete{requestID: requestID, messageInterest: messageInterest})
+}
+
+// --- Synchronous commands ---
+
+// InitiateEventOddsMessagesRecovery is the legacy uint-returning shape
+// kept for protocols.RecoveryManager interface compatibility.
+func (m *Manager) InitiateEventOddsMessagesRecovery(ctx context.Context, producerID uint, eventID protocols.URN) (uint, error) {
+	h, err := m.InitiateEventOddsRecoveryHandle(ctx, producerID, eventID)
+	if err != nil {
+		return 0, err
+	}
+	return h.RequestID(), nil
+}
+
+// InitiateEventStatefulMessagesRecovery is the legacy uint-returning shape.
+func (m *Manager) InitiateEventStatefulMessagesRecovery(ctx context.Context, producerID uint, eventID protocols.URN) (uint, error) {
+	h, err := m.InitiateEventStatefulRecoveryHandle(ctx, producerID, eventID)
+	if err != nil {
+		return 0, err
+	}
+	return h.RequestID(), nil
+}
+
+// InitiateEventOddsRecoveryHandle is the handle-returning variant.
+// Sends a recoverEvent command to the actor and waits for the reply.
+func (m *Manager) InitiateEventOddsRecoveryHandle(ctx context.Context, producerID uint, eventID protocols.URN) (*Handle, error) {
+	return m.dispatchRecoverEvent(ctx, producerID, eventID, false)
+}
+
+// InitiateEventStatefulRecoveryHandle is the handle-returning variant.
+func (m *Manager) InitiateEventStatefulRecoveryHandle(ctx context.Context, producerID uint, eventID protocols.URN) (*Handle, error) {
+	return m.dispatchRecoverEvent(ctx, producerID, eventID, true)
+}
+
+func (m *Manager) dispatchRecoverEvent(ctx context.Context, producerID uint, eventID protocols.URN, stateful bool) (*Handle, error) {
+	a := m.findOrSpawn(producerID)
+	reply := make(chan recoverEventReply, 1)
+	a.sendBlocking(evRecoverEvent{
+		ctx:              ctx,
+		eventID:          eventID,
+		statefulRecovery: stateful,
+		reply:            reply,
+	})
+	select {
+	case r := <-reply:
+		return r.handle, r.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// --- Handle registry (called by actors via actorManagerOps) ---
 
 // LookupHandle returns the tracked handle for a request id. The second
 // return value is false when the id is unknown (never registered) or
@@ -70,7 +320,6 @@ func (m *Manager) LookupHandle(requestID uint) (*Handle, bool) {
 	return h, ok
 }
 
-// registerHandle inserts a new pending handle into the map.
 func (m *Manager) registerHandle(h *Handle) {
 	m.handlesMu.Lock()
 	if m.handles == nil {
@@ -80,8 +329,6 @@ func (m *Manager) registerHandle(h *Handle) {
 	m.handlesMu.Unlock()
 }
 
-// completeHandle transitions a tracked handle to a terminal state.
-// Returns the handle (or nil if no handle was registered for this id).
 func (m *Manager) completeHandle(requestID uint, status protocols.RecoveryRequestStatus, err error) *Handle {
 	m.handlesMu.RLock()
 	h := m.handles[requestID]
@@ -93,8 +340,6 @@ func (m *Manager) completeHandle(requestID uint, status protocols.RecoveryReques
 	return h
 }
 
-// gcCompletedHandles is run periodically from the manager loop to
-// evict terminal handles older than the grace period.
 func (m *Manager) gcCompletedHandles(now time.Time) {
 	m.handlesMu.Lock()
 	defer m.handlesMu.Unlock()
@@ -108,221 +353,6 @@ func (m *Manager) gcCompletedHandles(now time.Time) {
 	}
 }
 
-// OnMessageProcessingStarted ...
-func (m *Manager) OnMessageProcessingStarted(sessionID uuid.UUID, producerID uint, timestamp time.Time) {
-	m.lock.Lock()
-	m.messageProcessingTimes[sessionID] = timestamp
-	m.lock.Unlock()
-
-	data := m.findOrMakeProducerRecoveryData(producerID)
-	err := data.setLastMessageReceivedTimestamp(timestamp)
-	if err != nil {
-		m.logger.WithError(err).Error("failed to set last message received timestamp")
-	}
-}
-
-// OnMessageProcessingEnded ...
-func (m *Manager) OnMessageProcessingEnded(sessionID uuid.UUID, producerID uint, timestamp time.Time) {
-	if !timestamp.IsZero() {
-		data := m.findOrMakeProducerRecoveryData(producerID)
-		err := data.setLastProcessedMessageGenTimestamp(timestamp)
-		if err != nil {
-			m.logger.WithError(err).Error("failed to set processed message gen timestamp")
-		}
-	}
-
-	m.lock.RLock()
-	start, ok := m.messageProcessingTimes[sessionID]
-	if !ok {
-		start = time.Time{}
-	}
-	m.lock.RUnlock()
-
-	switch {
-	case start.IsZero():
-		m.logger.Warn("message processing ended, but was not started")
-	case time.Since(start).Milliseconds() > 1000:
-		m.logger.Warnf("processing message took more than 1s - %d ms", time.Since(start).Milliseconds())
-	}
-
-	m.lock.Lock()
-	delete(m.messageProcessingTimes, sessionID)
-	m.lock.Unlock()
-}
-
-// OnAliveReceived ...
-func (m *Manager) OnAliveReceived(producerID uint, timestamp protocols.MessageTimestamp, isSubscribed bool, messageInterest protocols.MessageInterest) {
-	data := m.findOrMakeProducerRecoveryData(producerID)
-
-	switch {
-	case data.isDisabled():
-		return
-
-	case messageInterest == protocols.SystemAliveOnly:
-		err := m.systemSessionAliveReceived(timestamp, isSubscribed, data)
-		if err != nil {
-			m.logger.WithError(err).Error("failed to process alive message")
-		}
-
-	default:
-		data.setLastUserSessionAliveReceivedTimestamp(timestamp.Created)
-	}
-}
-
-// OnSnapshotCompleteReceived ...
-func (m *Manager) OnSnapshotCompleteReceived(producerID uint, requestID uint, messageInterest protocols.MessageInterest) {
-	m.lock.RLock()
-	data, ok := m.producerRecoveryData[producerID]
-	m.lock.RUnlock()
-
-	if !ok {
-		return
-	}
-
-	switch {
-	case data.isDisabled():
-		m.logger.Infof("received snapshot recovery complete for disabled producer %d", producerID)
-
-	case !data.isKnownRecovery(requestID):
-		m.logger.Infof("unknown snapshot recovery complete received for request %d and producer %d", requestID, producerID)
-
-	case data.validateEventSnapshotComplete(requestID, messageInterest):
-		err := m.eventRecoveryFinished(requestID, data)
-		if err != nil {
-			m.logger.WithError(err).Error("event recovery failed")
-		}
-
-	case data.validateSnapshotComplete(requestID, messageInterest):
-		err := m.snapshotRecoveryFinished(requestID, data)
-		if err != nil {
-			m.logger.WithError(err).Error("snapshot recovery finished failed")
-		}
-	}
-}
-
-// InitiateEventOddsMessagesRecovery returns the request id. The richer
-// *Handle is fetched via InitiateEventOddsRecoveryHandle; this method
-// is kept on the protocols.RecoveryManager interface for compatibility.
-func (m *Manager) InitiateEventOddsMessagesRecovery(ctx context.Context, producerID uint, eventID protocols.URN) (uint, error) {
-	h, err := m.InitiateEventOddsRecoveryHandle(ctx, producerID, eventID)
-	if err != nil {
-		return 0, err
-	}
-	return h.RequestID(), nil
-}
-
-// InitiateEventStatefulMessagesRecovery returns the request id.
-func (m *Manager) InitiateEventStatefulMessagesRecovery(ctx context.Context, producerID uint, eventID protocols.URN) (uint, error) {
-	h, err := m.InitiateEventStatefulRecoveryHandle(ctx, producerID, eventID)
-	if err != nil {
-		return 0, err
-	}
-	return h.RequestID(), nil
-}
-
-// InitiateEventOddsRecoveryHandle is the handle-returning variant.
-func (m *Manager) InitiateEventOddsRecoveryHandle(ctx context.Context, producerID uint, eventID protocols.URN) (*Handle, error) {
-	return m.makeEventRecoveryHandle(producerID, eventID, func(name string, eid protocols.URN, rid uint, node *int) (bool, error) {
-		return m.apiClient.PostEventOddsRecovery(ctx, name, eid, rid, node)
-	})
-}
-
-// InitiateEventStatefulRecoveryHandle is the handle-returning variant.
-func (m *Manager) InitiateEventStatefulRecoveryHandle(ctx context.Context, producerID uint, eventID protocols.URN) (*Handle, error) {
-	return m.makeEventRecoveryHandle(producerID, eventID, func(name string, eid protocols.URN, rid uint, node *int) (bool, error) {
-		return m.apiClient.PostEventStatefulRecovery(ctx, name, eid, rid, node)
-	})
-}
-
-// Open ...
-//
-// The supplied ctx is the manager-lifetime context: it gates internal
-// API/producer calls from the recovery loop and from the producerRecoveryData
-// accessors. Close() cancels a derived child of this ctx, propagating
-// cancellation to in-flight work. Pass context.Background() if no upstream
-// ctx is available; the typical caller is gosdk.Client.Connect, which
-// supplies its internal lifetime ctx.
-func (m *Manager) Open(ctx context.Context) (<-chan protocols.RecoveryMessage, error) {
-	if m.msgCh != nil {
-		return nil, errors.New("already opened")
-	}
-
-	mgrCtx, cancel := context.WithCancel(ctx)
-	m.ctx = mgrCtx
-	m.cancelCtx = cancel
-
-	activeProducers, err := m.producerManager.ActiveProducers(mgrCtx)
-	switch {
-	case err != nil:
-		cancel()
-		return nil, err
-	case len(activeProducers) == 0:
-		m.logger.Warn("no active producers")
-	}
-
-	m.lock.Lock()
-	m.producerRecoveryData = make(map[uint]*producerRecoveryData)
-	for id := range activeProducers {
-		m.producerRecoveryData[id] = newProducerRecoveryData(mgrCtx, id, m.producerManager)
-	}
-	m.lock.Unlock()
-
-	m.msgCh = make(chan protocols.RecoveryMessage, 1024)
-	m.closeCh = make(chan struct{})
-	go func() {
-		select {
-		case <-time.After(initialDelay):
-		case <-m.closeCh:
-			return
-		}
-
-		m.ticker = time.NewTicker(tickPeriod)
-		for {
-			select {
-			case <-m.ticker.C:
-				m.timerTick()
-				m.gcCompletedHandles(time.Now())
-
-			case <-m.closeCh:
-				return
-			}
-		}
-	}()
-
-	return m.msgCh, nil
-}
-
-// Close terminates the recovery loop. Idempotent.
-//
-// Phase 5b lite-fix: replaces unbuffered `closeCh <- true` (which deadlocked
-// when timerTick was mid-send on msgCh) with a close-broadcast; protects
-// msgCh close via closeOnce. Also cancels the manager-lifetime ctx so
-// in-flight producer/API calls fail fast instead of stranding goroutines.
-//
-// Phase 6.1: also unblocks any *Handle waiters by marking pending
-// handles as Failed with a manager-shutdown error.
-func (m *Manager) Close() {
-	m.closeOnce.Do(func() {
-		if m.cancelCtx != nil {
-			m.cancelCtx()
-		}
-		if m.ticker != nil {
-			m.ticker.Stop()
-		}
-		if m.closeCh != nil {
-			close(m.closeCh)
-		}
-		// Fail any pending handles before closing msgCh so consumers
-		// blocked on handle.Done() unblock instead of waiting forever.
-		m.failPendingHandles(errors.New("recovery: manager closed"))
-		if m.msgCh != nil {
-			close(m.msgCh)
-		}
-	})
-}
-
-// failPendingHandles marks every still-Pending handle as Failed with the
-// supplied error. Used at Close to unblock any waiters.
 func (m *Manager) failPendingHandles(err error) {
 	m.handlesMu.RLock()
 	pending := make([]*Handle, 0, len(m.handles))
@@ -337,370 +367,33 @@ func (m *Manager) failPendingHandles(err error) {
 	}
 }
 
-func (m *Manager) makeEventRecoveryHandle(producerID uint, eventID protocols.URN, callback func(string, protocols.URN, uint, *int) (bool, error)) (*Handle, error) {
-	now := time.Now()
-	data := m.findOrMakeProducerRecoveryData(producerID)
+// --- actorManagerOps ---
 
-	producerName, err := data.producerName()
-	if err != nil {
-		return nil, err
+// nextRequestID is the actorManagerOps method backed by the shared
+// generator. Generator is internally locked.
+func (m *Manager) nextRequestID() uint { return m.sequence.next() }
+
+// emitRecoveryMessage is the actorManagerOps method to publish a
+// RecoveryMessage on the public stream. Buffered channel; if full,
+// blocks the caller (an actor) — back-pressure on slow consumers,
+// but acceptable since the buffer is 1024 and consumers should drain
+// promptly.
+func (m *Manager) emitRecoveryMessage(msg protocols.RecoveryMessage) {
+	if m.out == nil {
+		return
 	}
-
-	requestID := m.sequence.next()
-	handle := NewHandle(requestID, producerID, eventID, now)
-	m.registerHandle(handle)
-
-	data.setEventRecoveryState(eventID, requestID, now)
-	success, err := callback(producerName, eventID, requestID, m.cfg.SdkNodeID())
-	if !success {
-		data.eventRecoveryCompleted(requestID)
-	}
-
-	if err != nil {
-		m.logger.WithError(err).Error("event recovery failed")
-		// Mark the handle terminal so callers blocked on Done() unblock.
-		m.completeHandle(requestID, protocols.RecoveryStatusFailed, err)
-		return nil, err
-	}
-
-	return handle, nil
-}
-
-func (m *Manager) findOrMakeProducerRecoveryData(producerID uint) *producerRecoveryData {
-	m.lock.Lock()
-	defer m.lock.Unlock()
-
-	data, ok := m.producerRecoveryData[producerID]
-	if !ok {
-		data = newProducerRecoveryData(m.ctx, producerID, m.producerManager)
-		m.producerRecoveryData[producerID] = data
-	}
-
-	return data
-}
-
-func (m *Manager) timerTick() {
-	// Make a copy to don't block
-	m.lock.RLock()
-	localRecoveryData := make(map[uint]*producerRecoveryData, len(m.producerRecoveryData))
-	for i := range m.producerRecoveryData {
-		rd := m.producerRecoveryData[i]
-		localRecoveryData[i] = rd
-	}
-	m.lock.RUnlock()
-
-	now := time.Now()
-
-	for i := range localRecoveryData {
-		rd := localRecoveryData[i]
-		disabled := rd.isDisabled()
-		if disabled {
-			continue
-		}
-
-		var lastTimestamp time.Time
-		if t := rd.getLastSystemAliveReceivedTimestamp(); t != nil {
-			lastTimestamp = *t
-		}
-
-		aliveInterval := now.Sub(lastTimestamp)
-		var err error
-		switch {
-		case aliveInterval.Seconds() > float64(m.cfg.MaxInactivitySeconds()):
-			err = m.producerDown(rd, protocols.AliveInternalViolationProducerDownReason)
-		case !m.calculateTiming(rd, now):
-			err = m.producerDown(rd, protocols.ProcessingQueueDelayViolationProducerDownReason)
-		}
-
-		if err != nil {
-			m.logger.WithError(err).Errorf("failed to check recovery")
-		}
-	}
-}
-
-func (m *Manager) calculateTiming(data *producerRecoveryData, now time.Time) bool {
-	maxInactivity := float64(m.cfg.MaxInactivitySeconds())
-
-	lastProcessedMessageGenTimestamp, err := data.lastProcessedMessageGenTimestamp()
-	if err != nil {
-		m.logger.WithError(err).Warn("failed to get last processed message gen timestamp")
-		return false
-	}
-	lastUserSessionAliveReceivedTimestamp := data.getLastUserSessionAliveReceivedTimestamp()
-
-	messageProcessingDelay := now.Sub(lastProcessedMessageGenTimestamp)
-	userAliveDelay := now.Sub(lastUserSessionAliveReceivedTimestamp)
-
-	return math.Abs(messageProcessingDelay.Seconds()) < maxInactivity && math.Abs(userAliveDelay.Seconds()) < maxInactivity
-}
-
-func (m *Manager) producerDown(data *producerRecoveryData, reason protocols.ProducerDownReason) error {
-	if data.isDisabled() {
-		return nil
-	}
-
-	if data.isFlaggedDown() && data.getProducerDownReason() != reason {
-		name, err := data.producerName()
-		if err != nil {
-			return err
-		}
-
-		m.logger.Infof("changing producer %s down reason from %d to %d", name, data.getProducerDownReason(), reason)
-		err = data.setProducerDown(reason)
-		if err != nil {
-			return err
-		}
-	}
-
-	if data.getRecoveryState() == protocols.StartedRecoveryState && reason != protocols.ProcessingQueueDelayViolationProducerDownReason {
-		data.interruptProducerRecovery()
-	}
-
-	if !data.isFlaggedDown() {
-		err := data.setProducerDown(reason)
-		if err != nil {
-			return err
-		}
-	}
-
-	return m.notifyProducerChangedState(data, reason.ToProducerStatusReason())
-}
-
-func (m *Manager) notifyProducerChangedState(data *producerRecoveryData, reason protocols.ProducerStatusReason) error {
-	if data.getProducerStatusReason() == reason {
-		return nil
-	}
-
-	data.setProducerStatusReason(reason)
-
-	producerData, err := m.producerManager.GetProducer(m.ctx, data.producerID)
-	if err != nil {
-		return err
-	}
-
-	now := time.Now()
-	delayed := !m.calculateTiming(data, now)
-	msg := newProducerStatusImpl(
-		producerData,
-		protocols.MessageTimestamp{
-			Created:   now,
-			Sent:      now,
-			Received:  now,
-			Published: now,
-		},
-		data.isFlaggedDown(),
-		delayed,
-		reason,
-	)
-
-	m.msgCh <- protocols.RecoveryMessage{
-		ProducerStatus: msg,
-	}
-
-	return nil
-}
-
-func (m *Manager) systemSessionAliveReceived(timestamp protocols.MessageTimestamp, subscribed bool, data *producerRecoveryData) error {
-	err := data.setLastMessageReceivedTimestamp(timestamp.Received)
-	if err != nil {
-		return err
-	}
-
-	var recoveryTimestamp time.Time
-	recoveryTimestamp, err = data.timestampForRecovery()
-	if err != nil {
-		return err
-	}
-
-	if !subscribed {
-		if !data.isFlaggedDown() {
-			err := m.producerDown(data, protocols.OtherProducerDownReason)
-			if err != nil {
-				return err
-			}
-		}
-
-		return m.makeSnapshotRecovery(data, recoveryTimestamp)
-	}
-
-	now := time.Now()
-	state := data.getRecoveryState()
-	downReason := data.getProducerDownReason()
-	isBackFromInactivity := data.isFlaggedDown() &&
-		!data.isPerformingRecovery() &&
-		downReason == protocols.ProcessingQueueDelayViolationProducerDownReason &&
-		m.calculateTiming(data, now)
-	isInRecovery := state != protocols.NotStartedRecoveryState &&
-		state != protocols.ErrorRecoveryState &&
-		state != protocols.InterruptedRecoveryState
-
-	switch {
-	case isBackFromInactivity:
-		err = m.producerUp(data, protocols.ReturnedFromInactivityProducerUpReason)
-	case isInRecovery:
-
-		if data.isFlaggedDown() && !data.isPerformingRecovery() && data.getProducerDownReason() != protocols.ProcessingQueueDelayViolationProducerDownReason {
-			err = m.makeSnapshotRecovery(data, recoveryTimestamp)
-			if err != nil {
-				return err
-			}
-		}
-
-		recoveryTiming := now.Sub(data.lastRecoveryStartedAt())
-		maxInterval := float64(m.cfg.MaxRecoveryExecutionMinutes())
-		if data.isPerformingRecovery() && recoveryTiming.Minutes() > maxInterval {
-			data.setProducerRecoveryState(0, time.Time{}, protocols.ErrorRecoveryState)
-			err = m.makeSnapshotRecovery(data, recoveryTimestamp)
-			if err != nil {
-				return err
-			}
-		}
+	// Use a non-blocking-with-fallback: if the channel is full the
+	// fallback blocks, ensuring the message isn't silently dropped.
+	select {
+	case m.out <- msg:
 	default:
-		err = m.makeSnapshotRecovery(data, recoveryTimestamp)
-	}
-
-	if err != nil {
-		return err
-	}
-
-	return data.systemAliveReceived(timestamp.Received, timestamp.Created)
-}
-
-func (m *Manager) snapshotRecoveryFinished(requestID uint, data *producerRecoveryData) error {
-	started := data.lastRecoveryStartedAt()
-	if started.IsZero() {
-		return errors.New("inconsistent recovery state")
-	}
-	finished := time.Now()
-	m.logger.Infof("recovery finished for request %d in %d ms", requestID, finished.Sub(started).Milliseconds())
-
-	if data.getRecoveryState() == protocols.InterruptedRecoveryState {
-		err := m.makeSnapshotRecovery(data, data.getLastValidAliveGenTimestampInRecovery())
-		if err != nil {
-			return err
-		}
-	}
-
-	var reason protocols.ProducerUpReason
-	if data.getFirstRecoveryCompleted() {
-		reason = protocols.ReturnedFromInactivityProducerUpReason
-	} else {
-		reason = protocols.FirstRecoveryCompletedProducerUpReason
-	}
-
-	if !data.getFirstRecoveryCompleted() {
-		data.setFirstRecoveryCompleted(true)
-	}
-
-	data.setProducerRecoveryState(requestID, started, protocols.CompletedRecoveryState)
-	return m.producerUp(data, reason)
-}
-
-func (m *Manager) eventRecoveryFinished(id uint, data *producerRecoveryData) error {
-	eventRecovery := data.eventRecovery(id)
-	if eventRecovery == nil {
-		return errors.New("inconsistent event recovery state")
-	}
-
-	started := eventRecovery.recoveryStartedAt
-	finished := time.Now()
-	m.logger.Infof("event %s recovery finished for request %d in %d ms", eventRecovery.eventID.ToString(), id, finished.Sub(started).Milliseconds())
-
-	producerData, err := m.producerManager.GetProducer(m.ctx, data.producerID)
-	if err != nil {
-		return err
-	}
-
-	m.msgCh <- protocols.RecoveryMessage{
-		EventRecoveryMessage: &eventRecoveryMessageImpl{
-			eventID:   eventRecovery.eventID,
-			requestID: id,
-			producer:  producerData,
-			timestamp: protocols.MessageTimestamp{
-				Created:   finished,
-				Sent:      finished,
-				Received:  finished,
-				Published: finished,
-			},
-		},
-	}
-
-	// Reliable per-request completion (NEXT.md §11): even if the
-	// channel event above is dropped (lossy channel + slow consumer),
-	// the handle is updated and unblocks any caller blocked on Done().
-	m.completeHandle(id, protocols.RecoveryStatusCompleted, nil)
-
-	data.eventRecoveryCompleted(id)
-	return nil
-}
-
-func (m *Manager) makeSnapshotRecovery(data *producerRecoveryData, timestamp time.Time) error {
-	if m.msgCh == nil {
-		return nil
-	}
-
-	now := time.Now()
-	recoverFrom := timestamp
-	if !timestamp.IsZero() {
-		recoveryTime := now.Sub(recoverFrom)
-		if recoveryTime.Minutes() > float64(m.cfg.MaxRecoveryExecutionMinutes()) {
-			recoverFrom = now.Add(-time.Duration(m.cfg.MaxRecoveryExecutionMinutes()) * time.Minute)
-		}
-	}
-
-	requestID := m.sequence.next()
-	producerName, err := data.producerName()
-	if err != nil {
-		return err
-	}
-
-	data.setProducerRecoveryState(requestID, now, protocols.StartedRecoveryState)
-
-	m.logger.Infof("recovery started for request %d", requestID)
-
-	success, err := m.apiClient.PostRecovery(
-		m.ctx,
-		producerName,
-		requestID,
-		m.cfg.SdkNodeID(),
-		recoverFrom,
-	)
-	if err != nil {
-		return err
-	}
-
-	recoveryInfo := newRecoveryInfoImpl(recoverFrom, now, requestID, success, m.cfg.SdkNodeID())
-	return m.producerManager.SetProducerRecoveryInfo(data.producerID, recoveryInfo)
-}
-
-func (m *Manager) producerUp(data *producerRecoveryData, reason protocols.ProducerUpReason) error {
-	if data.isDisabled() {
-		return nil
-	}
-
-	if data.isFlaggedDown() {
-		err := data.setProducerUp()
-		if err != nil {
-			return err
-		}
-	}
-
-	return m.notifyProducerChangedState(data, reason.ToProducerStatusReason())
-}
-
-// NewManager ...
-func NewManager(cfg protocols.OddsFeedConfiguration, producerManager *producer.Manager, apiClient *api.Client, logger *log.Logger) *Manager {
-	return &Manager{
-		cfg:                    cfg,
-		producerManager:        producerManager,
-		apiClient:              apiClient,
-		logger:                 logger,
-		messageProcessingTimes: make(map[uuid.UUID]time.Time),
-		sequence:               newGenerator(1),
-		producerRecoveryData:   make(map[uint]*producerRecoveryData),
+		m.out <- msg
 	}
 }
 
+// eventRecoveryMessageImpl satisfies protocols.EventRecoveryMessage —
+// the per-event recovery completion event delivered on the recovery
+// stream.
 type eventRecoveryMessageImpl struct {
 	eventID   protocols.URN
 	requestID uint
@@ -708,18 +401,7 @@ type eventRecoveryMessageImpl struct {
 	timestamp protocols.MessageTimestamp
 }
 
-func (e eventRecoveryMessageImpl) Producer() protocols.Producer {
-	return e.producer
-}
-
-func (e eventRecoveryMessageImpl) Timestamp() protocols.MessageTimestamp {
-	return e.timestamp
-}
-
-func (e eventRecoveryMessageImpl) EventID() protocols.URN {
-	return e.eventID
-}
-
-func (e eventRecoveryMessageImpl) RequestID() uint {
-	return e.requestID
-}
+func (e eventRecoveryMessageImpl) Producer() protocols.Producer       { return e.producer }
+func (e eventRecoveryMessageImpl) Timestamp() protocols.MessageTimestamp { return e.timestamp }
+func (e eventRecoveryMessageImpl) EventID() protocols.URN              { return e.eventID }
+func (e eventRecoveryMessageImpl) RequestID() uint                     { return e.requestID }

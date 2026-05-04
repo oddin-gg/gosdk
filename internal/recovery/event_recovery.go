@@ -29,8 +29,8 @@ func (r *recoveryData) snapshotComplete(messageInterest protocols.MessageInteres
 	return result
 }
 
-func newRecoveryData(recoveryID uint, recoveryStartedAt time.Time) recoveryData {
-	return recoveryData{
+func newRecoveryData(recoveryID uint, recoveryStartedAt time.Time) *recoveryData {
+	return &recoveryData{
 		recoveryID:                  recoveryID,
 		recoveryStartedAt:           recoveryStartedAt,
 		interestsOfSnapshotComplete: make(map[protocols.MessageInterest]struct{}, 0),
@@ -38,12 +38,12 @@ func newRecoveryData(recoveryID uint, recoveryStartedAt time.Time) recoveryData 
 }
 
 type eventRecovery struct {
-	recoveryData
+	*recoveryData
 	eventID protocols.URN
 }
 
-func newEventRecovery(eventID protocols.URN, recoveryID uint, recoveryStartedAt time.Time) eventRecovery {
-	return eventRecovery{
+func newEventRecovery(eventID protocols.URN, recoveryID uint, recoveryStartedAt time.Time) *eventRecovery {
+	return &eventRecovery{
 		recoveryData: newRecoveryData(recoveryID, recoveryStartedAt),
 		eventID:      eventID,
 	}
