@@ -348,11 +348,11 @@ func (m matchImpl) Competitors() ([]protocols.Competitor, error) {
 	}
 	out := make([]protocols.Competitor, 0, len(teams))
 	for _, t := range teams {
-		t := t
-		out = append(out, teamCompetitorImpl{
-			qualifier:  &t.qualifier,
-			competitor: m.entityFactory.BuildCompetitor(t.urn, m.locales),
-		})
+		c, err := m.entityFactory.BuildCompetitor(context.Background(), t.urn, m.locales)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *c)
 	}
 	return out, nil
 }
@@ -390,27 +390,30 @@ func (m matchImpl) Tournament() (protocols.Tournament, error) {
 }
 
 func (m matchImpl) homeAwayCompetitor(home bool) (protocols.TeamCompetitor, error) {
+	zero := protocols.TeamCompetitor{}
 	item, err := m.matchCache.Match(context.Background(), m.id, m.locales)
 	if err != nil {
-		return nil, err
+		return zero, err
 	}
 	teams := item.Competitors()
 	switch {
 	case len(teams) < 2:
-		return nil, fmt.Errorf("match %s has less than 2 competitors", m.id.ToString())
+		return zero, fmt.Errorf("match %s has less than 2 competitors", m.id.ToString())
 	case item.SportFormat() != protocols.SportFormatClassic:
-		return nil, fmt.Errorf("match %s is not a classic sport format", m.id.ToString())
+		return zero, fmt.Errorf("match %s is not a classic sport format", m.id.ToString())
 	case len(teams) > 2:
-		return nil, fmt.Errorf("classic sport match %s has more than 2 competitors", m.id.ToString())
+		return zero, fmt.Errorf("classic sport match %s has more than 2 competitors", m.id.ToString())
 	}
 	team := teams[0]
 	if !home {
 		team = teams[1]
 	}
-	return teamCompetitorImpl{
-		qualifier:  &team.qualifier,
-		competitor: m.entityFactory.BuildCompetitor(team.urn, m.locales),
-	}, nil
+	q := team.qualifier
+	tc, err := m.entityFactory.BuildTeamCompetitor(context.Background(), team.urn, &q, m.locales)
+	if err != nil {
+		return zero, err
+	}
+	return *tc, nil
 }
 
 func (m matchImpl) HomeCompetitor() (protocols.TeamCompetitor, error) { return m.homeAwayCompetitor(true) }

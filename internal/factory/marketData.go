@@ -125,14 +125,16 @@ func (m marketDataImpl) makeOutcomeName(outcomeName *string, locale protocols.Lo
 		if err != nil {
 			return nil, err
 		}
-		return home.LocalizedName(locale)
+		name := home.Name(locale)
+		return &name, nil
 		// @TODO this broke with different locale - need to use ID
 	case *outcomeName == "away" && isMatch:
 		away, err := match.AwayCompetitor()
 		if err != nil {
 			return nil, err
 		}
-		return away.LocalizedName(locale)
+		name := away.Name(locale)
+		return &name, nil
 	default:
 		return outcomeName, nil
 	}
@@ -166,21 +168,13 @@ func (m marketDataImpl) makeMarketName(marketName string, locale protocols.Local
 			if err != nil {
 				return nil, err
 			}
-			name, err := home.LocalizedName(locale)
-			if err != nil {
-				return nil, err
-			}
-			value = *name
+			value = home.Name(locale)
 		case value == "away" && isMatch:
 			away, err := match.AwayCompetitor()
 			if err != nil {
 				return nil, err
 			}
-			name, err := away.LocalizedName(locale)
-			if err != nil {
-				return nil, err
-			}
-			value = *name
+			value = away.Name(locale)
 		}
 
 		// handle props markets

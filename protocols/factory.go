@@ -12,8 +12,9 @@ type EntityFactory interface {
 	BuildTournament(id URN, sportID URN, locales []Locale) Tournament
 	BuildSports(ctx context.Context, locales []Locale) ([]Sport, error)
 	BuildSport(ctx context.Context, id URN, locales []Locale) (*Sport, error)
-	BuildCompetitors(competitorIDs []URN, locales []Locale) []Competitor
-	BuildCompetitor(id URN, locales []Locale) Competitor
+	BuildCompetitors(ctx context.Context, ids []URN, locales []Locale) ([]Competitor, error)
+	BuildCompetitor(ctx context.Context, id URN, locales []Locale) (*Competitor, error)
+	BuildTeamCompetitor(ctx context.Context, id URN, qualifier *string, locales []Locale) (*TeamCompetitor, error)
 	BuildPlayer(ctx context.Context, id URN, locale Locale) (*Player, error)
 	BuildFixture(ctx context.Context, id URN, locale Locale) (*Fixture, error)
 	BuildMatchStatus(id URN, locales []Locale) MatchStatus

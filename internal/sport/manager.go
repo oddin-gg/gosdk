@@ -160,8 +160,11 @@ func (m *Manager) Competitor(ctx context.Context, id protocols.URN) (protocols.C
 
 // LocalizedCompetitor ...
 func (m *Manager) LocalizedCompetitor(ctx context.Context, id protocols.URN, locale protocols.Locale) (protocols.Competitor, error) {
-	_ = ctx
-	return m.entityFactory.BuildCompetitor(id, []protocols.Locale{locale}), nil
+	c, err := m.entityFactory.BuildCompetitor(ctx, id, []protocols.Locale{locale})
+	if err != nil {
+		return protocols.Competitor{}, err
+	}
+	return *c, nil
 }
 
 // FixtureChanges ...

@@ -372,7 +372,7 @@ func (t tournamentImpl) Competitors() ([]protocols.Competitor, error) {
 			return nil, err
 		}
 	}
-	return t.entityFactory.BuildCompetitors(urns, t.locales), nil
+	return t.entityFactory.BuildCompetitors(context.Background(), urns, t.locales)
 }
 
 func (t tournamentImpl) StartDate() (*time.Time, error) {

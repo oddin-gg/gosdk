@@ -252,164 +252,105 @@ func newCompetitorCache(client *api.Client, logger *log.Logger) *CompetitorCache
 	return cc
 }
 
-// competitorImpl implements protocols.Competitor.
-type competitorImpl struct {
-	id              protocols.URN
-	competitorCache *CompetitorCache
-	entityFactory   protocols.EntityFactory
-	locales         []protocols.Locale
-}
-
-func (c competitorImpl) IconPath() (*string, error) {
-	if len(c.locales) == 0 {
-		return nil, fmt.Errorf("missing locales")
+// snapshot projects the cached entry into a protocols.Competitor value
+// (data-copy under the entry's read lock). Resolves players for each
+// locale via the supplied factory; returns an error if any player fetch
+// fails.
+func (l *LocalizedCompetitor) snapshot(
+	ctx context.Context,
+	icon *string,
+	factory protocols.EntityFactory,
+	locales []protocols.Locale,
+) (*protocols.Competitor, error) {
+	l.mu.RLock()
+	names := make(map[protocols.Locale]string, len(l.name))
+	for k, v := range l.name {
+		names[k] = v
 	}
-	return c.competitorCache.CompetitorIcon(context.Background(), c.id, c.locales[0])
-}
-
-func (c competitorImpl) ID() protocols.URN { return c.id }
-
-func (c competitorImpl) Names() (map[protocols.Locale]string, error) {
-	item, err := c.competitorCache.Competitor(context.Background(), c.id, c.locales)
-	if err != nil {
-		return nil, err
+	abbr := make(map[protocols.Locale]string, len(l.abbreviation))
+	for k, v := range l.abbreviation {
+		abbr[k] = v
 	}
-	return item.names(), nil
-}
+	playerURNs := append([]protocols.URN(nil), l.players...)
+	underage := protocols.UnderageUnknown
+	if l.underage != nil {
+		underage = *l.underage
+	}
+	l.mu.RUnlock()
 
-func (c competitorImpl) LocalizedName(locale protocols.Locale) (*string, error) {
-	item, err := c.competitorCache.Competitor(context.Background(), c.id, c.locales)
-	if err != nil {
-		return nil, err
-	}
-	return item.LocalizedName(locale)
-}
-
-func (c competitorImpl) Abbreviations() (map[protocols.Locale]string, error) {
-	item, err := c.competitorCache.Competitor(context.Background(), c.id, c.locales)
-	if err != nil {
-		return nil, err
-	}
-	return item.abbreviations(), nil
-}
-
-func (c competitorImpl) LocalizedAbbreviation(locale protocols.Locale) (*string, error) {
-	item, err := c.competitorCache.Competitor(context.Background(), c.id, c.locales)
-	if err != nil {
-		return nil, err
-	}
-	return item.localizedAbbreviation(locale)
-}
-
-func (c competitorImpl) Players() (map[protocols.Locale][]protocols.Player, error) {
-	item, err := c.competitorCache.Competitor(context.Background(), c.id, c.locales)
-	if err != nil {
-		return nil, err
-	}
-	urns := item.playerURNs()
-	if len(urns) == 0 {
-		// Re-fetch the profile-with-players to surface the player list
-		// (a non-profile fetch may have populated the entry without players).
-		item, err = c.competitorCache.reloadCompetitor(context.Background(), c.id, c.locales)
-		if err != nil {
-			return nil, fmt.Errorf("loading players into cache: %w", err)
-		}
-		urns = item.playerURNs()
-	}
-	out := make(map[protocols.Locale][]protocols.Player, len(c.locales))
-	for _, locale := range c.locales {
-		players := make([]protocols.Player, 0, len(urns))
-		for _, urn := range urns {
-			p, err := c.entityFactory.BuildPlayer(context.Background(), urn, locale)
+	players := map[protocols.Locale][]protocols.Player{}
+	for _, locale := range locales {
+		bucket := make([]protocols.Player, 0, len(playerURNs))
+		for _, urn := range playerURNs {
+			p, err := factory.BuildPlayer(ctx, urn, locale)
 			if err != nil {
 				return nil, fmt.Errorf("build player %s/%s: %w", urn.ToString(), locale, err)
 			}
-			players = append(players, *p)
+			bucket = append(bucket, *p)
 		}
-		out[locale] = players
+		players[locale] = bucket
 	}
-	return out, nil
+
+	return &protocols.Competitor{
+		ID:            l.id,
+		Names:         names,
+		Abbreviations: abbr,
+		IconPath:      icon,
+		Underage:      underage,
+		Players:       players,
+	}, nil
 }
 
-func (c competitorImpl) LocalizedPlayers(locale protocols.Locale) ([]protocols.Player, error) {
-	item, err := c.competitorCache.Competitor(context.Background(), c.id, c.locales)
+// BuildCompetitor resolves a Competitor snapshot from the cache for the
+// given locales. Player URNs on the entry are eagerly resolved into
+// populated Player snapshots per locale; the cache fetches are
+// deduplicated through the player cache's load mutex.
+//
+// If the cached entry is missing players (the API path that populated
+// it didn't include them), this falls back to reloadCompetitor to force
+// a profile-with-players fetch.
+func BuildCompetitor(
+	ctx context.Context,
+	cc *CompetitorCache,
+	factory protocols.EntityFactory,
+	id protocols.URN,
+	locales []protocols.Locale,
+) (*protocols.Competitor, error) {
+	item, err := cc.Competitor(ctx, id, locales)
 	if err != nil {
 		return nil, err
 	}
-	urns := item.playerURNs()
-	if len(urns) == 0 {
-		item, err = c.competitorCache.reloadCompetitor(context.Background(), c.id, c.locales)
+	if len(item.playerURNs()) == 0 {
+		item, err = cc.reloadCompetitor(ctx, id, locales)
 		if err != nil {
-			return nil, fmt.Errorf("loading players into cache: %w", err)
+			return nil, fmt.Errorf("loading competitor profile: %w", err)
 		}
-		urns = item.playerURNs()
 	}
-	players := make([]protocols.Player, 0, len(urns))
-	for _, urn := range urns {
-		p, err := c.entityFactory.BuildPlayer(context.Background(), urn, locale)
+	var icon *string
+	if len(locales) > 0 {
+		icon, err = cc.CompetitorIcon(ctx, id, locales[0])
 		if err != nil {
-			return nil, fmt.Errorf("build player %s/%s: %w", urn.ToString(), locale, err)
+			return nil, err
 		}
-		players = append(players, *p)
 	}
-	return players, nil
+	return item.snapshot(ctx, icon, factory, locales)
 }
 
-func (c competitorImpl) Underage() (protocols.UnderageStatus, error) {
-	item, err := c.competitorCache.Competitor(context.Background(), c.id, c.locales)
+// BuildTeamCompetitor adds a side qualifier to a Competitor snapshot.
+func BuildTeamCompetitor(
+	ctx context.Context,
+	cc *CompetitorCache,
+	factory protocols.EntityFactory,
+	id protocols.URN,
+	qualifier *string,
+	locales []protocols.Locale,
+) (*protocols.TeamCompetitor, error) {
+	c, err := BuildCompetitor(ctx, cc, factory, id, locales)
 	if err != nil {
-		return protocols.UnderageUnknown, err
+		return nil, err
 	}
-	underage := item.getUnderage()
-	if underage == nil {
-		// Underage may not have been populated by a non-profile API path.
-		item, err = c.competitorCache.reloadCompetitor(context.Background(), c.id, c.locales)
-		if err != nil {
-			return protocols.UnderageUnknown, fmt.Errorf("loading competitor profile into cache: %w", err)
-		}
-		underage = item.getUnderage()
-	}
-	if underage == nil {
-		return protocols.UnderageUnknown, nil
-	}
-	return *underage, nil
-}
-
-// teamCompetitorImpl decorates a Competitor with a "home"/"away" qualifier.
-type teamCompetitorImpl struct {
-	qualifier  *string
-	competitor protocols.Competitor
-}
-
-func (t teamCompetitorImpl) IconPath() (*string, error) { return t.competitor.IconPath() }
-func (t teamCompetitorImpl) ID() protocols.URN          { return t.competitor.ID() }
-func (t teamCompetitorImpl) Names() (map[protocols.Locale]string, error) {
-	return t.competitor.Names()
-}
-func (t teamCompetitorImpl) LocalizedName(locale protocols.Locale) (*string, error) {
-	return t.competitor.LocalizedName(locale)
-}
-func (t teamCompetitorImpl) Abbreviations() (map[protocols.Locale]string, error) {
-	return t.competitor.Abbreviations()
-}
-func (t teamCompetitorImpl) LocalizedAbbreviation(locale protocols.Locale) (*string, error) {
-	return t.competitor.LocalizedAbbreviation(locale)
-}
-func (t teamCompetitorImpl) Players() (map[protocols.Locale][]protocols.Player, error) {
-	return t.competitor.Players()
-}
-func (t teamCompetitorImpl) LocalizedPlayers(locale protocols.Locale) ([]protocols.Player, error) {
-	return t.competitor.LocalizedPlayers(locale)
-}
-func (t teamCompetitorImpl) Qualifier() *string                       { return t.qualifier }
-func (t teamCompetitorImpl) Underage() (protocols.UnderageStatus, error) { return t.competitor.Underage() }
-
-// NewCompetitor ...
-func NewCompetitor(id protocols.URN, competitorCache *CompetitorCache, entityFactory protocols.EntityFactory, locales []protocols.Locale) protocols.Competitor {
-	return &competitorImpl{
-		id:              id,
-		competitorCache: competitorCache,
-		entityFactory:   entityFactory,
-		locales:         locales,
-	}
+	return &protocols.TeamCompetitor{
+		Competitor: *c,
+		Qualifier:  qualifier,
+	}, nil
 }

@@ -64,20 +64,27 @@ func (e *EntityFactory) BuildSport(ctx context.Context, id protocols.URN, locale
 	return cache.BuildSport(ctx, e.cacheManager.SportDataCache, id, locales)
 }
 
-// BuildCompetitors ...
-func (e *EntityFactory) BuildCompetitors(competitorIDs []protocols.URN, locales []protocols.Locale) []protocols.Competitor {
-	result := make([]protocols.Competitor, len(competitorIDs))
-	for i := range competitorIDs {
-		id := competitorIDs[i]
-		result[i] = cache.NewCompetitor(id, e.cacheManager.CompetitorCache, e, locales)
+// BuildCompetitors resolves a slice of Competitor snapshots.
+func (e *EntityFactory) BuildCompetitors(ctx context.Context, ids []protocols.URN, locales []protocols.Locale) ([]protocols.Competitor, error) {
+	result := make([]protocols.Competitor, 0, len(ids))
+	for _, id := range ids {
+		c, err := cache.BuildCompetitor(ctx, e.cacheManager.CompetitorCache, e, id, locales)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, *c)
 	}
-
-	return result
+	return result, nil
 }
 
-// BuildCompetitor ...
-func (e *EntityFactory) BuildCompetitor(id protocols.URN, locales []protocols.Locale) protocols.Competitor {
-	return cache.NewCompetitor(id, e.cacheManager.CompetitorCache, e, locales)
+// BuildCompetitor resolves a single Competitor snapshot.
+func (e *EntityFactory) BuildCompetitor(ctx context.Context, id protocols.URN, locales []protocols.Locale) (*protocols.Competitor, error) {
+	return cache.BuildCompetitor(ctx, e.cacheManager.CompetitorCache, e, id, locales)
+}
+
+// BuildTeamCompetitor resolves a TeamCompetitor (Competitor + qualifier).
+func (e *EntityFactory) BuildTeamCompetitor(ctx context.Context, id protocols.URN, qualifier *string, locales []protocols.Locale) (*protocols.TeamCompetitor, error) {
+	return cache.BuildTeamCompetitor(ctx, e.cacheManager.CompetitorCache, e, id, qualifier, locales)
 }
 
 // BuildPlayer resolves a Player snapshot from the cache, fetching if
