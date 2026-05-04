@@ -52,11 +52,16 @@ func TestEvent_Emitter_DispatchesAllKinds(t *testing.T) {
 
 // TestEvent_Emitter_ConcurrentSetAndEmit confirms swapping the emitter
 // while emit fires from another goroutine is race-safe.
+//
+// The test only asserts no panic / no -race violation — the call count
+// is non-deterministic because the writer alternates SetEventEmitter
+// between non-nil and nil; the reader may snapshot during a nil window.
+// The previous "expected at least one emitter call" assertion was
+// flaky for that reason.
 func TestEvent_Emitter_ConcurrentSetAndEmit(t *testing.T) {
 	c := &Client{}
 
-	var calls atomic.Int64
-	emitter := func(Event) { calls.Add(1) }
+	emitter := func(Event) {}
 
 	var wg sync.WaitGroup
 	stop := make(chan struct{})
@@ -91,11 +96,6 @@ func TestEvent_Emitter_ConcurrentSetAndEmit(t *testing.T) {
 	}
 	close(stop)
 	wg.Wait()
-
-	// Just want to confirm we got SOME calls and the race detector didn't trip.
-	if calls.Load() == 0 {
-		t.Fatal("expected at least one emitter call")
-	}
 }
 
 // TestEvent_Emitter_NilArgIsNoOp verifies SetEventEmitter(nil) clears
