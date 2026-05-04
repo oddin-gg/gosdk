@@ -2,7 +2,7 @@ package cache
 
 import (
 	"github.com/oddin-gg/gosdk/protocols"
-	log "github.com/sirupsen/logrus"
+	log "github.com/oddin-gg/gosdk/internal/log"
 	"sync"
 	"time"
 )

@@ -12,7 +12,7 @@ import (
 	feedXML "github.com/oddin-gg/gosdk/internal/feed/xml"
 	"github.com/oddin-gg/gosdk/internal/producer"
 	"github.com/oddin-gg/gosdk/protocols"
-	log "github.com/sirupsen/logrus"
+	log "github.com/oddin-gg/gosdk/internal/log"
 )
 
 type sdkOddsFeedSession interface {
@@ -35,7 +35,7 @@ type oddsFeedSessionImpl struct {
 	exchangeName             string
 	sportIDPrefix            string
 	sessionID                uuid.UUID
-	logger                   *log.Entry
+	logger                   *log.Logger
 	closeCh                  chan bool
 	msgCh                    chan protocols.SessionMessage
 	isReplay                 bool
@@ -218,7 +218,7 @@ func newSession(
 	exchangeName string,
 	sportIDPrefix string,
 	isReplay bool,
-	logger *log.Entry,
+	logger *log.Logger,
 ) sdkOddsFeedSession {
 	return &oddsFeedSessionImpl{
 		channelConsumer: feed.NewChannelConsumer(

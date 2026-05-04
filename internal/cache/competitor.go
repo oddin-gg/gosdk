@@ -9,7 +9,7 @@ import (
 	"github.com/oddin-gg/gosdk/internal/api/xml"
 	"github.com/oddin-gg/gosdk/internal/cache/lru"
 	"github.com/oddin-gg/gosdk/protocols"
-	log "github.com/sirupsen/logrus"
+	log "github.com/oddin-gg/gosdk/internal/log"
 )
 
 // TeamWrapper is the small interface implemented by every API XML type that
@@ -35,7 +35,7 @@ type TeamWithPlayers interface {
 // singleflight gives the equivalent.
 type CompetitorCache struct {
 	apiClient *api.Client
-	logger    *log.Entry
+	logger    *log.Logger
 	lru       *lru.EventCache[protocols.URN, protocols.Locale, *LocalizedCompetitor]
 
 	iconMu sync.RWMutex
@@ -209,7 +209,7 @@ func (c *CompetitorCache) ClearCacheItem(id protocols.URN) {
 	c.iconMu.Unlock()
 }
 
-func newCompetitorCache(client *api.Client, logger *log.Entry) *CompetitorCache {
+func newCompetitorCache(client *api.Client, logger *log.Logger) *CompetitorCache {
 	cc := &CompetitorCache{
 		apiClient: client,
 		logger:    logger,

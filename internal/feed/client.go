@@ -12,7 +12,7 @@ import (
 	"github.com/cenkalti/backoff/v5"
 	"github.com/oddin-gg/gosdk/protocols"
 	amqp "github.com/rabbitmq/amqp091-go"
-	log "github.com/sirupsen/logrus"
+	log "github.com/oddin-gg/gosdk/internal/log"
 )
 
 // Client manages a single AMQP connection with automatic reconnection.
@@ -25,7 +25,7 @@ import (
 type Client struct {
 	cfg           protocols.OddsFeedConfiguration
 	whoAmIManager protocols.WhoAmIManager
-	logger        *log.Entry
+	logger        *log.Logger
 
 	// conn holds the current *amqp.Connection. Nil while disconnected.
 	conn atomic.Pointer[amqp.Connection]
@@ -50,7 +50,7 @@ type Client struct {
 }
 
 // NewClient ...
-func NewClient(cfg protocols.OddsFeedConfiguration, whoAmIManager protocols.WhoAmIManager, logger *log.Entry) *Client {
+func NewClient(cfg protocols.OddsFeedConfiguration, whoAmIManager protocols.WhoAmIManager, logger *log.Logger) *Client {
 	return &Client{
 		cfg:           cfg,
 		whoAmIManager: whoAmIManager,

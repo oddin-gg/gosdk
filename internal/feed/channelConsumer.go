@@ -12,7 +12,7 @@ import (
 	feedXML "github.com/oddin-gg/gosdk/internal/feed/xml"
 	"github.com/oddin-gg/gosdk/protocols"
 	amqp "github.com/rabbitmq/amqp091-go"
-	log "github.com/sirupsen/logrus"
+	log "github.com/oddin-gg/gosdk/internal/log"
 )
 
 const (
@@ -37,7 +37,7 @@ const (
 type ChannelConsumer struct {
 	client             *Client
 	feedMessageFactory *factory.FeedMessageFactory
-	logger             *log.Entry
+	logger             *log.Logger
 	exchangeName       string
 	sportIDPrefix      string
 
@@ -59,7 +59,7 @@ type ChannelConsumer struct {
 func NewChannelConsumer(
 	client *Client,
 	feedMessageFactory *factory.FeedMessageFactory,
-	logger *log.Entry,
+	logger *log.Logger,
 	exchangeName string,
 	sportIDPrefix string,
 ) *ChannelConsumer {

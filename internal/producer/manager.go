@@ -9,7 +9,7 @@ import (
 
 	"github.com/oddin-gg/gosdk/internal/api"
 	"github.com/oddin-gg/gosdk/protocols"
-	log "github.com/sirupsen/logrus"
+	log "github.com/oddin-gg/gosdk/internal/log"
 )
 
 // Manager ...
@@ -22,7 +22,7 @@ import (
 type Manager struct {
 	apiClient   *api.Client
 	cfg         protocols.OddsFeedConfiguration
-	logger      *log.Entry
+	logger      *log.Logger
 	mu          sync.RWMutex
 	producerMap map[uint]*data
 }
@@ -254,7 +254,7 @@ func (m *Manager) IsProducerDown(ctx context.Context, id uint) (bool, error) {
 }
 
 // NewManager ...
-func NewManager(cfg protocols.OddsFeedConfiguration, apiClient *api.Client, logger *log.Entry) *Manager {
+func NewManager(cfg protocols.OddsFeedConfiguration, apiClient *api.Client, logger *log.Logger) *Manager {
 	return &Manager{
 		apiClient: apiClient,
 		cfg:       cfg,

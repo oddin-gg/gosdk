@@ -18,7 +18,7 @@ import (
 	"github.com/oddin-gg/gosdk/internal/sport"
 	"github.com/oddin-gg/gosdk/internal/whoami"
 	"github.com/oddin-gg/gosdk/protocols"
-	log "github.com/sirupsen/logrus"
+	log "github.com/oddin-gg/gosdk/internal/log"
 )
 
 const (
@@ -34,7 +34,7 @@ type oddsFeedImpl struct {
 	sportsInfoManager        protocols.SportsInfoManager
 	replayManager            protocols.ReplayManager
 	cfg                      protocols.OddsFeedConfiguration
-	logger                   *log.Entry
+	logger                   *log.Logger
 	apiClient                *api.Client
 	opened                   bool
 	cacheManager             *cache.Manager
@@ -333,7 +333,7 @@ func (o *oddsFeedImpl) init() error {
 		return err
 	}
 
-	o.logger = log.New().WithField("client_id", details.BookmakerID())
+	o.logger = log.New(nil).WithField("client_id", details.BookmakerID())
 
 	o.producerManager = producer.NewManager(o.cfg, o.apiClient, o.logger)
 

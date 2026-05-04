@@ -12,7 +12,7 @@ import (
 	"github.com/oddin-gg/gosdk/internal/cache/lru"
 	feedXML "github.com/oddin-gg/gosdk/internal/feed/xml"
 	"github.com/oddin-gg/gosdk/protocols"
-	log "github.com/sirupsen/logrus"
+	log "github.com/oddin-gg/gosdk/internal/log"
 )
 
 // TournamentWrapper is the small interface implemented by the various API XML
@@ -40,7 +40,7 @@ type TournamentExtendedWrapper interface {
 // TournamentCache stores tournament data per (URN, locale).
 type TournamentCache struct {
 	apiClient *api.Client
-	logger    *log.Entry
+	logger    *log.Logger
 	lru       *lru.EventCache[protocols.URN, protocols.Locale, *LocalizedTournament]
 
 	iconMu sync.RWMutex
@@ -245,7 +245,7 @@ func (t *TournamentCache) ClearCacheItem(id protocols.URN) {
 	t.iconMu.Unlock()
 }
 
-func newTournamentCache(client *api.Client, logger *log.Entry) *TournamentCache {
+func newTournamentCache(client *api.Client, logger *log.Logger) *TournamentCache {
 	tc := &TournamentCache{
 		apiClient: client,
 		logger:    logger,

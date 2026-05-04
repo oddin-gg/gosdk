@@ -5,14 +5,14 @@ import (
 
 	feedXML "github.com/oddin-gg/gosdk/internal/feed/xml"
 	"github.com/oddin-gg/gosdk/protocols"
-	log "github.com/sirupsen/logrus"
+	log "github.com/oddin-gg/gosdk/internal/log"
 )
 
 // MarketFactory ...
 type MarketFactory struct {
 	marketDataFactory *MarketDataFactory
 	locales           []protocols.Locale
-	logger            *log.Entry
+	logger            *log.Logger
 }
 
 // BuildMarket ...
@@ -128,7 +128,7 @@ func (m MarketFactory) buildOutcomeSettlement(outcome feedXML.Outcome, marketDat
 }
 
 // NewMarketFactory ...
-func NewMarketFactory(marketDataFactory *MarketDataFactory, locales []protocols.Locale, logger *log.Entry) *MarketFactory {
+func NewMarketFactory(marketDataFactory *MarketDataFactory, locales []protocols.Locale, logger *log.Logger) *MarketFactory {
 	return &MarketFactory{
 		marketDataFactory: marketDataFactory,
 		locales:           locales,

@@ -8,7 +8,7 @@ import (
 	"github.com/oddin-gg/gosdk/internal/api"
 	"github.com/oddin-gg/gosdk/internal/api/xml"
 	"github.com/oddin-gg/gosdk/protocols"
-	log "github.com/sirupsen/logrus"
+	log "github.com/oddin-gg/gosdk/internal/log"
 )
 
 // PlayerCacheKey represent cache key
@@ -26,7 +26,7 @@ type PlayerCacheKey struct {
 // context.Background() at the boundary.
 type PlayersCache struct {
 	apiClient *api.Client
-	logger    *log.Entry
+	logger    *log.Logger
 
 	mu      sync.RWMutex
 	players map[PlayerCacheKey]LocalizedPlayer
@@ -158,7 +158,7 @@ func (c *PlayersCache) MergePlayers(locale protocols.Locale, players []xml.Playe
 	}
 }
 
-func newPlayersCache(apiClient *api.Client, logger *log.Entry) *PlayersCache {
+func newPlayersCache(apiClient *api.Client, logger *log.Logger) *PlayersCache {
 	return &PlayersCache{
 		apiClient: apiClient,
 		logger:    logger,

@@ -10,7 +10,7 @@ import (
 	"github.com/oddin-gg/gosdk/internal/producer"
 	"github.com/oddin-gg/gosdk/internal/recovery"
 	"github.com/oddin-gg/gosdk/protocols"
-	log "github.com/sirupsen/logrus"
+	log "github.com/oddin-gg/gosdk/internal/log"
 )
 
 type builderImpl struct {
@@ -23,7 +23,7 @@ type builderImpl struct {
 	cacheManager             *cache.Manager
 	feedMessageFactory       *factory.FeedMessageFactory
 	recoveryMessageProcessor protocols.RecoveryMessageProcessor
-	logger                   *log.Entry
+	logger                   *log.Logger
 }
 
 func (b *builderImpl) SetMessageInterest(messageInterest protocols.MessageInterest) protocols.OddsFeedSessionBuilder {

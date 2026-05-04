@@ -12,7 +12,7 @@ import (
 	feedXML "github.com/oddin-gg/gosdk/internal/feed/xml"
 	"github.com/oddin-gg/gosdk/internal/utils"
 	"github.com/oddin-gg/gosdk/protocols"
-	log "github.com/sirupsen/logrus"
+	log "github.com/oddin-gg/gosdk/internal/log"
 )
 
 // MatchCache stores match summaries per (URN, locale).
@@ -23,7 +23,7 @@ import (
 // loading + singleflight gives equivalent results with cleaner semantics.
 type MatchCache struct {
 	apiClient *api.Client
-	logger    *log.Entry
+	logger    *log.Logger
 	lru       *lru.EventCache[protocols.URN, protocols.Locale, *LocalizedMatch]
 }
 
@@ -157,7 +157,7 @@ func (m *MatchCache) OnFeedMessage(id protocols.URN, feedMessage *protocols.Feed
 // ClearCacheItem is the public invalidation hook.
 func (m *MatchCache) ClearCacheItem(id protocols.URN) { m.lru.Clear(id) }
 
-func newMatchCache(client *api.Client, logger *log.Entry) *MatchCache {
+func newMatchCache(client *api.Client, logger *log.Logger) *MatchCache {
 	mc := &MatchCache{apiClient: client, logger: logger}
 	mc.lru = lru.NewEventCache[protocols.URN, protocols.Locale, *LocalizedMatch](
 		lru.Config{},

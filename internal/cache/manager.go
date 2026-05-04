@@ -5,7 +5,7 @@ import (
 
 	"github.com/oddin-gg/gosdk/internal/api"
 	"github.com/oddin-gg/gosdk/protocols"
-	log "github.com/sirupsen/logrus"
+	log "github.com/oddin-gg/gosdk/internal/log"
 )
 
 // Manager ...
@@ -19,7 +19,7 @@ type Manager struct {
 	MatchStatusCache           *MatchStatusCache
 	LocalizedStaticMatchStatus *LocalizedStaticDataCache
 	PlayersCache               *PlayersCache
-	logger                     *log.Entry
+	logger                     *log.Logger
 	MarketVoidReasonsCache     *MarketVoidReasonsCache
 }
 
@@ -48,7 +48,7 @@ func (m Manager) Close() {
 }
 
 // NewManager ...
-func NewManager(client *api.Client, oddsFeedConfiguration protocols.OddsFeedConfiguration, logger *log.Entry) *Manager {
+func NewManager(client *api.Client, oddsFeedConfiguration protocols.OddsFeedConfiguration, logger *log.Logger) *Manager {
 	manager := &Manager{
 		MarketDescriptionCache: newMarketDescriptionCache(client),
 		CompetitorCache:        newCompetitorCache(client, logger),

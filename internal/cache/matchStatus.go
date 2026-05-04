@@ -10,7 +10,7 @@ import (
 	apiXML "github.com/oddin-gg/gosdk/internal/api/xml"
 	feedXML "github.com/oddin-gg/gosdk/internal/feed/xml"
 	"github.com/oddin-gg/gosdk/protocols"
-	log "github.com/sirupsen/logrus"
+	log "github.com/oddin-gg/gosdk/internal/log"
 )
 
 var _ protocols.PeriodScore = (*periodScoreImpl)(nil)
@@ -325,7 +325,7 @@ func (s scoreboardImpl) AwayGames() *uint32 {
 // see a stable snapshot — no partial-update tears.
 type MatchStatusCache struct {
 	apiClient             *api.Client
-	logger                *log.Entry
+	logger                *log.Logger
 	oddsFeedConfiguration protocols.OddsFeedConfiguration
 
 	mu      sync.RWMutex
@@ -666,7 +666,7 @@ func (m *MatchStatusCache) makeFeedStatistics(statistics *feedXML.Statistics) pr
 	}
 }
 
-func newMatchStatusCache(client *api.Client, oddsFeedConfiguration protocols.OddsFeedConfiguration, logger *log.Entry) *MatchStatusCache {
+func newMatchStatusCache(client *api.Client, oddsFeedConfiguration protocols.OddsFeedConfiguration, logger *log.Logger) *MatchStatusCache {
 	matchStatusCache := &MatchStatusCache{
 		apiClient:             client,
 		oddsFeedConfiguration: oddsFeedConfiguration,

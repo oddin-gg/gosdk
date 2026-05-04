@@ -9,7 +9,7 @@ import (
 	"github.com/oddin-gg/gosdk/internal/api"
 	"github.com/oddin-gg/gosdk/internal/api/xml"
 	"github.com/oddin-gg/gosdk/protocols"
-	log "github.com/sirupsen/logrus"
+	log "github.com/oddin-gg/gosdk/internal/log"
 )
 
 // SportCache caches the (small, bounded) sport list and per-sport tournament
@@ -21,7 +21,7 @@ import (
 // known sport for that locale.
 type SportCache struct {
 	apiClient *api.Client
-	logger    *log.Entry
+	logger    *log.Logger
 
 	mu            sync.RWMutex
 	loadedLocales map[protocols.Locale]struct{}
@@ -251,7 +251,7 @@ func (s *SportCache) Purge() {
 	s.mu.Unlock()
 }
 
-func newSportDataCache(client *api.Client, logger *log.Entry) *SportCache {
+func newSportDataCache(client *api.Client, logger *log.Logger) *SportCache {
 	return &SportCache{
 		apiClient:     client,
 		logger:        logger,

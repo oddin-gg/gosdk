@@ -11,7 +11,7 @@ import (
 	"github.com/oddin-gg/gosdk/internal/api"
 	"github.com/oddin-gg/gosdk/internal/producer"
 	"github.com/oddin-gg/gosdk/protocols"
-	log "github.com/sirupsen/logrus"
+	log "github.com/oddin-gg/gosdk/internal/log"
 )
 
 const (
@@ -26,7 +26,7 @@ type Manager struct {
 	apiClient              *api.Client
 	lock                   sync.RWMutex
 	producerRecoveryData   map[uint]*producerRecoveryData
-	logger                 *log.Entry
+	logger                 *log.Logger
 	ticker                 *time.Ticker
 	closeCh                chan struct{}
 	messageProcessingTimes map[uuid.UUID]time.Time
@@ -553,7 +553,7 @@ func (m *Manager) producerUp(data *producerRecoveryData, reason protocols.Produc
 }
 
 // NewManager ...
-func NewManager(cfg protocols.OddsFeedConfiguration, producerManager *producer.Manager, apiClient *api.Client, logger *log.Entry) *Manager {
+func NewManager(cfg protocols.OddsFeedConfiguration, producerManager *producer.Manager, apiClient *api.Client, logger *log.Logger) *Manager {
 	return &Manager{
 		cfg:                    cfg,
 		producerManager:        producerManager,
