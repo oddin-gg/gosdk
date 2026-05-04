@@ -544,6 +544,104 @@ across the three repos.
 
 ---
 
+## 11. v1.1 — Market reshape + RecoveryHandle
+
+v1.1 extends the v1.0 entity reshape to the market/outcome tree and
+delivers reliable per-request recovery completion.
+
+### 11.1 Market types — interfaces → value structs
+
+| Pre-v1.1 idiom | v1.1 equivalent |
+|---|---|
+| `market.ID()` | `market.ID` |
+| `market.Specifiers()` | `market.Specifiers` |
+| `market.Name()` (returns `(*string, error)`) | `market.Name` (string, "" when unavailable) |
+| `market.LocalizedName(loc)` | dropped — markets are constructed in the SDK's default locale; for other locales fetch via `client.MarketDescription` |
+| `marketWithOdds.Status()` | `marketWithOdds.Status` |
+| `marketWithOdds.OutcomeOdds()` | `marketWithOdds.OutcomeOdds` |
+| `marketWithOdds.IsFavourite()` | `marketWithOdds.IsFavourite` |
+| `marketCancel.VoidReasonID()` | `marketCancel.VoidReasonID` |
+| `marketCancel.VoidReasonParams()` | `marketCancel.VoidReasonParams` |
+| `marketWithSettlement.OutcomeSettlements()` | `marketWithSettlement.OutcomeSettlements` |
+| `outcome.ID()` | `outcome.ID` |
+| `outcome.Name()` | `outcome.Name` |
+| `outcome.LocalizedName(loc)` | dropped (same rationale as Market) |
+| `outcomeOdds.IsActive()` | `outcomeOdds.IsActive` |
+| `outcomeOdds.Probability()` | `outcomeOdds.Probability` |
+| `outcomeOdds.Odds(displayType)` | `outcomeOdds.Odds(displayType)` (helper kept) |
+| `outcomeSettlement.OutcomeResult()` | `outcomeSettlement.OutcomeResult` |
+| `outcomeSettlement.VoidFactor()` | `outcomeSettlement.VoidFactor` |
+
+### 11.2 MarketDescription / OutcomeDescription / Specifier / VoidReason
+
+| Pre-v1.1 idiom | v1.1 equivalent |
+|---|---|
+| `desc.ID()` (returns `(uint, error)`) | `desc.ID` |
+| `desc.LocalizedName(loc)` | `desc.LocalizedName(loc)` (helper kept, returns `*string`) |
+| `desc.Variant()` | `desc.Variant` |
+| `desc.Outcomes()` | `desc.Outcomes` |
+| `desc.Specifiers()` | `desc.Specifiers` |
+| `desc.Groups()` | `desc.Groups` |
+| `desc.OutcomeType()` | `desc.OutcomeType` |
+| `desc.IncludesOutcomesOfType()` | `desc.IncludesOutcomesOfType` |
+| `outcomeDesc.ID()` | `outcomeDesc.ID` |
+| `outcomeDesc.LocalizedName(loc)` | `outcomeDesc.LocalizedName(loc)` (helper kept) |
+| `specifier.Name()` / `Type()` | `specifier.Name` / `specifier.Type` |
+| `voidReason.ID()` / `Name()` / `Description()` / `Template()` / `Params()` | `voidReason.ID` / `Name` / `Description` / `Template` / `Params` |
+
+`Client.MarketDescription` now returns `*protocols.MarketDescription`
+(was: `protocols.MarketDescription` interface).
+
+### 11.3 RecoveryHandle — reliable per-request completion
+
+`Client.RecoverEventOdds` and `Client.RecoverEventStateful` previously
+returned just a `(uint, error)` request id. Consumers had to scan the
+lossy `RecoveryEvents()` channel to learn when a specific recovery
+completed — and dropped events were silent.
+
+v1.1 returns `*RecoveryHandle`. The handle is reliable: even if the
+channel event is dropped, `<-handle.Done()` unblocks and
+`handle.Result()` reflects the correct terminal state.
+
+```go
+handle, err := client.RecoverEventOdds(ctx, producerID, eventURN)
+if err != nil { ... }
+
+// Block until terminal:
+<-handle.Done()
+res := handle.Result()
+switch res.Status {
+case protocols.RecoveryStatusCompleted:
+    log.Printf("recovery %d completed in %v", res.RequestID, res.EndedAt.Sub(res.StartedAt))
+case protocols.RecoveryStatusFailed:
+    log.Printf("recovery %d failed: %v", res.RequestID, res.Err)
+}
+
+// Or non-blocking:
+status := handle.Status()
+```
+
+For consumers that only kept the request id:
+
+```go
+result, ok := client.EventRecoveryStatus(requestID)
+if !ok { /* unknown / GC'd */ }
+```
+
+Handles stay queryable for `recovery.HandleGCGracePeriod` (default 5
+minutes) after they reach a terminal state.
+
+### What's deferred to v1.2
+
+- **Per-producer actor goroutine model (NEXT.md §11).** The current
+  mutex-hygiene `producerRecoveryData` (Phase 5b) is correct under
+  `-race` and supports `RecoveryHandle` cleanly. The full actor
+  rewrite is architectural cleanup — it makes per-producer state
+  ownership single-threaded — but doesn't unlock additional v1.x
+  user-visible behavior. Better tackled as a focused refactor when
+  there's a concrete need (e.g., a Phase 11 expansion that benefits
+  from actor-per-producer concurrency).
+
 ## Questions
 
 Open an issue or ping the SDK channel. The reference design lives in
