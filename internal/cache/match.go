@@ -378,15 +378,20 @@ func (m matchImpl) Status() protocols.MatchStatus {
 }
 
 func (m matchImpl) Tournament() (protocols.Tournament, error) {
+	zero := protocols.Tournament{}
 	sportID, err := m.SportID()
 	if err != nil {
-		return nil, err
+		return zero, err
 	}
 	item, err := m.matchCache.Match(context.Background(), m.id, m.locales)
 	if err != nil {
-		return nil, err
+		return zero, err
 	}
-	return m.entityFactory.BuildTournament(item.TournamentID(), *sportID, m.locales), nil
+	t, err := m.entityFactory.BuildTournament(context.Background(), item.TournamentID(), *sportID, m.locales)
+	if err != nil {
+		return zero, err
+	}
+	return *t, nil
 }
 
 func (m matchImpl) homeAwayCompetitor(home bool) (protocols.TeamCompetitor, error) {

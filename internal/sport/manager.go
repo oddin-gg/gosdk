@@ -62,7 +62,10 @@ func (m *Manager) LocalizedActiveTournaments(ctx context.Context, locale protoco
 
 	var result []protocols.Tournament
 	for _, sport := range sports {
-		tournaments := m.entityFactory.BuildTournaments(sport.TournamentIDs, sport.ID, []protocols.Locale{locale})
+		tournaments, err := m.entityFactory.BuildTournaments(ctx, sport.TournamentIDs, sport.ID, []protocols.Locale{locale})
+		if err != nil {
+			return nil, err
+		}
 		result = append(result, tournaments...)
 	}
 
@@ -87,7 +90,7 @@ func (m *Manager) LocalizedSportActiveTournaments(ctx context.Context, sportName
 			continue
 		}
 		if strings.EqualFold(name, sportName) {
-			return m.entityFactory.BuildTournaments(sport.TournamentIDs, sport.ID, []protocols.Locale{locale}), nil
+			return m.entityFactory.BuildTournaments(ctx, sport.TournamentIDs, sport.ID, []protocols.Locale{locale})
 		}
 	}
 
@@ -239,13 +242,17 @@ func (m *Manager) LocalizedAvailableTournaments(ctx context.Context, sportID pro
 		return nil, err
 	}
 
-	result := make([]protocols.Tournament, len(data))
+	result := make([]protocols.Tournament, 0, len(data))
 	for i := range data {
 		id, err := protocols.ParseURN(data[i].ID)
 		if err != nil {
 			return nil, err
 		}
-		result[i] = m.entityFactory.BuildTournament(*id, sportID, []protocols.Locale{locale})
+		t, err := m.entityFactory.BuildTournament(ctx, *id, sportID, []protocols.Locale{locale})
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, *t)
 	}
 
 	return result, nil

@@ -178,29 +178,41 @@ type Match interface {
 	ExtraInfo() (map[string]string, error)
 }
 
-// LongTermEvent ...
-type LongTermEvent interface {
-	SportEvent
-	Sport() SportSummary
+// Category is a pure-data tournament category (e.g., a country grouping
+// for a sport).
+type Category struct {
+	ID          string
+	Name        string
+	CountryCode *string
 }
 
-// Tournament ...
-type Tournament interface {
-	LongTermEvent
-	Competitors() ([]Competitor, error)
-	StartDate() (*time.Time, error)
-	EndDate() (*time.Time, error)
-	LocalizedAbbreviation(locale Locale) (*string, error)
-	IconPath() (*string, error)
-	RiskTier() (int, error)
-	Category() (Category, error)
+// Tournament is a pure-data snapshot of a tournament populated across
+// one or more locales.
+//
+// Phase 6 reshape: replaces the previous Tournament interface (with
+// (value, error) lazy accessors) with a value struct populated at
+// construction. Sport carries the sport summary; CompetitorIDs lets
+// callers resolve competitors lazily through the SDK.
+type Tournament struct {
+	ID               URN
+	Names            map[Locale]string
+	Abbreviations    map[Locale]string
+	StartDate        *time.Time
+	EndDate          *time.Time
+	ScheduledTime    *time.Time
+	ScheduledEndTime *time.Time
+	IconPath         *string
+	RiskTier         int
+	Category         *Category
+	Sport            SportSummary
+	CompetitorIDs    []URN
 }
 
-type Category interface {
-	ID() string
-	Name() string
-	CountryCode() *string
-}
+// Name returns the localized name, or "" if not loaded.
+func (t Tournament) Name(locale Locale) string { return t.Names[locale] }
+
+// Abbreviation returns the localized abbreviation, or "" if not loaded.
+func (t Tournament) Abbreviation(locale Locale) string { return t.Abbreviations[locale] }
 
 // SportSummary is a pure-data snapshot of a sport's per-locale labels.
 //

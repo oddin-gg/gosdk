@@ -2,7 +2,6 @@ package cache
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -289,152 +288,100 @@ func newTournamentCache(client *api.Client, logger *log.Logger) *TournamentCache
 	return tc
 }
 
-// tournamentImpl implements protocols.Tournament.
-type tournamentImpl struct {
-	id              protocols.URN
-	sportID         protocols.URN
-	tournamentCache *TournamentCache
-	entityFactory   protocols.EntityFactory
-	locales         []protocols.Locale
-}
-
-func (t tournamentImpl) IconPath() (*string, error) {
-	if len(t.locales) == 0 {
-		return nil, errors.New("missing locales")
+// tournamentSnapshot projects the cached entry into a
+// protocols.Tournament value. Resolves the embedded sport summary
+// through the entity factory; competitor URNs are kept as URNs (lazy
+// resolution per call site).
+func (l *LocalizedTournament) tournamentSnapshot(
+	ctx context.Context,
+	icon *string,
+	sportSummary protocols.SportSummary,
+) protocols.Tournament {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	names := make(map[protocols.Locale]string, len(l.name))
+	for k, v := range l.name {
+		names[k] = v
 	}
-	return t.tournamentCache.TournamentIcon(context.Background(), t.id, t.locales[0])
+	abbr := make(map[protocols.Locale]string, len(l.abbreviation))
+	for k, v := range l.abbreviation {
+		abbr[k] = v
+	}
+	competitorIDs := make([]protocols.URN, 0, len(l.competitorIDs))
+	for k := range l.competitorIDs {
+		competitorIDs = append(competitorIDs, k)
+	}
+	var category *protocols.Category
+	if l.category != nil {
+		category = &protocols.Category{
+			ID:          l.category.ID,
+			Name:        l.category.Name,
+			CountryCode: l.category.CountryCode,
+		}
+	}
+	return protocols.Tournament{
+		ID:               l.id,
+		Names:            names,
+		Abbreviations:    abbr,
+		StartDate:        cloneTime(l.startDate),
+		EndDate:          cloneTime(l.endDate),
+		ScheduledTime:    cloneTime(l.scheduledTime),
+		ScheduledEndTime: cloneTime(l.scheduledEndTime),
+		IconPath:         icon,
+		RiskTier:         l.riskTier,
+		Category:         category,
+		Sport:            sportSummary,
+		CompetitorIDs:    competitorIDs,
+	}
 }
 
-func (t tournamentImpl) ID() protocols.URN { return t.id }
+func cloneTime(t *time.Time) *time.Time {
+	if t == nil {
+		return nil
+	}
+	v := *t
+	return &v
+}
 
-func (t tournamentImpl) LocalizedAbbreviation(locale protocols.Locale) (*string, error) {
-	item, err := t.tournamentCache.Tournament(context.Background(), t.id, []protocols.Locale{locale})
+// BuildTournament resolves a Tournament snapshot from the cache for the
+// given locales. The embedded SportSummary is fetched through the entity
+// factory; competitor URNs are kept lazy.
+func BuildTournament(
+	ctx context.Context,
+	tc *TournamentCache,
+	factory protocols.EntityFactory,
+	id protocols.URN,
+	sportID protocols.URN,
+	locales []protocols.Locale,
+) (*protocols.Tournament, error) {
+	item, err := tc.Tournament(ctx, id, locales)
 	if err != nil {
 		return nil, err
 	}
-	return item.localizedAbbreviation(locale)
-}
-
-func (t tournamentImpl) LocalizedName(locale protocols.Locale) (*string, error) {
-	item, err := t.tournamentCache.Tournament(context.Background(), t.id, []protocols.Locale{locale})
-	if err != nil {
-		return nil, err
-	}
-	return item.localizedName(locale)
-}
-
-func (t tournamentImpl) SportID() (*protocols.URN, error) { return &t.sportID, nil }
-
-func (t tournamentImpl) ScheduledTime() (*time.Time, error) {
-	item, err := t.tournamentCache.Tournament(context.Background(), t.id, t.locales)
-	if err != nil {
-		return nil, err
-	}
-	_, _, sched, _, _, _ := item.snapshot()
-	return sched, nil
-}
-
-func (t tournamentImpl) ScheduledEndTime() (*time.Time, error) {
-	item, err := t.tournamentCache.Tournament(context.Background(), t.id, t.locales)
-	if err != nil {
-		return nil, err
-	}
-	_, _, _, schedEnd, _, _ := item.snapshot()
-	return schedEnd, nil
-}
-
-func (t tournamentImpl) LiveOddsAvailability() (*protocols.LiveOddsAvailability, error) {
-	available := protocols.NotAvailableLiveOddsAvailability
-	return &available, nil
-}
-
-// Sport returns the sport summary for this tournament. On fetch error
-// returns a zero-value SportSummary (callers can refetch via the
-// SportsCache directly). Errorless to keep the legacy Tournament
-// interface compiling until the Tournament reshape lands.
-func (t tournamentImpl) Sport() protocols.SportSummary {
-	s, err := t.entityFactory.BuildSport(context.Background(), t.sportID, t.locales)
-	if err != nil || s == nil {
-		return protocols.SportSummary{ID: t.sportID}
-	}
-	return s.SportSummary
-}
-
-func (t tournamentImpl) Competitors() ([]protocols.Competitor, error) {
-	item, err := t.tournamentCache.Tournament(context.Background(), t.id, t.locales)
-	if err != nil {
-		return nil, err
-	}
-	urns := item.competitorIDList()
-	if len(urns) == 0 {
-		urns, err = t.tournamentCache.TournamentCompetitors(context.Background(), t.id, t.locales[0])
+	if len(item.competitorIDList()) == 0 && len(locales) > 0 {
+		// Force a fetch that surfaces competitor URNs (the bare
+		// /info path may not include them).
+		if _, err := tc.TournamentCompetitors(ctx, id, locales[0]); err != nil {
+			return nil, err
+		}
+		item, err = tc.Tournament(ctx, id, locales)
 		if err != nil {
 			return nil, err
 		}
 	}
-	return t.entityFactory.BuildCompetitors(context.Background(), urns, t.locales)
-}
-
-func (t tournamentImpl) StartDate() (*time.Time, error) {
-	item, err := t.tournamentCache.Tournament(context.Background(), t.id, t.locales)
-	if err != nil {
-		return nil, err
+	var icon *string
+	if len(locales) > 0 {
+		icon, err = tc.TournamentIcon(ctx, id, locales[0])
+		if err != nil {
+			return nil, err
+		}
 	}
-	start, _, _, _, _, _ := item.snapshot()
-	return start, nil
-}
-
-func (t tournamentImpl) EndDate() (*time.Time, error) {
-	item, err := t.tournamentCache.Tournament(context.Background(), t.id, t.locales)
-	if err != nil {
-		return nil, err
+	var sportSummary protocols.SportSummary
+	if sport, err := factory.BuildSport(ctx, sportID, locales); err == nil && sport != nil {
+		sportSummary = sport.SportSummary
+	} else {
+		sportSummary = protocols.SportSummary{ID: sportID}
 	}
-	_, end, _, _, _, _ := item.snapshot()
-	return end, nil
-}
-
-func (t tournamentImpl) RiskTier() (int, error) {
-	item, err := t.tournamentCache.Tournament(context.Background(), t.id, t.locales)
-	if err != nil {
-		return 0, err
-	}
-	_, _, _, _, riskTier, _ := item.snapshot()
-	return riskTier, nil
-}
-
-type categoryImpl struct {
-	id          string
-	name        string
-	countryCode *string
-}
-
-func (c *categoryImpl) ID() string           { return c.id }
-func (c *categoryImpl) Name() string         { return c.name }
-func (c *categoryImpl) CountryCode() *string { return c.countryCode }
-
-func (t tournamentImpl) Category() (protocols.Category, error) {
-	item, err := t.tournamentCache.Tournament(context.Background(), t.id, t.locales)
-	if err != nil {
-		return nil, err
-	}
-	_, _, _, _, _, cat := item.snapshot()
-	if cat == nil {
-		return nil, errors.New("category not found")
-	}
-	return &categoryImpl{
-		id:          cat.ID,
-		name:        cat.Name,
-		countryCode: cat.CountryCode,
-	}, nil
-}
-
-// NewTournament ...
-func NewTournament(id protocols.URN, sportID protocols.URN, tournamentCache *TournamentCache, entityFactory protocols.EntityFactory, locales []protocols.Locale) protocols.Tournament {
-	return &tournamentImpl{
-		id:              id,
-		sportID:         sportID,
-		tournamentCache: tournamentCache,
-		entityFactory:   entityFactory,
-		locales:         locales,
-	}
+	tournament := item.tournamentSnapshot(ctx, icon, sportSummary)
+	return &tournament, nil
 }

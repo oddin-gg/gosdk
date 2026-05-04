@@ -1,6 +1,7 @@
 package factory
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
@@ -35,7 +36,13 @@ func (f *FeedMessageFactory) BuildMessage(feedMessage *protocols.FeedMessage) (i
 	var event interface{}
 	switch protocols.EventType(feedMessage.RoutingKey.EventID.Type) {
 	case protocols.TournamentEventType:
-		event = f.entityFactory.BuildTournament(*feedMessage.RoutingKey.EventID, *feedMessage.RoutingKey.SportID, []protocols.Locale{f.oddsFeedConfiguration.DefaultLocale()})
+		// Hot path: AMQP message decode. Uses context.Background() because
+		// BuildMessage doesn't carry a caller ctx today; the data is
+		// expected to be cached after the first encounter.
+		t, err := f.entityFactory.BuildTournament(context.Background(), *feedMessage.RoutingKey.EventID, *feedMessage.RoutingKey.SportID, []protocols.Locale{f.oddsFeedConfiguration.DefaultLocale()})
+		if err == nil && t != nil {
+			event = *t
+		}
 	case protocols.MatchEventType:
 		event = f.entityFactory.BuildMatch(*feedMessage.RoutingKey.EventID, []protocols.Locale{f.oddsFeedConfiguration.DefaultLocale()}, feedMessage.RoutingKey.SportID)
 	}
@@ -120,7 +127,13 @@ func (f *FeedMessageFactory) BuildUnparsableMessage(feedMessage *protocols.FeedM
 	var event interface{}
 	switch protocols.EventType(feedMessage.RoutingKey.EventID.Type) {
 	case protocols.TournamentEventType:
-		event = f.entityFactory.BuildTournament(*feedMessage.RoutingKey.EventID, *feedMessage.RoutingKey.SportID, []protocols.Locale{f.oddsFeedConfiguration.DefaultLocale()})
+		// Hot path: AMQP message decode. Uses context.Background() because
+		// BuildMessage doesn't carry a caller ctx today; the data is
+		// expected to be cached after the first encounter.
+		t, err := f.entityFactory.BuildTournament(context.Background(), *feedMessage.RoutingKey.EventID, *feedMessage.RoutingKey.SportID, []protocols.Locale{f.oddsFeedConfiguration.DefaultLocale()})
+		if err == nil && t != nil {
+			event = *t
+		}
 	case protocols.MatchEventType:
 		event = f.entityFactory.BuildMatch(*feedMessage.RoutingKey.EventID, []protocols.Locale{f.oddsFeedConfiguration.DefaultLocale()}, feedMessage.RoutingKey.SportID)
 	}

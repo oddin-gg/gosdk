@@ -8,8 +8,8 @@ import "context"
 // value struct (or an error). Other Build* methods will follow as each
 // entity is reshaped from interface-with-lazy-loads to value type.
 type EntityFactory interface {
-	BuildTournaments(tournamentIDs []URN, sportID URN, locales []Locale) []Tournament
-	BuildTournament(id URN, sportID URN, locales []Locale) Tournament
+	BuildTournaments(ctx context.Context, ids []URN, sportID URN, locales []Locale) ([]Tournament, error)
+	BuildTournament(ctx context.Context, id URN, sportID URN, locales []Locale) (*Tournament, error)
 	BuildSports(ctx context.Context, locales []Locale) ([]Sport, error)
 	BuildSport(ctx context.Context, id URN, locales []Locale) (*Sport, error)
 	BuildCompetitors(ctx context.Context, ids []URN, locales []Locale) ([]Competitor, error)

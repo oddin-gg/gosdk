@@ -12,32 +12,22 @@ type EntityFactory struct {
 	cacheManager *cache.Manager
 }
 
-// BuildTournaments ...
-func (e *EntityFactory) BuildTournaments(tournamentIDs []protocols.URN, sportID protocols.URN, locales []protocols.Locale) []protocols.Tournament {
-	result := make([]protocols.Tournament, len(tournamentIDs))
-	for i := range tournamentIDs {
-		id := tournamentIDs[i]
-		result[i] = cache.NewTournament(
-			id,
-			sportID,
-			e.cacheManager.TournamentCache,
-			e,
-			locales,
-		)
+// BuildTournaments resolves a slice of Tournament snapshots.
+func (e *EntityFactory) BuildTournaments(ctx context.Context, ids []protocols.URN, sportID protocols.URN, locales []protocols.Locale) ([]protocols.Tournament, error) {
+	result := make([]protocols.Tournament, 0, len(ids))
+	for _, id := range ids {
+		t, err := cache.BuildTournament(ctx, e.cacheManager.TournamentCache, e, id, sportID, locales)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, *t)
 	}
-
-	return result
+	return result, nil
 }
 
-// BuildTournament ...
-func (e *EntityFactory) BuildTournament(id protocols.URN, sportID protocols.URN, locales []protocols.Locale) protocols.Tournament {
-	return cache.NewTournament(
-		id,
-		sportID,
-		e.cacheManager.TournamentCache,
-		e,
-		locales,
-	)
+// BuildTournament resolves a single Tournament snapshot.
+func (e *EntityFactory) BuildTournament(ctx context.Context, id protocols.URN, sportID protocols.URN, locales []protocols.Locale) (*protocols.Tournament, error) {
+	return cache.BuildTournament(ctx, e.cacheManager.TournamentCache, e, id, sportID, locales)
 }
 
 // BuildSports resolves the catalog of Sport snapshots for the given
