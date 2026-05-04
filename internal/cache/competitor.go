@@ -78,42 +78,6 @@ func (l *LocalizedCompetitor) LocalizedName(locale protocols.Locale) (*string, e
 	return &v, nil
 }
 
-func (l *LocalizedCompetitor) names() map[protocols.Locale]string {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	out := make(map[protocols.Locale]string, len(l.name))
-	for k, v := range l.name {
-		out[k] = v
-	}
-	return out
-}
-
-func (l *LocalizedCompetitor) abbreviations() map[protocols.Locale]string {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	out := make(map[protocols.Locale]string, len(l.abbreviation))
-	for k, v := range l.abbreviation {
-		out[k] = v
-	}
-	return out
-}
-
-func (l *LocalizedCompetitor) localizedAbbreviation(locale protocols.Locale) (*string, error) {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	v, ok := l.abbreviation[locale]
-	if !ok {
-		return nil, fmt.Errorf("missing locale %s", locale)
-	}
-	return &v, nil
-}
-
-func (l *LocalizedCompetitor) getUnderage() *protocols.UnderageStatus {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	return l.underage
-}
-
 func (l *LocalizedCompetitor) playerURNs() []protocols.URN {
 	l.mu.RLock()
 	defer l.mu.RUnlock()

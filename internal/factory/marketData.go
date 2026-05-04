@@ -127,7 +127,7 @@ func (m marketDataImpl) makeOutcomeName(outcomeName *string, locale protocols.Lo
 }
 
 func (m marketDataImpl) makeMarketName(marketName string, locale protocols.Locale) (*string, error) {
-	if m.specifiers == nil || len(m.specifiers) == 0 {
+	if len(m.specifiers) == 0 {
 		return &marketName, nil
 	}
 

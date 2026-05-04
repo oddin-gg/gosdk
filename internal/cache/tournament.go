@@ -2,7 +2,6 @@ package cache
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"time"
 
@@ -74,32 +73,6 @@ func (l *LocalizedTournament) Locales() []protocols.Locale {
 		out = append(out, locale)
 	}
 	return out
-}
-
-func (l *LocalizedTournament) localizedName(locale protocols.Locale) (*string, error) {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	v, ok := l.name[locale]
-	if !ok {
-		return nil, fmt.Errorf("missing locale %s", locale)
-	}
-	return &v, nil
-}
-
-func (l *LocalizedTournament) localizedAbbreviation(locale protocols.Locale) (*string, error) {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	v, ok := l.abbreviation[locale]
-	if !ok {
-		return nil, fmt.Errorf("missing locale %s", locale)
-	}
-	return &v, nil
-}
-
-func (l *LocalizedTournament) snapshot() (start, end, sched, schedEnd *time.Time, riskTier int, cat *apiXML.Category) {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	return l.startDate, l.endDate, l.scheduledTime, l.scheduledEndTime, l.riskTier, l.category
 }
 
 func (l *LocalizedTournament) competitorIDList() []protocols.URN {
