@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/oddin-gg/gosdk/internal/api"
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 )
 
 type bookmakerDetailImpl struct {
@@ -31,20 +31,20 @@ func (b bookmakerDetailImpl) VirtualHost() string {
 // Manager ...
 type Manager struct {
 	mu        sync.Mutex
-	cached    protocols.BookmakerDetail
-	cfg       protocols.OddsFeedConfiguration
+	cached    types.BookmakerDetail
+	cfg       types.OddsFeedConfiguration
 	apiClient *api.Client
 	logger    *slog.Logger
 }
 
 // NewManager ...
-func NewManager(cfg protocols.OddsFeedConfiguration, client *api.Client) protocols.WhoAmIManager {
+func NewManager(cfg types.OddsFeedConfiguration, client *api.Client) types.WhoAmIManager {
 	return NewManagerWithLogger(cfg, client, nil)
 }
 
 // NewManagerWithLogger constructs a WhoAmIManager with a caller-supplied
 // slog.Logger; pass nil for slog.Default().
-func NewManagerWithLogger(cfg protocols.OddsFeedConfiguration, client *api.Client, logger *slog.Logger) protocols.WhoAmIManager {
+func NewManagerWithLogger(cfg types.OddsFeedConfiguration, client *api.Client, logger *slog.Logger) types.WhoAmIManager {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -59,7 +59,7 @@ func NewManagerWithLogger(cfg protocols.OddsFeedConfiguration, client *api.Clien
 //
 // Concurrent callers serialize on the manager's mutex so that only one fetch
 // is in flight; later callers re-use the cached result.
-func (m *Manager) BookmakerDetails(ctx context.Context) (protocols.BookmakerDetail, error) {
+func (m *Manager) BookmakerDetails(ctx context.Context) (types.BookmakerDetail, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 

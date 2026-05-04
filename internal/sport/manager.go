@@ -9,15 +9,15 @@ import (
 	"github.com/oddin-gg/gosdk/internal/api"
 	"github.com/oddin-gg/gosdk/internal/cache"
 	"github.com/oddin-gg/gosdk/internal/factory"
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 )
 
 type fixtureChangeImpl struct {
-	id          protocols.URN
+	id          types.URN
 	updatedTime time.Time
 }
 
-func (f fixtureChangeImpl) SportEventID() protocols.URN {
+func (f fixtureChangeImpl) SportEventID() types.URN {
 	return f.id
 }
 
@@ -34,35 +34,35 @@ func (f fixtureChangeImpl) UpdateTime() time.Time {
 type Manager struct {
 	entityFactory         *factory.EntityFactory
 	apiClient             *api.Client
-	oddsFeedConfiguration protocols.OddsFeedConfiguration
+	oddsFeedConfiguration types.OddsFeedConfiguration
 	cacheManager          *cache.Manager
 }
 
 // Sports ...
-func (m *Manager) Sports(ctx context.Context) ([]protocols.Sport, error) {
+func (m *Manager) Sports(ctx context.Context) ([]types.Sport, error) {
 	return m.LocalizedSports(ctx, m.oddsFeedConfiguration.DefaultLocale())
 }
 
 // LocalizedSports ...
-func (m *Manager) LocalizedSports(ctx context.Context, locale protocols.Locale) ([]protocols.Sport, error) {
-	return m.entityFactory.BuildSports(ctx, []protocols.Locale{locale})
+func (m *Manager) LocalizedSports(ctx context.Context, locale types.Locale) ([]types.Sport, error) {
+	return m.entityFactory.BuildSports(ctx, []types.Locale{locale})
 }
 
 // ActiveTournaments ...
-func (m *Manager) ActiveTournaments(ctx context.Context) ([]protocols.Tournament, error) {
+func (m *Manager) ActiveTournaments(ctx context.Context) ([]types.Tournament, error) {
 	return m.LocalizedActiveTournaments(ctx, m.oddsFeedConfiguration.DefaultLocale())
 }
 
 // LocalizedActiveTournaments ...
-func (m *Manager) LocalizedActiveTournaments(ctx context.Context, locale protocols.Locale) ([]protocols.Tournament, error) {
+func (m *Manager) LocalizedActiveTournaments(ctx context.Context, locale types.Locale) ([]types.Tournament, error) {
 	sports, err := m.LocalizedSports(ctx, locale)
 	if err != nil {
 		return nil, err
 	}
 
-	var result []protocols.Tournament
+	var result []types.Tournament
 	for _, sport := range sports {
-		tournaments, err := m.entityFactory.BuildTournaments(ctx, sport.TournamentIDs, sport.ID, []protocols.Locale{locale})
+		tournaments, err := m.entityFactory.BuildTournaments(ctx, sport.TournamentIDs, sport.ID, []types.Locale{locale})
 		if err != nil {
 			return nil, err
 		}
@@ -73,12 +73,12 @@ func (m *Manager) LocalizedActiveTournaments(ctx context.Context, locale protoco
 }
 
 // SportActiveTournaments ...
-func (m *Manager) SportActiveTournaments(ctx context.Context, sportName string) ([]protocols.Tournament, error) {
+func (m *Manager) SportActiveTournaments(ctx context.Context, sportName string) ([]types.Tournament, error) {
 	return m.LocalizedSportActiveTournaments(ctx, sportName, m.oddsFeedConfiguration.DefaultLocale())
 }
 
 // LocalizedSportActiveTournaments ...
-func (m *Manager) LocalizedSportActiveTournaments(ctx context.Context, sportName string, locale protocols.Locale) ([]protocols.Tournament, error) {
+func (m *Manager) LocalizedSportActiveTournaments(ctx context.Context, sportName string, locale types.Locale) ([]types.Tournament, error) {
 	sports, err := m.Sports(ctx)
 	if err != nil {
 		return nil, err
@@ -90,7 +90,7 @@ func (m *Manager) LocalizedSportActiveTournaments(ctx context.Context, sportName
 			continue
 		}
 		if strings.EqualFold(name, sportName) {
-			return m.entityFactory.BuildTournaments(ctx, sport.TournamentIDs, sport.ID, []protocols.Locale{locale})
+			return m.entityFactory.BuildTournaments(ctx, sport.TournamentIDs, sport.ID, []types.Locale{locale})
 		}
 	}
 
@@ -98,24 +98,24 @@ func (m *Manager) LocalizedSportActiveTournaments(ctx context.Context, sportName
 }
 
 // MatchesFor ...
-func (m *Manager) MatchesFor(ctx context.Context, date time.Time) ([]protocols.Match, error) {
+func (m *Manager) MatchesFor(ctx context.Context, date time.Time) ([]types.Match, error) {
 	return m.LocalizedMatchesFor(ctx, date, m.oddsFeedConfiguration.DefaultLocale())
 }
 
 // LocalizedMatchesFor ...
-func (m *Manager) LocalizedMatchesFor(ctx context.Context, date time.Time, locale protocols.Locale) ([]protocols.Match, error) {
+func (m *Manager) LocalizedMatchesFor(ctx context.Context, date time.Time, locale types.Locale) ([]types.Match, error) {
 	data, err := m.apiClient.FetchMatches(ctx, date, locale)
 	if err != nil {
 		return nil, err
 	}
 
-	result := make([]protocols.Match, 0, len(data))
+	result := make([]types.Match, 0, len(data))
 	for i := range data {
-		id, err := protocols.ParseURN(data[i].ID)
+		id, err := types.ParseURN(data[i].ID)
 		if err != nil {
 			return nil, err
 		}
-		match, err := m.entityFactory.BuildMatch(ctx, *id, []protocols.Locale{locale}, nil)
+		match, err := m.entityFactory.BuildMatch(ctx, *id, []types.Locale{locale}, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -126,24 +126,24 @@ func (m *Manager) LocalizedMatchesFor(ctx context.Context, date time.Time, local
 }
 
 // LiveMatches ...
-func (m *Manager) LiveMatches(ctx context.Context) ([]protocols.Match, error) {
+func (m *Manager) LiveMatches(ctx context.Context) ([]types.Match, error) {
 	return m.LocalizedLiveMatches(ctx, m.oddsFeedConfiguration.DefaultLocale())
 }
 
 // LocalizedLiveMatches ...
-func (m *Manager) LocalizedLiveMatches(ctx context.Context, locale protocols.Locale) ([]protocols.Match, error) {
+func (m *Manager) LocalizedLiveMatches(ctx context.Context, locale types.Locale) ([]types.Match, error) {
 	data, err := m.apiClient.FetchLiveMatches(ctx, locale)
 	if err != nil {
 		return nil, err
 	}
 
-	result := make([]protocols.Match, 0, len(data))
+	result := make([]types.Match, 0, len(data))
 	for i := range data {
-		id, err := protocols.ParseURN(data[i].ID)
+		id, err := types.ParseURN(data[i].ID)
 		if err != nil {
 			return nil, err
 		}
-		match, err := m.entityFactory.BuildMatch(ctx, *id, []protocols.Locale{locale}, nil)
+		match, err := m.entityFactory.BuildMatch(ctx, *id, []types.Locale{locale}, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -154,49 +154,49 @@ func (m *Manager) LocalizedLiveMatches(ctx context.Context, locale protocols.Loc
 }
 
 // Match ...
-func (m *Manager) Match(ctx context.Context, id protocols.URN) (protocols.Match, error) {
+func (m *Manager) Match(ctx context.Context, id types.URN) (types.Match, error) {
 	return m.LocalizedMatch(ctx, id, m.oddsFeedConfiguration.DefaultLocale())
 }
 
 // LocalizedMatch ...
-func (m *Manager) LocalizedMatch(ctx context.Context, id protocols.URN, locale protocols.Locale) (protocols.Match, error) {
-	match, err := m.entityFactory.BuildMatch(ctx, id, []protocols.Locale{locale}, nil)
+func (m *Manager) LocalizedMatch(ctx context.Context, id types.URN, locale types.Locale) (types.Match, error) {
+	match, err := m.entityFactory.BuildMatch(ctx, id, []types.Locale{locale}, nil)
 	if err != nil {
-		return protocols.Match{}, err
+		return types.Match{}, err
 	}
 	return *match, nil
 }
 
 // Competitor ...
-func (m *Manager) Competitor(ctx context.Context, id protocols.URN) (protocols.Competitor, error) {
+func (m *Manager) Competitor(ctx context.Context, id types.URN) (types.Competitor, error) {
 	return m.LocalizedCompetitor(ctx, id, m.oddsFeedConfiguration.DefaultLocale())
 }
 
 // LocalizedCompetitor ...
-func (m *Manager) LocalizedCompetitor(ctx context.Context, id protocols.URN, locale protocols.Locale) (protocols.Competitor, error) {
-	c, err := m.entityFactory.BuildCompetitor(ctx, id, []protocols.Locale{locale})
+func (m *Manager) LocalizedCompetitor(ctx context.Context, id types.URN, locale types.Locale) (types.Competitor, error) {
+	c, err := m.entityFactory.BuildCompetitor(ctx, id, []types.Locale{locale})
 	if err != nil {
-		return protocols.Competitor{}, err
+		return types.Competitor{}, err
 	}
 	return *c, nil
 }
 
 // FixtureChanges ...
-func (m *Manager) FixtureChanges(ctx context.Context, after time.Time) ([]protocols.FixtureChange, error) {
+func (m *Manager) FixtureChanges(ctx context.Context, after time.Time) ([]types.FixtureChange, error) {
 	return m.LocalizedFixtureChanges(ctx, m.oddsFeedConfiguration.DefaultLocale(), after)
 }
 
 // LocalizedFixtureChanges ...
-func (m *Manager) LocalizedFixtureChanges(ctx context.Context, locale protocols.Locale, after time.Time) ([]protocols.FixtureChange, error) {
+func (m *Manager) LocalizedFixtureChanges(ctx context.Context, locale types.Locale, after time.Time) ([]types.FixtureChange, error) {
 	data, err := m.apiClient.FetchFixtureChanges(ctx, locale, after)
 	if err != nil {
 		return nil, err
 	}
 
-	result := make([]protocols.FixtureChange, len(data))
+	result := make([]types.FixtureChange, len(data))
 	for i := range data {
 		fixtureChange := data[i]
-		id, err := protocols.ParseURN(fixtureChange.SportEventID)
+		id, err := types.ParseURN(fixtureChange.SportEventID)
 		if err != nil {
 			return nil, err
 		}
@@ -211,12 +211,12 @@ func (m *Manager) LocalizedFixtureChanges(ctx context.Context, locale protocols.
 }
 
 // ListOfMatches ...
-func (m *Manager) ListOfMatches(ctx context.Context, startIndex uint, limit uint) ([]protocols.Match, error) {
+func (m *Manager) ListOfMatches(ctx context.Context, startIndex uint, limit uint) ([]types.Match, error) {
 	return m.LocalizedListOfMatches(ctx, startIndex, limit, m.oddsFeedConfiguration.DefaultLocale())
 }
 
 // LocalizedListOfMatches ...
-func (m *Manager) LocalizedListOfMatches(ctx context.Context, startIndex uint, limit uint, locale protocols.Locale) ([]protocols.Match, error) {
+func (m *Manager) LocalizedListOfMatches(ctx context.Context, startIndex uint, limit uint, locale types.Locale) ([]types.Match, error) {
 	switch {
 	case limit > 1000:
 		return nil, fmt.Errorf("max limit is 1000")
@@ -229,13 +229,13 @@ func (m *Manager) LocalizedListOfMatches(ctx context.Context, startIndex uint, l
 		return nil, err
 	}
 
-	result := make([]protocols.Match, 0, len(data))
+	result := make([]types.Match, 0, len(data))
 	for i := range data {
-		id, err := protocols.ParseURN(data[i].ID)
+		id, err := types.ParseURN(data[i].ID)
 		if err != nil {
 			return nil, err
 		}
-		match, err := m.entityFactory.BuildMatch(ctx, *id, []protocols.Locale{locale}, nil)
+		match, err := m.entityFactory.BuildMatch(ctx, *id, []types.Locale{locale}, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -246,24 +246,24 @@ func (m *Manager) LocalizedListOfMatches(ctx context.Context, startIndex uint, l
 }
 
 // AvailableTournaments ...
-func (m *Manager) AvailableTournaments(ctx context.Context, sportID protocols.URN) ([]protocols.Tournament, error) {
+func (m *Manager) AvailableTournaments(ctx context.Context, sportID types.URN) ([]types.Tournament, error) {
 	return m.LocalizedAvailableTournaments(ctx, sportID, m.oddsFeedConfiguration.DefaultLocale())
 }
 
 // LocalizedAvailableTournaments ...
-func (m *Manager) LocalizedAvailableTournaments(ctx context.Context, sportID protocols.URN, locale protocols.Locale) ([]protocols.Tournament, error) {
+func (m *Manager) LocalizedAvailableTournaments(ctx context.Context, sportID types.URN, locale types.Locale) ([]types.Tournament, error) {
 	data, err := m.apiClient.FetchTournaments(ctx, sportID, locale)
 	if err != nil {
 		return nil, err
 	}
 
-	result := make([]protocols.Tournament, 0, len(data))
+	result := make([]types.Tournament, 0, len(data))
 	for i := range data {
-		id, err := protocols.ParseURN(data[i].ID)
+		id, err := types.ParseURN(data[i].ID)
 		if err != nil {
 			return nil, err
 		}
-		t, err := m.entityFactory.BuildTournament(ctx, *id, sportID, []protocols.Locale{locale})
+		t, err := m.entityFactory.BuildTournament(ctx, *id, sportID, []types.Locale{locale})
 		if err != nil {
 			return nil, err
 		}
@@ -274,22 +274,22 @@ func (m *Manager) LocalizedAvailableTournaments(ctx context.Context, sportID pro
 }
 
 // ClearMatch ...
-func (m *Manager) ClearMatch(id protocols.URN) {
+func (m *Manager) ClearMatch(id types.URN) {
 	m.cacheManager.MatchCache.ClearCacheItem(id)
 }
 
 // ClearTournament ...
-func (m *Manager) ClearTournament(id protocols.URN) {
+func (m *Manager) ClearTournament(id types.URN) {
 	m.cacheManager.TournamentCache.ClearCacheItem(id)
 }
 
 // ClearCompetitor ...
-func (m *Manager) ClearCompetitor(id protocols.URN) {
+func (m *Manager) ClearCompetitor(id types.URN) {
 	m.cacheManager.CompetitorCache.ClearCacheItem(id)
 }
 
 // NewManager ...
-func NewManager(entityFactory *factory.EntityFactory, apiClient *api.Client, cacheManager *cache.Manager, oddsFeedConfiguration protocols.OddsFeedConfiguration) *Manager {
+func NewManager(entityFactory *factory.EntityFactory, apiClient *api.Client, cacheManager *cache.Manager, oddsFeedConfiguration types.OddsFeedConfiguration) *Manager {
 	return &Manager{
 		entityFactory:         entityFactory,
 		apiClient:             apiClient,

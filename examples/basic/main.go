@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/oddin-gg/gosdk"
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 )
 
 func main() {
@@ -36,7 +36,7 @@ func main() {
 	}()
 
 	sub, err := c.Subscribe(context.Background(),
-		gosdk.WithMessageInterest(protocols.AllMessageInterest),
+		gosdk.WithMessageInterest(types.AllMessageInterest),
 	)
 	if err != nil {
 		log.Fatalf("subscribe: %v", err)
@@ -45,11 +45,11 @@ func main() {
 	go func() {
 		for msg := range sub.Messages() {
 			switch m := msg.Message.(type) {
-			case protocols.OddsChange:
+			case types.OddsChange:
 				log.Printf("odds change: event=%v markets=%d", m.Event(), len(m.Markets()))
-			case protocols.BetSettlement:
+			case types.BetSettlement:
 				log.Printf("settlement: event=%v", m.Event())
-			case protocols.BetCancel:
+			case types.BetCancel:
 				log.Printf("cancel: event=%v", m.Event())
 			default:
 				if msg.UnparsableMessage != nil {
@@ -72,13 +72,13 @@ func envOrDie(key string) string {
 	return v
 }
 
-func parseEnvironment() protocols.Environment {
+func parseEnvironment() types.Environment {
 	switch os.Getenv("ENV") {
 	case "production":
-		return protocols.ProductionEnvironment
+		return types.ProductionEnvironment
 	case "test":
-		return protocols.TestEnvironment
+		return types.TestEnvironment
 	default:
-		return protocols.IntegrationEnvironment
+		return types.IntegrationEnvironment
 	}
 }

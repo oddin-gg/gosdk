@@ -16,7 +16,7 @@ import (
 
 	"github.com/cenkalti/backoff/v5"
 	data "github.com/oddin-gg/gosdk/internal/api/xml"
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 )
 
 const (
@@ -30,7 +30,7 @@ const (
 
 // Observer ...
 type Observer interface {
-	OnAPIResponse(apiResponse protocols.Response)
+	OnAPIResponse(apiResponse types.Response)
 }
 
 // APIEvent describes a single HTTP attempt the API client made: the
@@ -45,7 +45,7 @@ type APIEvent struct {
 	Status    int // 0 on transport-level errors (no HTTP response)
 	Latency   time.Duration
 	Attempt   int
-	Locale    *protocols.Locale
+	Locale    *types.Locale
 	Request   []byte // empty unless EventCapture.RequestBody is set
 	Response  []byte // empty unless EventCapture.ResponseBody is set
 	Truncated bool
@@ -67,24 +67,24 @@ type EventCapture struct {
 
 // Client ...
 type Client struct {
-	cfg         protocols.OddsFeedConfiguration
+	cfg         types.OddsFeedConfiguration
 	httpClient  *http.Client
 	logger      *slog.Logger
 	maxRetries  uint
 	mu          sync.RWMutex
-	msgCh       chan protocols.Response
+	msgCh       chan types.Response
 	observers   []Observer
 	capture     EventCapture
 	closed      bool
 }
 
 // New constructs an API client. Pass a nil logger to fall back to slog.Default().
-func New(cfg protocols.OddsFeedConfiguration) *Client {
+func New(cfg types.OddsFeedConfiguration) *Client {
 	return NewWithLogger(cfg, nil)
 }
 
 // NewWithLogger constructs an API client with a caller-provided slog.Logger.
-func NewWithLogger(cfg protocols.OddsFeedConfiguration, logger *slog.Logger) *Client {
+func NewWithLogger(cfg types.OddsFeedConfiguration, logger *slog.Logger) *Client {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -99,10 +99,10 @@ func NewWithLogger(cfg protocols.OddsFeedConfiguration, logger *slog.Logger) *Cl
 
 // Open enables async API-response streaming via the returned channel.
 // Used by the cache layer; will be retired in Phase 6.
-func (c *Client) Open() <-chan protocols.Response {
+func (c *Client) Open() <-chan types.Response {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.msgCh = make(chan protocols.Response)
+	c.msgCh = make(chan types.Response)
 	return c.msgCh
 }
 
@@ -165,7 +165,7 @@ func (c *Client) FetchProducers(ctx context.Context) ([]data.Producer, error) {
 }
 
 // FetchSports ...
-func (c *Client) FetchSports(ctx context.Context, locale protocols.Locale) ([]data.Sport, error) {
+func (c *Client) FetchSports(ctx context.Context, locale types.Locale) ([]data.Sport, error) {
 	var resp data.SportsResponse
 	if err := c.fetchData(ctx, fmt.Sprintf("/sports/%s/sports", locale), &resp, &locale); err != nil {
 		return nil, err
@@ -174,7 +174,7 @@ func (c *Client) FetchSports(ctx context.Context, locale protocols.Locale) ([]da
 }
 
 // FetchMatchStatusDescriptions ...
-func (c *Client) FetchMatchStatusDescriptions(ctx context.Context, locale protocols.Locale) ([]data.MatchStatus, error) {
+func (c *Client) FetchMatchStatusDescriptions(ctx context.Context, locale types.Locale) ([]data.MatchStatus, error) {
 	var resp data.MatchStatusDescriptionResponse
 	if err := c.fetchData(ctx, fmt.Sprintf("/descriptions/%s/match_status", locale), &resp, &locale); err != nil {
 		return nil, err
@@ -183,7 +183,7 @@ func (c *Client) FetchMatchStatusDescriptions(ctx context.Context, locale protoc
 }
 
 // FetchFixtureChanges ...
-func (c *Client) FetchFixtureChanges(ctx context.Context, locale protocols.Locale, after time.Time) ([]data.FixtureChange, error) {
+func (c *Client) FetchFixtureChanges(ctx context.Context, locale types.Locale, after time.Time) ([]data.FixtureChange, error) {
 	path := fmt.Sprintf("/sports/%s/fixtures/changes", locale)
 	if !after.IsZero() {
 		path = fmt.Sprintf("%s?after=%d", path, after.UnixNano()/1e6)
@@ -196,7 +196,7 @@ func (c *Client) FetchFixtureChanges(ctx context.Context, locale protocols.Local
 }
 
 // FetchFixture ...
-func (c *Client) FetchFixture(ctx context.Context, id protocols.URN, locale protocols.Locale) (*data.Fixture, error) {
+func (c *Client) FetchFixture(ctx context.Context, id types.URN, locale types.Locale) (*data.Fixture, error) {
 	var resp data.FixtureResponse
 	if err := c.fetchData(ctx, fmt.Sprintf("/sports/%s/sport_events/%s/fixture", locale, id.ToString()), &resp, &locale); err != nil {
 		return nil, err
@@ -205,7 +205,7 @@ func (c *Client) FetchFixture(ctx context.Context, id protocols.URN, locale prot
 }
 
 // FetchSchedule ...
-func (c *Client) FetchSchedule(ctx context.Context, startIndex, limit uint, locale protocols.Locale) ([]data.SportEvent, error) {
+func (c *Client) FetchSchedule(ctx context.Context, startIndex, limit uint, locale types.Locale) ([]data.SportEvent, error) {
 	var resp data.ScheduleResponse
 	if err := c.fetchData(ctx, fmt.Sprintf("/sports/%s/schedules/pre/schedule?start=%d&limit=%d", locale, startIndex, limit), &resp, &locale); err != nil {
 		return nil, err
@@ -214,7 +214,7 @@ func (c *Client) FetchSchedule(ctx context.Context, startIndex, limit uint, loca
 }
 
 // FetchTournaments ...
-func (c *Client) FetchTournaments(ctx context.Context, sportID protocols.URN, locale protocols.Locale) ([]data.Tournament, error) {
+func (c *Client) FetchTournaments(ctx context.Context, sportID types.URN, locale types.Locale) ([]data.Tournament, error) {
 	var resp data.SportTournamentsResponse
 	if err := c.fetchData(ctx, fmt.Sprintf("/sports/%s/sports/%s/tournaments", locale, sportID.ToString()), &resp, &locale); err != nil {
 		return nil, err
@@ -226,7 +226,7 @@ func (c *Client) FetchTournaments(ctx context.Context, sportID protocols.URN, lo
 }
 
 // FetchTournament ...
-func (c *Client) FetchTournament(ctx context.Context, id protocols.URN, locale protocols.Locale) (*data.TournamentExtended, error) {
+func (c *Client) FetchTournament(ctx context.Context, id types.URN, locale types.Locale) (*data.TournamentExtended, error) {
 	var resp data.SportTournamentInfoResponse
 	if err := c.fetchData(ctx, fmt.Sprintf("/sports/%s/tournaments/%s/info", locale, id.ToString()), &resp, &locale); err != nil {
 		return nil, err
@@ -235,7 +235,7 @@ func (c *Client) FetchTournament(ctx context.Context, id protocols.URN, locale p
 }
 
 // FetchCompetitorProfile ...
-func (c *Client) FetchCompetitorProfile(ctx context.Context, id protocols.URN, locale protocols.Locale) (*data.TeamExtended, error) {
+func (c *Client) FetchCompetitorProfile(ctx context.Context, id types.URN, locale types.Locale) (*data.TeamExtended, error) {
 	resp, err := c.FetchCompetitorProfileWithPlayers(ctx, id, locale)
 	if err != nil {
 		return nil, err
@@ -244,7 +244,7 @@ func (c *Client) FetchCompetitorProfile(ctx context.Context, id protocols.URN, l
 }
 
 // FetchCompetitorProfileWithPlayers ...
-func (c *Client) FetchCompetitorProfileWithPlayers(ctx context.Context, id protocols.URN, locale protocols.Locale) (*data.CompetitorResponse, error) {
+func (c *Client) FetchCompetitorProfileWithPlayers(ctx context.Context, id types.URN, locale types.Locale) (*data.CompetitorResponse, error) {
 	var resp data.CompetitorResponse
 	if err := c.fetchData(ctx, fmt.Sprintf("/sports/%s/competitors/%s/profile", locale, id.ToString()), &resp, &locale); err != nil {
 		return nil, err
@@ -253,7 +253,7 @@ func (c *Client) FetchCompetitorProfileWithPlayers(ctx context.Context, id proto
 }
 
 // FetchMatchSummary ...
-func (c *Client) FetchMatchSummary(ctx context.Context, id protocols.URN, locale protocols.Locale) (*data.MatchSummaryResponse, error) {
+func (c *Client) FetchMatchSummary(ctx context.Context, id types.URN, locale types.Locale) (*data.MatchSummaryResponse, error) {
 	var resp data.MatchSummaryResponse
 	if err := c.fetchData(ctx, fmt.Sprintf("/sports/%s/sport_events/%s/summary", locale, id.ToString()), &resp, &locale); err != nil {
 		return nil, err
@@ -262,7 +262,7 @@ func (c *Client) FetchMatchSummary(ctx context.Context, id protocols.URN, locale
 }
 
 // FetchLiveMatches ...
-func (c *Client) FetchLiveMatches(ctx context.Context, locale protocols.Locale) ([]data.SportEvent, error) {
+func (c *Client) FetchLiveMatches(ctx context.Context, locale types.Locale) ([]data.SportEvent, error) {
 	var resp data.ScheduleResponse
 	if err := c.fetchData(ctx, fmt.Sprintf("/sports/%s/schedules/live/schedule", locale), &resp, &locale); err != nil {
 		return nil, err
@@ -271,7 +271,7 @@ func (c *Client) FetchLiveMatches(ctx context.Context, locale protocols.Locale) 
 }
 
 // FetchMatches ...
-func (c *Client) FetchMatches(ctx context.Context, t time.Time, locale protocols.Locale) ([]data.SportEvent, error) {
+func (c *Client) FetchMatches(ctx context.Context, t time.Time, locale types.Locale) ([]data.SportEvent, error) {
 	var resp data.ScheduleResponse
 	if err := c.fetchData(ctx, fmt.Sprintf("/sports/%s/schedules/%s/schedule", locale, t.Format(timeLayout)), &resp, &locale); err != nil {
 		return nil, err
@@ -280,7 +280,7 @@ func (c *Client) FetchMatches(ctx context.Context, t time.Time, locale protocols
 }
 
 // FetchMarketDescriptions ...
-func (c *Client) FetchMarketDescriptions(ctx context.Context, locale protocols.Locale) ([]data.MarketDescription, error) {
+func (c *Client) FetchMarketDescriptions(ctx context.Context, locale types.Locale) ([]data.MarketDescription, error) {
 	var resp data.MarketDescriptionResponse
 	if err := c.fetchData(ctx, fmt.Sprintf("/descriptions/%s/markets", locale), &resp, &locale); err != nil {
 		return nil, err
@@ -293,7 +293,7 @@ func (c *Client) FetchMarketDescriptionsWithDynamicOutcomes(
 	ctx context.Context,
 	marketTypeID uint,
 	marketVariant string,
-	locale protocols.Locale,
+	locale types.Locale,
 ) ([]data.MarketDescription, error) {
 	var resp data.MarketDescriptionResponse
 	if err := c.fetchData(
@@ -317,7 +317,7 @@ func (c *Client) FetchMarketVoidReasons(ctx context.Context) ([]data.MarketVoidR
 }
 
 // FetchPlayerProfile ...
-func (c *Client) FetchPlayerProfile(ctx context.Context, playerID string, locale protocols.Locale) (*data.PlayerProfile, error) {
+func (c *Client) FetchPlayerProfile(ctx context.Context, playerID string, locale types.Locale) (*data.PlayerProfile, error) {
 	var resp data.PlayerProfile
 	if err := c.fetchData(ctx, fmt.Sprintf("/sports/%s/players/%s/profile", locale, playerID), &resp, &locale); err != nil {
 		return nil, err
@@ -326,7 +326,7 @@ func (c *Client) FetchPlayerProfile(ctx context.Context, playerID string, locale
 }
 
 // PostEventStatefulRecovery ...
-func (c *Client) PostEventStatefulRecovery(ctx context.Context, producerName string, eventID protocols.URN, requestID uint, nodeID *int) (bool, error) {
+func (c *Client) PostEventStatefulRecovery(ctx context.Context, producerName string, eventID types.URN, requestID uint, nodeID *int) (bool, error) {
 	path := fmt.Sprintf("/%s/stateful_messages/events/%s/initiate_request?request_id=%d", producerName, eventID.ToString(), requestID)
 	if nodeID != nil {
 		path = fmt.Sprintf("%s&node_id=%d", path, *nodeID)
@@ -335,7 +335,7 @@ func (c *Client) PostEventStatefulRecovery(ctx context.Context, producerName str
 }
 
 // PostEventOddsRecovery ...
-func (c *Client) PostEventOddsRecovery(ctx context.Context, producerName string, eventID protocols.URN, requestID uint, nodeID *int) (bool, error) {
+func (c *Client) PostEventOddsRecovery(ctx context.Context, producerName string, eventID types.URN, requestID uint, nodeID *int) (bool, error) {
 	path := fmt.Sprintf("/%s/odds/events/%s/initiate_request?request_id=%d", producerName, eventID.ToString(), requestID)
 	if nodeID != nil {
 		path = fmt.Sprintf("%s&node_id=%d", path, *nodeID)
@@ -387,7 +387,7 @@ func (c *Client) FetchReplaySetContent(ctx context.Context, nodeID *int) ([]data
 }
 
 // PutReplayEvent ...
-func (c *Client) PutReplayEvent(ctx context.Context, eventID protocols.URN, nodeID *int) (bool, error) {
+func (c *Client) PutReplayEvent(ctx context.Context, eventID types.URN, nodeID *int) (bool, error) {
 	path := fmt.Sprintf("/replay/events/%s", eventID.ToString())
 	if nodeID != nil {
 		path = fmt.Sprintf("%s?node_id=%d", path, *nodeID)
@@ -396,7 +396,7 @@ func (c *Client) PutReplayEvent(ctx context.Context, eventID protocols.URN, node
 }
 
 // DeleteReplayEvent ...
-func (c *Client) DeleteReplayEvent(ctx context.Context, eventID protocols.URN, nodeID *int) (bool, error) {
+func (c *Client) DeleteReplayEvent(ctx context.Context, eventID types.URN, nodeID *int) (bool, error) {
 	path := fmt.Sprintf("/replay/events/%s", eventID.ToString())
 	if nodeID != nil {
 		path = fmt.Sprintf("%s?node_id=%d", path, *nodeID)
@@ -445,7 +445,7 @@ func (c *Client) PostReplayStart(
 
 // fetchData performs a GET, decodes the XML body into entity, and broadcasts
 // the response to observers and the optional Open() channel.
-func (c *Client) fetchData(ctx context.Context, path string, entity interface{}, locale *protocols.Locale) error {
+func (c *Client) fetchData(ctx context.Context, path string, entity interface{}, locale *types.Locale) error {
 	resp, err := c.do(ctx, http.MethodGet, path)
 	if err != nil {
 		return err
@@ -456,11 +456,11 @@ func (c *Client) fetchData(ctx context.Context, path string, entity interface{},
 		return fmt.Errorf("api: decode %s: %w", path, err)
 	}
 
-	if rwc, ok := entity.(protocols.ResponseWithCode); ok && rwc.Code() != protocols.OkResponseCode {
+	if rwc, ok := entity.(types.ResponseWithCode); ok && rwc.Code() != types.OkResponseCode {
 		return fmt.Errorf("api: not acceptable response code from %s: %s", path, rwc.Code())
 	}
 
-	apiResponse := protocols.Response{
+	apiResponse := types.Response{
 		Data:   entity,
 		URL:    resp.Request.URL,
 		Locale: locale,
@@ -629,7 +629,7 @@ func (c *Client) captureBody(r *http.Response) ([]byte, bool, bool) {
 }
 
 // emitEvent fires a metadata-only APIEvent (no bytes).
-func (c *Client) emitEvent(req *http.Request, status int, latency time.Duration, attempt int, locale *protocols.Locale, err error) {
+func (c *Client) emitEvent(req *http.Request, status int, latency time.Duration, attempt int, locale *types.Locale, err error) {
 	c.emitEventBytes(req, status, latency, attempt, nil, false, err)
 }
 

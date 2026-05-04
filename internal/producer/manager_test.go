@@ -13,35 +13,35 @@ import (
 
 	"github.com/oddin-gg/gosdk/internal/api"
 	log "github.com/oddin-gg/gosdk/internal/log"
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 )
 
-// minimalCfg satisfies protocols.OddsFeedConfiguration for tests.
+// minimalCfg satisfies types.OddsFeedConfiguration for tests.
 type minimalCfg struct {
 	apiURL string
 	token  string
 }
 
 func (c *minimalCfg) AccessToken() *string                                       { return &c.token }
-func (c *minimalCfg) DefaultLocale() protocols.Locale                            { return protocols.EnLocale }
+func (c *minimalCfg) DefaultLocale() types.Locale                            { return types.EnLocale }
 func (c *minimalCfg) MaxInactivitySeconds() int                                  { return 20 }
 func (c *minimalCfg) MaxRecoveryExecutionMinutes() int                           { return 360 }
 func (c *minimalCfg) MessagingPort() int                                         { return 5672 }
 func (c *minimalCfg) SdkNodeID() *int                                            { return nil }
-func (c *minimalCfg) SelectedEnvironment() *protocols.Environment                { return nil }
-func (c *minimalCfg) SelectedRegion() protocols.Region                           { return protocols.RegionDefault }
-func (c *minimalCfg) SetRegion(protocols.Region) protocols.OddsFeedConfiguration { return c }
+func (c *minimalCfg) SelectedEnvironment() *types.Environment                { return nil }
+func (c *minimalCfg) SelectedRegion() types.Region                           { return types.RegionDefault }
+func (c *minimalCfg) SetRegion(types.Region) types.OddsFeedConfiguration { return c }
 func (c *minimalCfg) ExchangeName() string                                       { return "oddinfeed" }
 func (c *minimalCfg) ReplayExchangeName() string                                 { return "oddinreplay" }
 func (c *minimalCfg) ReportExtendedData() bool                                   { return false }
-func (c *minimalCfg) SetExchangeName(string) protocols.OddsFeedConfiguration     { return c }
-func (c *minimalCfg) SetAPIURL(string) protocols.OddsFeedConfiguration           { return c }
-func (c *minimalCfg) SetMQURL(string) protocols.OddsFeedConfiguration            { return c }
-func (c *minimalCfg) SetMessagingPort(int) protocols.OddsFeedConfiguration       { return c }
+func (c *minimalCfg) SetExchangeName(string) types.OddsFeedConfiguration     { return c }
+func (c *minimalCfg) SetAPIURL(string) types.OddsFeedConfiguration           { return c }
+func (c *minimalCfg) SetMQURL(string) types.OddsFeedConfiguration            { return c }
+func (c *minimalCfg) SetMessagingPort(int) types.OddsFeedConfiguration       { return c }
 func (c *minimalCfg) APIURL() (string, error)                                    { return c.apiURL, nil }
 func (c *minimalCfg) MQURL() (string, error)                                     { return "", nil }
 func (c *minimalCfg) SportIDPrefix() string                                      { return "od:sport:" }
-func (c *minimalCfg) SetSportIDPrefix(string) protocols.OddsFeedConfiguration    { return c }
+func (c *minimalCfg) SetSportIDPrefix(string) types.OddsFeedConfiguration    { return c }
 
 type rewriteTransport struct {
 	target string
@@ -168,7 +168,7 @@ func TestManager_ActiveProducersInScope(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 
-	live, err := mgr.ActiveProducersInScope(context.Background(), protocols.LiveProducerScope)
+	live, err := mgr.ActiveProducersInScope(context.Background(), types.LiveProducerScope)
 	if err != nil {
 		t.Fatalf("ActiveProducersInScope live: %v", err)
 	}
@@ -177,7 +177,7 @@ func TestManager_ActiveProducersInScope(t *testing.T) {
 		t.Errorf("live count = %d, want 2", len(live))
 	}
 
-	prematch, err := mgr.ActiveProducersInScope(context.Background(), protocols.PrematchProducerScope)
+	prematch, err := mgr.ActiveProducersInScope(context.Background(), types.PrematchProducerScope)
 	if err != nil {
 		t.Fatalf("ActiveProducersInScope prematch: %v", err)
 	}

@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 )
 
 // Routing-key shape (8 dot-separated parts):
@@ -119,7 +119,7 @@ func TestParseRoute(t *testing.T) {
 			// SportID URN is built from `sportIDPrefix + parts[4]`, where
 			// sportIDPrefix is "od:sport:" and parts[4] is the numeric id.
 			// ParseURN splits on ":" giving Prefix=od, Type=sport, ID=<num>.
-			wantSport := protocols.URN{Prefix: "od", Type: "sport", ID: tt.wantSportID}
+			wantSport := types.URN{Prefix: "od", Type: "sport", ID: tt.wantSportID}
 			if *info.SportID != wantSport {
 				t.Fatalf("SportID = %+v, want %+v", *info.SportID, wantSport)
 			}

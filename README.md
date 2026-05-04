@@ -26,13 +26,13 @@ import (
     "time"
 
     "github.com/oddin-gg/gosdk"
-    "github.com/oddin-gg/gosdk/protocols"
+    "github.com/oddin-gg/gosdk/types"
 )
 
 func main() {
-    cfg := gosdk.NewConfig(os.Getenv("TOKEN"), protocols.IntegrationEnvironment,
+    cfg := gosdk.NewConfig(os.Getenv("TOKEN"), types.IntegrationEnvironment,
         gosdk.WithLogger(slog.Default()),
-        gosdk.WithDefaultLocale(protocols.EnLocale),
+        gosdk.WithDefaultLocale(types.EnLocale),
     )
 
     bootCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -49,7 +49,7 @@ func main() {
     }()
 
     sub, err := client.Subscribe(context.Background(),
-        gosdk.WithMessageInterest(protocols.AllMessageInterest),
+        gosdk.WithMessageInterest(types.AllMessageInterest),
     )
     if err != nil {
         log.Fatalf("subscribe: %v", err)
@@ -58,9 +58,9 @@ func main() {
     go func() {
         for msg := range sub.Messages() {
             switch m := msg.Message.(type) {
-            case protocols.OddsChange:
+            case types.OddsChange:
                 log.Printf("odds change: %d markets", len(m.Markets()))
-            case protocols.BetSettlement:
+            case types.BetSettlement:
                 log.Printf("bet settlement: %d markets", len(m.Markets()))
             }
         }
@@ -78,11 +78,11 @@ func main() {
 number of functional options. Common options:
 
 ```go
-gosdk.NewConfig(token, protocols.IntegrationEnvironment,
-    gosdk.WithRegion(protocols.RegionDefault),
+gosdk.NewConfig(token, types.IntegrationEnvironment,
+    gosdk.WithRegion(types.RegionDefault),
     gosdk.WithNodeID(1),
-    gosdk.WithDefaultLocale(protocols.EnLocale),
-    gosdk.WithPreloadLocales(protocols.EnLocale, protocols.RuLocale),
+    gosdk.WithDefaultLocale(types.EnLocale),
+    gosdk.WithPreloadLocales(types.EnLocale, types.RuLocale),
     gosdk.WithMaxInactivity(20*time.Second),
     gosdk.WithMaxRecoveryExecution(6*time.Hour),
     gosdk.WithLogger(slog.Default()),
@@ -109,10 +109,10 @@ field reads, no errors:
 
 ```go
 match, err := client.Match(ctx, eventURN)
-log.Println(match.Name(protocols.EnLocale))    // localized name
-log.Println(match.Tournament.Name(protocols.EnLocale))
+log.Println(match.Name(types.EnLocale))    // localized name
+log.Println(match.Tournament.Name(types.EnLocale))
 if match.HomeCompetitor != nil {
-    log.Println(match.HomeCompetitor.Name(protocols.EnLocale))
+    log.Println(match.HomeCompetitor.Name(types.EnLocale))
 }
 log.Println(match.Status.Status)                // EventStatus
 ```
@@ -123,7 +123,7 @@ log.Println(match.Status.Status)                // EventStatus
 handle, err := client.RecoverEventOdds(ctx, producerID, eventURN)
 <-handle.Done()
 res := handle.Result()
-if res.Status == protocols.RecoveryStatusCompleted { ... }
+if res.Status == types.RecoveryStatusCompleted { ... }
 ```
 
 The handle is reliable — even if the lossy `RecoveryEvents()` channel

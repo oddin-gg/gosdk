@@ -1,4 +1,4 @@
-package protocols
+package types
 
 // BasicFeedMessage ...
 type BasicFeedMessage struct {

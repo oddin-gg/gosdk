@@ -8,7 +8,7 @@ import (
 	"github.com/oddin-gg/gosdk/internal/api"
 	"github.com/oddin-gg/gosdk/internal/api/xml"
 	"github.com/oddin-gg/gosdk/internal/cache/lru"
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 	log "github.com/oddin-gg/gosdk/internal/log"
 )
 
@@ -36,10 +36,10 @@ type TeamWithPlayers interface {
 type CompetitorCache struct {
 	apiClient *api.Client
 	logger    *log.Logger
-	lru       *lru.EventCache[protocols.URN, protocols.Locale, *LocalizedCompetitor]
+	lru       *lru.EventCache[types.URN, types.Locale, *LocalizedCompetitor]
 
 	iconMu sync.RWMutex
-	icons  map[protocols.URN]*string
+	icons  map[types.URN]*string
 }
 
 // LocalizedCompetitor carries per-locale name/abbreviation plus
@@ -47,20 +47,20 @@ type CompetitorCache struct {
 type LocalizedCompetitor struct {
 	mu sync.RWMutex
 
-	id protocols.URN
+	id types.URN
 
-	name         map[protocols.Locale]string
-	abbreviation map[protocols.Locale]string
+	name         map[types.Locale]string
+	abbreviation map[types.Locale]string
 
-	underage *protocols.UnderageStatus
-	players  []protocols.URN
+	underage *types.UnderageStatus
+	players  []types.URN
 }
 
 // Locales implements lru.LocalizedEntry.
-func (l *LocalizedCompetitor) Locales() []protocols.Locale {
+func (l *LocalizedCompetitor) Locales() []types.Locale {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
-	out := make([]protocols.Locale, 0, len(l.name))
+	out := make([]types.Locale, 0, len(l.name))
 	for locale := range l.name {
 		out = append(out, locale)
 	}
@@ -68,7 +68,7 @@ func (l *LocalizedCompetitor) Locales() []protocols.Locale {
 }
 
 // LocalizedName returns the localized name or an error if the locale is not loaded.
-func (l *LocalizedCompetitor) LocalizedName(locale protocols.Locale) (*string, error) {
+func (l *LocalizedCompetitor) LocalizedName(locale types.Locale) (*string, error) {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	v, ok := l.name[locale]
@@ -78,36 +78,36 @@ func (l *LocalizedCompetitor) LocalizedName(locale protocols.Locale) (*string, e
 	return &v, nil
 }
 
-func (l *LocalizedCompetitor) playerURNs() []protocols.URN {
+func (l *LocalizedCompetitor) playerURNs() []types.URN {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
-	out := make([]protocols.URN, len(l.players))
+	out := make([]types.URN, len(l.players))
 	copy(out, l.players)
 	return out
 }
 
 // merge folds a TeamWrapper payload into the entry under mu.
-func (l *LocalizedCompetitor) merge(locale protocols.Locale, team TeamWrapper) error {
-	var underage *protocols.UnderageStatus
+func (l *LocalizedCompetitor) merge(locale types.Locale, team TeamWrapper) error {
+	var underage *types.UnderageStatus
 	if u := team.GetUnderage(); u != "" {
-		var parsed protocols.UnderageStatus
+		var parsed types.UnderageStatus
 		switch u {
 		case "0":
-			parsed = protocols.UnderageNo
+			parsed = types.UnderageNo
 		case "1":
-			parsed = protocols.UnderageYes
+			parsed = types.UnderageYes
 		default:
-			parsed = protocols.UnderageUnknown
+			parsed = types.UnderageUnknown
 		}
 		underage = &parsed
 	}
 
-	var playerURNs []protocols.URN
+	var playerURNs []types.URN
 	if twp, ok := team.(TeamWithPlayers); ok {
 		players := twp.GetPlayers()
-		playerURNs = make([]protocols.URN, 0, len(players))
+		playerURNs = make([]types.URN, 0, len(players))
 		for _, p := range players {
-			urn, err := protocols.ParseURN(p.ID)
+			urn, err := types.ParseURN(p.ID)
 			if err != nil {
 				return fmt.Errorf("parsing URN when refreshing players: %w", err)
 			}
@@ -129,7 +129,7 @@ func (l *LocalizedCompetitor) merge(locale protocols.Locale, team TeamWrapper) e
 }
 
 // Competitor returns a populated LocalizedCompetitor.
-func (c *CompetitorCache) Competitor(ctx context.Context, id protocols.URN, locales []protocols.Locale) (*LocalizedCompetitor, error) {
+func (c *CompetitorCache) Competitor(ctx context.Context, id types.URN, locales []types.Locale) (*LocalizedCompetitor, error) {
 	v, _, err := c.lru.Get(ctx, id, locales)
 	if err != nil {
 		return nil, err
@@ -140,13 +140,13 @@ func (c *CompetitorCache) Competitor(ctx context.Context, id protocols.URN, loca
 // reloadCompetitor forces a fresh fetch (used when callers want to refresh
 // players or underage that may not have been populated by an earlier
 // non-profile API path).
-func (c *CompetitorCache) reloadCompetitor(ctx context.Context, id protocols.URN, locales []protocols.Locale) (*LocalizedCompetitor, error) {
+func (c *CompetitorCache) reloadCompetitor(ctx context.Context, id types.URN, locales []types.Locale) (*LocalizedCompetitor, error) {
 	c.lru.Clear(id)
 	return c.Competitor(ctx, id, locales)
 }
 
 // CompetitorIcon returns the icon path, fetching the competitor profile if needed.
-func (c *CompetitorCache) CompetitorIcon(ctx context.Context, id protocols.URN, locale protocols.Locale) (*string, error) {
+func (c *CompetitorCache) CompetitorIcon(ctx context.Context, id types.URN, locale types.Locale) (*string, error) {
 	c.iconMu.RLock()
 	if v, ok := c.icons[id]; ok {
 		c.iconMu.RUnlock()
@@ -166,7 +166,7 @@ func (c *CompetitorCache) CompetitorIcon(ctx context.Context, id protocols.URN, 
 }
 
 // ClearCacheItem removes both the entry and its icon.
-func (c *CompetitorCache) ClearCacheItem(id protocols.URN) {
+func (c *CompetitorCache) ClearCacheItem(id types.URN) {
 	c.lru.Clear(id)
 	c.iconMu.Lock()
 	delete(c.icons, id)
@@ -177,14 +177,14 @@ func newCompetitorCache(client *api.Client, logger *log.Logger) *CompetitorCache
 	cc := &CompetitorCache{
 		apiClient: client,
 		logger:    logger,
-		icons:     make(map[protocols.URN]*string),
+		icons:     make(map[types.URN]*string),
 	}
-	cc.lru = lru.NewEventCache[protocols.URN, protocols.Locale, *LocalizedCompetitor](
+	cc.lru = lru.NewEventCache[types.URN, types.Locale, *LocalizedCompetitor](
 		lru.Config{},
 		func(
 			ctx context.Context,
-			id protocols.URN,
-			missing []protocols.Locale,
+			id types.URN,
+			missing []types.Locale,
 			existing *LocalizedCompetitor,
 			hasExisting bool,
 		) (*LocalizedCompetitor, error) {
@@ -194,8 +194,8 @@ func newCompetitorCache(client *api.Client, logger *log.Logger) *CompetitorCache
 			} else {
 				entry = &LocalizedCompetitor{
 					id:           id,
-					name:         make(map[protocols.Locale]string),
-					abbreviation: make(map[protocols.Locale]string),
+					name:         make(map[types.Locale]string),
+					abbreviation: make(map[types.Locale]string),
 				}
 			}
 			for _, locale := range missing {
@@ -216,35 +216,35 @@ func newCompetitorCache(client *api.Client, logger *log.Logger) *CompetitorCache
 	return cc
 }
 
-// snapshot projects the cached entry into a protocols.Competitor value
+// snapshot projects the cached entry into a types.Competitor value
 // (data-copy under the entry's read lock). Resolves players for each
 // locale via the supplied factory; returns an error if any player fetch
 // fails.
 func (l *LocalizedCompetitor) snapshot(
 	ctx context.Context,
 	icon *string,
-	factory protocols.EntityFactory,
-	locales []protocols.Locale,
-) (*protocols.Competitor, error) {
+	factory types.EntityFactory,
+	locales []types.Locale,
+) (*types.Competitor, error) {
 	l.mu.RLock()
-	names := make(map[protocols.Locale]string, len(l.name))
+	names := make(map[types.Locale]string, len(l.name))
 	for k, v := range l.name {
 		names[k] = v
 	}
-	abbr := make(map[protocols.Locale]string, len(l.abbreviation))
+	abbr := make(map[types.Locale]string, len(l.abbreviation))
 	for k, v := range l.abbreviation {
 		abbr[k] = v
 	}
-	playerURNs := append([]protocols.URN(nil), l.players...)
-	underage := protocols.UnderageUnknown
+	playerURNs := append([]types.URN(nil), l.players...)
+	underage := types.UnderageUnknown
 	if l.underage != nil {
 		underage = *l.underage
 	}
 	l.mu.RUnlock()
 
-	players := map[protocols.Locale][]protocols.Player{}
+	players := map[types.Locale][]types.Player{}
 	for _, locale := range locales {
-		bucket := make([]protocols.Player, 0, len(playerURNs))
+		bucket := make([]types.Player, 0, len(playerURNs))
 		for _, urn := range playerURNs {
 			p, err := factory.BuildPlayer(ctx, urn, locale)
 			if err != nil {
@@ -255,7 +255,7 @@ func (l *LocalizedCompetitor) snapshot(
 		players[locale] = bucket
 	}
 
-	return &protocols.Competitor{
+	return &types.Competitor{
 		ID:            l.id,
 		Names:         names,
 		Abbreviations: abbr,
@@ -276,10 +276,10 @@ func (l *LocalizedCompetitor) snapshot(
 func BuildCompetitor(
 	ctx context.Context,
 	cc *CompetitorCache,
-	factory protocols.EntityFactory,
-	id protocols.URN,
-	locales []protocols.Locale,
-) (*protocols.Competitor, error) {
+	factory types.EntityFactory,
+	id types.URN,
+	locales []types.Locale,
+) (*types.Competitor, error) {
 	item, err := cc.Competitor(ctx, id, locales)
 	if err != nil {
 		return nil, err
@@ -304,16 +304,16 @@ func BuildCompetitor(
 func BuildTeamCompetitor(
 	ctx context.Context,
 	cc *CompetitorCache,
-	factory protocols.EntityFactory,
-	id protocols.URN,
+	factory types.EntityFactory,
+	id types.URN,
 	qualifier *string,
-	locales []protocols.Locale,
-) (*protocols.TeamCompetitor, error) {
+	locales []types.Locale,
+) (*types.TeamCompetitor, error) {
 	c, err := BuildCompetitor(ctx, cc, factory, id, locales)
 	if err != nil {
 		return nil, err
 	}
-	return &protocols.TeamCompetitor{
+	return &types.TeamCompetitor{
 		Competitor: *c,
 		Qualifier:  qualifier,
 	}, nil

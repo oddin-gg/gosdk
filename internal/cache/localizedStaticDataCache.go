@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 	log "github.com/oddin-gg/gosdk/internal/log"
 )
 
@@ -15,13 +15,13 @@ const (
 
 // LocalizedStaticDataCache caches static-catalog data per locale.
 //
-// Phase 6 reshape: returns protocols.LocalizedStaticData value structs
+// Phase 6 reshape: returns types.LocalizedStaticData value structs
 // directly (the previous wrapper impl is gone).
 type LocalizedStaticDataCache struct {
-	oddsFeedConfiguration protocols.OddsFeedConfiguration
-	fetcher               func(locale protocols.Locale) ([]protocols.StaticData, error)
-	locales               []protocols.Locale
-	internalCache         map[uint]map[protocols.Locale]string
+	oddsFeedConfiguration types.OddsFeedConfiguration
+	fetcher               func(locale types.Locale) ([]types.StaticData, error)
+	locales               []types.Locale
+	internalCache         map[uint]map[types.Locale]string
 	ticker                *time.Ticker
 	closeCh               chan bool
 	logger                *log.Logger
@@ -30,12 +30,12 @@ type LocalizedStaticDataCache struct {
 
 // LocalizedItem returns a populated LocalizedStaticData for the given
 // id, fetching missing locales as needed.
-func (l *LocalizedStaticDataCache) LocalizedItem(id uint, locales []protocols.Locale) (protocols.LocalizedStaticData, error) {
+func (l *LocalizedStaticDataCache) LocalizedItem(id uint, locales []types.Locale) (types.LocalizedStaticData, error) {
 	l.mux.Lock()
 	defer l.mux.Unlock()
 
 	fetched := l.fetchedLocales()
-	missing := make([]protocols.Locale, 0)
+	missing := make([]types.Locale, 0)
 	for _, locale := range locales {
 		if _, ok := fetched[locale]; !ok {
 			missing = append(missing, locale)
@@ -43,14 +43,14 @@ func (l *LocalizedStaticDataCache) LocalizedItem(id uint, locales []protocols.Lo
 	}
 	if len(missing) > 0 {
 		if err := l.fetchData(missing); err != nil {
-			return protocols.LocalizedStaticData{}, err
+			return types.LocalizedStaticData{}, err
 		}
 	}
 
 	localeMap := l.internalCache[id]
-	out := protocols.LocalizedStaticData{
+	out := types.LocalizedStaticData{
 		ID:           id,
-		Descriptions: make(map[protocols.Locale]string, len(localeMap)),
+		Descriptions: make(map[types.Locale]string, len(localeMap)),
 	}
 	for k, v := range localeMap {
 		out.Descriptions[k] = v
@@ -62,7 +62,7 @@ func (l *LocalizedStaticDataCache) LocalizedItem(id uint, locales []protocols.Lo
 }
 
 // Item returns the entry in the configured default locale.
-func (l *LocalizedStaticDataCache) Item(id uint) (protocols.LocalizedStaticData, error) {
+func (l *LocalizedStaticDataCache) Item(id uint) (types.LocalizedStaticData, error) {
 	return l.LocalizedItem(id, l.locales)
 }
 
@@ -74,7 +74,7 @@ func (l *LocalizedStaticDataCache) Close() {
 	l.closeCh = nil
 }
 
-func (l *LocalizedStaticDataCache) fetchData(locales []protocols.Locale) error {
+func (l *LocalizedStaticDataCache) fetchData(locales []types.Locale) error {
 	for _, locale := range locales {
 		data, err := l.fetcher(locale)
 		if err != nil {
@@ -83,7 +83,7 @@ func (l *LocalizedStaticDataCache) fetchData(locales []protocols.Locale) error {
 		for _, sd := range data {
 			localCache, ok := l.internalCache[sd.GetID()]
 			if !ok {
-				localCache = make(map[protocols.Locale]string)
+				localCache = make(map[types.Locale]string)
 				l.internalCache[sd.GetID()] = localCache
 			}
 			if d := sd.GetDescription(); d != nil {
@@ -94,8 +94,8 @@ func (l *LocalizedStaticDataCache) fetchData(locales []protocols.Locale) error {
 	return nil
 }
 
-func (l *LocalizedStaticDataCache) fetchedLocales() map[protocols.Locale]struct{} {
-	result := make(map[protocols.Locale]struct{})
+func (l *LocalizedStaticDataCache) fetchedLocales() map[types.Locale]struct{} {
+	result := make(map[types.Locale]struct{})
 	for _, value := range l.internalCache {
 		for locale := range value {
 			result[locale] = struct{}{}
@@ -109,7 +109,7 @@ func (l *LocalizedStaticDataCache) timerTick() {
 	defer l.mux.Unlock()
 
 	localeMap := l.fetchedLocales()
-	locales := make([]protocols.Locale, 0, len(localeMap))
+	locales := make([]types.Locale, 0, len(localeMap))
 	for k := range localeMap {
 		locales = append(locales, k)
 	}
@@ -135,12 +135,12 @@ func (l *LocalizedStaticDataCache) startTimer() {
 	}()
 }
 
-func newLocalizedStaticDataCache(oddsFeedConfiguration protocols.OddsFeedConfiguration, fetcher func(locale protocols.Locale) ([]protocols.StaticData, error)) *LocalizedStaticDataCache {
+func newLocalizedStaticDataCache(oddsFeedConfiguration types.OddsFeedConfiguration, fetcher func(locale types.Locale) ([]types.StaticData, error)) *LocalizedStaticDataCache {
 	ca := &LocalizedStaticDataCache{
 		oddsFeedConfiguration: oddsFeedConfiguration,
 		fetcher:               fetcher,
-		locales:               []protocols.Locale{oddsFeedConfiguration.DefaultLocale()},
-		internalCache:         make(map[uint]map[protocols.Locale]string),
+		locales:               []types.Locale{oddsFeedConfiguration.DefaultLocale()},
+		internalCache:         make(map[uint]map[types.Locale]string),
 	}
 	ca.startTimer()
 	return ca

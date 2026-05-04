@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/oddin-gg/gosdk/internal/api"
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 )
 
 // minimalCfg is the smallest OddsFeedConfiguration that satisfies the
@@ -25,25 +25,25 @@ type minimalCfg struct {
 }
 
 func (c *minimalCfg) AccessToken() *string                                       { return &c.token }
-func (c *minimalCfg) DefaultLocale() protocols.Locale                            { return protocols.EnLocale }
+func (c *minimalCfg) DefaultLocale() types.Locale                            { return types.EnLocale }
 func (c *minimalCfg) MaxInactivitySeconds() int                                  { return 20 }
 func (c *minimalCfg) MaxRecoveryExecutionMinutes() int                           { return 360 }
 func (c *minimalCfg) MessagingPort() int                                         { return 5672 }
 func (c *minimalCfg) SdkNodeID() *int                                            { return c.nodeID }
-func (c *minimalCfg) SelectedEnvironment() *protocols.Environment                { return nil }
-func (c *minimalCfg) SelectedRegion() protocols.Region                           { return protocols.RegionDefault }
-func (c *minimalCfg) SetRegion(protocols.Region) protocols.OddsFeedConfiguration { return c }
+func (c *minimalCfg) SelectedEnvironment() *types.Environment                { return nil }
+func (c *minimalCfg) SelectedRegion() types.Region                           { return types.RegionDefault }
+func (c *minimalCfg) SetRegion(types.Region) types.OddsFeedConfiguration { return c }
 func (c *minimalCfg) ExchangeName() string                                       { return "oddinfeed" }
 func (c *minimalCfg) ReplayExchangeName() string                                 { return "oddinreplay" }
 func (c *minimalCfg) ReportExtendedData() bool                                   { return false }
-func (c *minimalCfg) SetExchangeName(string) protocols.OddsFeedConfiguration     { return c }
-func (c *minimalCfg) SetAPIURL(string) protocols.OddsFeedConfiguration           { return c }
-func (c *minimalCfg) SetMQURL(string) protocols.OddsFeedConfiguration            { return c }
-func (c *minimalCfg) SetMessagingPort(int) protocols.OddsFeedConfiguration       { return c }
+func (c *minimalCfg) SetExchangeName(string) types.OddsFeedConfiguration     { return c }
+func (c *minimalCfg) SetAPIURL(string) types.OddsFeedConfiguration           { return c }
+func (c *minimalCfg) SetMQURL(string) types.OddsFeedConfiguration            { return c }
+func (c *minimalCfg) SetMessagingPort(int) types.OddsFeedConfiguration       { return c }
 func (c *minimalCfg) APIURL() (string, error)                                    { return c.apiURL, nil }
 func (c *minimalCfg) MQURL() (string, error)                                     { return "", nil }
 func (c *minimalCfg) SportIDPrefix() string                                      { return "od:sport:" }
-func (c *minimalCfg) SetSportIDPrefix(string) protocols.OddsFeedConfiguration    { return c }
+func (c *minimalCfg) SetSportIDPrefix(string) types.OddsFeedConfiguration    { return c }
 
 type rewriteTransport struct {
 	target string
@@ -84,72 +84,72 @@ type fakeSportsInfo struct {
 	err   error
 }
 
-func (f *fakeSportsInfo) Match(ctx context.Context, id protocols.URN) (protocols.Match, error) {
+func (f *fakeSportsInfo) Match(ctx context.Context, id types.URN) (types.Match, error) {
 	f.calls.Add(1)
 	if f.err != nil {
-		return protocols.Match{}, f.err
+		return types.Match{}, f.err
 	}
-	return protocols.Match{ID: id}, nil
+	return types.Match{ID: id}, nil
 }
 
 // The remaining SportsInfoManager methods are not exercised by Replay;
 // stub them out.
-func (f *fakeSportsInfo) Sports(context.Context) ([]protocols.Sport, error)         { return nil, nil }
-func (f *fakeSportsInfo) LocalizedSports(context.Context, protocols.Locale) ([]protocols.Sport, error) {
+func (f *fakeSportsInfo) Sports(context.Context) ([]types.Sport, error)         { return nil, nil }
+func (f *fakeSportsInfo) LocalizedSports(context.Context, types.Locale) ([]types.Sport, error) {
 	return nil, nil
 }
-func (f *fakeSportsInfo) ActiveTournaments(context.Context) ([]protocols.Tournament, error) {
+func (f *fakeSportsInfo) ActiveTournaments(context.Context) ([]types.Tournament, error) {
 	return nil, nil
 }
-func (f *fakeSportsInfo) LocalizedActiveTournaments(context.Context, protocols.Locale) ([]protocols.Tournament, error) {
+func (f *fakeSportsInfo) LocalizedActiveTournaments(context.Context, types.Locale) ([]types.Tournament, error) {
 	return nil, nil
 }
-func (f *fakeSportsInfo) SportActiveTournaments(context.Context, string) ([]protocols.Tournament, error) {
+func (f *fakeSportsInfo) SportActiveTournaments(context.Context, string) ([]types.Tournament, error) {
 	return nil, nil
 }
-func (f *fakeSportsInfo) LocalizedSportActiveTournaments(context.Context, string, protocols.Locale) ([]protocols.Tournament, error) {
+func (f *fakeSportsInfo) LocalizedSportActiveTournaments(context.Context, string, types.Locale) ([]types.Tournament, error) {
 	return nil, nil
 }
-func (f *fakeSportsInfo) MatchesFor(context.Context, time.Time) ([]protocols.Match, error) {
+func (f *fakeSportsInfo) MatchesFor(context.Context, time.Time) ([]types.Match, error) {
 	return nil, nil
 }
-func (f *fakeSportsInfo) LocalizedMatchesFor(context.Context, time.Time, protocols.Locale) ([]protocols.Match, error) {
+func (f *fakeSportsInfo) LocalizedMatchesFor(context.Context, time.Time, types.Locale) ([]types.Match, error) {
 	return nil, nil
 }
-func (f *fakeSportsInfo) LiveMatches(context.Context) ([]protocols.Match, error) { return nil, nil }
-func (f *fakeSportsInfo) LocalizedLiveMatches(context.Context, protocols.Locale) ([]protocols.Match, error) {
+func (f *fakeSportsInfo) LiveMatches(context.Context) ([]types.Match, error) { return nil, nil }
+func (f *fakeSportsInfo) LocalizedLiveMatches(context.Context, types.Locale) ([]types.Match, error) {
 	return nil, nil
 }
-func (f *fakeSportsInfo) LocalizedMatch(ctx context.Context, id protocols.URN, _ protocols.Locale) (protocols.Match, error) {
+func (f *fakeSportsInfo) LocalizedMatch(ctx context.Context, id types.URN, _ types.Locale) (types.Match, error) {
 	return f.Match(ctx, id)
 }
-func (f *fakeSportsInfo) Competitor(context.Context, protocols.URN) (protocols.Competitor, error) {
-	return protocols.Competitor{}, nil
+func (f *fakeSportsInfo) Competitor(context.Context, types.URN) (types.Competitor, error) {
+	return types.Competitor{}, nil
 }
-func (f *fakeSportsInfo) LocalizedCompetitor(context.Context, protocols.URN, protocols.Locale) (protocols.Competitor, error) {
-	return protocols.Competitor{}, nil
+func (f *fakeSportsInfo) LocalizedCompetitor(context.Context, types.URN, types.Locale) (types.Competitor, error) {
+	return types.Competitor{}, nil
 }
-func (f *fakeSportsInfo) FixtureChanges(context.Context, time.Time) ([]protocols.FixtureChange, error) {
+func (f *fakeSportsInfo) FixtureChanges(context.Context, time.Time) ([]types.FixtureChange, error) {
 	return nil, nil
 }
-func (f *fakeSportsInfo) LocalizedFixtureChanges(context.Context, protocols.Locale, time.Time) ([]protocols.FixtureChange, error) {
+func (f *fakeSportsInfo) LocalizedFixtureChanges(context.Context, types.Locale, time.Time) ([]types.FixtureChange, error) {
 	return nil, nil
 }
-func (f *fakeSportsInfo) ListOfMatches(context.Context, uint, uint) ([]protocols.Match, error) {
+func (f *fakeSportsInfo) ListOfMatches(context.Context, uint, uint) ([]types.Match, error) {
 	return nil, nil
 }
-func (f *fakeSportsInfo) LocalizedListOfMatches(context.Context, uint, uint, protocols.Locale) ([]protocols.Match, error) {
+func (f *fakeSportsInfo) LocalizedListOfMatches(context.Context, uint, uint, types.Locale) ([]types.Match, error) {
 	return nil, nil
 }
-func (f *fakeSportsInfo) AvailableTournaments(context.Context, protocols.URN) ([]protocols.Tournament, error) {
+func (f *fakeSportsInfo) AvailableTournaments(context.Context, types.URN) ([]types.Tournament, error) {
 	return nil, nil
 }
-func (f *fakeSportsInfo) LocalizedAvailableTournaments(context.Context, protocols.URN, protocols.Locale) ([]protocols.Tournament, error) {
+func (f *fakeSportsInfo) LocalizedAvailableTournaments(context.Context, types.URN, types.Locale) ([]types.Tournament, error) {
 	return nil, nil
 }
-func (f *fakeSportsInfo) ClearMatch(protocols.URN)      {}
-func (f *fakeSportsInfo) ClearTournament(protocols.URN) {}
-func (f *fakeSportsInfo) ClearCompetitor(protocols.URN) {}
+func (f *fakeSportsInfo) ClearMatch(types.URN)      {}
+func (f *fakeSportsInfo) ClearTournament(types.URN) {}
+func (f *fakeSportsInfo) ClearCompetitor(types.URN) {}
 
 // --- tests ---
 
@@ -165,7 +165,7 @@ func TestReplay_AddSportEventID(t *testing.T) {
 	cfg := &minimalCfg{}
 	mgr := NewManager(newAPIClient(t, srv), cfg, &fakeSportsInfo{})
 
-	urn, _ := protocols.ParseURN("od:match:42")
+	urn, _ := types.ParseURN("od:match:42")
 	ok, err := mgr.AddSportEventID(context.Background(), *urn)
 	if err != nil {
 		t.Fatalf("AddSportEventID: %v", err)
@@ -191,7 +191,7 @@ func TestReplay_AddSportEventID_WithNodeID(t *testing.T) {
 	cfg := &minimalCfg{nodeID: &id}
 	mgr := NewManager(newAPIClient(t, srv), cfg, &fakeSportsInfo{})
 
-	urn, _ := protocols.ParseURN("od:match:42")
+	urn, _ := types.ParseURN("od:match:42")
 	if _, err := mgr.AddSportEventID(context.Background(), *urn); err != nil {
 		t.Fatalf("AddSportEventID: %v", err)
 	}
@@ -212,7 +212,7 @@ func TestReplay_RemoveSportEventID(t *testing.T) {
 	cfg := &minimalCfg{}
 	mgr := NewManager(newAPIClient(t, srv), cfg, &fakeSportsInfo{})
 
-	urn, _ := protocols.ParseURN("od:match:42")
+	urn, _ := types.ParseURN("od:match:42")
 	if _, err := mgr.RemoveSportEventID(context.Background(), *urn); err != nil {
 		t.Fatalf("RemoveSportEventID: %v", err)
 	}
@@ -236,7 +236,7 @@ func TestReplay_Play(t *testing.T) {
 	speed := 10
 	maxDelay := 50
 	rewrite := true
-	if _, err := mgr.Play(context.Background(), protocols.ReplayPlayParams{
+	if _, err := mgr.Play(context.Background(), types.ReplayPlayParams{
 		Speed:             &speed,
 		MaxDelayInMs:      &maxDelay,
 		RewriteTimestamps: &rewrite,

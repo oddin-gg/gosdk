@@ -8,7 +8,7 @@ import (
 	"github.com/oddin-gg/gosdk/internal/api"
 	"github.com/oddin-gg/gosdk/internal/cache/lru"
 	feedXML "github.com/oddin-gg/gosdk/internal/feed/xml"
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 )
 
 // FixtureCache stores fixture data per (URN, locale).
@@ -19,7 +19,7 @@ import (
 // (no more partial locking).
 type FixtureCache struct {
 	apiClient *api.Client
-	lru       *lru.EventCache[protocols.URN, protocols.Locale, *LocalizedFixture]
+	lru       *lru.EventCache[types.URN, types.Locale, *LocalizedFixture]
 }
 
 // LocalizedFixture is the cached representation of a fixture, populated
@@ -32,18 +32,18 @@ type LocalizedFixture struct {
 	mu sync.RWMutex
 
 	startTime  *time.Time
-	extraInfo  map[protocols.Locale]map[string]string
-	tvChannels map[protocols.Locale][]protocols.TvChannel
+	extraInfo  map[types.Locale]map[string]string
+	tvChannels map[types.Locale][]types.TvChannel
 
 	// loaded is the set of locales currently populated.
-	loaded map[protocols.Locale]struct{}
+	loaded map[types.Locale]struct{}
 }
 
 // Locales implements lru.LocalizedEntry.
-func (f *LocalizedFixture) Locales() []protocols.Locale {
+func (f *LocalizedFixture) Locales() []types.Locale {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
-	out := make([]protocols.Locale, 0, len(f.loaded))
+	out := make([]types.Locale, 0, len(f.loaded))
 	for l := range f.loaded {
 		out = append(out, l)
 	}
@@ -58,7 +58,7 @@ func (f *LocalizedFixture) StartTime() *time.Time {
 
 // ExtraInfo returns the extra-info map for the given locale, or nil if the
 // locale wasn't loaded.
-func (f *LocalizedFixture) ExtraInfo(locale protocols.Locale) map[string]string {
+func (f *LocalizedFixture) ExtraInfo(locale types.Locale) map[string]string {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 	return f.extraInfo[locale]
@@ -66,7 +66,7 @@ func (f *LocalizedFixture) ExtraInfo(locale protocols.Locale) map[string]string 
 
 // TvChannels returns the channel list for the given locale, or nil if the
 // locale wasn't loaded.
-func (f *LocalizedFixture) TvChannels(locale protocols.Locale) []protocols.TvChannel {
+func (f *LocalizedFixture) TvChannels(locale types.Locale) []types.TvChannel {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 	return f.tvChannels[locale]
@@ -74,7 +74,7 @@ func (f *LocalizedFixture) TvChannels(locale protocols.Locale) []protocols.TvCha
 
 // Fixture returns a populated LocalizedFixture for the given key, fetching
 // missing locales as needed.
-func (f *FixtureCache) Fixture(ctx context.Context, id protocols.URN, locales []protocols.Locale) (*LocalizedFixture, error) {
+func (f *FixtureCache) Fixture(ctx context.Context, id types.URN, locales []types.Locale) (*LocalizedFixture, error) {
 	v, _, err := f.lru.Get(ctx, id, locales)
 	if err != nil {
 		return nil, err
@@ -85,7 +85,7 @@ func (f *FixtureCache) Fixture(ctx context.Context, id protocols.URN, locales []
 // OnFeedMessage clears the cached fixture for `id` when a FixtureChange
 // arrives for a match. This is the auto-invalidation trigger documented in
 // NEXT.md §6.
-func (f *FixtureCache) OnFeedMessage(id protocols.URN, feedMessage *protocols.FeedMessage) {
+func (f *FixtureCache) OnFeedMessage(id types.URN, feedMessage *types.FeedMessage) {
 	if feedMessage.Message == nil {
 		return
 	}
@@ -96,7 +96,7 @@ func (f *FixtureCache) OnFeedMessage(id protocols.URN, feedMessage *protocols.Fe
 }
 
 // ClearCacheItem is the public invalidation hook (exposed via SportsInfoManager).
-func (f *FixtureCache) ClearCacheItem(id protocols.URN) {
+func (f *FixtureCache) ClearCacheItem(id types.URN) {
 	f.lru.Clear(id)
 }
 
@@ -104,8 +104,8 @@ func newFixtureCache(client *api.Client) *FixtureCache {
 	fc := &FixtureCache{apiClient: client}
 	loader := func(
 		ctx context.Context,
-		id protocols.URN,
-		missing []protocols.Locale,
+		id types.URN,
+		missing []types.Locale,
 		existing *LocalizedFixture,
 		hasExisting bool,
 	) (*LocalizedFixture, error) {
@@ -114,9 +114,9 @@ func newFixtureCache(client *api.Client) *FixtureCache {
 			entry = existing
 		} else {
 			entry = &LocalizedFixture{
-				extraInfo:  make(map[protocols.Locale]map[string]string),
-				tvChannels: make(map[protocols.Locale][]protocols.TvChannel),
-				loaded:     make(map[protocols.Locale]struct{}),
+				extraInfo:  make(map[types.Locale]map[string]string),
+				tvChannels: make(map[types.Locale][]types.TvChannel),
+				loaded:     make(map[types.Locale]struct{}),
 			}
 		}
 
@@ -138,10 +138,10 @@ func newFixtureCache(client *api.Client) *FixtureCache {
 				entry.extraInfo[locale] = m
 			}
 			if data.TVChannels != nil {
-				ch := make([]protocols.TvChannel, len(data.TVChannels.List))
+				ch := make([]types.TvChannel, len(data.TVChannels.List))
 				for i := range data.TVChannels.List {
 					tv := data.TVChannels.List[i]
-					ch[i] = protocols.TvChannel{
+					ch[i] = types.TvChannel{
 						Name:      tv.Name,
 						Language:  tv.Language,
 						StreamURL: tv.StreamURL,
@@ -154,7 +154,7 @@ func newFixtureCache(client *api.Client) *FixtureCache {
 		}
 		return entry, nil
 	}
-	fc.lru = lru.NewEventCache[protocols.URN, protocols.Locale, *LocalizedFixture](
+	fc.lru = lru.NewEventCache[types.URN, types.Locale, *LocalizedFixture](
 		lru.Config{}, loader,
 	)
 	return fc
@@ -165,18 +165,18 @@ func newFixtureCache(client *api.Client) *FixtureCache {
 // `locale` is the locale to project on the returned struct (extra info
 // and tv channels are pulled from that locale; startTime is locale-
 // independent).
-func BuildFixture(ctx context.Context, fc *FixtureCache, id protocols.URN, locale protocols.Locale) (*protocols.Fixture, error) {
-	item, err := fc.Fixture(ctx, id, []protocols.Locale{locale})
+func BuildFixture(ctx context.Context, fc *FixtureCache, id types.URN, locale types.Locale) (*types.Fixture, error) {
+	item, err := fc.Fixture(ctx, id, []types.Locale{locale})
 	if err != nil {
 		return nil, err
 	}
-	out := &protocols.Fixture{
+	out := &types.Fixture{
 		StartTime: item.StartTime(),
 		ExtraInfo: item.ExtraInfo(locale),
 		Locale:    locale,
 	}
 	if ch := item.TvChannels(locale); len(ch) > 0 {
-		out.TvChannels = append([]protocols.TvChannel(nil), ch...)
+		out.TvChannels = append([]types.TvChannel(nil), ch...)
 	}
 	return out, nil
 }

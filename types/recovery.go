@@ -1,4 +1,4 @@
-package protocols
+package types
 
 import (
 	"context"
@@ -17,7 +17,7 @@ type RecoveryMessage struct {
 //
 // Phase 6.1 reshape: returns the bare request id. The richer
 // *gosdk.RecoveryHandle is constructed at the gosdk.Client layer; the
-// protocols-level interface stays minimal so this package has no
+// types-level interface stays minimal so this package has no
 // dependency on the public Client types.
 type RecoveryManager interface {
 	InitiateEventOddsMessagesRecovery(ctx context.Context, producerID uint, eventID URN) (uint, error)

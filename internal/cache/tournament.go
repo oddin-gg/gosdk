@@ -9,7 +9,7 @@ import (
 	apiXML "github.com/oddin-gg/gosdk/internal/api/xml"
 	"github.com/oddin-gg/gosdk/internal/cache/lru"
 	feedXML "github.com/oddin-gg/gosdk/internal/feed/xml"
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 	log "github.com/oddin-gg/gosdk/internal/log"
 )
 
@@ -39,46 +39,46 @@ type TournamentExtendedWrapper interface {
 type TournamentCache struct {
 	apiClient *api.Client
 	logger    *log.Logger
-	lru       *lru.EventCache[protocols.URN, protocols.Locale, *LocalizedTournament]
+	lru       *lru.EventCache[types.URN, types.Locale, *LocalizedTournament]
 
 	iconMu sync.RWMutex
-	icons  map[protocols.URN]*string
+	icons  map[types.URN]*string
 }
 
 // LocalizedTournament holds tournament data; mu guards every field.
 type LocalizedTournament struct {
 	mu sync.RWMutex
 
-	id protocols.URN
+	id types.URN
 
 	startDate        *time.Time
 	endDate          *time.Time
-	sportID          protocols.URN
+	sportID          types.URN
 	scheduledTime    *time.Time
 	scheduledEndTime *time.Time
 	riskTier         int
 	category         *apiXML.Category
-	competitorIDs    map[protocols.URN]struct{}
+	competitorIDs    map[types.URN]struct{}
 
-	name         map[protocols.Locale]string
-	abbreviation map[protocols.Locale]string
+	name         map[types.Locale]string
+	abbreviation map[types.Locale]string
 }
 
 // Locales implements lru.LocalizedEntry.
-func (l *LocalizedTournament) Locales() []protocols.Locale {
+func (l *LocalizedTournament) Locales() []types.Locale {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
-	out := make([]protocols.Locale, 0, len(l.name))
+	out := make([]types.Locale, 0, len(l.name))
 	for locale := range l.name {
 		out = append(out, locale)
 	}
 	return out
 }
 
-func (l *LocalizedTournament) competitorIDList() []protocols.URN {
+func (l *LocalizedTournament) competitorIDList() []types.URN {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
-	out := make([]protocols.URN, 0, len(l.competitorIDs))
+	out := make([]types.URN, 0, len(l.competitorIDs))
 	for k := range l.competitorIDs {
 		out = append(out, k)
 	}
@@ -86,18 +86,18 @@ func (l *LocalizedTournament) competitorIDList() []protocols.URN {
 }
 
 // merge folds a TournamentWrapper payload into the entry under mu.
-func (l *LocalizedTournament) merge(locale protocols.Locale, t TournamentWrapper) error {
-	sportID, err := protocols.ParseURN(t.GetSportID())
+func (l *LocalizedTournament) merge(locale types.Locale, t TournamentWrapper) error {
+	sportID, err := types.ParseURN(t.GetSportID())
 	if err != nil {
 		return err
 	}
 
-	var competitorURNs []protocols.URN
+	var competitorURNs []types.URN
 	if ext, ok := t.(TournamentExtendedWrapper); ok {
 		comps := ext.GetCompetitors()
-		competitorURNs = make([]protocols.URN, 0, len(comps))
+		competitorURNs = make([]types.URN, 0, len(comps))
 		for _, c := range comps {
-			urn, err := protocols.ParseURN(c.GetID())
+			urn, err := types.ParseURN(c.GetID())
 			if err != nil {
 				return err
 			}
@@ -118,7 +118,7 @@ func (l *LocalizedTournament) merge(locale protocols.Locale, t TournamentWrapper
 	l.name[locale] = t.GetName()
 	l.abbreviation[locale] = t.GetAbbreviation()
 	if competitorURNs != nil {
-		l.competitorIDs = make(map[protocols.URN]struct{}, len(competitorURNs))
+		l.competitorIDs = make(map[types.URN]struct{}, len(competitorURNs))
 		for _, urn := range competitorURNs {
 			l.competitorIDs[urn] = struct{}{}
 		}
@@ -127,24 +127,24 @@ func (l *LocalizedTournament) merge(locale protocols.Locale, t TournamentWrapper
 }
 
 // ifZeroURN returns `prefer` if `current` is the zero URN, else `current`.
-func ifZeroURN(current, prefer protocols.URN) protocols.URN {
-	if current == (protocols.URN{}) {
+func ifZeroURN(current, prefer types.URN) types.URN {
+	if current == (types.URN{}) {
 		return prefer
 	}
 	return current
 }
 
 // urnFromString parses, ignoring errors (used as a defensive fallback).
-func urnFromString(s string) protocols.URN {
-	u, err := protocols.ParseURN(s)
+func urnFromString(s string) types.URN {
+	u, err := types.ParseURN(s)
 	if err != nil || u == nil {
-		return protocols.URN{}
+		return types.URN{}
 	}
 	return *u
 }
 
 // Tournament returns a populated LocalizedTournament.
-func (t *TournamentCache) Tournament(ctx context.Context, id protocols.URN, locales []protocols.Locale) (*LocalizedTournament, error) {
+func (t *TournamentCache) Tournament(ctx context.Context, id types.URN, locales []types.Locale) (*LocalizedTournament, error) {
 	v, _, err := t.lru.Get(ctx, id, locales)
 	if err != nil {
 		return nil, err
@@ -155,8 +155,8 @@ func (t *TournamentCache) Tournament(ctx context.Context, id protocols.URN, loca
 // TournamentCompetitors returns the competitor URN list for the tournament.
 // If the entry was populated by a non-Tournament-info API path it may not
 // have the competitor list yet; in that case we force a fresh fetch.
-func (t *TournamentCache) TournamentCompetitors(ctx context.Context, id protocols.URN, locale protocols.Locale) ([]protocols.URN, error) {
-	v, err := t.Tournament(ctx, id, []protocols.Locale{locale})
+func (t *TournamentCache) TournamentCompetitors(ctx context.Context, id types.URN, locale types.Locale) ([]types.URN, error) {
+	v, err := t.Tournament(ctx, id, []types.Locale{locale})
 	if err != nil {
 		return nil, err
 	}
@@ -166,7 +166,7 @@ func (t *TournamentCache) TournamentCompetitors(ctx context.Context, id protocol
 	}
 	// Force re-fetch via the FetchTournament path which carries competitors.
 	t.lru.Clear(id)
-	v, err = t.Tournament(ctx, id, []protocols.Locale{locale})
+	v, err = t.Tournament(ctx, id, []types.Locale{locale})
 	if err != nil {
 		return nil, err
 	}
@@ -174,7 +174,7 @@ func (t *TournamentCache) TournamentCompetitors(ctx context.Context, id protocol
 }
 
 // TournamentIcon returns the cached icon path, fetching if needed.
-func (t *TournamentCache) TournamentIcon(ctx context.Context, id protocols.URN, locale protocols.Locale) (*string, error) {
+func (t *TournamentCache) TournamentIcon(ctx context.Context, id types.URN, locale types.Locale) (*string, error) {
 	t.iconMu.RLock()
 	if v, ok := t.icons[id]; ok {
 		t.iconMu.RUnlock()
@@ -193,7 +193,7 @@ func (t *TournamentCache) TournamentIcon(ctx context.Context, id protocols.URN, 
 }
 
 // OnFeedMessage clears the cache for tournament-typed FixtureChange messages.
-func (t *TournamentCache) OnFeedMessage(id protocols.URN, feedMessage *protocols.FeedMessage) {
+func (t *TournamentCache) OnFeedMessage(id types.URN, feedMessage *types.FeedMessage) {
 	if feedMessage.Message == nil {
 		return
 	}
@@ -201,7 +201,7 @@ func (t *TournamentCache) OnFeedMessage(id protocols.URN, feedMessage *protocols
 	if !ok || id.Type != "tournament" {
 		return
 	}
-	parsed, err := protocols.ParseURN(msg.EventID)
+	parsed, err := types.ParseURN(msg.EventID)
 	if err != nil || parsed == nil {
 		t.logger.WithError(err).Errorf("failed to convert urn %s", msg.EventID)
 		return
@@ -210,7 +210,7 @@ func (t *TournamentCache) OnFeedMessage(id protocols.URN, feedMessage *protocols
 }
 
 // ClearCacheItem is the public invalidation hook.
-func (t *TournamentCache) ClearCacheItem(id protocols.URN) {
+func (t *TournamentCache) ClearCacheItem(id types.URN) {
 	t.lru.Clear(id)
 	t.iconMu.Lock()
 	delete(t.icons, id)
@@ -221,14 +221,14 @@ func newTournamentCache(client *api.Client, logger *log.Logger) *TournamentCache
 	tc := &TournamentCache{
 		apiClient: client,
 		logger:    logger,
-		icons:     make(map[protocols.URN]*string),
+		icons:     make(map[types.URN]*string),
 	}
-	tc.lru = lru.NewEventCache[protocols.URN, protocols.Locale, *LocalizedTournament](
+	tc.lru = lru.NewEventCache[types.URN, types.Locale, *LocalizedTournament](
 		lru.Config{},
 		func(
 			ctx context.Context,
-			id protocols.URN,
-			missing []protocols.Locale,
+			id types.URN,
+			missing []types.Locale,
 			existing *LocalizedTournament,
 			hasExisting bool,
 		) (*LocalizedTournament, error) {
@@ -238,9 +238,9 @@ func newTournamentCache(client *api.Client, logger *log.Logger) *TournamentCache
 			} else {
 				entry = &LocalizedTournament{
 					id:            id,
-					name:          make(map[protocols.Locale]string),
-					abbreviation:  make(map[protocols.Locale]string),
-					competitorIDs: make(map[protocols.URN]struct{}),
+					name:          make(map[types.Locale]string),
+					abbreviation:  make(map[types.Locale]string),
+					competitorIDs: make(map[types.URN]struct{}),
 				}
 			}
 			for _, locale := range missing {
@@ -262,37 +262,37 @@ func newTournamentCache(client *api.Client, logger *log.Logger) *TournamentCache
 }
 
 // tournamentSnapshot projects the cached entry into a
-// protocols.Tournament value. Resolves the embedded sport summary
+// types.Tournament value. Resolves the embedded sport summary
 // through the entity factory; competitor URNs are kept as URNs (lazy
 // resolution per call site).
 func (l *LocalizedTournament) tournamentSnapshot(
 	ctx context.Context,
 	icon *string,
-	sportSummary protocols.SportSummary,
-) protocols.Tournament {
+	sportSummary types.SportSummary,
+) types.Tournament {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
-	names := make(map[protocols.Locale]string, len(l.name))
+	names := make(map[types.Locale]string, len(l.name))
 	for k, v := range l.name {
 		names[k] = v
 	}
-	abbr := make(map[protocols.Locale]string, len(l.abbreviation))
+	abbr := make(map[types.Locale]string, len(l.abbreviation))
 	for k, v := range l.abbreviation {
 		abbr[k] = v
 	}
-	competitorIDs := make([]protocols.URN, 0, len(l.competitorIDs))
+	competitorIDs := make([]types.URN, 0, len(l.competitorIDs))
 	for k := range l.competitorIDs {
 		competitorIDs = append(competitorIDs, k)
 	}
-	var category *protocols.Category
+	var category *types.Category
 	if l.category != nil {
-		category = &protocols.Category{
+		category = &types.Category{
 			ID:          l.category.ID,
 			Name:        l.category.Name,
 			CountryCode: l.category.CountryCode,
 		}
 	}
-	return protocols.Tournament{
+	return types.Tournament{
 		ID:               l.id,
 		Names:            names,
 		Abbreviations:    abbr,
@@ -322,11 +322,11 @@ func cloneTime(t *time.Time) *time.Time {
 func BuildTournament(
 	ctx context.Context,
 	tc *TournamentCache,
-	factory protocols.EntityFactory,
-	id protocols.URN,
-	sportID protocols.URN,
-	locales []protocols.Locale,
-) (*protocols.Tournament, error) {
+	factory types.EntityFactory,
+	id types.URN,
+	sportID types.URN,
+	locales []types.Locale,
+) (*types.Tournament, error) {
 	item, err := tc.Tournament(ctx, id, locales)
 	if err != nil {
 		return nil, err
@@ -349,11 +349,11 @@ func BuildTournament(
 			return nil, err
 		}
 	}
-	var sportSummary protocols.SportSummary
+	var sportSummary types.SportSummary
 	if sport, err := factory.BuildSport(ctx, sportID, locales); err == nil && sport != nil {
 		sportSummary = sport.SportSummary
 	} else {
-		sportSummary = protocols.SportSummary{ID: sportID}
+		sportSummary = types.SportSummary{ID: sportID}
 	}
 	tournament := item.tournamentSnapshot(ctx, icon, sportSummary)
 	return &tournament, nil

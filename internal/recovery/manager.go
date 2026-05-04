@@ -10,7 +10,7 @@ import (
 	"github.com/oddin-gg/gosdk/internal/api"
 	"github.com/oddin-gg/gosdk/internal/producer"
 	log "github.com/oddin-gg/gosdk/internal/log"
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 )
 
 const (
@@ -33,7 +33,7 @@ const HandleGCGracePeriod = 5 * time.Minute
 // the actor and push events to its inbox. The previous mutex-guarded
 // producerRecoveryData + central manager-locks are gone.
 type Manager struct {
-	cfg             protocols.OddsFeedConfiguration
+	cfg             types.OddsFeedConfiguration
 	producerManager *producer.Manager
 	apiClient       *api.Client
 	logger          *log.Logger
@@ -46,7 +46,7 @@ type Manager struct {
 	actors   map[uint]*recoveryActor
 
 	// out is the public RecoveryEvents stream (closed on Close).
-	out chan protocols.RecoveryMessage
+	out chan types.RecoveryMessage
 
 	// handles tracks outstanding *Handle objects keyed by request id.
 	// Inserted by registerHandle, transitioned to terminal by
@@ -71,7 +71,7 @@ type Manager struct {
 
 // NewManager constructs the recovery manager. Open(ctx) must be called
 // before any actors are spawned.
-func NewManager(cfg protocols.OddsFeedConfiguration, producerManager *producer.Manager, apiClient *api.Client, logger *log.Logger) *Manager {
+func NewManager(cfg types.OddsFeedConfiguration, producerManager *producer.Manager, apiClient *api.Client, logger *log.Logger) *Manager {
 	return &Manager{
 		cfg:             cfg,
 		producerManager: producerManager,
@@ -86,7 +86,7 @@ func NewManager(cfg protocols.OddsFeedConfiguration, producerManager *producer.M
 
 // Open spawns one actor per active producer and starts the periodic
 // inactivity tick. Returns the recovery-events channel.
-func (m *Manager) Open(ctx context.Context) (<-chan protocols.RecoveryMessage, error) {
+func (m *Manager) Open(ctx context.Context) (<-chan types.RecoveryMessage, error) {
 	if m.out != nil {
 		return nil, errors.New("already opened")
 	}
@@ -103,7 +103,7 @@ func (m *Manager) Open(ctx context.Context) (<-chan protocols.RecoveryMessage, e
 		m.logger.Warn("no active producers")
 	}
 
-	m.out = make(chan protocols.RecoveryMessage, 1024)
+	m.out = make(chan types.RecoveryMessage, 1024)
 	m.closeCh = make(chan struct{})
 
 	m.actorsMu.Lock()
@@ -239,7 +239,7 @@ func (m *Manager) OnMessageProcessingEnded(sessionID uuid.UUID, producerID uint,
 }
 
 // OnAliveReceived dispatches to the producer's actor.
-func (m *Manager) OnAliveReceived(producerID uint, timestamp protocols.MessageTimestamp, isSubscribed bool, messageInterest protocols.MessageInterest) {
+func (m *Manager) OnAliveReceived(producerID uint, timestamp types.MessageTimestamp, isSubscribed bool, messageInterest types.MessageInterest) {
 	a := m.findOrSpawn(producerID)
 	_ = a.send(evAlive{
 		timestamp:       timestamp,
@@ -249,7 +249,7 @@ func (m *Manager) OnAliveReceived(producerID uint, timestamp protocols.MessageTi
 }
 
 // OnSnapshotCompleteReceived dispatches to the producer's actor.
-func (m *Manager) OnSnapshotCompleteReceived(producerID uint, requestID uint, messageInterest protocols.MessageInterest) {
+func (m *Manager) OnSnapshotCompleteReceived(producerID uint, requestID uint, messageInterest types.MessageInterest) {
 	m.actorsMu.RLock()
 	a, ok := m.actors[producerID]
 	m.actorsMu.RUnlock()
@@ -262,8 +262,8 @@ func (m *Manager) OnSnapshotCompleteReceived(producerID uint, requestID uint, me
 // --- Synchronous commands ---
 
 // InitiateEventOddsMessagesRecovery is the legacy uint-returning shape
-// kept for protocols.RecoveryManager interface compatibility.
-func (m *Manager) InitiateEventOddsMessagesRecovery(ctx context.Context, producerID uint, eventID protocols.URN) (uint, error) {
+// kept for types.RecoveryManager interface compatibility.
+func (m *Manager) InitiateEventOddsMessagesRecovery(ctx context.Context, producerID uint, eventID types.URN) (uint, error) {
 	h, err := m.InitiateEventOddsRecoveryHandle(ctx, producerID, eventID)
 	if err != nil {
 		return 0, err
@@ -272,7 +272,7 @@ func (m *Manager) InitiateEventOddsMessagesRecovery(ctx context.Context, produce
 }
 
 // InitiateEventStatefulMessagesRecovery is the legacy uint-returning shape.
-func (m *Manager) InitiateEventStatefulMessagesRecovery(ctx context.Context, producerID uint, eventID protocols.URN) (uint, error) {
+func (m *Manager) InitiateEventStatefulMessagesRecovery(ctx context.Context, producerID uint, eventID types.URN) (uint, error) {
 	h, err := m.InitiateEventStatefulRecoveryHandle(ctx, producerID, eventID)
 	if err != nil {
 		return 0, err
@@ -282,16 +282,16 @@ func (m *Manager) InitiateEventStatefulMessagesRecovery(ctx context.Context, pro
 
 // InitiateEventOddsRecoveryHandle is the handle-returning variant.
 // Sends a recoverEvent command to the actor and waits for the reply.
-func (m *Manager) InitiateEventOddsRecoveryHandle(ctx context.Context, producerID uint, eventID protocols.URN) (*Handle, error) {
+func (m *Manager) InitiateEventOddsRecoveryHandle(ctx context.Context, producerID uint, eventID types.URN) (*Handle, error) {
 	return m.dispatchRecoverEvent(ctx, producerID, eventID, false)
 }
 
 // InitiateEventStatefulRecoveryHandle is the handle-returning variant.
-func (m *Manager) InitiateEventStatefulRecoveryHandle(ctx context.Context, producerID uint, eventID protocols.URN) (*Handle, error) {
+func (m *Manager) InitiateEventStatefulRecoveryHandle(ctx context.Context, producerID uint, eventID types.URN) (*Handle, error) {
 	return m.dispatchRecoverEvent(ctx, producerID, eventID, true)
 }
 
-func (m *Manager) dispatchRecoverEvent(ctx context.Context, producerID uint, eventID protocols.URN, stateful bool) (*Handle, error) {
+func (m *Manager) dispatchRecoverEvent(ctx context.Context, producerID uint, eventID types.URN, stateful bool) (*Handle, error) {
 	a := m.findOrSpawn(producerID)
 	reply := make(chan recoverEventReply, 1)
 	a.sendBlocking(evRecoverEvent{
@@ -329,7 +329,7 @@ func (m *Manager) registerHandle(h *Handle) {
 	m.handlesMu.Unlock()
 }
 
-func (m *Manager) completeHandle(requestID uint, status protocols.RecoveryRequestStatus, err error) *Handle {
+func (m *Manager) completeHandle(requestID uint, status types.RecoveryRequestStatus, err error) *Handle {
 	m.handlesMu.RLock()
 	h := m.handles[requestID]
 	m.handlesMu.RUnlock()
@@ -363,7 +363,7 @@ func (m *Manager) failPendingHandles(err error) {
 	}
 	m.handlesMu.RUnlock()
 	for _, h := range pending {
-		h.complete(protocols.RecoveryStatusFailed, err, time.Now())
+		h.complete(types.RecoveryStatusFailed, err, time.Now())
 	}
 }
 
@@ -378,7 +378,7 @@ func (m *Manager) nextRequestID() uint { return m.sequence.next() }
 // blocks the caller (an actor) — back-pressure on slow consumers,
 // but acceptable since the buffer is 1024 and consumers should drain
 // promptly.
-func (m *Manager) emitRecoveryMessage(msg protocols.RecoveryMessage) {
+func (m *Manager) emitRecoveryMessage(msg types.RecoveryMessage) {
 	if m.out == nil {
 		return
 	}
@@ -391,17 +391,17 @@ func (m *Manager) emitRecoveryMessage(msg protocols.RecoveryMessage) {
 	}
 }
 
-// eventRecoveryMessageImpl satisfies protocols.EventRecoveryMessage —
+// eventRecoveryMessageImpl satisfies types.EventRecoveryMessage —
 // the per-event recovery completion event delivered on the recovery
 // stream.
 type eventRecoveryMessageImpl struct {
-	eventID   protocols.URN
+	eventID   types.URN
 	requestID uint
-	producer  protocols.Producer
-	timestamp protocols.MessageTimestamp
+	producer  types.Producer
+	timestamp types.MessageTimestamp
 }
 
-func (e eventRecoveryMessageImpl) Producer() protocols.Producer       { return e.producer }
-func (e eventRecoveryMessageImpl) Timestamp() protocols.MessageTimestamp { return e.timestamp }
-func (e eventRecoveryMessageImpl) EventID() protocols.URN              { return e.eventID }
+func (e eventRecoveryMessageImpl) Producer() types.Producer       { return e.producer }
+func (e eventRecoveryMessageImpl) Timestamp() types.MessageTimestamp { return e.timestamp }
+func (e eventRecoveryMessageImpl) EventID() types.URN              { return e.eventID }
 func (e eventRecoveryMessageImpl) RequestID() uint                     { return e.requestID }

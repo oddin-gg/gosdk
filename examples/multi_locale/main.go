@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/oddin-gg/gosdk"
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 )
 
 func main() {
@@ -22,8 +22,8 @@ func main() {
 	}
 
 	cfg := gosdk.NewConfig(token, parseEnv(),
-		gosdk.WithDefaultLocale(protocols.EnLocale),
-		gosdk.WithPreloadLocales(protocols.EnLocale, protocols.RuLocale, protocols.DeLocale),
+		gosdk.WithDefaultLocale(types.EnLocale),
+		gosdk.WithPreloadLocales(types.EnLocale, types.RuLocale, types.DeLocale),
 	)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -41,7 +41,7 @@ func main() {
 
 	// Asking for sports in three locales fills the cache for all three.
 	// The variadic method does the multi-locale fan-out for us.
-	sports, err := c.Sports(ctx, protocols.EnLocale, protocols.RuLocale, protocols.DeLocale)
+	sports, err := c.Sports(ctx, types.EnLocale, types.RuLocale, types.DeLocale)
 	if err != nil {
 		log.Fatalf("sports: %v", err)
 	}
@@ -51,20 +51,20 @@ func main() {
 		// Per-locale lookups don't refetch.
 		log.Printf("%s | en=%s ru=%s de=%s",
 			s.ID.ToString(),
-			s.Name(protocols.EnLocale),
-			s.Name(protocols.RuLocale),
-			s.Name(protocols.DeLocale))
+			s.Name(types.EnLocale),
+			s.Name(types.RuLocale),
+			s.Name(types.DeLocale))
 	}
 }
 
-func parseEnv() protocols.Environment {
+func parseEnv() types.Environment {
 	switch os.Getenv("ENV") {
 	case "production":
-		return protocols.ProductionEnvironment
+		return types.ProductionEnvironment
 	case "test":
-		return protocols.TestEnvironment
+		return types.TestEnvironment
 	default:
-		return protocols.IntegrationEnvironment
+		return types.IntegrationEnvironment
 	}
 }
 

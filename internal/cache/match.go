@@ -11,7 +11,7 @@ import (
 	"github.com/oddin-gg/gosdk/internal/cache/lru"
 	feedXML "github.com/oddin-gg/gosdk/internal/feed/xml"
 	"github.com/oddin-gg/gosdk/internal/utils"
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 	log "github.com/oddin-gg/gosdk/internal/log"
 )
 
@@ -24,7 +24,7 @@ import (
 type MatchCache struct {
 	apiClient *api.Client
 	logger    *log.Logger
-	lru       *lru.EventCache[protocols.URN, protocols.Locale, *LocalizedMatch]
+	lru       *lru.EventCache[types.URN, types.Locale, *LocalizedMatch]
 }
 
 // LocalizedMatch is the cached representation of a match. All fields are
@@ -32,32 +32,32 @@ type MatchCache struct {
 type LocalizedMatch struct {
 	mu sync.RWMutex
 
-	id protocols.URN
+	id types.URN
 
 	// Locale-independent fields (set on first load; later loads re-set them).
 	scheduledTime        *time.Time
 	scheduledEndTime     *time.Time
-	sportID              protocols.URN
-	tournamentID         protocols.URN
+	sportID              types.URN
+	tournamentID         types.URN
 	competitors          []competitor
-	liveOddsAvailability *protocols.LiveOddsAvailability
-	sportFormat          protocols.SportFormat
+	liveOddsAvailability *types.LiveOddsAvailability
+	sportFormat          types.SportFormat
 
 	// Per-locale fields.
-	name      map[protocols.Locale]string
-	extraInfo map[protocols.Locale]map[string]string
+	name      map[types.Locale]string
+	extraInfo map[types.Locale]map[string]string
 }
 
 type competitor struct {
-	urn       protocols.URN
+	urn       types.URN
 	qualifier string
 }
 
 // Locales implements lru.LocalizedEntry.
-func (m *LocalizedMatch) Locales() []protocols.Locale {
+func (m *LocalizedMatch) Locales() []types.Locale {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	out := make([]protocols.Locale, 0, len(m.name))
+	out := make([]types.Locale, 0, len(m.name))
 	for l := range m.name {
 		out = append(out, l)
 	}
@@ -66,9 +66,9 @@ func (m *LocalizedMatch) Locales() []protocols.Locale {
 
 // Accessors are pure-data reads under RLock — no I/O.
 
-func (m *LocalizedMatch) ID() protocols.URN { return m.id }
+func (m *LocalizedMatch) ID() types.URN { return m.id }
 
-func (m *LocalizedMatch) Name(locale protocols.Locale) (string, bool) {
+func (m *LocalizedMatch) Name(locale types.Locale) (string, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	v, ok := m.name[locale]
@@ -87,13 +87,13 @@ func (m *LocalizedMatch) ScheduledEndTime() *time.Time {
 	return m.scheduledEndTime
 }
 
-func (m *LocalizedMatch) SportID() protocols.URN {
+func (m *LocalizedMatch) SportID() types.URN {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.sportID
 }
 
-func (m *LocalizedMatch) TournamentID() protocols.URN {
+func (m *LocalizedMatch) TournamentID() types.URN {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.tournamentID
@@ -107,20 +107,20 @@ func (m *LocalizedMatch) Competitors() []competitor {
 	return out
 }
 
-func (m *LocalizedMatch) LiveOddsAvailability() *protocols.LiveOddsAvailability {
+func (m *LocalizedMatch) LiveOddsAvailability() *types.LiveOddsAvailability {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.liveOddsAvailability
 }
 
-func (m *LocalizedMatch) SportFormat() protocols.SportFormat {
+func (m *LocalizedMatch) SportFormat() types.SportFormat {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.sportFormat
 }
 
 // ExtraInfo returns a copy of the locale's extra-info map (or nil).
-func (m *LocalizedMatch) ExtraInfo(locale protocols.Locale) map[string]string {
+func (m *LocalizedMatch) ExtraInfo(locale types.Locale) map[string]string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	src := m.extraInfo[locale]
@@ -135,7 +135,7 @@ func (m *LocalizedMatch) ExtraInfo(locale protocols.Locale) map[string]string {
 }
 
 // Match returns a populated LocalizedMatch, fetching missing locales as needed.
-func (m *MatchCache) Match(ctx context.Context, id protocols.URN, locales []protocols.Locale) (*LocalizedMatch, error) {
+func (m *MatchCache) Match(ctx context.Context, id types.URN, locales []types.Locale) (*LocalizedMatch, error) {
 	v, _, err := m.lru.Get(ctx, id, locales)
 	if err != nil {
 		return nil, err
@@ -144,7 +144,7 @@ func (m *MatchCache) Match(ctx context.Context, id protocols.URN, locales []prot
 }
 
 // OnFeedMessage clears the cache entry on a FixtureChange for a match.
-func (m *MatchCache) OnFeedMessage(id protocols.URN, feedMessage *protocols.FeedMessage) {
+func (m *MatchCache) OnFeedMessage(id types.URN, feedMessage *types.FeedMessage) {
 	if feedMessage.Message == nil {
 		return
 	}
@@ -155,16 +155,16 @@ func (m *MatchCache) OnFeedMessage(id protocols.URN, feedMessage *protocols.Feed
 }
 
 // ClearCacheItem is the public invalidation hook.
-func (m *MatchCache) ClearCacheItem(id protocols.URN) { m.lru.Clear(id) }
+func (m *MatchCache) ClearCacheItem(id types.URN) { m.lru.Clear(id) }
 
 func newMatchCache(client *api.Client, logger *log.Logger) *MatchCache {
 	mc := &MatchCache{apiClient: client, logger: logger}
-	mc.lru = lru.NewEventCache[protocols.URN, protocols.Locale, *LocalizedMatch](
+	mc.lru = lru.NewEventCache[types.URN, types.Locale, *LocalizedMatch](
 		lru.Config{},
 		func(
 			ctx context.Context,
-			id protocols.URN,
-			missing []protocols.Locale,
+			id types.URN,
+			missing []types.Locale,
 			existing *LocalizedMatch,
 			hasExisting bool,
 		) (*LocalizedMatch, error) {
@@ -174,8 +174,8 @@ func newMatchCache(client *api.Client, logger *log.Logger) *MatchCache {
 			} else {
 				entry = &LocalizedMatch{
 					id:        id,
-					name:      make(map[protocols.Locale]string),
-					extraInfo: make(map[protocols.Locale]map[string]string),
+					name:      make(map[types.Locale]string),
+					extraInfo: make(map[types.Locale]map[string]string),
 				}
 			}
 			for _, locale := range missing {
@@ -194,7 +194,7 @@ func newMatchCache(client *api.Client, logger *log.Logger) *MatchCache {
 }
 
 // merge folds a freshly fetched match summary into the entry under mu.
-func (m *LocalizedMatch) merge(locale protocols.Locale, match apiXML.SportEvent) error {
+func (m *LocalizedMatch) merge(locale types.Locale, match apiXML.SportEvent) error {
 	tournamentID, err := unwrapURN(&match.Tournament.ID)
 	if err != nil {
 		return err
@@ -210,16 +210,16 @@ func (m *LocalizedMatch) merge(locale protocols.Locale, match apiXML.SportEvent)
 		return fmt.Errorf("match %s has no sport id", match.ID)
 	}
 
-	var sportFormat protocols.SportFormat = protocols.SportFormatClassic
+	var sportFormat types.SportFormat = types.SportFormatClassic
 	extraInfo := make(map[string]string)
 	if match.ExtraInfo != nil && match.ExtraInfo.List != nil {
 		for _, info := range match.ExtraInfo.List {
 			if info.Key == apiXML.ExtraInfoSportFormatKey && len(info.Value) > 0 {
 				switch info.Value {
-				case protocols.SportFormatRace:
-					sportFormat = protocols.SportFormatRace
-				case protocols.SportFormatClassic:
-					sportFormat = protocols.SportFormatClassic
+				case types.SportFormatRace:
+					sportFormat = types.SportFormatRace
+				case types.SportFormatClassic:
+					sportFormat = types.SportFormatClassic
 				default:
 					return fmt.Errorf("unknown sport format for match %s: %s", match.ID, info.Value)
 				}
@@ -232,7 +232,7 @@ func (m *LocalizedMatch) merge(locale protocols.Locale, match apiXML.SportEvent)
 	if match.Competitors != nil && len(match.Competitors.Competitor) > 0 {
 		competitors = make([]competitor, 0, len(match.Competitors.Competitor))
 		for _, c := range match.Competitors.Competitor {
-			urn, err := protocols.ParseURN(c.ID)
+			urn, err := types.ParseURN(c.ID)
 			if err != nil {
 				return err
 			}
@@ -243,12 +243,12 @@ func (m *LocalizedMatch) merge(locale protocols.Locale, match apiXML.SportEvent)
 		}
 	}
 
-	var liveOdds protocols.LiveOddsAvailability
+	var liveOdds types.LiveOddsAvailability
 	switch match.LiveOdds {
 	case apiXML.LiveOddsNotAvailable:
-		liveOdds = protocols.NotAvailableLiveOddsAvailability
+		liveOdds = types.NotAvailableLiveOddsAvailability
 	default:
-		liveOdds = protocols.AvailableLiveOddsAvailability
+		liveOdds = types.AvailableLiveOddsAvailability
 	}
 
 	scheduledTime, err := unwrapTime(match.Scheduled)
@@ -275,23 +275,23 @@ func (m *LocalizedMatch) merge(locale protocols.Locale, match apiXML.SportEvent)
 }
 
 // snapshot projects the cached match entry into the field shapes used
-// by protocols.Match (data-copy under the entry's read lock).
+// by types.Match (data-copy under the entry's read lock).
 func (m *LocalizedMatch) snapshot() (
-	names map[protocols.Locale]string,
-	extraInfo map[protocols.Locale]map[string]string,
+	names map[types.Locale]string,
+	extraInfo map[types.Locale]map[string]string,
 	scheduledTime, scheduledEndTime *time.Time,
-	sportID, tournamentID protocols.URN,
+	sportID, tournamentID types.URN,
 	competitors []competitor,
-	liveOddsAvailability protocols.LiveOddsAvailability,
-	sportFormat protocols.SportFormat,
+	liveOddsAvailability types.LiveOddsAvailability,
+	sportFormat types.SportFormat,
 ) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	names = make(map[protocols.Locale]string, len(m.name))
+	names = make(map[types.Locale]string, len(m.name))
 	for k, v := range m.name {
 		names[k] = v
 	}
-	extraInfo = make(map[protocols.Locale]map[string]string, len(m.extraInfo))
+	extraInfo = make(map[types.Locale]map[string]string, len(m.extraInfo))
 	for locale, src := range m.extraInfo {
 		dst := make(map[string]string, len(src))
 		for k, v := range src {
@@ -318,7 +318,7 @@ func (m *LocalizedMatch) snapshot() (
 	return
 }
 
-// BuildMatch resolves a *protocols.Match snapshot. Eagerly loads:
+// BuildMatch resolves a *types.Match snapshot. Eagerly loads:
 //   - the per-locale match summary (entry + name + extra-info)
 //   - the tournament (with its embedded sport summary)
 //   - per-competitor profiles (across the requested locales)
@@ -331,11 +331,11 @@ func (m *LocalizedMatch) snapshot() (
 func BuildMatch(
 	ctx context.Context,
 	mc *MatchCache,
-	factory protocols.EntityFactory,
-	id protocols.URN,
-	sportID *protocols.URN,
-	locales []protocols.Locale,
-) (*protocols.Match, error) {
+	factory types.EntityFactory,
+	id types.URN,
+	sportID *types.URN,
+	locales []types.Locale,
+) (*types.Match, error) {
 	if len(locales) == 0 {
 		return nil, fmt.Errorf("BuildMatch: no locales supplied")
 	}
@@ -357,7 +357,7 @@ func BuildMatch(
 
 	// Competitors (eager). For classic sports the home/away pair is
 	// projected into TeamCompetitor pointers as well.
-	competitors := make([]protocols.Competitor, 0, len(comps))
+	competitors := make([]types.Competitor, 0, len(comps))
 	for _, t := range comps {
 		c, err := factory.BuildCompetitor(ctx, t.urn, locales)
 		if err != nil {
@@ -366,8 +366,8 @@ func BuildMatch(
 		competitors = append(competitors, *c)
 	}
 
-	var home, away *protocols.TeamCompetitor
-	if format == protocols.SportFormatClassic && len(comps) == 2 {
+	var home, away *types.TeamCompetitor
+	if format == types.SportFormatClassic && len(comps) == 2 {
 		hq := comps[0].qualifier
 		aq := comps[1].qualifier
 		h, err := factory.BuildTeamCompetitor(ctx, comps[0].urn, &hq, locales)
@@ -395,7 +395,7 @@ func BuildMatch(
 		return nil, fmt.Errorf("build match status %s: %w", id.ToString(), err)
 	}
 
-	return &protocols.Match{
+	return &types.Match{
 		ID:                   id,
 		Names:                names,
 		SportID:              resolvedSport,
@@ -415,11 +415,11 @@ func BuildMatch(
 
 // shared helpers used across this package's caches.
 
-func unwrapURN(id *string) (*protocols.URN, error) {
+func unwrapURN(id *string) (*types.URN, error) {
 	if id == nil {
 		return nil, nil
 	}
-	return protocols.ParseURN(*id)
+	return types.ParseURN(*id)
 }
 
 func unwrapTime(dateTime *utils.DateTime) (*time.Time, error) {

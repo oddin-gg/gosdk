@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/cenkalti/backoff/v5"
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 	amqp "github.com/rabbitmq/amqp091-go"
 	log "github.com/oddin-gg/gosdk/internal/log"
 )
@@ -52,8 +52,8 @@ type EventEmitter func(Event)
 // driven shutdown. Open is idempotent, Close is idempotent. Callers wait
 // for a usable connection via Channel(ctx) instead of poking c.connection.
 type Client struct {
-	cfg           protocols.OddsFeedConfiguration
-	whoAmIManager protocols.WhoAmIManager
+	cfg           types.OddsFeedConfiguration
+	whoAmIManager types.WhoAmIManager
 	logger        *log.Logger
 	emitter       EventEmitter
 
@@ -80,7 +80,7 @@ type Client struct {
 }
 
 // NewClient ...
-func NewClient(cfg protocols.OddsFeedConfiguration, whoAmIManager protocols.WhoAmIManager, logger *log.Logger) *Client {
+func NewClient(cfg types.OddsFeedConfiguration, whoAmIManager types.WhoAmIManager, logger *log.Logger) *Client {
 	return &Client{
 		cfg:           cfg,
 		whoAmIManager: whoAmIManager,

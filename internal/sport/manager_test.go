@@ -15,35 +15,35 @@ import (
 	"github.com/oddin-gg/gosdk/internal/cache"
 	"github.com/oddin-gg/gosdk/internal/factory"
 	log "github.com/oddin-gg/gosdk/internal/log"
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 )
 
-// minimalCfg satisfies protocols.OddsFeedConfiguration.
+// minimalCfg satisfies types.OddsFeedConfiguration.
 type minimalCfg struct {
 	apiURL string
 	token  string
 }
 
 func (c *minimalCfg) AccessToken() *string                                       { return &c.token }
-func (c *minimalCfg) DefaultLocale() protocols.Locale                            { return protocols.EnLocale }
+func (c *minimalCfg) DefaultLocale() types.Locale                            { return types.EnLocale }
 func (c *minimalCfg) MaxInactivitySeconds() int                                  { return 20 }
 func (c *minimalCfg) MaxRecoveryExecutionMinutes() int                           { return 360 }
 func (c *minimalCfg) MessagingPort() int                                         { return 5672 }
 func (c *minimalCfg) SdkNodeID() *int                                            { return nil }
-func (c *minimalCfg) SelectedEnvironment() *protocols.Environment                { return nil }
-func (c *minimalCfg) SelectedRegion() protocols.Region                           { return protocols.RegionDefault }
-func (c *minimalCfg) SetRegion(protocols.Region) protocols.OddsFeedConfiguration { return c }
+func (c *minimalCfg) SelectedEnvironment() *types.Environment                { return nil }
+func (c *minimalCfg) SelectedRegion() types.Region                           { return types.RegionDefault }
+func (c *minimalCfg) SetRegion(types.Region) types.OddsFeedConfiguration { return c }
 func (c *minimalCfg) ExchangeName() string                                       { return "oddinfeed" }
 func (c *minimalCfg) ReplayExchangeName() string                                 { return "oddinreplay" }
 func (c *minimalCfg) ReportExtendedData() bool                                   { return false }
-func (c *minimalCfg) SetExchangeName(string) protocols.OddsFeedConfiguration     { return c }
-func (c *minimalCfg) SetAPIURL(string) protocols.OddsFeedConfiguration           { return c }
-func (c *minimalCfg) SetMQURL(string) protocols.OddsFeedConfiguration            { return c }
-func (c *minimalCfg) SetMessagingPort(int) protocols.OddsFeedConfiguration       { return c }
+func (c *minimalCfg) SetExchangeName(string) types.OddsFeedConfiguration     { return c }
+func (c *minimalCfg) SetAPIURL(string) types.OddsFeedConfiguration           { return c }
+func (c *minimalCfg) SetMQURL(string) types.OddsFeedConfiguration            { return c }
+func (c *minimalCfg) SetMessagingPort(int) types.OddsFeedConfiguration       { return c }
 func (c *minimalCfg) APIURL() (string, error)                                    { return c.apiURL, nil }
 func (c *minimalCfg) MQURL() (string, error)                                     { return "", nil }
 func (c *minimalCfg) SportIDPrefix() string                                      { return "od:sport:" }
-func (c *minimalCfg) SetSportIDPrefix(string) protocols.OddsFeedConfiguration    { return c }
+func (c *minimalCfg) SetSportIDPrefix(string) types.OddsFeedConfiguration    { return c }
 
 type rewriteTransport struct {
 	target string
@@ -172,7 +172,7 @@ func TestSport_LocalizedSports(t *testing.T) {
 	defer srv.Close()
 
 	mgr := newSportManager(t, srv)
-	got, err := mgr.LocalizedSports(context.Background(), protocols.EnLocale)
+	got, err := mgr.LocalizedSports(context.Background(), types.EnLocale)
 	if err != nil {
 		t.Fatalf("LocalizedSports: %v", err)
 	}
@@ -206,8 +206,8 @@ func TestSport_LocalizedAvailableTournaments(t *testing.T) {
 	defer srv.Close()
 
 	mgr := newSportManager(t, srv)
-	urn, _ := protocols.ParseURN("od:sport:1")
-	got, err := mgr.LocalizedAvailableTournaments(context.Background(), *urn, protocols.EnLocale)
+	urn, _ := types.ParseURN("od:sport:1")
+	got, err := mgr.LocalizedAvailableTournaments(context.Background(), *urn, types.EnLocale)
 	if err != nil {
 		t.Fatalf("LocalizedAvailableTournaments: %v", err)
 	}
@@ -228,7 +228,7 @@ func TestSport_AvailableTournaments_DefaultLocale(t *testing.T) {
 	defer srv.Close()
 
 	mgr := newSportManager(t, srv)
-	urn, _ := protocols.ParseURN("od:sport:1")
+	urn, _ := types.ParseURN("od:sport:1")
 	if _, err := mgr.AvailableTournaments(context.Background(), *urn); err != nil {
 		t.Errorf("AvailableTournaments: %v", err)
 	}
@@ -244,7 +244,7 @@ func TestSport_LocalizedFixtureChanges(t *testing.T) {
 	defer srv.Close()
 
 	mgr := newSportManager(t, srv)
-	got, err := mgr.LocalizedFixtureChanges(context.Background(), protocols.EnLocale, time.Now().Add(-time.Hour))
+	got, err := mgr.LocalizedFixtureChanges(context.Background(), types.EnLocale, time.Now().Add(-time.Hour))
 	if err != nil {
 		t.Fatalf("LocalizedFixtureChanges: %v", err)
 	}
@@ -276,10 +276,10 @@ func TestSport_LocalizedListOfMatches_LimitChecks(t *testing.T) {
 	defer srv.Close()
 
 	mgr := newSportManager(t, srv)
-	if _, err := mgr.LocalizedListOfMatches(context.Background(), 0, 1001, protocols.EnLocale); err == nil {
+	if _, err := mgr.LocalizedListOfMatches(context.Background(), 0, 1001, types.EnLocale); err == nil {
 		t.Error("limit > 1000 should error")
 	}
-	if _, err := mgr.LocalizedListOfMatches(context.Background(), 0, 0, protocols.EnLocale); err == nil {
+	if _, err := mgr.LocalizedListOfMatches(context.Background(), 0, 0, types.EnLocale); err == nil {
 		t.Error("limit < 1 should error")
 	}
 }
@@ -292,13 +292,13 @@ func TestSport_LocalizedSportActiveTournaments_NotFoundError(t *testing.T) {
 	defer srv.Close()
 
 	mgr := newSportManager(t, srv)
-	if _, err := mgr.LocalizedSportActiveTournaments(context.Background(), "nonexistent-sport", protocols.EnLocale); err == nil {
+	if _, err := mgr.LocalizedSportActiveTournaments(context.Background(), "nonexistent-sport", types.EnLocale); err == nil {
 		t.Error("expected error when sport name doesn't match")
 	}
 }
 
 func TestSport_FixtureChangeImpl_Accessors(t *testing.T) {
-	urn, _ := protocols.ParseURN("od:match:1")
+	urn, _ := types.ParseURN("od:match:1")
 	now := time.Now()
 	f := fixtureChangeImpl{id: *urn, updatedTime: now}
 	if f.SportEventID() != *urn {
@@ -317,7 +317,7 @@ func TestSport_ClearMethods(t *testing.T) {
 	defer srv.Close()
 
 	mgr := newSportManager(t, srv)
-	urn, _ := protocols.ParseURN("od:match:1")
+	urn, _ := types.ParseURN("od:match:1")
 	// Ensure no panic.
 	mgr.ClearMatch(*urn)
 	mgr.ClearTournament(*urn)

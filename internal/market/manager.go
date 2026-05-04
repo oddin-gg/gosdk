@@ -5,7 +5,7 @@ import (
 
 	"github.com/oddin-gg/gosdk/internal/cache"
 	"github.com/oddin-gg/gosdk/internal/factory"
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 )
 
 // Manager ...
@@ -15,13 +15,13 @@ import (
 // (cache loader signatures take ctx). For Phase 2 we accept a one-line
 // context.Background() inside delegations that will be replaced.
 type Manager struct {
-	oddsFeedConfiguration    protocols.OddsFeedConfiguration
+	oddsFeedConfiguration    types.OddsFeedConfiguration
 	marketDescriptionFactory *factory.MarketDescriptionFactory
 	cacheManager             *cache.Manager
 }
 
 // MarketDescriptions ...
-func (m Manager) MarketDescriptions(ctx context.Context) ([]protocols.MarketDescription, error) {
+func (m Manager) MarketDescriptions(ctx context.Context) ([]types.MarketDescription, error) {
 	return m.LocalizedMarketDescriptions(ctx, m.oddsFeedConfiguration.DefaultLocale())
 }
 
@@ -30,14 +30,14 @@ func (m Manager) MarketDescriptionByIDAndVariant(
 	ctx context.Context,
 	marketID uint,
 	variant *string,
-) (*protocols.MarketDescription, error) {
+) (*types.MarketDescription, error) {
 	_ = ctx // Phase 3 plumbs through the cache loader.
-	locale := []protocols.Locale{m.oddsFeedConfiguration.DefaultLocale()}
+	locale := []types.Locale{m.oddsFeedConfiguration.DefaultLocale()}
 	return m.marketDescriptionFactory.MarketDescriptionByIDAndVariant(marketID, variant, locale)
 }
 
 // LocalizedMarketDescriptions ...
-func (m Manager) LocalizedMarketDescriptions(ctx context.Context, locale protocols.Locale) ([]protocols.MarketDescription, error) {
+func (m Manager) LocalizedMarketDescriptions(ctx context.Context, locale types.Locale) ([]types.MarketDescription, error) {
 	_ = ctx // Phase 3 plumbs through the cache loader.
 	return m.marketDescriptionFactory.MarketDescriptions(locale)
 }
@@ -48,19 +48,19 @@ func (m Manager) ClearMarketDescription(marketID uint, variant *string) {
 }
 
 // MarketVoidReasons ...
-func (m Manager) MarketVoidReasons(ctx context.Context) ([]protocols.MarketVoidReason, error) {
+func (m Manager) MarketVoidReasons(ctx context.Context) ([]types.MarketVoidReason, error) {
 	_ = ctx // Phase 3 plumbs through the cache loader.
 	return m.marketDescriptionFactory.MarketVoidReasons()
 }
 
 // ReloadMarketVoidReasons ...
-func (m Manager) ReloadMarketVoidReasons(ctx context.Context) ([]protocols.MarketVoidReason, error) {
+func (m Manager) ReloadMarketVoidReasons(ctx context.Context) ([]types.MarketVoidReason, error) {
 	_ = ctx // Phase 3 plumbs through the cache loader.
 	return m.marketDescriptionFactory.ReloadMarketVoidReasons()
 }
 
 // NewManager ...
-func NewManager(cacheManager *cache.Manager, marketDescriptionFactory *factory.MarketDescriptionFactory, oddsFeedConfiguration protocols.OddsFeedConfiguration) *Manager {
+func NewManager(cacheManager *cache.Manager, marketDescriptionFactory *factory.MarketDescriptionFactory, oddsFeedConfiguration types.OddsFeedConfiguration) *Manager {
 	return &Manager{
 		oddsFeedConfiguration:    oddsFeedConfiguration,
 		marketDescriptionFactory: marketDescriptionFactory,

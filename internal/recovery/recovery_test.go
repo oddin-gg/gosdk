@@ -10,7 +10,7 @@ import (
 	"time"
 
 	log "github.com/oddin-gg/gosdk/internal/log"
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 )
 
 // newDiscardLogger builds a recovery logger that drops everything —
@@ -60,18 +60,18 @@ func TestGenerator_NextConcurrentUnique(t *testing.T) {
 func TestRecoveryData_SnapshotComplete_Accumulates(t *testing.T) {
 	rd := newRecoveryData(42, time.Now())
 
-	got := rd.snapshotComplete(protocols.LiveOnlyMessageInterest)
-	if len(got) != 1 || got[0] != protocols.LiveOnlyMessageInterest {
+	got := rd.snapshotComplete(types.LiveOnlyMessageInterest)
+	if len(got) != 1 || got[0] != types.LiveOnlyMessageInterest {
 		t.Errorf("first call = %v", got)
 	}
 
-	got = rd.snapshotComplete(protocols.PrematchOnlyMessageInterest)
+	got = rd.snapshotComplete(types.PrematchOnlyMessageInterest)
 	if len(got) != 2 {
 		t.Errorf("second call = %v, want 2 entries", got)
 	}
 
 	// Idempotent: same interest doesn't grow the set.
-	got = rd.snapshotComplete(protocols.LiveOnlyMessageInterest)
+	got = rd.snapshotComplete(types.LiveOnlyMessageInterest)
 	if len(got) != 2 {
 		t.Errorf("dup call = %v, want 2 entries", got)
 	}
@@ -85,23 +85,23 @@ func TestRecoveryData_SnapshotComplete_RaceSafe(t *testing.T) {
 	for i := 0; i < goroutines; i++ {
 		go func(i int) {
 			defer wg.Done()
-			interest := protocols.LiveOnlyMessageInterest
+			interest := types.LiveOnlyMessageInterest
 			if i%2 == 0 {
-				interest = protocols.PrematchOnlyMessageInterest
+				interest = types.PrematchOnlyMessageInterest
 			}
 			_ = rd.snapshotComplete(interest)
 		}(i)
 	}
 	wg.Wait()
 
-	final := rd.snapshotComplete(protocols.LiveOnlyMessageInterest)
+	final := rd.snapshotComplete(types.LiveOnlyMessageInterest)
 	if len(final) > 2 {
 		t.Errorf("final size = %d, want <=2", len(final))
 	}
 }
 
 func TestEventRecovery_CarriesEventID(t *testing.T) {
-	urn, _ := protocols.ParseURN("od:match:42")
+	urn, _ := types.ParseURN("od:match:42")
 	er := newEventRecovery(*urn, 7, time.Now())
 	if er.eventID != *urn {
 		t.Errorf("eventID = %v, want %v", er.eventID, *urn)
@@ -126,12 +126,12 @@ type fakeManagerOps struct {
 	registered  []*Handle
 	completed   []completedHandle
 	nextID      atomic.Uint32
-	emittedMsgs []protocols.RecoveryMessage
+	emittedMsgs []types.RecoveryMessage
 }
 
 type completedHandle struct {
 	id     uint
-	status protocols.RecoveryRequestStatus
+	status types.RecoveryRequestStatus
 	err    error
 }
 
@@ -147,7 +147,7 @@ func (f *fakeManagerOps) registerHandle(h *Handle) {
 	f.mu.Unlock()
 }
 
-func (f *fakeManagerOps) completeHandle(id uint, status protocols.RecoveryRequestStatus, err error) *Handle {
+func (f *fakeManagerOps) completeHandle(id uint, status types.RecoveryRequestStatus, err error) *Handle {
 	f.mu.Lock()
 	f.completed = append(f.completed, completedHandle{id: id, status: status, err: err})
 	f.mu.Unlock()
@@ -158,7 +158,7 @@ func (f *fakeManagerOps) nextRequestID() uint {
 	return uint(f.nextID.Add(1))
 }
 
-func (f *fakeManagerOps) emitRecoveryMessage(msg protocols.RecoveryMessage) {
+func (f *fakeManagerOps) emitRecoveryMessage(msg types.RecoveryMessage) {
 	f.mu.Lock()
 	f.emittedMsgs = append(f.emittedMsgs, msg)
 	f.mu.Unlock()
@@ -182,29 +182,29 @@ func newTestActor(mgr actorManagerOps) *recoveryActor {
 func TestActor_RecoveryStateTransitions(t *testing.T) {
 	a := newTestActor(newFakeManagerOps())
 
-	if a.recoveryState != protocols.DefaultRecoveryState {
+	if a.recoveryState != types.DefaultRecoveryState {
 		t.Errorf("initial state = %v, want Default", a.recoveryState)
 	}
 	if a.isPerformingRecovery() {
 		t.Error("isPerformingRecovery should be false in Default state")
 	}
 
-	a.recoveryState = protocols.StartedRecoveryState
+	a.recoveryState = types.StartedRecoveryState
 	if !a.isPerformingRecovery() {
 		t.Error("isPerformingRecovery should be true in Started state")
 	}
 
-	a.recoveryState = protocols.InterruptedRecoveryState
+	a.recoveryState = types.InterruptedRecoveryState
 	if !a.isPerformingRecovery() {
 		t.Error("isPerformingRecovery should be true in Interrupted state")
 	}
 
-	a.recoveryState = protocols.CompletedRecoveryState
+	a.recoveryState = types.CompletedRecoveryState
 	if a.isPerformingRecovery() {
 		t.Error("isPerformingRecovery should be false in Completed state")
 	}
 
-	a.recoveryState = protocols.ErrorRecoveryState
+	a.recoveryState = types.ErrorRecoveryState
 	if a.isPerformingRecovery() {
 		t.Error("isPerformingRecovery should be false in Error state")
 	}
@@ -212,7 +212,7 @@ func TestActor_RecoveryStateTransitions(t *testing.T) {
 
 func TestActor_IsKnownRecovery(t *testing.T) {
 	a := newTestActor(newFakeManagerOps())
-	urn, _ := protocols.ParseURN("od:match:1")
+	urn, _ := types.ParseURN("od:match:1")
 
 	if a.isKnownRecovery(7) {
 		t.Error("unknown id reported as known")
@@ -235,14 +235,14 @@ func TestActor_IsKnownRecovery(t *testing.T) {
 
 func TestActor_SnapshotValidationNeeded(t *testing.T) {
 	a := newTestActor(newFakeManagerOps())
-	cases := map[protocols.MessageInterest]bool{
-		protocols.LiveOnlyMessageInterest:             true,
-		protocols.PrematchOnlyMessageInterest:         true,
-		protocols.AllMessageInterest:                  false,
-		protocols.HiPriorityOnlyMessageInterest:       false,
-		protocols.LowPriorityOnlyMessageInterest:      false,
-		protocols.SystemAliveOnly:                     false,
-		protocols.SpecifiedMatchesOnlyMessageInterest: false,
+	cases := map[types.MessageInterest]bool{
+		types.LiveOnlyMessageInterest:             true,
+		types.PrematchOnlyMessageInterest:         true,
+		types.AllMessageInterest:                  false,
+		types.HiPriorityOnlyMessageInterest:       false,
+		types.LowPriorityOnlyMessageInterest:      false,
+		types.SystemAliveOnly:                     false,
+		types.SpecifiedMatchesOnlyMessageInterest: false,
 	}
 	for interest, want := range cases {
 		if got := a.snapshotValidationNeeded(interest); got != want {
@@ -259,31 +259,31 @@ func TestActor_ValidateSnapshotComplete(t *testing.T) {
 	a := newTestActor(newFakeManagerOps())
 
 	// No current recovery → false.
-	if a.validateSnapshotComplete(7, protocols.AllMessageInterest) {
+	if a.validateSnapshotComplete(7, types.AllMessageInterest) {
 		t.Error("should be false when not performing recovery")
 	}
 
 	// Started + matching request id + non-validating interest → true.
-	a.recoveryState = protocols.StartedRecoveryState
+	a.recoveryState = types.StartedRecoveryState
 	a.currentRecovery = newRecoveryData(7, time.Now())
-	if !a.validateSnapshotComplete(7, protocols.AllMessageInterest) {
+	if !a.validateSnapshotComplete(7, types.AllMessageInterest) {
 		t.Error("Started + matching request id + AllMessageInterest should validate")
 	}
 
 	// Mismatched request id → false.
-	if a.validateSnapshotComplete(99, protocols.AllMessageInterest) {
+	if a.validateSnapshotComplete(99, types.AllMessageInterest) {
 		t.Error("mismatched request id should not validate")
 	}
 
 	// Interrupted state is also accepted (matches Java/.NET).
-	a.recoveryState = protocols.InterruptedRecoveryState
-	if !a.validateSnapshotComplete(7, protocols.AllMessageInterest) {
+	a.recoveryState = types.InterruptedRecoveryState
+	if !a.validateSnapshotComplete(7, types.AllMessageInterest) {
 		t.Error("Interrupted + matching id should validate (matches Java/.NET)")
 	}
 
 	// Default state → false.
-	a.recoveryState = protocols.DefaultRecoveryState
-	if a.validateSnapshotComplete(7, protocols.AllMessageInterest) {
+	a.recoveryState = types.DefaultRecoveryState
+	if a.validateSnapshotComplete(7, types.AllMessageInterest) {
 		t.Error("Default state should not validate")
 	}
 }

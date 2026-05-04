@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 )
 
 // Handle is the per-request handle tracked by recovery.Manager.
@@ -14,12 +14,12 @@ import (
 type Handle struct {
 	requestID  uint
 	producerID uint
-	eventID    protocols.URN
+	eventID    types.URN
 
 	done chan struct{}
 
 	mu        sync.RWMutex
-	status    protocols.RecoveryRequestStatus
+	status    types.RecoveryRequestStatus
 	err       error
 	startedAt time.Time
 	endedAt   time.Time
@@ -27,13 +27,13 @@ type Handle struct {
 
 // NewHandle creates a Pending handle. The Manager registers it before
 // the API request is issued.
-func NewHandle(requestID, producerID uint, eventID protocols.URN, startedAt time.Time) *Handle {
+func NewHandle(requestID, producerID uint, eventID types.URN, startedAt time.Time) *Handle {
 	return &Handle{
 		requestID:  requestID,
 		producerID: producerID,
 		eventID:    eventID,
 		done:       make(chan struct{}),
-		status:     protocols.RecoveryStatusPending,
+		status:     types.RecoveryStatusPending,
 		startedAt:  startedAt,
 	}
 }
@@ -45,25 +45,25 @@ func (h *Handle) RequestID() uint { return h.requestID }
 func (h *Handle) ProducerID() uint { return h.producerID }
 
 // EventID returns the event under recovery.
-func (h *Handle) EventID() protocols.URN { return h.eventID }
+func (h *Handle) EventID() types.URN { return h.eventID }
 
 // Done returns a channel that closes when the handle reaches a
 // terminal state (Completed / Failed / TimedOut).
 func (h *Handle) Done() <-chan struct{} { return h.done }
 
 // Status returns the current status without blocking.
-func (h *Handle) Status() protocols.RecoveryRequestStatus {
+func (h *Handle) Status() types.RecoveryRequestStatus {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	return h.status
 }
 
 // Result returns the terminal result. Blocks until Done.
-func (h *Handle) Result() protocols.RecoveryResult {
+func (h *Handle) Result() types.RecoveryResult {
 	<-h.done
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	return protocols.RecoveryResult{
+	return types.RecoveryResult{
 		RequestID:  h.requestID,
 		ProducerID: h.producerID,
 		EventID:    h.eventID,
@@ -77,10 +77,10 @@ func (h *Handle) Result() protocols.RecoveryResult {
 // Snapshot returns the current state without blocking. Status may be
 // Pending if the handle hasn't completed yet; the caller can use Done
 // to wait for terminal state.
-func (h *Handle) Snapshot() protocols.RecoveryResult {
+func (h *Handle) Snapshot() types.RecoveryResult {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	return protocols.RecoveryResult{
+	return types.RecoveryResult{
 		RequestID:  h.requestID,
 		ProducerID: h.producerID,
 		EventID:    h.eventID,
@@ -93,9 +93,9 @@ func (h *Handle) Snapshot() protocols.RecoveryResult {
 
 // complete transitions the handle to a terminal state. Idempotent —
 // subsequent calls are no-ops.
-func (h *Handle) complete(status protocols.RecoveryRequestStatus, err error, endedAt time.Time) {
+func (h *Handle) complete(status types.RecoveryRequestStatus, err error, endedAt time.Time) {
 	h.mu.Lock()
-	if h.status != protocols.RecoveryStatusPending {
+	if h.status != types.RecoveryStatusPending {
 		h.mu.Unlock()
 		return
 	}

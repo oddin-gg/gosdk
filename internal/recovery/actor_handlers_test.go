@@ -13,35 +13,35 @@ import (
 
 	"github.com/oddin-gg/gosdk/internal/api"
 	"github.com/oddin-gg/gosdk/internal/producer"
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 )
 
-// minimalCfg satisfies protocols.OddsFeedConfiguration.
+// minimalCfg satisfies types.OddsFeedConfiguration.
 type minimalCfg struct {
 	apiURL string
 	token  string
 }
 
 func (c *minimalCfg) AccessToken() *string                                       { return &c.token }
-func (c *minimalCfg) DefaultLocale() protocols.Locale                            { return protocols.EnLocale }
+func (c *minimalCfg) DefaultLocale() types.Locale                            { return types.EnLocale }
 func (c *minimalCfg) MaxInactivitySeconds() int                                  { return 20 }
 func (c *minimalCfg) MaxRecoveryExecutionMinutes() int                           { return 360 }
 func (c *minimalCfg) MessagingPort() int                                         { return 5672 }
 func (c *minimalCfg) SdkNodeID() *int                                            { return nil }
-func (c *minimalCfg) SelectedEnvironment() *protocols.Environment                { return nil }
-func (c *minimalCfg) SelectedRegion() protocols.Region                           { return protocols.RegionDefault }
-func (c *minimalCfg) SetRegion(protocols.Region) protocols.OddsFeedConfiguration { return c }
+func (c *minimalCfg) SelectedEnvironment() *types.Environment                { return nil }
+func (c *minimalCfg) SelectedRegion() types.Region                           { return types.RegionDefault }
+func (c *minimalCfg) SetRegion(types.Region) types.OddsFeedConfiguration { return c }
 func (c *minimalCfg) ExchangeName() string                                       { return "oddinfeed" }
 func (c *minimalCfg) ReplayExchangeName() string                                 { return "oddinreplay" }
 func (c *minimalCfg) ReportExtendedData() bool                                   { return false }
-func (c *minimalCfg) SetExchangeName(string) protocols.OddsFeedConfiguration     { return c }
-func (c *minimalCfg) SetAPIURL(string) protocols.OddsFeedConfiguration           { return c }
-func (c *minimalCfg) SetMQURL(string) protocols.OddsFeedConfiguration            { return c }
-func (c *minimalCfg) SetMessagingPort(int) protocols.OddsFeedConfiguration       { return c }
+func (c *minimalCfg) SetExchangeName(string) types.OddsFeedConfiguration     { return c }
+func (c *minimalCfg) SetAPIURL(string) types.OddsFeedConfiguration           { return c }
+func (c *minimalCfg) SetMQURL(string) types.OddsFeedConfiguration            { return c }
+func (c *minimalCfg) SetMessagingPort(int) types.OddsFeedConfiguration       { return c }
 func (c *minimalCfg) APIURL() (string, error)                                    { return c.apiURL, nil }
 func (c *minimalCfg) MQURL() (string, error)                                     { return "", nil }
 func (c *minimalCfg) SportIDPrefix() string                                      { return "od:sport:" }
-func (c *minimalCfg) SetSportIDPrefix(string) protocols.OddsFeedConfiguration    { return c }
+func (c *minimalCfg) SetSportIDPrefix(string) types.OddsFeedConfiguration    { return c }
 
 type rewriteTransport struct {
 	target string
@@ -194,9 +194,9 @@ func TestActor_OnAlive_UserSessionUpdatesTimestamp(t *testing.T) {
 
 	now := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
 	a.onAlive(evAlive{
-		timestamp:       protocols.MessageTimestamp{Created: now},
+		timestamp:       types.MessageTimestamp{Created: now},
 		isSubscribed:    true,
-		messageInterest: protocols.AllMessageInterest, // non-system → user session
+		messageInterest: types.AllMessageInterest, // non-system → user session
 	})
 	if !a.lastUserSessionAlive.Equal(now) {
 		t.Errorf("lastUserSessionAlive = %v, want %v", a.lastUserSessionAlive, now)
@@ -213,7 +213,7 @@ func TestActor_OnAlive_DisabledProducerNoOp(t *testing.T) {
 
 	now := time.Now()
 	a.onAlive(evAlive{
-		timestamp:    protocols.MessageTimestamp{Created: now},
+		timestamp:    types.MessageTimestamp{Created: now},
 		isSubscribed: true,
 	})
 	if !a.lastUserSessionAlive.IsZero() {
@@ -229,7 +229,7 @@ func TestActor_OnSnapshotComplete_UnknownRequestID(t *testing.T) {
 	fake := newFakeManagerOps()
 	a := newWiredActor(t, srv, fake)
 	// No registered recoveries — request 99 is unknown.
-	a.onSnapshotComplete(evSnapshotComplete{requestID: 99, messageInterest: protocols.AllMessageInterest})
+	a.onSnapshotComplete(evSnapshotComplete{requestID: 99, messageInterest: types.AllMessageInterest})
 	// Nothing should be emitted.
 	if len(fake.emittedMsgs) != 0 {
 		t.Errorf("unknown snapshot should not emit, got %d", len(fake.emittedMsgs))
@@ -285,7 +285,7 @@ func TestActor_ProducerDown_AndUp(t *testing.T) {
 
 	// Producer starts flagged down (newData defaults). producerUp should
 	// flip it via SetProducerDown(false) and emit.
-	if err := a.producerUp(protocols.FirstRecoveryCompletedProducerUpReason); err != nil {
+	if err := a.producerUp(types.FirstRecoveryCompletedProducerUpReason); err != nil {
 		t.Fatalf("producerUp: %v", err)
 	}
 	if len(fake.emittedMsgs) == 0 {
@@ -298,7 +298,7 @@ func TestActor_ProducerDown_AndUp(t *testing.T) {
 
 	// Now down again with a reason — should re-emit (different status reason).
 	prevEmissions := len(fake.emittedMsgs)
-	if err := a.producerDown(protocols.AliveInternalViolationProducerDownReason); err != nil {
+	if err := a.producerDown(types.AliveInternalViolationProducerDownReason); err != nil {
 		t.Fatalf("producerDown: %v", err)
 	}
 	if len(fake.emittedMsgs) == prevEmissions {
@@ -318,7 +318,7 @@ func TestActor_ProducerDown_DisabledIsNoOp(t *testing.T) {
 	if err := a.pm.SetProducerState(context.Background(), 1, false); err != nil {
 		t.Fatalf("SetProducerState: %v", err)
 	}
-	if err := a.producerDown(protocols.OtherProducerDownReason); err != nil {
+	if err := a.producerDown(types.OtherProducerDownReason); err != nil {
 		t.Fatalf("producerDown: %v", err)
 	}
 	if len(fake.emittedMsgs) != 0 {
@@ -333,14 +333,14 @@ func TestActor_NotifyProducerChangedState_DedupesSameReason(t *testing.T) {
 	a := newWiredActor(t, srv, fake)
 
 	// First call: status reason changes from default → emits.
-	if err := a.notifyProducerChangedState(protocols.AliveIntervalViolationProducerStatusReason); err != nil {
+	if err := a.notifyProducerChangedState(types.AliveIntervalViolationProducerStatusReason); err != nil {
 		t.Fatalf("first notify: %v", err)
 	}
 	if len(fake.emittedMsgs) != 1 {
 		t.Errorf("first notify should emit, got %d", len(fake.emittedMsgs))
 	}
 	// Second call with same reason: no change → no emission.
-	if err := a.notifyProducerChangedState(protocols.AliveIntervalViolationProducerStatusReason); err != nil {
+	if err := a.notifyProducerChangedState(types.AliveIntervalViolationProducerStatusReason); err != nil {
 		t.Fatalf("second notify: %v", err)
 	}
 	if len(fake.emittedMsgs) != 1 {
@@ -388,7 +388,7 @@ func TestActor_OnRecoverEvent_HappyPath(t *testing.T) {
 	fake := newFakeManagerOps()
 	a := newWiredActor(t, srv, fake)
 
-	urn, _ := protocols.ParseURN("od:match:1")
+	urn, _ := types.ParseURN("od:match:1")
 	reply := make(chan recoverEventReply, 1)
 	a.onRecoverEvent(evRecoverEvent{
 		ctx:              context.Background(),
@@ -419,7 +419,7 @@ func TestActor_OnRecoverEvent_StatefulFlagSetsCorrectEndpoint(t *testing.T) {
 	fake := newFakeManagerOps()
 	a := newWiredActor(t, srv, fake)
 
-	urn, _ := protocols.ParseURN("od:match:1")
+	urn, _ := types.ParseURN("od:match:1")
 	reply := make(chan recoverEventReply, 1)
 	a.onRecoverEvent(evRecoverEvent{
 		ctx:              context.Background(),
@@ -441,11 +441,11 @@ func TestActor_IsPerformingRecovery_Sanity(t *testing.T) {
 	if a.isPerformingRecovery() {
 		t.Error("default state shouldn't be performing recovery")
 	}
-	a.recoveryState = protocols.StartedRecoveryState
+	a.recoveryState = types.StartedRecoveryState
 	if !a.isPerformingRecovery() {
 		t.Error("Started should be performing recovery")
 	}
-	a.recoveryState = protocols.InterruptedRecoveryState
+	a.recoveryState = types.InterruptedRecoveryState
 	if !a.isPerformingRecovery() {
 		t.Error("Interrupted should be performing recovery")
 	}
@@ -460,7 +460,7 @@ func TestActor_SystemAliveReceived_NotSubscribedTriggersRecovery(t *testing.T) {
 	a := newWiredActor(t, srv, fake)
 
 	now := time.Now()
-	if err := a.systemAliveReceived(protocols.MessageTimestamp{Received: now, Created: now}, false); err != nil {
+	if err := a.systemAliveReceived(types.MessageTimestamp{Received: now, Created: now}, false); err != nil {
 		t.Fatalf("systemAliveReceived: %v", err)
 	}
 	// Should have triggered recovery (PostRecovery endpoint hit).
@@ -468,7 +468,7 @@ func TestActor_SystemAliveReceived_NotSubscribedTriggersRecovery(t *testing.T) {
 		t.Error("expected recovery initiate to be hit")
 	}
 	// Recovery state should be Started.
-	if a.recoveryState != protocols.StartedRecoveryState {
+	if a.recoveryState != types.StartedRecoveryState {
 		t.Errorf("recoveryState = %v, want Started", a.recoveryState)
 	}
 }
@@ -483,7 +483,7 @@ func TestActor_SystemAliveReceived_SubscribedDefaultBranch(t *testing.T) {
 	// from producer.Manager). This falls into the default branch
 	// → makeSnapshotRecovery.
 	now := time.Now()
-	if err := a.systemAliveReceived(protocols.MessageTimestamp{Received: now, Created: now}, true); err != nil {
+	if err := a.systemAliveReceived(types.MessageTimestamp{Received: now, Created: now}, true); err != nil {
 		t.Fatalf("systemAliveReceived: %v", err)
 	}
 	if hits.recover == 0 {
@@ -504,13 +504,13 @@ func TestActor_SnapshotRecoveryFinished_TransitionsToCompleted(t *testing.T) {
 	a := newWiredActor(t, srv, fake)
 
 	// Set up a recovery that's "in progress".
-	a.recoveryState = protocols.StartedRecoveryState
+	a.recoveryState = types.StartedRecoveryState
 	a.currentRecovery = newRecoveryData(42, time.Now().Add(-time.Minute))
 
 	if err := a.snapshotRecoveryFinished(42); err != nil {
 		t.Fatalf("snapshotRecoveryFinished: %v", err)
 	}
-	if a.recoveryState != protocols.CompletedRecoveryState {
+	if a.recoveryState != types.CompletedRecoveryState {
 		t.Errorf("recoveryState = %v, want Completed", a.recoveryState)
 	}
 	if !a.firstRecoveryCompleted {
@@ -530,7 +530,7 @@ func TestActor_EventRecoveryFinished_EmitsEventRecoveryAndCompletesHandle(t *tes
 	fake := newFakeManagerOps()
 	a := newWiredActor(t, srv, fake)
 
-	urn, _ := protocols.ParseURN("od:match:1")
+	urn, _ := types.ParseURN("od:match:1")
 	a.eventRecoveries[7] = newEventRecovery(*urn, 7, time.Now().Add(-time.Second))
 
 	if err := a.eventRecoveryFinished(7); err != nil {
@@ -569,8 +569,8 @@ func TestActor_ValidateProducerSnapshotCompletes(t *testing.T) {
 
 	// Producer 1 has live scope only. A LiveOnly snapshot complete fully
 	// validates.
-	ok, err := a.validateProducerSnapshotCompletes([]protocols.MessageInterest{
-		protocols.LiveOnlyMessageInterest,
+	ok, err := a.validateProducerSnapshotCompletes([]types.MessageInterest{
+		types.LiveOnlyMessageInterest,
 	})
 	if err != nil {
 		t.Fatalf("err = %v", err)
@@ -580,14 +580,14 @@ func TestActor_ValidateProducerSnapshotCompletes(t *testing.T) {
 	}
 
 	// Empty list: not validated.
-	ok, _ = a.validateProducerSnapshotCompletes([]protocols.MessageInterest{})
+	ok, _ = a.validateProducerSnapshotCompletes([]types.MessageInterest{})
 	if ok {
 		t.Error("empty completes list should not validate")
 	}
 
 	// Mismatch: prematch interest on a live-only producer.
-	ok, _ = a.validateProducerSnapshotCompletes([]protocols.MessageInterest{
-		protocols.PrematchOnlyMessageInterest,
+	ok, _ = a.validateProducerSnapshotCompletes([]types.MessageInterest{
+		types.PrematchOnlyMessageInterest,
 	})
 	if ok {
 		t.Error("prematch interest on live-only producer should not validate")

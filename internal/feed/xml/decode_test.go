@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 )
 
 // readTestdata loads a fixture from internal/feed/xml/testdata/.
@@ -225,7 +225,7 @@ func TestDecode_Malformed(t *testing.T) {
 	}
 }
 
-// Round-trip: decode every fixture, verify it implements protocols.BasicMessage,
+// Round-trip: decode every fixture, verify it implements types.BasicMessage,
 // and Product()/Timestamp() return non-zero.
 func TestDecode_BasicMessageContract(t *testing.T) {
 	fixtures := []string{
@@ -246,7 +246,7 @@ func TestDecode_BasicMessageContract(t *testing.T) {
 			if err != nil {
 				t.Fatalf("decode: %v", err)
 			}
-			var _ protocols.BasicMessage = msg // compile-time guarantee
+			var _ types.BasicMessage = msg // compile-time guarantee
 			if msg.Product() == 0 {
 				t.Fatalf("Product = 0, expected non-zero")
 			}

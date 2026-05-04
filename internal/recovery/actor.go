@@ -9,7 +9,7 @@ import (
 	"github.com/oddin-gg/gosdk/internal/api"
 	"github.com/oddin-gg/gosdk/internal/producer"
 	log "github.com/oddin-gg/gosdk/internal/log"
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 )
 
 // recoveryActor owns all state for a single producer's recovery state
@@ -25,7 +25,7 @@ import (
 type recoveryActor struct {
 	// Immutable after construction.
 	producerID uint
-	cfg        protocols.OddsFeedConfiguration
+	cfg        types.OddsFeedConfiguration
 	api        *api.Client
 	pm         *producer.Manager
 	mgr        actorManagerOps // narrow interface back to the Manager
@@ -40,15 +40,15 @@ type recoveryActor struct {
 	ctx context.Context
 
 	// Per-producer state. Only the actor goroutine touches these.
-	recoveryState          protocols.RecoveryState
+	recoveryState          types.RecoveryState
 	currentRecovery        *recoveryData
 	eventRecoveries        map[uint]*eventRecovery
 	lastUserSessionAlive   time.Time
 	lastValidAliveGen      time.Time  // gen-timestamp captured during recovery
 	lastSystemAlive        *time.Time // pointer: nil = never seen
 	firstRecoveryCompleted bool
-	downReason             protocols.ProducerDownReason
-	statusReason           protocols.ProducerStatusReason
+	downReason             types.ProducerDownReason
+	statusReason           types.ProducerStatusReason
 }
 
 // actorManagerOps is the narrow surface the actor needs back into the
@@ -56,15 +56,15 @@ type recoveryActor struct {
 // doubles simple.
 type actorManagerOps interface {
 	registerHandle(*Handle)
-	completeHandle(requestID uint, status protocols.RecoveryRequestStatus, err error) *Handle
+	completeHandle(requestID uint, status types.RecoveryRequestStatus, err error) *Handle
 	nextRequestID() uint
-	emitRecoveryMessage(protocols.RecoveryMessage)
+	emitRecoveryMessage(types.RecoveryMessage)
 }
 
 func newRecoveryActor(
 	ctx context.Context,
 	producerID uint,
-	cfg protocols.OddsFeedConfiguration,
+	cfg types.OddsFeedConfiguration,
 	apiClient *api.Client,
 	pm *producer.Manager,
 	mgr actorManagerOps,
@@ -198,8 +198,8 @@ func (a *recoveryActor) lastProcessedMessageGenTimestamp() (time.Time, error) {
 // --- Per-producer state queries (no mutex — actor goroutine only) ---
 
 func (a *recoveryActor) isPerformingRecovery() bool {
-	return a.recoveryState == protocols.StartedRecoveryState ||
-		a.recoveryState == protocols.InterruptedRecoveryState
+	return a.recoveryState == types.StartedRecoveryState ||
+		a.recoveryState == types.InterruptedRecoveryState
 }
 
 func (a *recoveryActor) isKnownRecovery(requestID uint) bool {
@@ -210,9 +210,9 @@ func (a *recoveryActor) isKnownRecovery(requestID uint) bool {
 	return ok
 }
 
-func (a *recoveryActor) snapshotValidationNeeded(interest protocols.MessageInterest) bool {
-	return interest == protocols.LiveOnlyMessageInterest ||
-		interest == protocols.PrematchOnlyMessageInterest
+func (a *recoveryActor) snapshotValidationNeeded(interest types.MessageInterest) bool {
+	return interest == types.LiveOnlyMessageInterest ||
+		interest == types.PrematchOnlyMessageInterest
 }
 
 // validateSnapshotComplete checks whether a SnapshotComplete with this
@@ -221,7 +221,7 @@ func (a *recoveryActor) snapshotValidationNeeded(interest protocols.MessageInter
 // Logic preserved exactly from the pre-actor implementation; matches
 // Java/Kotlin and .NET reference SDKs (all three accept Started OR
 // Interrupted state via the !isPerformingRecovery gate).
-func (a *recoveryActor) validateSnapshotComplete(requestID uint, interest protocols.MessageInterest) bool {
+func (a *recoveryActor) validateSnapshotComplete(requestID uint, interest types.MessageInterest) bool {
 	if !a.isPerformingRecovery() {
 		return false
 	}
@@ -238,7 +238,7 @@ func (a *recoveryActor) validateSnapshotComplete(requestID uint, interest protoc
 	return res
 }
 
-func (a *recoveryActor) validateEventSnapshotComplete(requestID uint, interest protocols.MessageInterest) bool {
+func (a *recoveryActor) validateEventSnapshotComplete(requestID uint, interest types.MessageInterest) bool {
 	er, ok := a.eventRecoveries[requestID]
 	if !ok {
 		return false
@@ -255,7 +255,7 @@ func (a *recoveryActor) validateEventSnapshotComplete(requestID uint, interest p
 
 // validateProducerSnapshotCompletes checks each producer scope has had
 // its corresponding SnapshotComplete reported.
-func (a *recoveryActor) validateProducerSnapshotCompletes(received []protocols.MessageInterest) (bool, error) {
+func (a *recoveryActor) validateProducerSnapshotCompletes(received []types.MessageInterest) (bool, error) {
 	prod, err := a.pm.GetProducer(a.ctx, a.producerID)
 	if err != nil {
 		return false, err
@@ -264,10 +264,10 @@ func (a *recoveryActor) validateProducerSnapshotCompletes(received []protocols.M
 	for i, scope := range prod.ProducerScopes() {
 		for _, interest := range received {
 			switch scope {
-			case protocols.LiveProducerScope:
-				finished[i] = interest == protocols.LiveOnlyMessageInterest
-			case protocols.PrematchProducerScope:
-				finished[i] = interest == protocols.PrematchOnlyMessageInterest
+			case types.LiveProducerScope:
+				finished[i] = interest == types.LiveOnlyMessageInterest
+			case types.PrematchProducerScope:
+				finished[i] = interest == types.PrematchOnlyMessageInterest
 			default:
 				return false, errors.New("unknown producer scope")
 			}
@@ -306,7 +306,7 @@ func (a *recoveryActor) onAlive(e evAlive) {
 	if a.isDisabled() {
 		return
 	}
-	if e.messageInterest == protocols.SystemAliveOnly {
+	if e.messageInterest == types.SystemAliveOnly {
 		if err := a.systemAliveReceived(e.timestamp, e.isSubscribed); err != nil {
 			a.logger.WithError(err).Error("failed to process alive")
 		}
@@ -344,9 +344,9 @@ func (a *recoveryActor) onTick(now time.Time) {
 	var err error
 	switch {
 	case aliveInterval.Seconds() > float64(a.cfg.MaxInactivitySeconds()):
-		err = a.producerDown(protocols.AliveInternalViolationProducerDownReason)
+		err = a.producerDown(types.AliveInternalViolationProducerDownReason)
 	case !a.calculateTiming(now):
-		err = a.producerDown(protocols.ProcessingQueueDelayViolationProducerDownReason)
+		err = a.producerDown(types.ProcessingQueueDelayViolationProducerDownReason)
 	}
 	if err != nil {
 		a.logger.WithError(err).Errorf("failed to check recovery")
@@ -376,7 +376,7 @@ func (a *recoveryActor) onRecoverEvent(e evRecoverEvent) {
 	}
 	if err != nil {
 		a.logger.WithError(err).Error("event recovery failed")
-		a.mgr.completeHandle(requestID, protocols.RecoveryStatusFailed, err)
+		a.mgr.completeHandle(requestID, types.RecoveryStatusFailed, err)
 		e.reply <- recoverEventReply{err: err}
 		return
 	}
@@ -385,7 +385,7 @@ func (a *recoveryActor) onRecoverEvent(e evRecoverEvent) {
 
 // --- State-machine helpers (preserved verbatim from manager.go) ---
 
-func (a *recoveryActor) systemAliveReceived(timestamp protocols.MessageTimestamp, subscribed bool) error {
+func (a *recoveryActor) systemAliveReceived(timestamp types.MessageTimestamp, subscribed bool) error {
 	if err := a.pm.SetProducerLastMessageTimestamp(a.producerID, timestamp.Received); err != nil {
 		return err
 	}
@@ -397,7 +397,7 @@ func (a *recoveryActor) systemAliveReceived(timestamp protocols.MessageTimestamp
 
 	if !subscribed {
 		if !a.isFlaggedDown() {
-			if err := a.producerDown(protocols.OtherProducerDownReason); err != nil {
+			if err := a.producerDown(types.OtherProducerDownReason); err != nil {
 				return err
 			}
 		}
@@ -409,17 +409,17 @@ func (a *recoveryActor) systemAliveReceived(timestamp protocols.MessageTimestamp
 	downReason := a.downReason
 	isBackFromInactivity := a.isFlaggedDown() &&
 		!a.isPerformingRecovery() &&
-		downReason == protocols.ProcessingQueueDelayViolationProducerDownReason &&
+		downReason == types.ProcessingQueueDelayViolationProducerDownReason &&
 		a.calculateTiming(now)
-	isInRecovery := state != protocols.NotStartedRecoveryState &&
-		state != protocols.ErrorRecoveryState &&
-		state != protocols.InterruptedRecoveryState
+	isInRecovery := state != types.NotStartedRecoveryState &&
+		state != types.ErrorRecoveryState &&
+		state != types.InterruptedRecoveryState
 
 	switch {
 	case isBackFromInactivity:
-		err = a.producerUp(protocols.ReturnedFromInactivityProducerUpReason)
+		err = a.producerUp(types.ReturnedFromInactivityProducerUpReason)
 	case isInRecovery:
-		if a.isFlaggedDown() && !a.isPerformingRecovery() && a.downReason != protocols.ProcessingQueueDelayViolationProducerDownReason {
+		if a.isFlaggedDown() && !a.isPerformingRecovery() && a.downReason != types.ProcessingQueueDelayViolationProducerDownReason {
 			if err := a.makeSnapshotRecovery(recoveryTimestamp); err != nil {
 				return err
 			}
@@ -427,7 +427,7 @@ func (a *recoveryActor) systemAliveReceived(timestamp protocols.MessageTimestamp
 		recoveryTiming := now.Sub(a.lastRecoveryStartedAt())
 		maxInterval := float64(a.cfg.MaxRecoveryExecutionMinutes())
 		if a.isPerformingRecovery() && recoveryTiming.Minutes() > maxInterval {
-			a.recoveryState = protocols.ErrorRecoveryState
+			a.recoveryState = types.ErrorRecoveryState
 			a.currentRecovery = nil
 			if err := a.makeSnapshotRecovery(recoveryTimestamp); err != nil {
 				return err
@@ -443,7 +443,7 @@ func (a *recoveryActor) systemAliveReceived(timestamp protocols.MessageTimestamp
 	// Per-producer state mutation (was: data.systemAliveReceived).
 	t := timestamp.Received
 	a.lastSystemAlive = &t
-	if a.recoveryState == protocols.StartedRecoveryState {
+	if a.recoveryState == types.StartedRecoveryState {
 		a.lastValidAliveGen = timestamp.Created
 	}
 	if !a.isFlaggedDown() {
@@ -478,7 +478,7 @@ func (a *recoveryActor) calculateTiming(now time.Time) bool {
 // data.setProducerDown crossed into producer.Manager (mutex-protected),
 // then notifyProducerChangedState emitted on msgCh. The actor flow is
 // the same — only the actor's own state mutates without locks.
-func (a *recoveryActor) producerDown(reason protocols.ProducerDownReason) error {
+func (a *recoveryActor) producerDown(reason types.ProducerDownReason) error {
 	if a.isDisabled() {
 		return nil
 	}
@@ -496,8 +496,8 @@ func (a *recoveryActor) producerDown(reason protocols.ProducerDownReason) error 
 		a.eventRecoveries = make(map[uint]*eventRecovery)
 	}
 
-	if a.recoveryState == protocols.StartedRecoveryState && reason != protocols.ProcessingQueueDelayViolationProducerDownReason {
-		a.recoveryState = protocols.InterruptedRecoveryState
+	if a.recoveryState == types.StartedRecoveryState && reason != types.ProcessingQueueDelayViolationProducerDownReason {
+		a.recoveryState = types.InterruptedRecoveryState
 	}
 
 	if !a.isFlaggedDown() {
@@ -511,7 +511,7 @@ func (a *recoveryActor) producerDown(reason protocols.ProducerDownReason) error 
 	return a.notifyProducerChangedState(reason.ToProducerStatusReason())
 }
 
-func (a *recoveryActor) producerUp(reason protocols.ProducerUpReason) error {
+func (a *recoveryActor) producerUp(reason types.ProducerUpReason) error {
 	if a.isDisabled() {
 		return nil
 	}
@@ -519,12 +519,12 @@ func (a *recoveryActor) producerUp(reason protocols.ProducerUpReason) error {
 		if err := a.pm.SetProducerDown(a.producerID, false); err != nil {
 			return err
 		}
-		a.downReason = protocols.DefaultProducerDownReason
+		a.downReason = types.DefaultProducerDownReason
 	}
 	return a.notifyProducerChangedState(reason.ToProducerStatusReason())
 }
 
-func (a *recoveryActor) notifyProducerChangedState(reason protocols.ProducerStatusReason) error {
+func (a *recoveryActor) notifyProducerChangedState(reason types.ProducerStatusReason) error {
 	if a.statusReason == reason {
 		return nil
 	}
@@ -538,14 +538,14 @@ func (a *recoveryActor) notifyProducerChangedState(reason protocols.ProducerStat
 	delayed := !a.calculateTiming(now)
 	msg := newProducerStatusImpl(
 		producerData,
-		protocols.MessageTimestamp{
+		types.MessageTimestamp{
 			Created: now, Sent: now, Received: now, Published: now,
 		},
 		a.isFlaggedDown(),
 		delayed,
 		reason,
 	)
-	a.mgr.emitRecoveryMessage(protocols.RecoveryMessage{ProducerStatus: msg})
+	a.mgr.emitRecoveryMessage(types.RecoveryMessage{ProducerStatus: msg})
 	return nil
 }
 
@@ -566,7 +566,7 @@ func (a *recoveryActor) makeSnapshotRecovery(timestamp time.Time) error {
 	}
 
 	a.currentRecovery = newRecoveryData(requestID, now)
-	a.recoveryState = protocols.StartedRecoveryState
+	a.recoveryState = types.StartedRecoveryState
 
 	a.logger.Infof("recovery started for request %d", requestID)
 
@@ -586,22 +586,22 @@ func (a *recoveryActor) snapshotRecoveryFinished(requestID uint) error {
 	finished := time.Now()
 	a.logger.Infof("recovery finished for request %d in %d ms", requestID, finished.Sub(started).Milliseconds())
 
-	if a.recoveryState == protocols.InterruptedRecoveryState {
+	if a.recoveryState == types.InterruptedRecoveryState {
 		if err := a.makeSnapshotRecovery(a.lastValidAliveGen); err != nil {
 			return err
 		}
 	}
 
-	var reason protocols.ProducerUpReason
+	var reason types.ProducerUpReason
 	if a.firstRecoveryCompleted {
-		reason = protocols.ReturnedFromInactivityProducerUpReason
+		reason = types.ReturnedFromInactivityProducerUpReason
 	} else {
-		reason = protocols.FirstRecoveryCompletedProducerUpReason
+		reason = types.FirstRecoveryCompletedProducerUpReason
 		a.firstRecoveryCompleted = true
 	}
 
 	a.currentRecovery = newRecoveryData(requestID, started)
-	a.recoveryState = protocols.CompletedRecoveryState
+	a.recoveryState = types.CompletedRecoveryState
 	return a.producerUp(reason)
 }
 
@@ -618,12 +618,12 @@ func (a *recoveryActor) eventRecoveryFinished(id uint) error {
 	if err != nil {
 		return err
 	}
-	a.mgr.emitRecoveryMessage(protocols.RecoveryMessage{
+	a.mgr.emitRecoveryMessage(types.RecoveryMessage{
 		EventRecoveryMessage: &eventRecoveryMessageImpl{
 			eventID:   er.eventID,
 			requestID: id,
 			producer:  producerData,
-			timestamp: protocols.MessageTimestamp{
+			timestamp: types.MessageTimestamp{
 				Created: finished, Sent: finished, Received: finished, Published: finished,
 			},
 		},
@@ -632,7 +632,7 @@ func (a *recoveryActor) eventRecoveryFinished(id uint) error {
 	// Reliable per-request completion (NEXT.md §11): even if the
 	// channel send above is dropped (lossy + slow consumer), the
 	// handle is updated and unblocks any caller blocked on Done().
-	a.mgr.completeHandle(id, protocols.RecoveryStatusCompleted, nil)
+	a.mgr.completeHandle(id, types.RecoveryStatusCompleted, nil)
 
 	delete(a.eventRecoveries, id)
 	return nil

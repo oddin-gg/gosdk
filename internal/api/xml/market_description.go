@@ -3,7 +3,7 @@ package xml
 import (
 	"encoding/xml"
 
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 )
 
 // MarketDescriptionResponse ...
@@ -14,8 +14,8 @@ type MarketDescriptionResponse struct {
 }
 
 // Code ...
-func (m MarketDescriptionResponse) Code() protocols.ResponseCode {
-	return protocols.ResponseCode(m.ResponseCode)
+func (m MarketDescriptionResponse) Code() types.ResponseCode {
+	return types.ResponseCode(m.ResponseCode)
 }
 
 // MarketDescription represents market type

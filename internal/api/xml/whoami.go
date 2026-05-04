@@ -3,7 +3,7 @@ package xml
 import (
 	"encoding/xml"
 	"github.com/oddin-gg/gosdk/internal/utils"
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 )
 
 // WhoAMI ...
@@ -16,6 +16,6 @@ type WhoAMI struct {
 }
 
 // Code ...
-func (w WhoAMI) Code() protocols.ResponseCode {
-	return protocols.ResponseCode(w.ResponseCode)
+func (w WhoAMI) Code() types.ResponseCode {
+	return types.ResponseCode(w.ResponseCode)
 }

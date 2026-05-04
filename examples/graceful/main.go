@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"github.com/oddin-gg/gosdk"
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 )
 
 const drainDeadline = 10 * time.Second
@@ -39,7 +39,7 @@ func main() {
 	}
 
 	sub, err := c.Subscribe(context.Background(),
-		gosdk.WithMessageInterest(protocols.AllMessageInterest),
+		gosdk.WithMessageInterest(types.AllMessageInterest),
 	)
 	if err != nil {
 		log.Fatalf("subscribe: %v", err)
@@ -79,7 +79,7 @@ func main() {
 	}
 }
 
-func handle(msg protocols.SessionMessage) {
+func handle(msg types.SessionMessage) {
 	if msg.UnparsableMessage != nil {
 		log.Println("unparsable message")
 		return
@@ -87,13 +87,13 @@ func handle(msg protocols.SessionMessage) {
 	log.Printf("message: %T", msg.Message)
 }
 
-func parseEnv() protocols.Environment {
+func parseEnv() types.Environment {
 	switch os.Getenv("ENV") {
 	case "production":
-		return protocols.ProductionEnvironment
+		return types.ProductionEnvironment
 	case "test":
-		return protocols.TestEnvironment
+		return types.TestEnvironment
 	default:
-		return protocols.IntegrationEnvironment
+		return types.IntegrationEnvironment
 	}
 }

@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/oddin-gg/gosdk/internal/feed"
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 )
 
 // rewriteTransport reroutes outbound requests to a test server's host
@@ -68,7 +68,7 @@ func TestClient_New_EagerWhoAmI(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfg := NewConfig("test-token", protocols.IntegrationEnvironment,
+	cfg := NewConfig("test-token", types.IntegrationEnvironment,
 		WithAPIURL("api.example.test"),
 		WithHTTPClient(newTestHTTPClient(srv)),
 	)
@@ -122,7 +122,7 @@ func TestClient_New_BookmakerProbeError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfg := NewConfig("bad-token", protocols.IntegrationEnvironment,
+	cfg := NewConfig("bad-token", types.IntegrationEnvironment,
 		WithAPIURL("api.example.test"),
 		WithHTTPClient(newTestHTTPClient(srv)),
 	)
@@ -144,7 +144,7 @@ func TestClient_APIEvents_OffByDefault(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfg := NewConfig("t", protocols.IntegrationEnvironment,
+	cfg := NewConfig("t", types.IntegrationEnvironment,
 		WithAPIURL("api.example.test"),
 		WithHTTPClient(newTestHTTPClient(srv)),
 	)
@@ -175,7 +175,7 @@ func TestClient_APIEvents_MetadataLevel(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfg := NewConfig("t", protocols.IntegrationEnvironment,
+	cfg := NewConfig("t", types.IntegrationEnvironment,
 		WithAPIURL("api.example.test"),
 		WithHTTPClient(newTestHTTPClient(srv)),
 		WithAPICallLogging(APILogMetadata),
@@ -220,7 +220,7 @@ func TestClient_APIEvents_ResponsesLevel(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfg := NewConfig("t", protocols.IntegrationEnvironment,
+	cfg := NewConfig("t", types.IntegrationEnvironment,
 		WithAPIURL("api.example.test"),
 		WithHTTPClient(newTestHTTPClient(srv)),
 		WithAPICallLogging(APILogResponses),
@@ -256,7 +256,7 @@ func TestClient_APIEvents_BodyTruncation(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfg := NewConfig("t", protocols.IntegrationEnvironment,
+	cfg := NewConfig("t", types.IntegrationEnvironment,
 		WithAPIURL("api.example.test"),
 		WithHTTPClient(newTestHTTPClient(srv)),
 		WithAPICallLogging(APILogResponses),
@@ -294,7 +294,7 @@ func TestClient_ConnectionEvents_TranslatesFeedEvents(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfg := NewConfig("t", protocols.IntegrationEnvironment,
+	cfg := NewConfig("t", types.IntegrationEnvironment,
 		WithAPIURL("api.example.test"),
 		WithHTTPClient(newTestHTTPClient(srv)),
 	)
@@ -416,7 +416,7 @@ func newTestClient(t *testing.T) *Client {
 	srv := fullFixtureServer(t)
 	t.Cleanup(srv.Close)
 
-	cfg := NewConfig("t", protocols.IntegrationEnvironment,
+	cfg := NewConfig("t", types.IntegrationEnvironment,
 		WithAPIURL("api.example.test"),
 		WithHTTPClient(newTestHTTPClient(srv)),
 	)
@@ -456,7 +456,7 @@ func TestClient_Producers_Methods(t *testing.T) {
 		t.Errorf("ActiveProducers count = %d", len(active))
 	}
 
-	live, err := c.ProducersInScope(ctx, protocols.LiveProducerScope)
+	live, err := c.ProducersInScope(ctx, types.LiveProducerScope)
 	if err != nil {
 		t.Fatalf("ProducersInScope: %v", err)
 	}
@@ -500,7 +500,7 @@ func TestClient_Sports_Methods(t *testing.T) {
 	if _, err := c.ActiveTournaments(ctx); err != nil {
 		t.Errorf("ActiveTournaments: %v", err)
 	}
-	urn, _ := protocols.ParseURN("od:sport:1")
+	urn, _ := types.ParseURN("od:sport:1")
 	if _, err := c.AvailableTournaments(ctx, *urn); err != nil {
 		t.Errorf("AvailableTournaments: %v", err)
 	}
@@ -556,7 +556,7 @@ func TestClient_MarketDescriptions(t *testing.T) {
 // TestClient_ClearMethods just verifies they don't panic.
 func TestClient_ClearMethods(t *testing.T) {
 	c := newTestClient(t)
-	urn, _ := protocols.ParseURN("od:match:1")
+	urn, _ := types.ParseURN("od:match:1")
 	c.ClearMatch(*urn)
 	c.ClearTournament(*urn)
 	c.ClearCompetitor(*urn)
@@ -583,7 +583,7 @@ func TestClient_EventRecoveryStatus_UnknownID(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfg := NewConfig("t", protocols.IntegrationEnvironment,
+	cfg := NewConfig("t", types.IntegrationEnvironment,
 		WithAPIURL("api.example.test"),
 		WithHTTPClient(newTestHTTPClient(srv)),
 	)
@@ -609,7 +609,7 @@ func TestClient_Close_Idempotent(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfg := NewConfig("t", protocols.IntegrationEnvironment,
+	cfg := NewConfig("t", types.IntegrationEnvironment,
 		WithAPIURL("api.example.test"),
 		WithHTTPClient(newTestHTTPClient(srv)),
 	)

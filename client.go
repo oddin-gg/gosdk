@@ -20,7 +20,7 @@ import (
 	"github.com/oddin-gg/gosdk/internal/replay"
 	"github.com/oddin-gg/gosdk/internal/sport"
 	"github.com/oddin-gg/gosdk/internal/whoami"
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 )
 
 // Default lossy buffer for event channels (ConnectionEvents,
@@ -45,19 +45,19 @@ const snapshotKeyTemplate = "-.-.-.snapshot_complete.-.-.-."
 // Concurrency: all methods are safe for concurrent use after New returns.
 type Client struct {
 	cfg     Config
-	cfgAdpt protocols.OddsFeedConfiguration
+	cfgAdpt types.OddsFeedConfiguration
 	logger  *log.Logger
 
 	apiClient                *api.Client
-	whoAmIManager            protocols.WhoAmIManager
+	whoAmIManager            types.WhoAmIManager
 	producerManager          *producer.Manager
 	cacheManager             *cache.Manager
 	feedMessageFactory       *factory.FeedMessageFactory
 	recoveryManager          *recovery.Manager
 	rabbitMQClient           *feed.Client
-	marketDescriptionManager protocols.MarketDescriptionManager
-	sportsInfoManager        protocols.SportsInfoManager
-	replayManager            protocols.ReplayManager
+	marketDescriptionManager types.MarketDescriptionManager
+	sportsInfoManager        types.SportsInfoManager
+	replayManager            types.ReplayManager
 	replay                   *Replay
 
 	// connectOnce + connectErr ensure Connect runs to completion at most
@@ -91,8 +91,8 @@ type Client struct {
 // Either ProducerStatus or EventRecovery is set, never both. Consumers
 // type-switch on the populated field.
 type RecoveryEvent struct {
-	ProducerStatus protocols.ProducerStatus
-	EventRecovery  protocols.EventRecoveryMessage
+	ProducerStatus types.ProducerStatus
+	EventRecovery  types.EventRecoveryMessage
 	At             time.Time
 }
 
@@ -140,7 +140,7 @@ func New(ctx context.Context, cfg Config) (*Client, error) {
 	marketDataFactory := factory.NewMarketDataFactory(c.cfgAdpt, marketDescriptionFactory)
 	marketFactory := factory.NewMarketFactory(
 		marketDataFactory,
-		[]protocols.Locale{c.cfg.DefaultLocale()},
+		[]types.Locale{c.cfg.DefaultLocale()},
 		c.logger,
 	)
 	c.feedMessageFactory = factory.NewFeedMessageFactory(
@@ -250,8 +250,8 @@ func (c *Client) Connect(ctx context.Context) error {
 		false,
 		c.logger,
 	)
-	aliveInterest := protocols.SystemAliveOnly
-	if err := alive.Open(ctx, []string{string(protocols.SystemAliveOnly)}, &aliveInterest, false); err != nil {
+	aliveInterest := types.SystemAliveOnly
+	if err := alive.Open(ctx, []string{string(types.SystemAliveOnly)}, &aliveInterest, false); err != nil {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		_ = c.rabbitMQClient.Close(shutdownCtx)
 		cancel()
@@ -376,12 +376,12 @@ func (c *Client) runShutdown() {
 // once Subscribe returns, the subscription lives until the caller calls
 // Subscription.Close, the Client closes, or a terminal error occurs.
 func (c *Client) Subscribe(ctx context.Context, opts ...SubscribeOption) (*Subscription, error) {
-	subCfg := subscribeConfig{messageInterest: protocols.AllMessageInterest}
+	subCfg := subscribeConfig{messageInterest: types.AllMessageInterest}
 	for _, opt := range opts {
 		opt(&subCfg)
 	}
 	if subCfg.messageInterest == "" {
-		subCfg.messageInterest = protocols.AllMessageInterest
+		subCfg.messageInterest = types.AllMessageInterest
 	}
 
 	if ConnectionState(c.connectState.Load()) == ConnectionStateClosed {
@@ -400,7 +400,7 @@ func (c *Client) Subscribe(ctx context.Context, opts ...SubscribeOption) (*Subsc
 	}
 
 	exchangeName := c.cfg.exchangeName
-	recoveryProcessor := protocols.RecoveryMessageProcessor(c.recoveryManager)
+	recoveryProcessor := types.RecoveryMessageProcessor(c.recoveryManager)
 	if subCfg.replay {
 		exchangeName = c.cfg.replayExchangeName
 		recoveryProcessor = &recovery.DummyManager{}
@@ -434,7 +434,7 @@ func (c *Client) Subscribe(ctx context.Context, opts ...SubscribeOption) (*Subsc
 	}
 	sub := &Subscription{
 		id:         uuid.New(),
-		messages:   make(chan protocols.SessionMessage, bufSize),
+		messages:   make(chan types.SessionMessage, bufSize),
 		closed:     make(chan struct{}),
 		underlying: session,
 		pumpDone:   make(chan struct{}),
@@ -476,7 +476,7 @@ func (c *Client) pumpSubscription(sub *Subscription) {
 	}
 }
 
-func (c *Client) pumpRecovery(ctx context.Context, in <-chan protocols.RecoveryMessage) {
+func (c *Client) pumpRecovery(ctx context.Context, in <-chan types.RecoveryMessage) {
 	defer c.wg.Done()
 	for {
 		select {
@@ -556,12 +556,12 @@ func (c *Client) pushAPIEvent(ev api.APIEvent) {
 func (c *Client) routingKeys(cfg subscribeConfig) ([]string, error) {
 	if cfg.replay {
 		// Replay sessions consume everything from the replay exchange.
-		return []string{string(protocols.AllMessageInterest)}, nil
+		return []string{string(types.AllMessageInterest)}, nil
 	}
 
 	keysSet := make(map[string]struct{})
 	var basicKeys []string
-	if cfg.messageInterest == protocols.SpecifiedMatchesOnlyMessageInterest {
+	if cfg.messageInterest == types.SpecifiedMatchesOnlyMessageInterest {
 		if len(cfg.specificEvents) == 0 {
 			return nil, errors.New("gosdk: SpecifiedMatchesOnly requires WithSpecificEvents")
 		}
@@ -589,8 +589,8 @@ func (c *Client) routingKeys(cfg subscribeConfig) ([]string, error) {
 		}
 		keysSet[snapshotKey] = struct{}{}
 	}
-	if cfg.messageInterest != protocols.SystemAliveOnly {
-		keysSet[string(protocols.SystemAliveOnly)] = struct{}{}
+	if cfg.messageInterest != types.SystemAliveOnly {
+		keysSet[string(types.SystemAliveOnly)] = struct{}{}
 	}
 
 	out := make([]string, 0, len(keysSet))
@@ -625,14 +625,14 @@ func (c *Client) APIEvents() <-chan APIEvent { return c.apiEvents }
 // --- Bookmaker ---
 
 // BookmakerDetails returns the authenticated bookmaker profile.
-func (c *Client) BookmakerDetails(ctx context.Context) (protocols.BookmakerDetail, error) {
+func (c *Client) BookmakerDetails(ctx context.Context) (types.BookmakerDetail, error) {
 	return c.whoAmIManager.BookmakerDetails(ctx)
 }
 
 // --- Producers ---
 
 // Producers returns all producers known to the SDK.
-func (c *Client) Producers(ctx context.Context) ([]protocols.Producer, error) {
+func (c *Client) Producers(ctx context.Context) ([]types.Producer, error) {
 	m, err := c.producerManager.AvailableProducers(ctx)
 	if err != nil {
 		return nil, err
@@ -641,7 +641,7 @@ func (c *Client) Producers(ctx context.Context) ([]protocols.Producer, error) {
 }
 
 // ActiveProducers returns currently-active producers.
-func (c *Client) ActiveProducers(ctx context.Context) ([]protocols.Producer, error) {
+func (c *Client) ActiveProducers(ctx context.Context) ([]types.Producer, error) {
 	m, err := c.producerManager.ActiveProducers(ctx)
 	if err != nil {
 		return nil, err
@@ -651,7 +651,7 @@ func (c *Client) ActiveProducers(ctx context.Context) ([]protocols.Producer, err
 
 // ProducersInScope returns active producers serving the given scope
 // (live or prematch).
-func (c *Client) ProducersInScope(ctx context.Context, scope protocols.ProducerScope) ([]protocols.Producer, error) {
+func (c *Client) ProducersInScope(ctx context.Context, scope types.ProducerScope) ([]types.Producer, error) {
 	m, err := c.producerManager.ActiveProducersInScope(ctx, scope)
 	if err != nil {
 		return nil, err
@@ -660,7 +660,7 @@ func (c *Client) ProducersInScope(ctx context.Context, scope protocols.ProducerS
 }
 
 // Producer returns a single producer by id.
-func (c *Client) Producer(ctx context.Context, id uint) (protocols.Producer, error) {
+func (c *Client) Producer(ctx context.Context, id uint) (types.Producer, error) {
 	return c.producerManager.GetProducer(ctx, id)
 }
 
@@ -695,17 +695,17 @@ type RecoveryHandle = recovery.Handle
 //	if err != nil { ... }
 //	<-h.Done()
 //	res := h.Result()
-//	if res.Status == protocols.RecoveryStatusCompleted { ... }
+//	if res.Status == types.RecoveryStatusCompleted { ... }
 //
 // Handles remain queryable via Client.EventRecoveryStatus for a
 // configurable grace period (recovery.HandleGCGracePeriod, default
 // 5 minutes) after they reach a terminal state.
-func (c *Client) RecoverEventOdds(ctx context.Context, producerID uint, eventID protocols.URN) (*RecoveryHandle, error) {
+func (c *Client) RecoverEventOdds(ctx context.Context, producerID uint, eventID types.URN) (*RecoveryHandle, error) {
 	return c.recoveryManager.InitiateEventOddsRecoveryHandle(ctx, producerID, eventID)
 }
 
 // RecoverEventStateful initiates a stateful-recovery for a single event.
-func (c *Client) RecoverEventStateful(ctx context.Context, producerID uint, eventID protocols.URN) (*RecoveryHandle, error) {
+func (c *Client) RecoverEventStateful(ctx context.Context, producerID uint, eventID types.URN) (*RecoveryHandle, error) {
 	return c.recoveryManager.InitiateEventStatefulRecoveryHandle(ctx, producerID, eventID)
 }
 
@@ -713,10 +713,10 @@ func (c *Client) RecoverEventStateful(ctx context.Context, producerID uint, even
 // callers that only kept the request id and want to check whether the
 // recovery has completed. The second return value is false when the
 // id is unknown — never registered or GC'd after the grace period.
-func (c *Client) EventRecoveryStatus(requestID uint) (protocols.RecoveryResult, bool) {
+func (c *Client) EventRecoveryStatus(requestID uint) (types.RecoveryResult, bool) {
 	h, ok := c.recoveryManager.LookupHandle(requestID)
 	if !ok {
-		return protocols.RecoveryResult{}, false
+		return types.RecoveryResult{}, false
 	}
 	return h.Snapshot(), true
 }
@@ -726,7 +726,7 @@ func (c *Client) EventRecoveryStatus(requestID uint) (protocols.RecoveryResult, 
 // Sports returns the sports catalog. The first variadic locale (or the
 // default locale when omitted) drives the entity-method-level locale.
 // Multiple locales preload all of them into the cache.
-func (c *Client) Sports(ctx context.Context, locales ...protocols.Locale) ([]protocols.Sport, error) {
+func (c *Client) Sports(ctx context.Context, locales ...types.Locale) ([]types.Sport, error) {
 	loc := c.localeOrDefault(locales)
 	if len(locales) > 1 {
 		for _, l := range locales {
@@ -739,77 +739,77 @@ func (c *Client) Sports(ctx context.Context, locales ...protocols.Locale) ([]pro
 }
 
 // ActiveTournaments returns active tournaments across all sports.
-func (c *Client) ActiveTournaments(ctx context.Context, locales ...protocols.Locale) ([]protocols.Tournament, error) {
+func (c *Client) ActiveTournaments(ctx context.Context, locales ...types.Locale) ([]types.Tournament, error) {
 	return c.sportsInfoManager.LocalizedActiveTournaments(ctx, c.localeOrDefault(locales))
 }
 
 // AvailableTournaments returns tournaments under a given sport.
-func (c *Client) AvailableTournaments(ctx context.Context, sportID protocols.URN, locales ...protocols.Locale) ([]protocols.Tournament, error) {
+func (c *Client) AvailableTournaments(ctx context.Context, sportID types.URN, locales ...types.Locale) ([]types.Tournament, error) {
 	return c.sportsInfoManager.LocalizedAvailableTournaments(ctx, sportID, c.localeOrDefault(locales))
 }
 
 // Match returns the match identified by URN.
-func (c *Client) Match(ctx context.Context, id protocols.URN, locales ...protocols.Locale) (protocols.Match, error) {
+func (c *Client) Match(ctx context.Context, id types.URN, locales ...types.Locale) (types.Match, error) {
 	return c.sportsInfoManager.LocalizedMatch(ctx, id, c.localeOrDefault(locales))
 }
 
 // MatchesFor returns matches scheduled for a calendar date.
-func (c *Client) MatchesFor(ctx context.Context, t time.Time, locales ...protocols.Locale) ([]protocols.Match, error) {
+func (c *Client) MatchesFor(ctx context.Context, t time.Time, locales ...types.Locale) ([]types.Match, error) {
 	return c.sportsInfoManager.LocalizedMatchesFor(ctx, t, c.localeOrDefault(locales))
 }
 
 // LiveMatches returns currently-live matches.
-func (c *Client) LiveMatches(ctx context.Context, locales ...protocols.Locale) ([]protocols.Match, error) {
+func (c *Client) LiveMatches(ctx context.Context, locales ...types.Locale) ([]types.Match, error) {
 	return c.sportsInfoManager.LocalizedLiveMatches(ctx, c.localeOrDefault(locales))
 }
 
 // ListMatches paginates through the schedule. start is the offset and
 // limit is the page size.
-func (c *Client) ListMatches(ctx context.Context, start, limit uint, locales ...protocols.Locale) ([]protocols.Match, error) {
+func (c *Client) ListMatches(ctx context.Context, start, limit uint, locales ...types.Locale) ([]types.Match, error) {
 	return c.sportsInfoManager.LocalizedListOfMatches(ctx, start, limit, c.localeOrDefault(locales))
 }
 
 // Competitor returns a competitor profile by URN.
-func (c *Client) Competitor(ctx context.Context, id protocols.URN, locales ...protocols.Locale) (protocols.Competitor, error) {
+func (c *Client) Competitor(ctx context.Context, id types.URN, locales ...types.Locale) (types.Competitor, error) {
 	return c.sportsInfoManager.LocalizedCompetitor(ctx, id, c.localeOrDefault(locales))
 }
 
 // FixtureChanges returns fixture changes since `after`.
-func (c *Client) FixtureChanges(ctx context.Context, after time.Time, locales ...protocols.Locale) ([]protocols.FixtureChange, error) {
+func (c *Client) FixtureChanges(ctx context.Context, after time.Time, locales ...types.Locale) ([]types.FixtureChange, error) {
 	return c.sportsInfoManager.LocalizedFixtureChanges(ctx, c.localeOrDefault(locales), after)
 }
 
 // ClearMatch invalidates the cached match entry.
-func (c *Client) ClearMatch(id protocols.URN) { c.sportsInfoManager.ClearMatch(id) }
+func (c *Client) ClearMatch(id types.URN) { c.sportsInfoManager.ClearMatch(id) }
 
 // ClearTournament invalidates the cached tournament entry.
-func (c *Client) ClearTournament(id protocols.URN) { c.sportsInfoManager.ClearTournament(id) }
+func (c *Client) ClearTournament(id types.URN) { c.sportsInfoManager.ClearTournament(id) }
 
 // ClearCompetitor invalidates the cached competitor entry.
-func (c *Client) ClearCompetitor(id protocols.URN) { c.sportsInfoManager.ClearCompetitor(id) }
+func (c *Client) ClearCompetitor(id types.URN) { c.sportsInfoManager.ClearCompetitor(id) }
 
 // --- Market descriptions ---
 
 // MarketDescriptions returns all market descriptions for the (first
 // supplied or default) locale.
-func (c *Client) MarketDescriptions(ctx context.Context, locales ...protocols.Locale) ([]protocols.MarketDescription, error) {
+func (c *Client) MarketDescriptions(ctx context.Context, locales ...types.Locale) ([]types.MarketDescription, error) {
 	return c.marketDescriptionManager.LocalizedMarketDescriptions(ctx, c.localeOrDefault(locales))
 }
 
 // MarketDescription returns the description for a (marketID, variant)
 // tuple. variant=nil selects the base (non-variant) description; pass a
 // non-nil pointer for the dynamic variant catalog.
-func (c *Client) MarketDescription(ctx context.Context, id uint, variant *string) (*protocols.MarketDescription, error) {
+func (c *Client) MarketDescription(ctx context.Context, id uint, variant *string) (*types.MarketDescription, error) {
 	return c.marketDescriptionManager.MarketDescriptionByIDAndVariant(ctx, id, variant)
 }
 
 // MarketVoidReasons returns the void-reasons catalog.
-func (c *Client) MarketVoidReasons(ctx context.Context) ([]protocols.MarketVoidReason, error) {
+func (c *Client) MarketVoidReasons(ctx context.Context) ([]types.MarketVoidReason, error) {
 	return c.marketDescriptionManager.MarketVoidReasons(ctx)
 }
 
 // ReloadMarketVoidReasons forces a refetch of the void-reasons catalog.
-func (c *Client) ReloadMarketVoidReasons(ctx context.Context) ([]protocols.MarketVoidReason, error) {
+func (c *Client) ReloadMarketVoidReasons(ctx context.Context) ([]types.MarketVoidReason, error) {
 	return c.marketDescriptionManager.ReloadMarketVoidReasons(ctx)
 }
 
@@ -831,25 +831,25 @@ type Replay struct {
 }
 
 // List returns the replay queue contents as Match value snapshots.
-func (r *Replay) List(ctx context.Context) ([]protocols.Match, error) {
+func (r *Replay) List(ctx context.Context) ([]types.Match, error) {
 	return r.client.replayManager.ReplayList(ctx)
 }
 
 // AddEvent adds an event to the replay queue.
-func (r *Replay) AddEvent(ctx context.Context, eventID protocols.URN) error {
+func (r *Replay) AddEvent(ctx context.Context, eventID types.URN) error {
 	_, err := r.client.replayManager.AddSportEventID(ctx, eventID)
 	return err
 }
 
 // RemoveEvent removes an event from the replay queue.
-func (r *Replay) RemoveEvent(ctx context.Context, eventID protocols.URN) error {
+func (r *Replay) RemoveEvent(ctx context.Context, eventID types.URN) error {
 	_, err := r.client.replayManager.RemoveSportEventID(ctx, eventID)
 	return err
 }
 
 // Start begins replay playback with the supplied options.
 func (r *Replay) Start(ctx context.Context, opts ...ReplayOption) error {
-	params := protocols.ReplayPlayParams{}
+	params := types.ReplayPlayParams{}
 	for _, opt := range opts {
 		opt(&params)
 	}
@@ -879,44 +879,44 @@ func (r *Replay) StopAndClear(ctx context.Context) error {
 }
 
 // ReplayOption tunes a Replay.Start invocation.
-type ReplayOption func(*protocols.ReplayPlayParams)
+type ReplayOption func(*types.ReplayPlayParams)
 
 // WithReplaySpeed scales playback speed (e.g. 10 = ten times realtime).
 func WithReplaySpeed(speed int) ReplayOption {
-	return func(p *protocols.ReplayPlayParams) { p.Speed = &speed }
+	return func(p *types.ReplayPlayParams) { p.Speed = &speed }
 }
 
 // WithReplayMaxDelayMs caps the delay between consecutive messages.
 func WithReplayMaxDelayMs(ms int) ReplayOption {
-	return func(p *protocols.ReplayPlayParams) { p.MaxDelayInMs = &ms }
+	return func(p *types.ReplayPlayParams) { p.MaxDelayInMs = &ms }
 }
 
 // WithReplayRunParallel runs events in parallel rather than sequentially.
 func WithReplayRunParallel(parallel bool) ReplayOption {
-	return func(p *protocols.ReplayPlayParams) { p.RunParallel = &parallel }
+	return func(p *types.ReplayPlayParams) { p.RunParallel = &parallel }
 }
 
 // WithReplayRewriteTimestamps rewrites historical timestamps to "now".
 func WithReplayRewriteTimestamps(rewrite bool) ReplayOption {
-	return func(p *protocols.ReplayPlayParams) { p.RewriteTimestamps = &rewrite }
+	return func(p *types.ReplayPlayParams) { p.RewriteTimestamps = &rewrite }
 }
 
 // WithReplayProducer narrows replay to a specific producer name.
 func WithReplayProducer(producer string) ReplayOption {
-	return func(p *protocols.ReplayPlayParams) { p.Producer = &producer }
+	return func(p *types.ReplayPlayParams) { p.Producer = &producer }
 }
 
 // --- Helpers ---
 
-func (c *Client) localeOrDefault(locales []protocols.Locale) protocols.Locale {
+func (c *Client) localeOrDefault(locales []types.Locale) types.Locale {
 	if len(locales) > 0 {
 		return locales[0]
 	}
 	return c.cfg.DefaultLocale()
 }
 
-func mapToSlice(m map[uint]protocols.Producer) []protocols.Producer {
-	out := make([]protocols.Producer, 0, len(m))
+func mapToSlice(m map[uint]types.Producer) []types.Producer {
+	out := make([]types.Producer, 0, len(m))
 	for _, p := range m {
 		out = append(out, p)
 	}

@@ -4,22 +4,22 @@ import (
 	"strings"
 
 	feedXML "github.com/oddin-gg/gosdk/internal/feed/xml"
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 	log "github.com/oddin-gg/gosdk/internal/log"
 )
 
 // MarketFactory builds value-typed market snapshots from feed XML.
 type MarketFactory struct {
 	marketDataFactory *MarketDataFactory
-	locales           []protocols.Locale
+	locales           []types.Locale
 	logger            *log.Logger
 }
 
 // BuildMarket ...
-func (m MarketFactory) BuildMarket(event interface{}, market *feedXML.MarketAttributes) protocols.Market {
+func (m MarketFactory) BuildMarket(event interface{}, market *feedXML.MarketAttributes) types.Market {
 	specs := m.extractSpecifiers(market.Specifiers)
 	md := m.marketDataFactory.BuildMarketData(event, market.ID, specs)
-	return protocols.Market{
+	return types.Market{
 		ID:         market.ID,
 		Specifiers: specs,
 		Name:       resolveMarketName(md, m.locales[0]),
@@ -27,15 +27,15 @@ func (m MarketFactory) BuildMarket(event interface{}, market *feedXML.MarketAttr
 }
 
 // BuildMarketWithOdds ...
-func (m MarketFactory) BuildMarketWithOdds(event interface{}, market *feedXML.MarketWithOutcome) protocols.MarketWithOdds {
+func (m MarketFactory) BuildMarketWithOdds(event interface{}, market *feedXML.MarketWithOutcome) types.MarketWithOdds {
 	specs := m.extractSpecifiers(market.Specifiers)
 	md := m.marketDataFactory.BuildMarketData(event, market.ID, specs)
-	odds := make([]protocols.OutcomeOdds, len(market.Outcomes))
+	odds := make([]types.OutcomeOdds, len(market.Outcomes))
 	for i := range market.Outcomes {
 		odds[i] = m.buildOutcomeOdds(market.Outcomes[i], md, m.locales[0])
 	}
-	return protocols.MarketWithOdds{
-		Market: protocols.Market{
+	return types.MarketWithOdds{
+		Market: types.Market{
 			ID:         market.ID,
 			Specifiers: specs,
 			Name:       resolveMarketName(md, m.locales[0]),
@@ -47,15 +47,15 @@ func (m MarketFactory) BuildMarketWithOdds(event interface{}, market *feedXML.Ma
 }
 
 // BuildMarketWithSettlement ...
-func (m MarketFactory) BuildMarketWithSettlement(event interface{}, market *feedXML.MarketWithOutcome) protocols.MarketWithSettlement {
+func (m MarketFactory) BuildMarketWithSettlement(event interface{}, market *feedXML.MarketWithOutcome) types.MarketWithSettlement {
 	specs := m.extractSpecifiers(market.Specifiers)
 	md := m.marketDataFactory.BuildMarketData(event, market.ID, specs)
-	settlements := make([]protocols.OutcomeSettlement, len(market.Outcomes))
+	settlements := make([]types.OutcomeSettlement, len(market.Outcomes))
 	for i := range market.Outcomes {
 		settlements[i] = m.buildOutcomeSettlement(market.Outcomes[i], md, m.locales[0])
 	}
-	return protocols.MarketWithSettlement{
-		Market: protocols.Market{
+	return types.MarketWithSettlement{
+		Market: types.Market{
 			ID:         market.ID,
 			Specifiers: specs,
 			Name:       resolveMarketName(md, m.locales[0]),
@@ -65,11 +65,11 @@ func (m MarketFactory) BuildMarketWithSettlement(event interface{}, market *feed
 }
 
 // BuildMarketCancel ...
-func (m MarketFactory) BuildMarketCancel(event interface{}, market *feedXML.MarketWithoutOutcome) protocols.MarketCancel {
+func (m MarketFactory) BuildMarketCancel(event interface{}, market *feedXML.MarketWithoutOutcome) types.MarketCancel {
 	specs := m.extractSpecifiers(market.Specifiers)
 	md := m.marketDataFactory.BuildMarketData(event, market.ID, specs)
-	return protocols.MarketCancel{
-		Market: protocols.Market{
+	return types.MarketCancel{
+		Market: types.Market{
 			ID:         market.ID,
 			Specifiers: specs,
 			Name:       resolveMarketName(md, m.locales[0]),
@@ -96,10 +96,10 @@ func (m MarketFactory) extractSpecifiers(specifiers *string) map[string]string {
 	return result
 }
 
-func (m MarketFactory) buildOutcomeOdds(outcome feedXML.Outcome, md protocols.MarketData, locale protocols.Locale) protocols.OutcomeOdds {
+func (m MarketFactory) buildOutcomeOdds(outcome feedXML.Outcome, md types.MarketData, locale types.Locale) types.OutcomeOdds {
 	active := outcome.Active != nil && *outcome.Active == 1
-	return protocols.OutcomeOdds{
-		Outcome: protocols.Outcome{
+	return types.OutcomeOdds{
+		Outcome: types.Outcome{
 			ID:   outcome.ID,
 			Name: resolveOutcomeName(md, outcome.ID, locale),
 		},
@@ -109,35 +109,35 @@ func (m MarketFactory) buildOutcomeOdds(outcome feedXML.Outcome, md protocols.Ma
 	}
 }
 
-func (m MarketFactory) buildOutcomeSettlement(outcome feedXML.Outcome, md protocols.MarketData, locale protocols.Locale) protocols.OutcomeSettlement {
-	var result protocols.OutcomeResult
+func (m MarketFactory) buildOutcomeSettlement(outcome feedXML.Outcome, md types.MarketData, locale types.Locale) types.OutcomeSettlement {
+	var result types.OutcomeResult
 	if outcome.Result != nil {
 		switch *outcome.Result {
 		case feedXML.OutcomeResultLost:
-			result = protocols.LostOutcomeResult
+			result = types.LostOutcomeResult
 		case feedXML.OutcomeResultWon:
-			result = protocols.WonOutcomeResult
+			result = types.WonOutcomeResult
 		case feedXML.OutcomeResultUndecidedYet:
-			result = protocols.UndecidedYetOutcomeResult
+			result = types.UndecidedYetOutcomeResult
 		default:
-			result = protocols.UnknownOutcomeResult
+			result = types.UnknownOutcomeResult
 		}
 	}
 
-	var voidFactor *protocols.VoidFactor
+	var voidFactor *types.VoidFactor
 	if outcome.VoidFactor != nil {
 		switch *outcome.VoidFactor {
 		case 0.5:
-			v := protocols.VoidFactorRefundHalf
+			v := types.VoidFactorRefundHalf
 			voidFactor = &v
 		case 1.0:
-			v := protocols.VoidFactorRefundFull
+			v := types.VoidFactorRefundFull
 			voidFactor = &v
 		}
 	}
 
-	return protocols.OutcomeSettlement{
-		Outcome: protocols.Outcome{
+	return types.OutcomeSettlement{
+		Outcome: types.Outcome{
 			ID:   outcome.ID,
 			Name: resolveOutcomeName(md, outcome.ID, locale),
 		},
@@ -151,7 +151,7 @@ func (m MarketFactory) buildOutcomeSettlement(outcome feedXML.Outcome, md protoc
 // factory is on the AMQP hot path and a missing description shouldn't
 // fail the entire message decode; consumers can fetch the description
 // directly via Client.MarketDescription if needed.
-func resolveMarketName(md protocols.MarketData, locale protocols.Locale) string {
+func resolveMarketName(md types.MarketData, locale types.Locale) string {
 	if md == nil {
 		return ""
 	}
@@ -162,7 +162,7 @@ func resolveMarketName(md protocols.MarketData, locale protocols.Locale) string 
 	return *name
 }
 
-func resolveOutcomeName(md protocols.MarketData, outcomeID string, locale protocols.Locale) string {
+func resolveOutcomeName(md types.MarketData, outcomeID string, locale types.Locale) string {
 	if md == nil {
 		return ""
 	}
@@ -174,7 +174,7 @@ func resolveOutcomeName(md protocols.MarketData, outcomeID string, locale protoc
 }
 
 // NewMarketFactory ...
-func NewMarketFactory(marketDataFactory *MarketDataFactory, locales []protocols.Locale, logger *log.Logger) *MarketFactory {
+func NewMarketFactory(marketDataFactory *MarketDataFactory, locales []types.Locale, logger *log.Logger) *MarketFactory {
 	return &MarketFactory{
 		marketDataFactory: marketDataFactory,
 		locales:           locales,
@@ -184,25 +184,25 @@ func NewMarketFactory(marketDataFactory *MarketDataFactory, locales []protocols.
 
 // ConvertFeedMarketStatus exposes the feed-status → public-status
 // mapping for callers that build markets outside this factory.
-func ConvertFeedMarketStatus(status *feedXML.MarketStatus) protocols.MarketStatus {
+func ConvertFeedMarketStatus(status *feedXML.MarketStatus) types.MarketStatus {
 	if status == nil {
-		return protocols.UnknownMarketStatus
+		return types.UnknownMarketStatus
 	}
 	switch *status {
 	case feedXML.MarketStatusActive:
-		return protocols.ActiveMarketStatus
+		return types.ActiveMarketStatus
 	case feedXML.MarketStatusDeactived:
-		return protocols.DeactivatedMarketStatus
+		return types.DeactivatedMarketStatus
 	case feedXML.MarketStatusSuspended:
-		return protocols.SuspendedMarketStatus
+		return types.SuspendedMarketStatus
 	case feedXML.MarketStatusHandedOver:
-		return protocols.HandedOverMarketStatus
+		return types.HandedOverMarketStatus
 	case feedXML.MarketStatusSettled:
-		return protocols.SettledMarketStatus
+		return types.SettledMarketStatus
 	case feedXML.MarketStatusCancelled:
-		return protocols.CancelledMarketStatus
+		return types.CancelledMarketStatus
 	default:
-		return protocols.UnknownMarketStatus
+		return types.UnknownMarketStatus
 	}
 }
 

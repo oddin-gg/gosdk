@@ -2,7 +2,7 @@ package xml
 
 import (
 	"encoding/xml"
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 )
 
 // MQSubscriptionTypeName ...
@@ -31,8 +31,8 @@ type ProducersResponse struct {
 }
 
 // Code ...
-func (p ProducersResponse) Code() protocols.ResponseCode {
-	return protocols.ResponseCode(p.ResponseCode)
+func (p ProducersResponse) Code() types.ResponseCode {
+	return types.ResponseCode(p.ResponseCode)
 }
 
 // Producer ...

@@ -3,7 +3,7 @@ package gosdk
 import (
 	"time"
 
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 )
 
 // ConnectionEventKind enumerates the AMQP-level connection state transitions
@@ -99,7 +99,7 @@ type APIEvent struct {
 	Status    int // 0 on transport-level failures (no HTTP response)
 	Latency   time.Duration
 	Attempt   int
-	Locale    *protocols.Locale
+	Locale    *types.Locale
 	Request   []byte
 	Response  []byte
 	Truncated bool

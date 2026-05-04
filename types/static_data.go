@@ -1,4 +1,4 @@
-package protocols
+package types
 
 // StaticData is a primary-locale static-catalog entry (one row of a
 // catalog like match-status descriptions or void reasons).

@@ -3,7 +3,7 @@ package xml
 import (
 	"encoding/xml"
 
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 )
 
 // MarketVoidReasonsResponse ...
@@ -14,8 +14,8 @@ type MarketVoidReasonsResponse struct {
 }
 
 // Code ...
-func (m MarketVoidReasonsResponse) Code() protocols.ResponseCode {
-	return protocols.ResponseCode(m.ResponseCode)
+func (m MarketVoidReasonsResponse) Code() types.ResponseCode {
+	return types.ResponseCode(m.ResponseCode)
 }
 
 // MarketVoidReasons represents market void reason type

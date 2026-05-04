@@ -6,7 +6,7 @@ import (
 	"fmt"
 
 	"github.com/oddin-gg/gosdk/internal/cache"
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 )
 
 // MarketDescriptionFactory ...
@@ -22,8 +22,8 @@ type MarketDescriptionFactory struct {
 func (m MarketDescriptionFactory) MarketDescriptionByIDAndSpecifiers(
 	marketID uint,
 	specifiers map[string]string,
-	locales []protocols.Locale,
-) (*protocols.MarketDescription, error) {
+	locales []types.Locale,
+) (*types.MarketDescription, error) {
 	var variant *string
 	if specifier, ok := specifiers["variant"]; ok {
 		variant = &specifier
@@ -37,8 +37,8 @@ func (m MarketDescriptionFactory) MarketDescriptionByIDAndSpecifiers(
 func (m MarketDescriptionFactory) MarketDescriptionByIDAndVariant(
 	marketID uint,
 	variant *string,
-	locales []protocols.Locale,
-) (*protocols.MarketDescription, error) {
+	locales []types.Locale,
+) (*types.MarketDescription, error) {
 	mds, err := m.marketDescriptionCache.MarketDescriptionByID(context.Background(), marketID, variant, locales)
 	if err != nil {
 		return nil, fmt.Errorf("get market description by id failed: %w", err)
@@ -51,12 +51,12 @@ func (m MarketDescriptionFactory) MarketDescriptionByIDAndVariant(
 }
 
 // MarketVoidReasons returns the void-reasons catalog.
-func (m MarketDescriptionFactory) MarketVoidReasons() ([]protocols.MarketVoidReason, error) {
+func (m MarketDescriptionFactory) MarketVoidReasons() ([]types.MarketVoidReason, error) {
 	data, err := m.marketVoidReasonsCache.MarketVoidReasons(context.Background())
 	if err != nil {
 		return nil, err
 	}
-	result := make([]protocols.MarketVoidReason, 0, len(data))
+	result := make([]types.MarketVoidReason, 0, len(data))
 	for _, d := range data {
 		params := make([]string, len(d.VoidReasonParams))
 		for i, p := range d.VoidReasonParams {
@@ -74,7 +74,7 @@ func (m MarketDescriptionFactory) MarketVoidReasons() ([]protocols.MarketVoidRea
 }
 
 // ReloadMarketVoidReasons forces a refresh and returns the new list.
-func (m MarketDescriptionFactory) ReloadMarketVoidReasons() ([]protocols.MarketVoidReason, error) {
+func (m MarketDescriptionFactory) ReloadMarketVoidReasons() ([]types.MarketVoidReason, error) {
 	if err := m.marketVoidReasonsCache.ReloadMarketVoidReasons(context.Background()); err != nil {
 		return nil, err
 	}
@@ -82,12 +82,12 @@ func (m MarketDescriptionFactory) ReloadMarketVoidReasons() ([]protocols.MarketV
 }
 
 // MarketDescriptions returns every market description for the locale.
-func (m MarketDescriptionFactory) MarketDescriptions(locale protocols.Locale) ([]protocols.MarketDescription, error) {
+func (m MarketDescriptionFactory) MarketDescriptions(locale types.Locale) ([]types.MarketDescription, error) {
 	mds, err := m.marketDescriptionCache.LocalizedMarketDescriptions(context.Background(), locale)
 	if err != nil {
 		return nil, err
 	}
-	result := make([]protocols.MarketDescription, 0, len(mds))
+	result := make([]types.MarketDescription, 0, len(mds))
 	for _, value := range mds {
 		result = append(result, value.Snapshot())
 	}

@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/oddin-gg/gosdk"
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 )
 
 func main() {
@@ -23,7 +23,7 @@ func main() {
 	if token == "" || rawURN == "" {
 		log.Fatal("TOKEN and EVENT_URN required")
 	}
-	eventURN, err := protocols.ParseURN(rawURN)
+	eventURN, err := types.ParseURN(rawURN)
 	if err != nil {
 		log.Fatalf("parse URN %q: %v", rawURN, err)
 	}
@@ -53,7 +53,7 @@ func main() {
 		log.Fatalf("connect: %v", err)
 	}
 
-	prods, err := c.ProducersInScope(bootCtx, protocols.LiveProducerScope)
+	prods, err := c.ProducersInScope(bootCtx, types.LiveProducerScope)
 	if err != nil {
 		log.Fatalf("producers: %v", err)
 	}
@@ -99,13 +99,13 @@ func main() {
 	<-sigCh
 }
 
-func env() protocols.Environment {
+func env() types.Environment {
 	switch os.Getenv("ENV") {
 	case "production":
-		return protocols.ProductionEnvironment
+		return types.ProductionEnvironment
 	case "test":
-		return protocols.TestEnvironment
+		return types.TestEnvironment
 	default:
-		return protocols.IntegrationEnvironment
+		return types.IntegrationEnvironment
 	}
 }

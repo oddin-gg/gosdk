@@ -6,10 +6,10 @@ import (
 
 	feedXML "github.com/oddin-gg/gosdk/internal/feed/xml"
 	log "github.com/oddin-gg/gosdk/internal/log"
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 )
 
-// stubMarketData is a tiny protocols.MarketData implementation for tests.
+// stubMarketData is a tiny types.MarketData implementation for tests.
 type stubMarketData struct {
 	marketName  string
 	marketErr   error
@@ -17,7 +17,7 @@ type stubMarketData struct {
 	outcomeErr  error
 }
 
-func (s *stubMarketData) MarketName(locale protocols.Locale) (*string, error) {
+func (s *stubMarketData) MarketName(locale types.Locale) (*string, error) {
 	if s.marketErr != nil {
 		return nil, s.marketErr
 	}
@@ -27,7 +27,7 @@ func (s *stubMarketData) MarketName(locale protocols.Locale) (*string, error) {
 	return &s.marketName, nil
 }
 
-func (s *stubMarketData) OutcomeName(id string, locale protocols.Locale) (*string, error) {
+func (s *stubMarketData) OutcomeName(id string, locale types.Locale) (*string, error) {
 	if s.outcomeErr != nil {
 		return nil, s.outcomeErr
 	}
@@ -40,14 +40,14 @@ func (s *stubMarketData) OutcomeName(id string, locale protocols.Locale) (*strin
 // --- ConvertFeedMarketStatus ---
 
 func TestConvertFeedMarketStatus(t *testing.T) {
-	cases := map[feedXML.MarketStatus]protocols.MarketStatus{
-		feedXML.MarketStatusActive:     protocols.ActiveMarketStatus,
-		feedXML.MarketStatusDeactived:  protocols.DeactivatedMarketStatus,
-		feedXML.MarketStatusSuspended:  protocols.SuspendedMarketStatus,
-		feedXML.MarketStatusHandedOver: protocols.HandedOverMarketStatus,
-		feedXML.MarketStatusSettled:    protocols.SettledMarketStatus,
-		feedXML.MarketStatusCancelled:  protocols.CancelledMarketStatus,
-		feedXML.MarketStatusDefault:    protocols.UnknownMarketStatus,
+	cases := map[feedXML.MarketStatus]types.MarketStatus{
+		feedXML.MarketStatusActive:     types.ActiveMarketStatus,
+		feedXML.MarketStatusDeactived:  types.DeactivatedMarketStatus,
+		feedXML.MarketStatusSuspended:  types.SuspendedMarketStatus,
+		feedXML.MarketStatusHandedOver: types.HandedOverMarketStatus,
+		feedXML.MarketStatusSettled:    types.SettledMarketStatus,
+		feedXML.MarketStatusCancelled:  types.CancelledMarketStatus,
+		feedXML.MarketStatusDefault:    types.UnknownMarketStatus,
 	}
 	for in, want := range cases {
 		s := in
@@ -56,7 +56,7 @@ func TestConvertFeedMarketStatus(t *testing.T) {
 		}
 	}
 	// nil input → Unknown.
-	if got := ConvertFeedMarketStatus(nil); got != protocols.UnknownMarketStatus {
+	if got := ConvertFeedMarketStatus(nil); got != types.UnknownMarketStatus {
 		t.Errorf("nil status: got %v, want Unknown", got)
 	}
 }
@@ -64,33 +64,33 @@ func TestConvertFeedMarketStatus(t *testing.T) {
 // --- resolveMarketName / resolveOutcomeName ---
 
 func TestResolveMarketName(t *testing.T) {
-	if got := resolveMarketName(nil, protocols.EnLocale); got != "" {
+	if got := resolveMarketName(nil, types.EnLocale); got != "" {
 		t.Errorf("nil md should return empty, got %q", got)
 	}
 	md := &stubMarketData{marketName: "1x2"}
-	if got := resolveMarketName(md, protocols.EnLocale); got != "1x2" {
+	if got := resolveMarketName(md, types.EnLocale); got != "1x2" {
 		t.Errorf("got %q, want 1x2", got)
 	}
 	mdErr := &stubMarketData{marketErr: errors.New("boom")}
-	if got := resolveMarketName(mdErr, protocols.EnLocale); got != "" {
+	if got := resolveMarketName(mdErr, types.EnLocale); got != "" {
 		t.Errorf("error path should return empty, got %q", got)
 	}
 	mdNil := &stubMarketData{}
-	if got := resolveMarketName(mdNil, protocols.EnLocale); got != "" {
+	if got := resolveMarketName(mdNil, types.EnLocale); got != "" {
 		t.Errorf("nil-name path should return empty, got %q", got)
 	}
 }
 
 func TestResolveOutcomeName(t *testing.T) {
-	if got := resolveOutcomeName(nil, "1", protocols.EnLocale); got != "" {
+	if got := resolveOutcomeName(nil, "1", types.EnLocale); got != "" {
 		t.Error("nil md should return empty")
 	}
 	md := &stubMarketData{outcomeName: "home"}
-	if got := resolveOutcomeName(md, "1", protocols.EnLocale); got != "home" {
+	if got := resolveOutcomeName(md, "1", types.EnLocale); got != "home" {
 		t.Errorf("got %q, want home", got)
 	}
 	mdErr := &stubMarketData{outcomeErr: errors.New("boom")}
-	if got := resolveOutcomeName(mdErr, "1", protocols.EnLocale); got != "" {
+	if got := resolveOutcomeName(mdErr, "1", types.EnLocale); got != "" {
 		t.Errorf("error should return empty, got %q", got)
 	}
 }
@@ -154,7 +154,7 @@ func TestMarketFactory_BuildOutcomeOdds(t *testing.T) {
 		Odds:          &odds,
 		Probabilities: &prob,
 		Active:        &active,
-	}, md, protocols.EnLocale)
+	}, md, types.EnLocale)
 
 	if got.ID != "1" {
 		t.Errorf("ID = %q", got.ID)
@@ -176,7 +176,7 @@ func TestMarketFactory_BuildOutcomeOdds(t *testing.T) {
 func TestMarketFactory_BuildOutcomeOdds_InactiveDefault(t *testing.T) {
 	mf := MarketFactory{logger: log.New(nil)}
 	md := &stubMarketData{}
-	got := mf.buildOutcomeOdds(feedXML.Outcome{ID: "1"}, md, protocols.EnLocale)
+	got := mf.buildOutcomeOdds(feedXML.Outcome{ID: "1"}, md, types.EnLocale)
 	if got.IsActive {
 		t.Error("IsActive should default to false when Active is nil")
 	}
@@ -191,16 +191,16 @@ func TestMarketFactory_BuildOutcomeSettlement(t *testing.T) {
 	cases := []struct {
 		name       string
 		feedResult *feedXML.OutcomeResult
-		want       protocols.OutcomeResult
+		want       types.OutcomeResult
 	}{
-		{"lost", ptrFR(feedXML.OutcomeResultLost), protocols.LostOutcomeResult},
-		{"won", ptrFR(feedXML.OutcomeResultWon), protocols.WonOutcomeResult},
-		{"undecided", ptrFR(feedXML.OutcomeResultUndecidedYet), protocols.UndecidedYetOutcomeResult},
-		{"nil", nil, protocols.UnknownOutcomeResult},
+		{"lost", ptrFR(feedXML.OutcomeResultLost), types.LostOutcomeResult},
+		{"won", ptrFR(feedXML.OutcomeResultWon), types.WonOutcomeResult},
+		{"undecided", ptrFR(feedXML.OutcomeResultUndecidedYet), types.UndecidedYetOutcomeResult},
+		{"nil", nil, types.UnknownOutcomeResult},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := mf.buildOutcomeSettlement(feedXML.Outcome{ID: "1", Result: c.feedResult}, md, protocols.EnLocale)
+			got := mf.buildOutcomeSettlement(feedXML.Outcome{ID: "1", Result: c.feedResult}, md, types.EnLocale)
 			if got.OutcomeResult != c.want {
 				t.Errorf("got %v, want %v", got.OutcomeResult, c.want)
 			}
@@ -218,16 +218,16 @@ func TestMarketFactory_BuildOutcomeSettlement_VoidFactor(t *testing.T) {
 	cases := []struct {
 		name string
 		vf   *float32
-		want *protocols.VoidFactor
+		want *types.VoidFactor
 	}{
 		{"nil", nil, nil},
-		{"full", &full, ptrVF(protocols.VoidFactorRefundFull)},
-		{"half", &half, ptrVF(protocols.VoidFactorRefundHalf)},
+		{"full", &full, ptrVF(types.VoidFactorRefundFull)},
+		{"half", &half, ptrVF(types.VoidFactorRefundHalf)},
 		{"other", &other, nil},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := mf.buildOutcomeSettlement(feedXML.Outcome{ID: "1", VoidFactor: c.vf}, md, protocols.EnLocale)
+			got := mf.buildOutcomeSettlement(feedXML.Outcome{ID: "1", VoidFactor: c.vf}, md, types.EnLocale)
 			switch {
 			case c.want == nil && got.VoidFactor != nil:
 				t.Errorf("want nil, got %v", *got.VoidFactor)
@@ -249,4 +249,4 @@ func TestMarketFactory_BuildOutcomeSettlement_VoidFactor(t *testing.T) {
 
 func ptrStr(s string) *string                            { return &s }
 func ptrFR(r feedXML.OutcomeResult) *feedXML.OutcomeResult { return &r }
-func ptrVF(v protocols.VoidFactor) *protocols.VoidFactor { return &v }
+func ptrVF(v types.VoidFactor) *types.VoidFactor { return &v }

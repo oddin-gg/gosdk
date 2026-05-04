@@ -16,7 +16,7 @@ shows how each pre-v1 idiom maps to the new surface.
 
 1. **Configuration** is now constructed via functional options
    (`gosdk.NewConfig` + `WithX(...)`) instead of the broken value-receiver
-   setter chain on `protocols.OddsFeedConfiguration`.
+   setter chain on `types.OddsFeedConfiguration`.
 2. **`gosdk.NewOddsFeed` is gone.** Replaced by `gosdk.New(ctx, cfg)`
    which returns `*gosdk.Client` — a flat type with direct methods, no
    manager-of-managers indirection.
@@ -24,7 +24,7 @@ shows how each pre-v1 idiom maps to the new surface.
    `client.Subscribe(ctx, opts...)` returning a `*Subscription`.
 4. **All I/O takes `context.Context`.** Manager methods that previously
    ignored ctx now propagate it through to the API and AMQP layers.
-5. **Localization** finally works: methods take `locales ...protocols.Locale`
+5. **Localization** finally works: methods take `locales ...types.Locale`
    variadic, and the cache holds per-locale fields rather than overwriting.
 6. **Lifecycle** uses idempotent `Close(ctx)` with a fast-path on the
    already-closed channel and a deterministic drain wait. Subscriptions
@@ -39,6 +39,18 @@ shows how each pre-v1 idiom maps to the new surface.
 
 No `// Deprecated` aliases or shims are kept — v1.0.0 is a clean cut.
 
+> **Package rename**: in v1, the `protocols` package was renamed to
+> `types`. Throughout this document — including the "Before" code
+> samples — references read `types.IntegrationEnvironment`, `types.Match`,
+> etc. **Your pre-v1 code uses the same identifiers under `protocols`**
+> (e.g., `protocols.IntegrationEnvironment`); the rename is mechanical:
+> ```sh
+> # In your project:
+> find . -name '*.go' -print0 | xargs -0 sed -i '' \
+>   -e 's|github.com/oddin-gg/gosdk/protocols|github.com/oddin-gg/gosdk/types|g' \
+>   -e 's|protocols\.|types.|g'
+> ```
+
 ---
 
 ## 1. Configuration
@@ -46,8 +58,8 @@ No `// Deprecated` aliases or shims are kept — v1.0.0 is a clean cut.
 ### Before
 
 ```go
-cfg := gosdk.NewConfiguration(token, protocols.IntegrationEnvironment, /*nodeID*/ 1, /*reportExtended*/ false).
-    SetRegion(protocols.RegionDefault).
+cfg := gosdk.NewConfiguration(token, types.IntegrationEnvironment, /*nodeID*/ 1, /*reportExtended*/ false).
+    SetRegion(types.RegionDefault).
     SetExchangeName("oddinfeed").
     SetMessagingPort(5672).
     SetAPIURL("api.example.com").
@@ -62,16 +74,16 @@ locale, logger, recovery cap, or HTTP timeout.
 ### After
 
 ```go
-cfg := gosdk.NewConfig(token, protocols.IntegrationEnvironment,
+cfg := gosdk.NewConfig(token, types.IntegrationEnvironment,
     gosdk.WithNodeID(1),
-    gosdk.WithRegion(protocols.RegionDefault),
+    gosdk.WithRegion(types.RegionDefault),
     gosdk.WithExchangeName("oddinfeed"),
     gosdk.WithMessagingPort(5672),
     gosdk.WithAPIURL("api.example.com"),
     gosdk.WithMQURL("mq.example.com"),
     gosdk.WithSportIDPrefix("od:sport:"),
-    gosdk.WithDefaultLocale(protocols.EnLocale),
-    gosdk.WithPreloadLocales(protocols.EnLocale, protocols.RuLocale),
+    gosdk.WithDefaultLocale(types.EnLocale),
+    gosdk.WithPreloadLocales(types.EnLocale, types.RuLocale),
     gosdk.WithMaxInactivity(20*time.Second),
     gosdk.WithMaxRecoveryExecution(6*time.Hour),
     gosdk.WithHTTPClientTimeout(30*time.Second),
@@ -91,7 +103,7 @@ cfg := gosdk.NewConfig(token, protocols.IntegrationEnvironment,
 |---|---|
 | `NewConfiguration(_, _, nodeID, _)` | `WithNodeID(int)` |
 | `NewConfiguration(_, _, _, reportExtended)` | `WithExtendedDataReporting(bool)` |
-| `SetRegion(...)` | `WithRegion(protocols.Region)` |
+| `SetRegion(...)` | `WithRegion(types.Region)` |
 | `SetExchangeName(...)` | `WithExchangeName(string)` + `WithReplayExchangeName(string)` |
 | `SetAPIURL(...)` | `WithAPIURL(string)` |
 | `SetMQURL(...)` | `WithMQURL(string)` |
@@ -114,7 +126,7 @@ feed := gosdk.NewOddsFeed(cfg)  // no ctx, no error
 defer feed.Close()
 ```
 
-`NewOddsFeed` returned `protocols.OddsFeed` synchronously and deferred
+`NewOddsFeed` returned `types.OddsFeed` synchronously and deferred
 all work to the first manager call. There was no probe of credentials
 up-front and no way to scope construction to a context.
 
@@ -156,7 +168,7 @@ defer func() {
 
 ```go
 ch, err := feed.SessionBuilder().
-    SetMessageInterest(protocols.AllMessageInterest).
+    SetMessageInterest(types.AllMessageInterest).
     SetSpecificEventOnly(eventURN).
     Build()
 if err != nil { return err }
@@ -166,8 +178,8 @@ if err != nil { return err }
 
 for msg := range ch {
     switch m := msg.Message.(type) {
-    case protocols.OddsChange:    ...
-    case protocols.BetSettlement: ...
+    case types.OddsChange:    ...
+    case types.BetSettlement: ...
     }
 }
 
@@ -181,7 +193,7 @@ for ev := range global {
 
 ```go
 sub, err := client.Subscribe(ctx,
-    gosdk.WithMessageInterest(protocols.AllMessageInterest),
+    gosdk.WithMessageInterest(types.AllMessageInterest),
     gosdk.WithSpecificEvents(eventURN),
 )
 if err != nil { return err }
@@ -189,8 +201,8 @@ if err != nil { return err }
 go func() {
     for msg := range sub.Messages() {
         switch m := msg.Message.(type) {
-        case protocols.OddsChange:    ...
-        case protocols.BetSettlement: ...
+        case types.OddsChange:    ...
+        case types.BetSettlement: ...
         }
         if msg.UnparsableMessage != nil { ... }
         if msg.RawFeedMessage != nil    { ... } // when WithExtendedDataReporting(true)
@@ -220,7 +232,7 @@ Differences:
 
 ## 4. Manager flattening
 
-The manager-of-managers shape is gone. Each `protocols.XxxManager`
+The manager-of-managers shape is gone. Each `types.XxxManager`
 interface still exists internally but is no longer reachable through the
 public API — methods land directly on `*Client`.
 
@@ -264,7 +276,7 @@ public API — methods land directly on `*Client`.
 
 ### Locale handling on entity methods
 
-Each Sports/Markets method takes `locales ...protocols.Locale` last:
+Each Sports/Markets method takes `locales ...types.Locale` last:
 - Pass nothing → uses `cfg.DefaultLocale()`
 - Pass one locale → method behaves as if a `LocalizedX` had been called
 - Pass several → each is preloaded into the cache (multi-locale fill-in
@@ -278,7 +290,7 @@ Each Sports/Markets method takes `locales ...protocols.Locale` last:
 ### Before
 
 ```go
-params := protocols.ReplayPlayParams{
+params := types.ReplayPlayParams{
     Speed:             ptr.Int(10),
     MaxDelayInMs:      ptr.Int(50),
     RewriteTimestamps: ptr.Bool(true),
@@ -297,7 +309,7 @@ err := client.Replay().Start(ctx,
 ```
 
 Bool / int / string params become typed options. Each option is a
-`ReplayOption func(*protocols.ReplayPlayParams)`.
+`ReplayOption func(*types.ReplayPlayParams)`.
 
 ---
 
@@ -389,11 +401,11 @@ No code changes needed on consumers — both behaviors are upgrades.
 A handful of fields were removed because they were unused by either
 internal consumer:
 
-- `protocols.SportEvent.SportEventRefID()` — RefID was never populated
+- `types.SportEvent.SportEventRefID()` — RefID was never populated
   by the API; removed.
-- `protocols.Market.RefID()`, `protocols.Outcome.RefID()`,
-  `protocols.Competitor.RefID()` — same.
-- `protocols.DefaulRegion` (typo alias for `RegionDefault`) — removed.
+- `types.Market.RefID()`, `types.Outcome.RefID()`,
+  `types.Competitor.RefID()` — same.
+- `types.DefaulRegion` (typo alias for `RegionDefault`) — removed.
 
 If you discover a method call site that no longer compiles and isn't
 listed above, file an issue — it likely got pruned in the same pass.
@@ -410,13 +422,13 @@ went from **interface-with-lazy-loads** to **plain value struct**.
 
 ```go
 match, err := client.Match(ctx, urn)
-// match is a protocols.Match interface — every accessor returns
+// match is a types.Match interface — every accessor returns
 // (value, error) and re-enters the cache to fetch on demand.
-name, err := match.LocalizedName(protocols.EnLocale) // *string, error
+name, err := match.LocalizedName(types.EnLocale) // *string, error
 ts,   err := match.ScheduledTime()                   // *time.Time, error
-status      := match.Status()                        // protocols.MatchStatus interface
-home,  err := match.HomeCompetitor()                 // protocols.TeamCompetitor, error
-hname, err := home.LocalizedName(protocols.EnLocale) // *string, error
+status      := match.Status()                        // types.MatchStatus interface
+home,  err := match.HomeCompetitor()                 // types.TeamCompetitor, error
+hname, err := home.LocalizedName(types.EnLocale) // *string, error
 ```
 
 Every accessor took a cache lock + map walk + nil/locale check. Every
@@ -427,12 +439,12 @@ accessor could return an error. Hidden lazy fetches via
 
 ```go
 match, err := client.Match(ctx, urn)
-// match is a protocols.Match value — fully populated at construction.
-name := match.Names[protocols.EnLocale]              // map lookup
+// match is a types.Match value — fully populated at construction.
+name := match.Names[types.EnLocale]              // map lookup
 ts   := match.ScheduledTime                          // *time.Time field
 status := match.Status                               // value struct
 home := match.HomeCompetitor                         // *TeamCompetitor field (nil for non-classic)
-hname := home.Name(protocols.EnLocale)               // pure helper, no error
+hname := home.Name(types.EnLocale)               // pure helper, no error
 ```
 
 Field access is allocation-free, never errors, never locks. Eager
@@ -589,8 +601,8 @@ delivers reliable per-request recovery completion.
 | `specifier.Name()` / `Type()` | `specifier.Name` / `specifier.Type` |
 | `voidReason.ID()` / `Name()` / `Description()` / `Template()` / `Params()` | `voidReason.ID` / `Name` / `Description` / `Template` / `Params` |
 
-`Client.MarketDescription` now returns `*protocols.MarketDescription`
-(was: `protocols.MarketDescription` interface).
+`Client.MarketDescription` now returns `*types.MarketDescription`
+(was: `types.MarketDescription` interface).
 
 ### 11.3 RecoveryHandle — reliable per-request completion
 
@@ -611,9 +623,9 @@ if err != nil { ... }
 <-handle.Done()
 res := handle.Result()
 switch res.Status {
-case protocols.RecoveryStatusCompleted:
+case types.RecoveryStatusCompleted:
     log.Printf("recovery %d completed in %v", res.RequestID, res.EndedAt.Sub(res.StartedAt))
-case protocols.RecoveryStatusFailed:
+case types.RecoveryStatusFailed:
     log.Printf("recovery %d failed: %v", res.RequestID, res.Err)
 }
 

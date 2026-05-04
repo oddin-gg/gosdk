@@ -4,7 +4,7 @@ import (
 	"context"
 
 	"github.com/oddin-gg/gosdk/internal/api"
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 	log "github.com/oddin-gg/gosdk/internal/log"
 )
 
@@ -24,13 +24,13 @@ type Manager struct {
 }
 
 // OnFeedMessageReceived ...
-func (m Manager) OnFeedMessageReceived(feedMessage *protocols.FeedMessage) {
-	idMessage, ok := feedMessage.Message.(protocols.IDMessage)
+func (m Manager) OnFeedMessageReceived(feedMessage *types.FeedMessage) {
+	idMessage, ok := feedMessage.Message.(types.IDMessage)
 	if !ok {
 		return
 	}
 
-	id, err := protocols.ParseURN(idMessage.GetEventID())
+	id, err := types.ParseURN(idMessage.GetEventID())
 	if err != nil {
 		m.logger.Errorf("failed to parse id %s", idMessage.GetEventID())
 		return
@@ -48,7 +48,7 @@ func (m Manager) Close() {
 }
 
 // NewManager ...
-func NewManager(client *api.Client, oddsFeedConfiguration protocols.OddsFeedConfiguration, logger *log.Logger) *Manager {
+func NewManager(client *api.Client, oddsFeedConfiguration types.OddsFeedConfiguration, logger *log.Logger) *Manager {
 	manager := &Manager{
 		MarketDescriptionCache: newMarketDescriptionCache(client),
 		CompetitorCache:        newCompetitorCache(client, logger),
@@ -60,16 +60,16 @@ func NewManager(client *api.Client, oddsFeedConfiguration protocols.OddsFeedConf
 		MarketVoidReasonsCache: newMarketVoidReasonsCache(client),
 		PlayersCache:           newPlayersCache(client, logger),
 
-		LocalizedStaticMatchStatus: newLocalizedStaticDataCache(oddsFeedConfiguration, func(locale protocols.Locale) ([]protocols.StaticData, error) {
+		LocalizedStaticMatchStatus: newLocalizedStaticDataCache(oddsFeedConfiguration, func(locale types.Locale) ([]types.StaticData, error) {
 			data, err := client.FetchMatchStatusDescriptions(context.Background(), locale)
 			if err != nil {
 				return nil, err
 			}
 
-			result := make([]protocols.StaticData, len(data))
+			result := make([]types.StaticData, len(data))
 			for i := range data {
 				d := data[i].GetDescription()
-				result[i] = protocols.StaticData{
+				result[i] = types.StaticData{
 					ID:          data[i].GetID(),
 					Description: d,
 				}

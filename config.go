@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 )
 
 // Config is the public, immutable SDK configuration. Construct via NewConfig.
@@ -16,16 +16,16 @@ import (
 // configuration drops.
 type Config struct {
 	accessToken          string
-	defaultLocale        protocols.Locale
-	preloadLocales       []protocols.Locale
+	defaultLocale        types.Locale
+	preloadLocales       []types.Locale
 	maxInactivity        time.Duration
 	maxRecoveryExecution time.Duration
 	initialSnapshotTime  time.Duration
 	httpClientTimeout    time.Duration
 	messagingPort        int
 	sdkNodeID            *int
-	selectedEnvironment  protocols.Environment
-	selectedRegion       protocols.Region
+	selectedEnvironment  types.Environment
+	selectedRegion       types.Region
 	reportExtendedData   bool
 	forcedAPIURL         string
 	forcedMQURL          string
@@ -89,11 +89,11 @@ const (
 
 // NewConfig constructs an SDK Config. The required arguments are the access
 // token and the target environment; everything else is supplied via options.
-func NewConfig(token string, env protocols.Environment, opts ...Option) Config {
+func NewConfig(token string, env types.Environment, opts ...Option) Config {
 	cfg := Config{
 		accessToken:          token,
 		selectedEnvironment:  env,
-		defaultLocale:        protocols.EnLocale,
+		defaultLocale:        types.EnLocale,
 		maxInactivity:        defaultMaxInactivity,
 		maxRecoveryExecution: defaultMaxRecoveryExecution,
 		httpClientTimeout:    defaultHTTPClientTimeoutPub,
@@ -118,23 +118,23 @@ func NewConfig(token string, env protocols.Environment, opts ...Option) Config {
 func WithNodeID(id int) Option { return func(c *Config) { v := id; c.sdkNodeID = &v } }
 
 // WithDefaultLocale sets the locale used when a query method is called
-// without an explicit `locales ...protocols.Locale` argument.
-func WithDefaultLocale(l protocols.Locale) Option {
+// without an explicit `locales ...types.Locale` argument.
+func WithDefaultLocale(l types.Locale) Option {
 	return func(c *Config) { c.defaultLocale = l }
 }
 
 // WithPreloadLocales lists locales to fetch eagerly when warming static
 // catalogs (sports, market descriptions). Per-event entities are still
 // fetched lazily per locale on first request.
-func WithPreloadLocales(locales ...protocols.Locale) Option {
+func WithPreloadLocales(locales ...types.Locale) Option {
 	return func(c *Config) {
-		c.preloadLocales = append([]protocols.Locale(nil), locales...)
+		c.preloadLocales = append([]types.Locale(nil), locales...)
 	}
 }
 
 // WithRegion selects the AWS region suffix for the broker / API host
-// (e.g. protocols.APSouthEast1). Defaults to RegionDefault (EU).
-func WithRegion(r protocols.Region) Option { return func(c *Config) { c.selectedRegion = r } }
+// (e.g. types.APSouthEast1). Defaults to RegionDefault (EU).
+func WithRegion(r types.Region) Option { return func(c *Config) { c.selectedRegion = r } }
 
 // WithAPIURL overrides the resolved API host (otherwise derived from the
 // environment + region).
@@ -232,20 +232,20 @@ func (c Config) HTTPClient() *http.Client { return c.httpClient }
 func (c Config) AccessToken() string { return c.accessToken }
 
 // DefaultLocale returns the configured default locale.
-func (c Config) DefaultLocale() protocols.Locale { return c.defaultLocale }
+func (c Config) DefaultLocale() types.Locale { return c.defaultLocale }
 
 // PreloadLocales returns a copy of the preload locale list.
-func (c Config) PreloadLocales() []protocols.Locale {
-	out := make([]protocols.Locale, len(c.preloadLocales))
+func (c Config) PreloadLocales() []types.Locale {
+	out := make([]types.Locale, len(c.preloadLocales))
 	copy(out, c.preloadLocales)
 	return out
 }
 
 // Environment returns the selected environment.
-func (c Config) Environment() protocols.Environment { return c.selectedEnvironment }
+func (c Config) Environment() types.Environment { return c.selectedEnvironment }
 
 // Region returns the selected region.
-func (c Config) Region() protocols.Region { return c.selectedRegion }
+func (c Config) Region() types.Region { return c.selectedRegion }
 
 // SdkNodeID returns the configured node id (nil if unset).
 func (c Config) SdkNodeID() *int {

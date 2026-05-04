@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/oddin-gg/gosdk/internal/api/xml"
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 )
 
 type data struct {
@@ -23,7 +23,7 @@ type data struct {
 	lastProcessedMessageGenTimestamp time.Time
 	lastAliveReceivedGenTimestamp    time.Time
 	recoveryFromTimestamp            time.Time
-	lastRecoveryInfo                 protocols.RecoveryInfo
+	lastRecoveryInfo                 types.RecoveryInfo
 }
 
 func newData(producer xml.Producer) *data {
@@ -49,7 +49,7 @@ type producerImpl struct {
 	description                     string
 	enabled                         bool
 	apiEndpoint                     string
-	producerScopes                  []protocols.ProducerScope
+	producerScopes                  []types.ProducerScope
 	statefulRecoveryWindowInMinutes uint
 	producerData                    *data
 }
@@ -96,7 +96,7 @@ func (p producerImpl) APIEndpoint() string {
 	return p.apiEndpoint
 }
 
-func (p producerImpl) ProducerScopes() []protocols.ProducerScope {
+func (p producerImpl) ProducerScopes() []types.ProducerScope {
 	return p.producerScopes
 }
 
@@ -131,19 +131,19 @@ func (p producerImpl) StatefulRecoveryWindowInMinutes() uint {
 	return p.statefulRecoveryWindowInMinutes
 }
 
-func (p producerImpl) RecoveryInfo() *protocols.RecoveryInfo {
+func (p producerImpl) RecoveryInfo() *types.RecoveryInfo {
 	panic("implement me")
 }
 
 func buildProducerImpl(producerData *data) (*producerImpl, error) {
-	var producerScopes []protocols.ProducerScope
+	var producerScopes []types.ProducerScope
 
 	for _, scope := range strings.Split(string(producerData.producerScope), "|") {
 		switch xml.Scope(scope) {
 		case xml.ScopeLive:
-			producerScopes = append(producerScopes, protocols.LiveProducerScope)
+			producerScopes = append(producerScopes, types.LiveProducerScope)
 		case xml.ScopePrematch:
-			producerScopes = append(producerScopes, protocols.PrematchProducerScope)
+			producerScopes = append(producerScopes, types.PrematchProducerScope)
 		default:
 			return nil, fmt.Errorf("unknown producer scope %s", producerData.producerScope)
 		}
@@ -166,7 +166,7 @@ func buildProducerImpl(producerData *data) (*producerImpl, error) {
 	}, nil
 }
 
-func buildProducerImplFromUnknown(unknownProducerID uint, cfg protocols.OddsFeedConfiguration) (*producerImpl, error) {
+func buildProducerImplFromUnknown(unknownProducerID uint, cfg types.OddsFeedConfiguration) (*producerImpl, error) {
 	apiURL, err := cfg.APIURL()
 	if err != nil {
 		return nil, err
@@ -178,7 +178,7 @@ func buildProducerImplFromUnknown(unknownProducerID uint, cfg protocols.OddsFeed
 		description:                     "unknown producer",
 		enabled:                         true,
 		apiEndpoint:                     apiURL,
-		producerScopes:                  []protocols.ProducerScope{protocols.LiveProducerScope, protocols.PrematchProducerScope},
+		producerScopes:                  []types.ProducerScope{types.LiveProducerScope, types.PrematchProducerScope},
 		statefulRecoveryWindowInMinutes: statefulRecoveryMinutes,
 	}, nil
 }

@@ -1,4 +1,4 @@
-package protocols
+package types
 
 // Competitor is a pure-data snapshot of a competitor profile, populated
 // across one or more locales.

@@ -14,10 +14,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 )
 
-// testConfig satisfies protocols.OddsFeedConfiguration for tests.
+// testConfig satisfies types.OddsFeedConfiguration for tests.
 // Only APIURL() and AccessToken() are exercised by the api.Client.
 type testConfig struct {
 	apiURL string
@@ -25,25 +25,25 @@ type testConfig struct {
 }
 
 func (c *testConfig) AccessToken() *string                                            { return &c.token }
-func (c *testConfig) DefaultLocale() protocols.Locale                                 { return protocols.EnLocale }
+func (c *testConfig) DefaultLocale() types.Locale                                 { return types.EnLocale }
 func (c *testConfig) MaxInactivitySeconds() int                                       { return 20 }
 func (c *testConfig) MaxRecoveryExecutionMinutes() int                                { return 360 }
 func (c *testConfig) MessagingPort() int                                              { return 5672 }
 func (c *testConfig) SdkNodeID() *int                                                 { return nil }
-func (c *testConfig) SelectedEnvironment() *protocols.Environment                     { return nil }
-func (c *testConfig) SelectedRegion() protocols.Region                                { return protocols.RegionDefault }
-func (c *testConfig) SetRegion(protocols.Region) protocols.OddsFeedConfiguration      { return c }
+func (c *testConfig) SelectedEnvironment() *types.Environment                     { return nil }
+func (c *testConfig) SelectedRegion() types.Region                                { return types.RegionDefault }
+func (c *testConfig) SetRegion(types.Region) types.OddsFeedConfiguration      { return c }
 func (c *testConfig) ExchangeName() string                                            { return "oddinfeed" }
-func (c *testConfig) SetExchangeName(string) protocols.OddsFeedConfiguration          { return c }
+func (c *testConfig) SetExchangeName(string) types.OddsFeedConfiguration          { return c }
 func (c *testConfig) ReplayExchangeName() string                                      { return "oddinreplay" }
 func (c *testConfig) ReportExtendedData() bool                                        { return false }
-func (c *testConfig) SetAPIURL(string) protocols.OddsFeedConfiguration                { return c }
-func (c *testConfig) SetMQURL(string) protocols.OddsFeedConfiguration                 { return c }
-func (c *testConfig) SetMessagingPort(int) protocols.OddsFeedConfiguration            { return c }
+func (c *testConfig) SetAPIURL(string) types.OddsFeedConfiguration                { return c }
+func (c *testConfig) SetMQURL(string) types.OddsFeedConfiguration                 { return c }
+func (c *testConfig) SetMessagingPort(int) types.OddsFeedConfiguration            { return c }
 func (c *testConfig) APIURL() (string, error)                                         { return c.apiURL, nil }
 func (c *testConfig) MQURL() (string, error)                                          { return "", nil }
 func (c *testConfig) SportIDPrefix() string                                           { return "od:sport:" }
-func (c *testConfig) SetSportIDPrefix(string) protocols.OddsFeedConfiguration         { return c }
+func (c *testConfig) SetSportIDPrefix(string) types.OddsFeedConfiguration         { return c }
 
 // newTestClient wires the API client to a test server. The api.Client builds
 // URLs as `https://<APIURL>/v1<path>`, so we strip the `https://` prefix from
@@ -339,7 +339,7 @@ func TestClient_PostEventOddsRecovery(t *testing.T) {
 
 	c := newTestClient(t, srv)
 	node := 5
-	urn, _ := protocols.ParseURN("od:match:42")
+	urn, _ := types.ParseURN("od:match:42")
 	ok, err := c.PostEventOddsRecovery(context.Background(), "live", *urn, 1234, &node)
 	if err != nil {
 		t.Fatalf("PostEventOddsRecovery: %v", err)

@@ -5,19 +5,19 @@ import (
 	"testing"
 	"time"
 
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 )
 
 func TestNewConfig_Defaults(t *testing.T) {
-	cfg := NewConfig("token", protocols.IntegrationEnvironment)
+	cfg := NewConfig("token", types.IntegrationEnvironment)
 
 	if cfg.AccessToken() != "token" {
 		t.Errorf("token: got %q", cfg.AccessToken())
 	}
-	if cfg.Environment() != protocols.IntegrationEnvironment {
+	if cfg.Environment() != types.IntegrationEnvironment {
 		t.Errorf("env: got %v", cfg.Environment())
 	}
-	if cfg.DefaultLocale() != protocols.EnLocale {
+	if cfg.DefaultLocale() != types.EnLocale {
 		t.Errorf("default locale: got %q", cfg.DefaultLocale())
 	}
 	if cfg.MaxInactivity() != defaultMaxInactivity {
@@ -29,7 +29,7 @@ func TestNewConfig_Defaults(t *testing.T) {
 	if cfg.SdkNodeID() != nil {
 		t.Errorf("sdkNodeID should be nil by default")
 	}
-	if cfg.Region() != protocols.RegionDefault {
+	if cfg.Region() != types.RegionDefault {
 		t.Errorf("region: got %q", cfg.Region())
 	}
 	if cfg.Logger() != nil {
@@ -39,11 +39,11 @@ func TestNewConfig_Defaults(t *testing.T) {
 
 func TestNewConfig_AllOptions(t *testing.T) {
 	logger := slog.Default()
-	cfg := NewConfig("tok", protocols.TestEnvironment,
+	cfg := NewConfig("tok", types.TestEnvironment,
 		WithNodeID(42),
-		WithDefaultLocale(protocols.RuLocale),
-		WithPreloadLocales(protocols.EnLocale, protocols.DeLocale),
-		WithRegion(protocols.APSouthEast1),
+		WithDefaultLocale(types.RuLocale),
+		WithPreloadLocales(types.EnLocale, types.DeLocale),
+		WithRegion(types.APSouthEast1),
 		WithAPIURL("api.example.test"),
 		WithMQURL("mq.example.test"),
 		WithMessagingPort(5673),
@@ -66,14 +66,14 @@ func TestNewConfig_AllOptions(t *testing.T) {
 	if got := cfg.SdkNodeID(); got == nil || *got != 42 {
 		t.Errorf("nodeID: got %v", got)
 	}
-	if cfg.DefaultLocale() != protocols.RuLocale {
+	if cfg.DefaultLocale() != types.RuLocale {
 		t.Errorf("default locale: got %q", cfg.DefaultLocale())
 	}
 	preload := cfg.PreloadLocales()
-	if len(preload) != 2 || preload[0] != protocols.EnLocale || preload[1] != protocols.DeLocale {
+	if len(preload) != 2 || preload[0] != types.EnLocale || preload[1] != types.DeLocale {
 		t.Errorf("preload locales: got %v", preload)
 	}
-	if cfg.Region() != protocols.APSouthEast1 {
+	if cfg.Region() != types.APSouthEast1 {
 		t.Errorf("region: got %q", cfg.Region())
 	}
 	if cfg.MaxInactivity() != 45*time.Second {
@@ -90,20 +90,20 @@ func TestNewConfig_AllOptions(t *testing.T) {
 // TestConfig_PreloadLocales_ReturnsCopy verifies that callers can't mutate
 // the config's internal locale slice through the returned slice header.
 func TestConfig_PreloadLocales_ReturnsCopy(t *testing.T) {
-	cfg := NewConfig("t", protocols.TestEnvironment,
-		WithPreloadLocales(protocols.EnLocale, protocols.RuLocale),
+	cfg := NewConfig("t", types.TestEnvironment,
+		WithPreloadLocales(types.EnLocale, types.RuLocale),
 	)
 	preload := cfg.PreloadLocales()
-	preload[0] = protocols.DeLocale // mutate the returned copy
+	preload[0] = types.DeLocale // mutate the returned copy
 	again := cfg.PreloadLocales()
-	if again[0] != protocols.EnLocale {
+	if again[0] != types.EnLocale {
 		t.Fatalf("internal slice was mutated through returned copy: got %v", again)
 	}
 }
 
 // TestConfig_NodeID_ReturnsCopy verifies the internal *int isn't aliased.
 func TestConfig_NodeID_ReturnsCopy(t *testing.T) {
-	cfg := NewConfig("t", protocols.TestEnvironment, WithNodeID(7))
+	cfg := NewConfig("t", types.TestEnvironment, WithNodeID(7))
 	id := cfg.SdkNodeID()
 	if id == nil || *id != 7 {
 		t.Fatalf("got %v", id)
@@ -118,7 +118,7 @@ func TestConfig_NodeID_ReturnsCopy(t *testing.T) {
 // TestNewConfig_OptionOrderApplies confirms later options override earlier
 // ones (consistent with the functional-options idiom).
 func TestNewConfig_OptionOrderApplies(t *testing.T) {
-	cfg := NewConfig("t", protocols.TestEnvironment,
+	cfg := NewConfig("t", types.TestEnvironment,
 		WithMaxInactivity(10*time.Second),
 		WithMaxInactivity(99*time.Second),
 	)

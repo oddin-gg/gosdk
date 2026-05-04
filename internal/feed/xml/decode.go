@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 )
 
 // ErrUnknownMessage is returned when the root element of a payload does not
@@ -18,7 +18,7 @@ var ErrUnknownMessage = errors.New("unknown feed message type")
 var ErrEmptyPayload = errors.New("empty feed payload")
 
 // Decode parses a single AMQP feed message body into the concrete
-// protocols.BasicMessage matching its root XML element.
+// types.BasicMessage matching its root XML element.
 //
 // Unlike the previous implementation, this does NOT wrap the payload in a
 // synthetic <envelope>...</envelope> wrapper. The decoder reads the first
@@ -29,7 +29,7 @@ var ErrEmptyPayload = errors.New("empty feed payload")
 //   - (nil, ErrEmptyPayload) for empty input.
 //   - (nil, wrapped ErrUnknownMessage) for an unrecognized root element.
 //   - (nil, wrapped error) on XML parse failure.
-func Decode(data []byte) (protocols.BasicMessage, error) {
+func Decode(data []byte) (types.BasicMessage, error) {
 	if len(data) == 0 {
 		return nil, ErrEmptyPayload
 	}
@@ -74,9 +74,9 @@ func Decode(data []byte) (protocols.BasicMessage, error) {
 }
 
 // decodeInto decodes the element at start into v and returns it as a
-// protocols.BasicMessage. v must be a pointer to a type that implements
-// protocols.BasicMessage.
-func decodeInto[T protocols.BasicMessage](dec *xml.Decoder, start *xml.StartElement, v T) (protocols.BasicMessage, error) {
+// types.BasicMessage. v must be a pointer to a type that implements
+// types.BasicMessage.
+func decodeInto[T types.BasicMessage](dec *xml.Decoder, start *xml.StartElement, v T) (types.BasicMessage, error) {
 	if err := dec.DecodeElement(v, start); err != nil {
 		return nil, fmt.Errorf("xml: decode %s: %w", start.Name.Local, err)
 	}

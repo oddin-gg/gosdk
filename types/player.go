@@ -1,4 +1,4 @@
-package protocols
+package types
 
 // Player is a pure-data snapshot of a player profile in one locale.
 //

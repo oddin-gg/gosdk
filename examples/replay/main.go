@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/oddin-gg/gosdk"
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 )
 
 func main() {
@@ -22,7 +22,7 @@ func main() {
 	if token == "" || rawURN == "" {
 		log.Fatal("TOKEN and EVENT_URN required")
 	}
-	eventURN, err := protocols.ParseURN(rawURN)
+	eventURN, err := types.ParseURN(rawURN)
 	if err != nil {
 		log.Fatalf("parse URN %q: %v", rawURN, err)
 	}
@@ -64,9 +64,9 @@ func main() {
 	go func() {
 		for msg := range sub.Messages() {
 			switch m := msg.Message.(type) {
-			case protocols.OddsChange:
+			case types.OddsChange:
 				log.Printf("replay odds change: event=%v markets=%d", m.Event(), len(m.Markets()))
-			case protocols.BetSettlement:
+			case types.BetSettlement:
 				log.Printf("replay settlement: event=%v", m.Event())
 			}
 		}
@@ -83,13 +83,13 @@ func main() {
 	}
 }
 
-func parseEnv() protocols.Environment {
+func parseEnv() types.Environment {
 	switch os.Getenv("ENV") {
 	case "production":
-		return protocols.ProductionEnvironment
+		return types.ProductionEnvironment
 	case "test":
-		return protocols.TestEnvironment
+		return types.TestEnvironment
 	default:
-		return protocols.IntegrationEnvironment
+		return types.IntegrationEnvironment
 	}
 }

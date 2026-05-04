@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 )
 
 // actorEvent is the marker interface for messages on a recoveryActor's
@@ -25,9 +25,9 @@ type evMsgProcessingEnded struct{ timestamp time.Time }
 
 // evAlive: an alive heartbeat arrived for this producer.
 type evAlive struct {
-	timestamp       protocols.MessageTimestamp
+	timestamp       types.MessageTimestamp
 	isSubscribed    bool
-	messageInterest protocols.MessageInterest
+	messageInterest types.MessageInterest
 }
 
 // evSnapshotComplete: a snapshot-complete arrived. The actor decides
@@ -35,7 +35,7 @@ type evAlive struct {
 // stale/unknown.
 type evSnapshotComplete struct {
 	requestID       uint
-	messageInterest protocols.MessageInterest
+	messageInterest types.MessageInterest
 }
 
 // --- inbound commands (synchronous via reply channel) ---
@@ -44,7 +44,7 @@ type evSnapshotComplete struct {
 // channel carries the resulting *Handle (or an error).
 type evRecoverEvent struct {
 	ctx              context.Context
-	eventID          protocols.URN
+	eventID          types.URN
 	statefulRecovery bool
 	reply            chan recoverEventReply
 }

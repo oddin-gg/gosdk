@@ -11,20 +11,20 @@ import (
 	"github.com/oddin-gg/gosdk/internal/feed"
 	feedXML "github.com/oddin-gg/gosdk/internal/feed/xml"
 	"github.com/oddin-gg/gosdk/internal/producer"
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 	log "github.com/oddin-gg/gosdk/internal/log"
 )
 
 // sdkOddsFeedSession is the internal interface the legacy session impl
-// satisfies. It used to embed a public protocols.OddsFeedSession; that
+// satisfies. It used to embed a public types.OddsFeedSession; that
 // public interface was retired alongside the manager-of-managers shape.
 type sdkOddsFeedSession interface {
 	ID() uuid.UUID
-	RespCh() protocols.SessionMessageDelivery
+	RespCh() types.SessionMessageDelivery
 	Open(
 		ctx context.Context,
 		routingKeys []string,
-		messageInterest *protocols.MessageInterest,
+		messageInterest *types.MessageInterest,
 		reportExtendedData bool,
 	) error
 	Close()
@@ -36,17 +36,17 @@ type oddsFeedSessionImpl struct {
 	producerManager          *producer.Manager
 	cacheManager             *cache.Manager
 	feedMessageFactory       *factory.FeedMessageFactory
-	recoveryMessageProcessor protocols.RecoveryMessageProcessor
+	recoveryMessageProcessor types.RecoveryMessageProcessor
 	exchangeName             string
 	sportIDPrefix            string
 	sessionID                uuid.UUID
 	logger                   *log.Logger
 	closeCh                  chan bool
-	msgCh                    chan protocols.SessionMessage
+	msgCh                    chan types.SessionMessage
 	isReplay                 bool
 }
 
-func (o *oddsFeedSessionImpl) RespCh() protocols.SessionMessageDelivery {
+func (o *oddsFeedSessionImpl) RespCh() types.SessionMessageDelivery {
 	return o.msgCh
 }
 
@@ -57,7 +57,7 @@ func (o *oddsFeedSessionImpl) IsReplay() bool {
 func (o *oddsFeedSessionImpl) Open(
 	ctx context.Context,
 	routingKeys []string,
-	messageInterest *protocols.MessageInterest,
+	messageInterest *types.MessageInterest,
 	reportExtendedData bool) error {
 	if o.closeCh != nil {
 		return errors.New("session is already opened")
@@ -70,7 +70,7 @@ func (o *oddsFeedSessionImpl) Open(
 
 	o.closeCh = make(chan bool, 1)
 
-	go func(messageInterest *protocols.MessageInterest) {
+	go func(messageInterest *types.MessageInterest) {
 		for {
 			select {
 			case <-o.closeCh:
@@ -104,16 +104,16 @@ func (o *oddsFeedSessionImpl) ID() uuid.UUID {
 	return o.sessionID
 }
 
-func (o *oddsFeedSessionImpl) processMessage(msg *protocols.QueueMessage, messageInterest *protocols.MessageInterest, reportExtendedData bool) {
+func (o *oddsFeedSessionImpl) processMessage(msg *types.QueueMessage, messageInterest *types.MessageInterest, reportExtendedData bool) {
 	if msg.UnparsableMessage != nil {
-		o.msgCh <- protocols.SessionMessage{
+		o.msgCh <- types.SessionMessage{
 			UnparsableMessage: msg.UnparsableMessage,
 		}
 		return
 	}
 
 	if msg.RawFeedMessage != nil && reportExtendedData {
-		o.msgCh <- protocols.SessionMessage{
+		o.msgCh <- types.SessionMessage{
 			RawFeedMessage: msg.RawFeedMessage,
 		}
 	}
@@ -146,7 +146,7 @@ func (o *oddsFeedSessionImpl) processMessage(msg *protocols.QueueMessage, messag
 
 }
 
-func (o *oddsFeedSessionImpl) processFeedMessage(feedMessage *protocols.FeedMessage, messageInterest protocols.MessageInterest) {
+func (o *oddsFeedSessionImpl) processFeedMessage(feedMessage *types.FeedMessage, messageInterest types.MessageInterest) {
 	producerID := feedMessage.Message.Product()
 	o.recoveryMessageProcessor.OnMessageProcessingStarted(o.sessionID, producerID, time.Now())
 
@@ -167,7 +167,7 @@ func (o *oddsFeedSessionImpl) processFeedMessage(feedMessage *protocols.FeedMess
 	if err != nil {
 		o.logger.WithError(err).Errorf("failed to build message from feed message %v", feedMessage)
 		unparsableMsg := o.feedMessageFactory.BuildUnparsableMessage(feedMessage)
-		o.msgCh <- protocols.SessionMessage{
+		o.msgCh <- types.SessionMessage{
 			UnparsableMessage: unparsableMsg,
 		}
 		return
@@ -175,39 +175,39 @@ func (o *oddsFeedSessionImpl) processFeedMessage(feedMessage *protocols.FeedMess
 
 	var timestamp time.Time
 	switch msg := message.(type) {
-	case protocols.OddsChange:
+	case types.OddsChange:
 		timestamp = msg.Timestamp().Created
-		o.msgCh <- protocols.SessionMessage{
+		o.msgCh <- types.SessionMessage{
 			Message: msg,
 		}
-	case protocols.BetStop:
+	case types.BetStop:
 		timestamp = msg.Timestamp().Created
-		o.msgCh <- protocols.SessionMessage{
+		o.msgCh <- types.SessionMessage{
 			Message: msg,
 		}
-	case protocols.BetCancel:
-		o.msgCh <- protocols.SessionMessage{
+	case types.BetCancel:
+		o.msgCh <- types.SessionMessage{
 			Message: msg,
 		}
-	case protocols.BetSettlement:
-		o.msgCh <- protocols.SessionMessage{
+	case types.BetSettlement:
+		o.msgCh <- types.SessionMessage{
 			Message: msg,
 		}
-	case protocols.FixtureChangeMessage:
-		o.msgCh <- protocols.SessionMessage{
+	case types.FixtureChangeMessage:
+		o.msgCh <- types.SessionMessage{
 			Message: msg,
 		}
-	case protocols.RollbackBetSettlement:
-		o.msgCh <- protocols.SessionMessage{
+	case types.RollbackBetSettlement:
+		o.msgCh <- types.SessionMessage{
 			Message: msg,
 		}
-	case protocols.RollbackBetCancel:
-		o.msgCh <- protocols.SessionMessage{
+	case types.RollbackBetCancel:
+		o.msgCh <- types.SessionMessage{
 			Message: msg,
 		}
 	default:
 		unparsableMsg := o.feedMessageFactory.BuildUnparsableMessage(feedMessage)
-		o.msgCh <- protocols.SessionMessage{
+		o.msgCh <- types.SessionMessage{
 			UnparsableMessage: unparsableMsg,
 		}
 	}
@@ -220,7 +220,7 @@ func newSession(
 	producerManager *producer.Manager,
 	cacheManager *cache.Manager,
 	feedMessageFactory *factory.FeedMessageFactory,
-	recoverMessageProcessor protocols.RecoveryMessageProcessor,
+	recoverMessageProcessor types.RecoveryMessageProcessor,
 	exchangeName string,
 	sportIDPrefix string,
 	isReplay bool,
@@ -243,6 +243,6 @@ func newSession(
 		sessionID:                uuid.New(),
 		isReplay:                 isReplay,
 		logger:                   logger,
-		msgCh:                    make(chan protocols.SessionMessage),
+		msgCh:                    make(chan types.SessionMessage),
 	}
 }

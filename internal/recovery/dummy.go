@@ -4,7 +4,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 )
 
 // DummyManager ...
@@ -20,9 +20,9 @@ func (d DummyManager) OnMessageProcessingEnded(sessionID uuid.UUID, producerID u
 }
 
 // OnAliveReceived ...
-func (d DummyManager) OnAliveReceived(producerID uint, timestamp protocols.MessageTimestamp, isSubscribed bool, messageInterest protocols.MessageInterest) {
+func (d DummyManager) OnAliveReceived(producerID uint, timestamp types.MessageTimestamp, isSubscribed bool, messageInterest types.MessageInterest) {
 }
 
 // OnSnapshotCompleteReceived ...
-func (d DummyManager) OnSnapshotCompleteReceived(producerID uint, requestID uint, messageInterest protocols.MessageInterest) {
+func (d DummyManager) OnSnapshotCompleteReceived(producerID uint, requestID uint, messageInterest types.MessageInterest) {
 }

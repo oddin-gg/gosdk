@@ -1,7 +1,7 @@
 package recovery
 
 import (
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 	"time"
 )
 
@@ -38,7 +38,7 @@ func newRecoveryInfoImpl(
 	timestamp time.Time,
 	requestID uint,
 	successful bool,
-	nodeID *int) protocols.RecoveryInfo {
+	nodeID *int) types.RecoveryInfo {
 	return &recoveryInfoImpl{
 		after:      after,
 		timestamp:  timestamp,

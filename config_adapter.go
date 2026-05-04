@@ -1,9 +1,9 @@
 package gosdk
 
-import "github.com/oddin-gg/gosdk/protocols"
+import "github.com/oddin-gg/gosdk/types"
 
 // configAdapter exposes gosdk.Config through the legacy
-// protocols.OddsFeedConfiguration interface so the existing internal
+// types.OddsFeedConfiguration interface so the existing internal
 // machinery (api.Client, recovery.Manager, feed.Client, ...) keeps working
 // while the new public Client builds out alongside the legacy NewOddsFeed.
 //
@@ -13,14 +13,14 @@ type configAdapter struct {
 	cfg *Config
 }
 
-func newConfigAdapter(cfg *Config) protocols.OddsFeedConfiguration { return &configAdapter{cfg: cfg} }
+func newConfigAdapter(cfg *Config) types.OddsFeedConfiguration { return &configAdapter{cfg: cfg} }
 
 func (a *configAdapter) AccessToken() *string {
 	v := a.cfg.accessToken
 	return &v
 }
 
-func (a *configAdapter) DefaultLocale() protocols.Locale { return a.cfg.defaultLocale }
+func (a *configAdapter) DefaultLocale() types.Locale { return a.cfg.defaultLocale }
 func (a *configAdapter) MaxInactivitySeconds() int       { return int(a.cfg.maxInactivity.Seconds()) }
 func (a *configAdapter) MaxRecoveryExecutionMinutes() int {
 	return int(a.cfg.maxRecoveryExecution.Minutes())
@@ -28,22 +28,22 @@ func (a *configAdapter) MaxRecoveryExecutionMinutes() int {
 func (a *configAdapter) MessagingPort() int { return a.cfg.messagingPort }
 func (a *configAdapter) SdkNodeID() *int    { return a.cfg.SdkNodeID() }
 
-func (a *configAdapter) SelectedEnvironment() *protocols.Environment {
+func (a *configAdapter) SelectedEnvironment() *types.Environment {
 	v := a.cfg.selectedEnvironment
 	return &v
 }
 
-func (a *configAdapter) SelectedRegion() protocols.Region { return a.cfg.selectedRegion }
+func (a *configAdapter) SelectedRegion() types.Region { return a.cfg.selectedRegion }
 
 // SetX methods on the legacy interface — unused by the new Client. The
 // adapter ignores mutations because Config is immutable. Returning the
 // same interface satisfies the contract.
-func (a *configAdapter) SetRegion(protocols.Region) protocols.OddsFeedConfiguration { return a }
-func (a *configAdapter) SetExchangeName(string) protocols.OddsFeedConfiguration     { return a }
-func (a *configAdapter) SetAPIURL(string) protocols.OddsFeedConfiguration           { return a }
-func (a *configAdapter) SetMQURL(string) protocols.OddsFeedConfiguration            { return a }
-func (a *configAdapter) SetMessagingPort(int) protocols.OddsFeedConfiguration       { return a }
-func (a *configAdapter) SetSportIDPrefix(string) protocols.OddsFeedConfiguration    { return a }
+func (a *configAdapter) SetRegion(types.Region) types.OddsFeedConfiguration { return a }
+func (a *configAdapter) SetExchangeName(string) types.OddsFeedConfiguration     { return a }
+func (a *configAdapter) SetAPIURL(string) types.OddsFeedConfiguration           { return a }
+func (a *configAdapter) SetMQURL(string) types.OddsFeedConfiguration            { return a }
+func (a *configAdapter) SetMessagingPort(int) types.OddsFeedConfiguration       { return a }
+func (a *configAdapter) SetSportIDPrefix(string) types.OddsFeedConfiguration    { return a }
 
 func (a *configAdapter) ExchangeName() string         { return a.cfg.exchangeName }
 func (a *configAdapter) ReplayExchangeName() string   { return a.cfg.replayExchangeName }

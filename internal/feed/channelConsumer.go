@@ -10,7 +10,7 @@ import (
 
 	"github.com/oddin-gg/gosdk/internal/factory"
 	feedXML "github.com/oddin-gg/gosdk/internal/feed/xml"
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 	amqp "github.com/rabbitmq/amqp091-go"
 	log "github.com/oddin-gg/gosdk/internal/log"
 )
@@ -45,9 +45,9 @@ type ChannelConsumer struct {
 	bufferSize int
 
 	mu              sync.Mutex
-	outgoing        chan *protocols.QueueMessage
+	outgoing        chan *types.QueueMessage
 	closeFn         context.CancelFunc
-	messageInterest *protocols.MessageInterest
+	messageInterest *types.MessageInterest
 	routingKeys     []string
 	loopCtx         context.Context
 	closeOnce       sync.Once
@@ -80,7 +80,7 @@ func NewChannelConsumer(
 //
 // On AMQP-level reconnect (handled by Client) the consumer re-creates its
 // channel transparently — callers don't need to react.
-func (c *ChannelConsumer) Open(ctx context.Context, routingKeys []string, messageInterest *protocols.MessageInterest) (<-chan *protocols.QueueMessage, error) {
+func (c *ChannelConsumer) Open(ctx context.Context, routingKeys []string, messageInterest *types.MessageInterest) (<-chan *types.QueueMessage, error) {
 	c.mu.Lock()
 	if c.outgoing != nil {
 		c.mu.Unlock()
@@ -89,7 +89,7 @@ func (c *ChannelConsumer) Open(ctx context.Context, routingKeys []string, messag
 
 	c.routingKeys = append([]string(nil), routingKeys...)
 	c.messageInterest = messageInterest
-	c.outgoing = make(chan *protocols.QueueMessage, c.bufferSize)
+	c.outgoing = make(chan *types.QueueMessage, c.bufferSize)
 
 	loopCtx, cancel := context.WithCancel(context.Background())
 	c.loopCtx = loopCtx
@@ -211,12 +211,12 @@ func (c *ChannelConsumer) consume(ctx context.Context, deliveries <-chan amqp.De
 	}
 }
 
-// processDelivery decodes a single AMQP delivery into a *protocols.QueueMessage.
+// processDelivery decodes a single AMQP delivery into a *types.QueueMessage.
 // On decode failure or routing-key parse failure it returns an unparsable
 // message; the caller still admits it to the buffer (consumer wants to know).
 // Returns nil only in the empty-body fast path that ack's and skips.
-func (c *ChannelConsumer) processDelivery(d amqp.Delivery) *protocols.QueueMessage {
-	timestamp := protocols.MessageTimestamp{
+func (c *ChannelConsumer) processDelivery(d amqp.Delivery) *types.QueueMessage {
+	timestamp := types.MessageTimestamp{
 		Created:  d.Timestamp,
 		Sent:     d.Timestamp,
 		Received: time.Now(),
@@ -230,12 +230,12 @@ func (c *ChannelConsumer) processDelivery(d amqp.Delivery) *protocols.QueueMessa
 		return nil
 	}
 
-	queueMessage := &protocols.QueueMessage{}
+	queueMessage := &types.QueueMessage{}
 
 	if len(d.Body) == 0 {
 		c.logger.Warnf("received message without proper body from %s", d.RoutingKey)
-		queueMessage.UnparsableMessage = c.feedMessageFactory.BuildUnparsableMessage(&protocols.FeedMessage{
-			BasicFeedMessage: protocols.BasicFeedMessage{
+		queueMessage.UnparsableMessage = c.feedMessageFactory.BuildUnparsableMessage(&types.FeedMessage{
+			BasicFeedMessage: types.BasicFeedMessage{
 				RawMessage: d.Body,
 				RoutingKey: routingKeyInfo,
 				Timestamp:  timestamp,
@@ -252,8 +252,8 @@ func (c *ChannelConsumer) processDelivery(d amqp.Delivery) *protocols.QueueMessa
 		default:
 			c.logger.WithError(err).Errorf("failed to unmarshall %s", string(d.Body))
 		}
-		queueMessage.UnparsableMessage = c.feedMessageFactory.BuildUnparsableMessage(&protocols.FeedMessage{
-			BasicFeedMessage: protocols.BasicFeedMessage{
+		queueMessage.UnparsableMessage = c.feedMessageFactory.BuildUnparsableMessage(&types.FeedMessage{
+			BasicFeedMessage: types.BasicFeedMessage{
 				RawMessage: d.Body,
 				RoutingKey: routingKeyInfo,
 				Timestamp:  timestamp,
@@ -263,25 +263,25 @@ func (c *ChannelConsumer) processDelivery(d amqp.Delivery) *protocols.QueueMessa
 	}
 
 	timestamp.Published = time.Now()
-	basicMessage := protocols.BasicFeedMessage{
+	basicMessage := types.BasicFeedMessage{
 		RawMessage: d.Body,
 		RoutingKey: routingKeyInfo,
 		Timestamp:  timestamp,
 	}
 
-	queueMessage.RawFeedMessage = &protocols.RawFeedMessage{
+	queueMessage.RawFeedMessage = &types.RawFeedMessage{
 		BasicFeedMessage: basicMessage,
 		Message:          message,
 		MessageInterest:  *c.messageInterest,
 	}
-	queueMessage.FeedMessage = &protocols.FeedMessage{
+	queueMessage.FeedMessage = &types.FeedMessage{
 		BasicFeedMessage: basicMessage,
 		Message:          message,
 	}
 	return queueMessage
 }
 
-func (c *ChannelConsumer) parseRoute(route string) (*protocols.RoutingKeyInfo, error) {
+func (c *ChannelConsumer) parseRoute(route string) (*types.RoutingKeyInfo, error) {
 	parts := strings.Split(route, ".")
 	if len(parts) != 8 {
 		return nil, fmt.Errorf("incorrect route %s", route)
@@ -291,7 +291,7 @@ func (c *ChannelConsumer) parseRoute(route string) (*protocols.RoutingKeyInfo, e
 	eventID := parts[6]
 	hasID := sportID != emptyPosition || eventID != emptyPosition
 	if !hasID {
-		return &protocols.RoutingKeyInfo{
+		return &types.RoutingKeyInfo{
 			FullRoutingKey:     route,
 			IsSystemRoutingKey: true,
 		}, nil
@@ -299,11 +299,11 @@ func (c *ChannelConsumer) parseRoute(route string) (*protocols.RoutingKeyInfo, e
 
 	var (
 		err      error
-		sportURN *protocols.URN
-		eventURN *protocols.URN
+		sportURN *types.URN
+		eventURN *types.URN
 	)
 	if sportID != emptyPosition {
-		sportURN, err = protocols.ParseURN(c.sportIDPrefix + sportID)
+		sportURN, err = types.ParseURN(c.sportIDPrefix + sportID)
 		if err != nil {
 			return nil, err
 		}
@@ -311,13 +311,13 @@ func (c *ChannelConsumer) parseRoute(route string) (*protocols.RoutingKeyInfo, e
 
 	eventType := parts[5]
 	if eventType != emptyPosition && eventID != emptyPosition {
-		eventURN, err = protocols.ParseURN(eventType + ":" + eventID)
+		eventURN, err = types.ParseURN(eventType + ":" + eventID)
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	return &protocols.RoutingKeyInfo{
+	return &types.RoutingKeyInfo{
 		FullRoutingKey:     route,
 		SportID:            sportURN,
 		EventID:            eventURN,

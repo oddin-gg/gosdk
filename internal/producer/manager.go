@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/oddin-gg/gosdk/internal/api"
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 	log "github.com/oddin-gg/gosdk/internal/log"
 )
 
@@ -21,7 +21,7 @@ import (
 // is reshaped (ctx-aware methods).
 type Manager struct {
 	apiClient   *api.Client
-	cfg         protocols.OddsFeedConfiguration
+	cfg         types.OddsFeedConfiguration
 	logger      *log.Logger
 	mu          sync.RWMutex
 	producerMap map[uint]*data
@@ -76,7 +76,7 @@ func (m *Manager) producerCached(id uint) (*data, error) {
 // GetProducerCached is the no-ctx variant of GetProducer for hot-path
 // callers (FeedMessageFactory). Uses only in-memory state — fails if
 // Open has not been called. Mirrors the public GetProducer return type.
-func (m *Manager) GetProducerCached(id uint) (protocols.Producer, error) {
+func (m *Manager) GetProducerCached(id uint) (types.Producer, error) {
 	d, err := m.producerCached(id)
 	if err != nil {
 		// Fall back to the unknown-producer placeholder, matching
@@ -154,7 +154,7 @@ func (m *Manager) SetLastAliveReceivedGenTimestamp(id uint, timestamp time.Time)
 }
 
 // SetProducerRecoveryInfo ...
-func (m *Manager) SetProducerRecoveryInfo(id uint, recoveryInfo protocols.RecoveryInfo) error {
+func (m *Manager) SetProducerRecoveryInfo(id uint, recoveryInfo types.RecoveryInfo) error {
 	producer, err := m.producerCached(id)
 	if err != nil {
 		return err
@@ -164,12 +164,12 @@ func (m *Manager) SetProducerRecoveryInfo(id uint, recoveryInfo protocols.Recove
 }
 
 // AvailableProducers ...
-func (m *Manager) AvailableProducers(ctx context.Context) (map[uint]protocols.Producer, error) {
+func (m *Manager) AvailableProducers(ctx context.Context) (map[uint]types.Producer, error) {
 	producers, err := m.producers(ctx)
 	if err != nil {
 		return nil, err
 	}
-	res := make(map[uint]protocols.Producer, len(producers))
+	res := make(map[uint]types.Producer, len(producers))
 	for i := range producers {
 		d := producers[i]
 		res[i], err = buildProducerImpl(d)
@@ -181,12 +181,12 @@ func (m *Manager) AvailableProducers(ctx context.Context) (map[uint]protocols.Pr
 }
 
 // ActiveProducers ...
-func (m *Manager) ActiveProducers(ctx context.Context) (map[uint]protocols.Producer, error) {
+func (m *Manager) ActiveProducers(ctx context.Context) (map[uint]types.Producer, error) {
 	producers, err := m.producers(ctx)
 	if err != nil {
 		return nil, err
 	}
-	res := make(map[uint]protocols.Producer, len(producers))
+	res := make(map[uint]types.Producer, len(producers))
 	for i := range producers {
 		d := producers[i]
 		if !d.active {
@@ -201,12 +201,12 @@ func (m *Manager) ActiveProducers(ctx context.Context) (map[uint]protocols.Produ
 }
 
 // ActiveProducersInScope ...
-func (m *Manager) ActiveProducersInScope(ctx context.Context, scope protocols.ProducerScope) (map[uint]protocols.Producer, error) {
+func (m *Manager) ActiveProducersInScope(ctx context.Context, scope types.ProducerScope) (map[uint]types.Producer, error) {
 	producers, err := m.producers(ctx)
 	if err != nil {
 		return nil, err
 	}
-	res := make(map[uint]protocols.Producer, len(producers))
+	res := make(map[uint]types.Producer, len(producers))
 	for i := range producers {
 		d := producers[i]
 		if !d.active {
@@ -227,7 +227,7 @@ func (m *Manager) ActiveProducersInScope(ctx context.Context, scope protocols.Pr
 }
 
 // GetProducer ...
-func (m *Manager) GetProducer(ctx context.Context, id uint) (protocols.Producer, error) {
+func (m *Manager) GetProducer(ctx context.Context, id uint) (types.Producer, error) {
 	producers, err := m.producers(ctx)
 	if err != nil {
 		return nil, err
@@ -285,7 +285,7 @@ func (m *Manager) IsProducerDown(ctx context.Context, id uint) (bool, error) {
 }
 
 // NewManager ...
-func NewManager(cfg protocols.OddsFeedConfiguration, apiClient *api.Client, logger *log.Logger) *Manager {
+func NewManager(cfg types.OddsFeedConfiguration, apiClient *api.Client, logger *log.Logger) *Manager {
 	return &Manager{
 		apiClient: apiClient,
 		cfg:       cfg,

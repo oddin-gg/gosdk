@@ -7,34 +7,34 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 )
 
 // SubscribeOption tunes a Subscribe call.
 type SubscribeOption func(*subscribeConfig)
 
 type subscribeConfig struct {
-	messageInterest protocols.MessageInterest
-	specificEvents  map[protocols.URN]struct{}
+	messageInterest types.MessageInterest
+	specificEvents  map[types.URN]struct{}
 	replay          bool
 }
 
 // WithMessageInterest selects which messages the subscription receives.
-// Default: protocols.AllMessageInterest.
-func WithMessageInterest(m protocols.MessageInterest) SubscribeOption {
+// Default: types.AllMessageInterest.
+func WithMessageInterest(m types.MessageInterest) SubscribeOption {
 	return func(c *subscribeConfig) { c.messageInterest = m }
 }
 
 // WithSpecificEvents narrows the subscription to a fixed set of event URNs.
 // Implies SpecifiedMatchesOnlyMessageInterest if no other interest is set.
-func WithSpecificEvents(events ...protocols.URN) SubscribeOption {
+func WithSpecificEvents(events ...types.URN) SubscribeOption {
 	return func(c *subscribeConfig) {
-		c.specificEvents = make(map[protocols.URN]struct{}, len(events))
+		c.specificEvents = make(map[types.URN]struct{}, len(events))
 		for _, e := range events {
 			c.specificEvents[e] = struct{}{}
 		}
 		if c.messageInterest == "" {
-			c.messageInterest = protocols.SpecifiedMatchesOnlyMessageInterest
+			c.messageInterest = types.SpecifiedMatchesOnlyMessageInterest
 		}
 	}
 }
@@ -55,7 +55,7 @@ func WithReplay() SubscribeOption { return func(c *subscribeConfig) { c.replay =
 //   - Err() returns the cause: nil for graceful close, non-nil otherwise.
 type Subscription struct {
 	id       uuid.UUID
-	messages chan protocols.SessionMessage
+	messages chan types.SessionMessage
 
 	closeOnce sync.Once
 	closed    chan struct{}
@@ -73,7 +73,7 @@ type Subscription struct {
 // The envelope's exact-one-of fields (FeedMessage / RawFeedMessage /
 // UnparsableMessage) reflect what was decoded; consumers type-switch on
 // `Message` for the parsed payload.
-func (s *Subscription) Messages() <-chan protocols.SessionMessage { return s.messages }
+func (s *Subscription) Messages() <-chan types.SessionMessage { return s.messages }
 
 // Done closes when the subscription terminates for any reason.
 func (s *Subscription) Done() <-chan struct{} { return s.closed }

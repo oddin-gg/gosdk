@@ -14,7 +14,7 @@ import (
 
 	"github.com/oddin-gg/gosdk/internal/api"
 	log "github.com/oddin-gg/gosdk/internal/log"
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 )
 
 // matchSummaryBody returns a minimal match-summary XML for the given
@@ -38,25 +38,25 @@ type minimalCfg struct {
 }
 
 func (c *minimalCfg) AccessToken() *string                                       { return &c.token }
-func (c *minimalCfg) DefaultLocale() protocols.Locale                            { return protocols.EnLocale }
+func (c *minimalCfg) DefaultLocale() types.Locale                            { return types.EnLocale }
 func (c *minimalCfg) MaxInactivitySeconds() int                                  { return 20 }
 func (c *minimalCfg) MaxRecoveryExecutionMinutes() int                           { return 360 }
 func (c *minimalCfg) MessagingPort() int                                         { return 5672 }
 func (c *minimalCfg) SdkNodeID() *int                                            { return nil }
-func (c *minimalCfg) SelectedEnvironment() *protocols.Environment                { return nil }
-func (c *minimalCfg) SelectedRegion() protocols.Region                           { return protocols.RegionDefault }
-func (c *minimalCfg) SetRegion(protocols.Region) protocols.OddsFeedConfiguration { return c }
+func (c *minimalCfg) SelectedEnvironment() *types.Environment                { return nil }
+func (c *minimalCfg) SelectedRegion() types.Region                           { return types.RegionDefault }
+func (c *minimalCfg) SetRegion(types.Region) types.OddsFeedConfiguration { return c }
 func (c *minimalCfg) ExchangeName() string                                       { return "oddinfeed" }
 func (c *minimalCfg) ReplayExchangeName() string                                 { return "oddinreplay" }
 func (c *minimalCfg) ReportExtendedData() bool                                   { return false }
-func (c *minimalCfg) SetExchangeName(string) protocols.OddsFeedConfiguration     { return c }
-func (c *minimalCfg) SetAPIURL(string) protocols.OddsFeedConfiguration           { return c }
-func (c *minimalCfg) SetMQURL(string) protocols.OddsFeedConfiguration            { return c }
-func (c *minimalCfg) SetMessagingPort(int) protocols.OddsFeedConfiguration       { return c }
+func (c *minimalCfg) SetExchangeName(string) types.OddsFeedConfiguration     { return c }
+func (c *minimalCfg) SetAPIURL(string) types.OddsFeedConfiguration           { return c }
+func (c *minimalCfg) SetMQURL(string) types.OddsFeedConfiguration            { return c }
+func (c *minimalCfg) SetMessagingPort(int) types.OddsFeedConfiguration       { return c }
 func (c *minimalCfg) APIURL() (string, error)                                    { return c.apiURL, nil }
 func (c *minimalCfg) MQURL() (string, error)                                     { return "", nil }
 func (c *minimalCfg) SportIDPrefix() string                                      { return "od:sport:" }
-func (c *minimalCfg) SetSportIDPrefix(string) protocols.OddsFeedConfiguration    { return c }
+func (c *minimalCfg) SetSportIDPrefix(string) types.OddsFeedConfiguration    { return c }
 
 type rewriteTransport struct {
 	target string
@@ -102,7 +102,7 @@ func newAPIClientForTest(t *testing.T, srv *httptest.Server) *api.Client {
 // and the subsequent call serves from cache (no second HTTP request).
 func TestMatchCache_FetchesAndPopulates(t *testing.T) {
 	matchURN := "od:match:42"
-	urn, _ := protocols.ParseURN(matchURN)
+	urn, _ := types.ParseURN(matchURN)
 
 	var hits atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -116,20 +116,20 @@ func TestMatchCache_FetchesAndPopulates(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	got, err := mc.Match(ctx, *urn, []protocols.Locale{protocols.EnLocale})
+	got, err := mc.Match(ctx, *urn, []types.Locale{types.EnLocale})
 	if err != nil {
 		t.Fatalf("Match: %v", err)
 	}
 	if got.ID() != *urn {
 		t.Errorf("ID = %v, want %v", got.ID(), *urn)
 	}
-	name, ok := got.Name(protocols.EnLocale)
+	name, ok := got.Name(types.EnLocale)
 	if !ok || name == "" {
 		t.Errorf("Name(en) = (%q, %v), want non-empty", name, ok)
 	}
 
 	// Second call — should hit cache, not the server.
-	if _, err = mc.Match(ctx, *urn, []protocols.Locale{protocols.EnLocale}); err != nil {
+	if _, err = mc.Match(ctx, *urn, []types.Locale{types.EnLocale}); err != nil {
 		t.Fatalf("Match (cached): %v", err)
 	}
 	if got := hits.Load(); got != 1 {
@@ -142,7 +142,7 @@ func TestMatchCache_FetchesAndPopulates(t *testing.T) {
 // This is the multi-locale fix called out in NEXT.md.
 func TestMatchCache_MultiLocaleFillIn(t *testing.T) {
 	matchURN := "od:match:99"
-	urn, _ := protocols.ParseURN(matchURN)
+	urn, _ := types.ParseURN(matchURN)
 
 	var enHits, ruHits atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -165,13 +165,13 @@ func TestMatchCache_MultiLocaleFillIn(t *testing.T) {
 	ctx := context.Background()
 
 	// First call: en only.
-	if _, err := mc.Match(ctx, *urn, []protocols.Locale{protocols.EnLocale}); err != nil {
+	if _, err := mc.Match(ctx, *urn, []types.Locale{types.EnLocale}); err != nil {
 		t.Fatalf("Match en: %v", err)
 	}
 
 	// Second call: ru. Must NOT re-fetch en (already cached); must
 	// fetch ru once.
-	got, err := mc.Match(ctx, *urn, []protocols.Locale{protocols.EnLocale, protocols.RuLocale})
+	got, err := mc.Match(ctx, *urn, []types.Locale{types.EnLocale, types.RuLocale})
 	if err != nil {
 		t.Fatalf("Match en+ru: %v", err)
 	}
@@ -184,10 +184,10 @@ func TestMatchCache_MultiLocaleFillIn(t *testing.T) {
 	}
 
 	// Both locales now coexist on the entry.
-	if name, ok := got.Name(protocols.EnLocale); !ok || name == "" {
+	if name, ok := got.Name(types.EnLocale); !ok || name == "" {
 		t.Errorf("en name missing after ru fetch")
 	}
-	if name, ok := got.Name(protocols.RuLocale); !ok || name == "" {
+	if name, ok := got.Name(types.RuLocale); !ok || name == "" {
 		t.Errorf("ru name missing after fetch")
 	}
 }
@@ -196,7 +196,7 @@ func TestMatchCache_MultiLocaleFillIn(t *testing.T) {
 // entry; subsequent reads refetch.
 func TestMatchCache_ClearForcesRefetch(t *testing.T) {
 	matchURN := "od:match:1"
-	urn, _ := protocols.ParseURN(matchURN)
+	urn, _ := types.ParseURN(matchURN)
 
 	var hits atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -209,11 +209,11 @@ func TestMatchCache_ClearForcesRefetch(t *testing.T) {
 	mc := newMatchCache(newAPIClientForTest(t, srv), log.New(nil))
 	ctx := context.Background()
 
-	if _, err := mc.Match(ctx, *urn, []protocols.Locale{protocols.EnLocale}); err != nil {
+	if _, err := mc.Match(ctx, *urn, []types.Locale{types.EnLocale}); err != nil {
 		t.Fatalf("Match: %v", err)
 	}
 	mc.ClearCacheItem(*urn)
-	if _, err := mc.Match(ctx, *urn, []protocols.Locale{protocols.EnLocale}); err != nil {
+	if _, err := mc.Match(ctx, *urn, []types.Locale{types.EnLocale}); err != nil {
 		t.Fatalf("Match after clear: %v", err)
 	}
 	if got := hits.Load(); got != 2 {

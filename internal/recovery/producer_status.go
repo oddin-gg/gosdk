@@ -1,22 +1,22 @@
 package recovery
 
 import (
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 )
 
 type producerStatusImpl struct {
-	producer             protocols.Producer
-	timestamp            protocols.MessageTimestamp
+	producer             types.Producer
+	timestamp            types.MessageTimestamp
 	isDown               bool
 	isDelayed            bool
-	producerStatusReason protocols.ProducerStatusReason
+	producerStatusReason types.ProducerStatusReason
 }
 
-func (p producerStatusImpl) Producer() protocols.Producer {
+func (p producerStatusImpl) Producer() types.Producer {
 	return p.producer
 }
 
-func (p producerStatusImpl) Timestamp() protocols.MessageTimestamp {
+func (p producerStatusImpl) Timestamp() types.MessageTimestamp {
 	return p.timestamp
 }
 
@@ -28,16 +28,16 @@ func (p producerStatusImpl) IsDelayed() bool {
 	return p.isDelayed
 }
 
-func (p producerStatusImpl) ProducerStatusReason() protocols.ProducerStatusReason {
+func (p producerStatusImpl) ProducerStatusReason() types.ProducerStatusReason {
 	return p.producerStatusReason
 }
 
 func newProducerStatusImpl(
-	producer protocols.Producer,
-	timestamp protocols.MessageTimestamp,
+	producer types.Producer,
+	timestamp types.MessageTimestamp,
 	isDown bool,
 	isDelayed bool,
-	producerStatusReason protocols.ProducerStatusReason) protocols.ProducerStatus {
+	producerStatusReason types.ProducerStatusReason) types.ProducerStatus {
 	return &producerStatusImpl{
 		producer:             producer,
 		timestamp:            timestamp,

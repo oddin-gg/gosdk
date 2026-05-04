@@ -7,17 +7,17 @@ import (
 	"strings"
 
 	"github.com/oddin-gg/gosdk/internal/cache"
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 )
 
 // MarketDataFactory ...
 type MarketDataFactory struct {
-	oddsFeedConfiguration    protocols.OddsFeedConfiguration
+	oddsFeedConfiguration    types.OddsFeedConfiguration
 	marketDescriptionFactory *MarketDescriptionFactory
 }
 
 // BuildMarketData ...
-func (m MarketDataFactory) BuildMarketData(event interface{}, marketID uint, specifiers map[string]string) protocols.MarketData {
+func (m MarketDataFactory) BuildMarketData(event interface{}, marketID uint, specifiers map[string]string) types.MarketData {
 	return &marketDataImpl{
 		marketID:                 marketID,
 		specifiers:               specifiers,
@@ -27,7 +27,7 @@ func (m MarketDataFactory) BuildMarketData(event interface{}, marketID uint, spe
 }
 
 // NewMarketDataFactory ...
-func NewMarketDataFactory(oddsFeedConfiguration protocols.OddsFeedConfiguration, marketDescriptionFactory *MarketDescriptionFactory) *MarketDataFactory {
+func NewMarketDataFactory(oddsFeedConfiguration types.OddsFeedConfiguration, marketDescriptionFactory *MarketDescriptionFactory) *MarketDataFactory {
 	return &MarketDataFactory{
 		oddsFeedConfiguration:    oddsFeedConfiguration,
 		marketDescriptionFactory: marketDescriptionFactory,
@@ -41,8 +41,8 @@ type marketDataImpl struct {
 	event                    interface{}
 }
 
-func (m marketDataImpl) OutcomeName(outcomeID string, locale protocols.Locale) (*string, error) {
-	marketDescription, err := m.marketDescriptionFactory.MarketDescriptionByIDAndSpecifiers(m.marketID, m.specifiers, []protocols.Locale{locale})
+func (m marketDataImpl) OutcomeName(outcomeID string, locale types.Locale) (*string, error) {
+	marketDescription, err := m.marketDescriptionFactory.MarketDescriptionByIDAndSpecifiers(m.marketID, m.specifiers, []types.Locale{locale})
 	if err != nil {
 		return nil, err
 	}
@@ -68,11 +68,11 @@ func (m marketDataImpl) OutcomeName(outcomeID string, locale protocols.Locale) (
 			outcomeName = &player.Name
 
 		case competitorOutcomeType:
-			urn, err := protocols.ParseURN(outcomeID)
+			urn, err := types.ParseURN(outcomeID)
 			if err != nil {
 				return nil, fmt.Errorf("unsupported competitor id in outcome %s: %w", outcomeID, err)
 			}
-			competitor, err := m.marketDescriptionFactory.competitorCache.Competitor(context.Background(), *urn, []protocols.Locale{locale})
+			competitor, err := m.marketDescriptionFactory.competitorCache.Competitor(context.Background(), *urn, []types.Locale{locale})
 			if err != nil {
 				return nil, fmt.Errorf("derivation of outcome name for dynamic player outcome failed for id [%s]: %w", outcomeID, err)
 			}
@@ -91,8 +91,8 @@ func (m marketDataImpl) OutcomeName(outcomeID string, locale protocols.Locale) (
 	return m.makeOutcomeName(outcomeName, locale)
 }
 
-func (m marketDataImpl) MarketName(locale protocols.Locale) (*string, error) {
-	marketDescription, err := m.marketDescriptionFactory.MarketDescriptionByIDAndSpecifiers(m.marketID, m.specifiers, []protocols.Locale{locale})
+func (m marketDataImpl) MarketName(locale types.Locale) (*string, error) {
+	marketDescription, err := m.marketDescriptionFactory.MarketDescriptionByIDAndSpecifiers(m.marketID, m.specifiers, []types.Locale{locale})
 	if err != nil {
 		return nil, err
 	}
@@ -105,12 +105,12 @@ func (m marketDataImpl) MarketName(locale protocols.Locale) (*string, error) {
 	return m.makeMarketName(*name, locale)
 }
 
-func (m marketDataImpl) makeOutcomeName(outcomeName *string, locale protocols.Locale) (*string, error) {
+func (m marketDataImpl) makeOutcomeName(outcomeName *string, locale types.Locale) (*string, error) {
 	if outcomeName == nil {
 		return nil, nil
 	}
 
-	match, isMatch := m.event.(protocols.Match)
+	match, isMatch := m.event.(types.Match)
 
 	switch {
 	// @TODO this broke with different locale - need to use ID
@@ -126,13 +126,13 @@ func (m marketDataImpl) makeOutcomeName(outcomeName *string, locale protocols.Lo
 	}
 }
 
-func (m marketDataImpl) makeMarketName(marketName string, locale protocols.Locale) (*string, error) {
+func (m marketDataImpl) makeMarketName(marketName string, locale types.Locale) (*string, error) {
 	if len(m.specifiers) == 0 {
 		return &marketName, nil
 	}
 
-	match, isMatch := m.event.(protocols.Match)
-	marketDescription, err := m.marketDescriptionFactory.MarketDescriptionByIDAndSpecifiers(m.marketID, m.specifiers, []protocols.Locale{locale})
+	match, isMatch := m.event.(types.Match)
+	marketDescription, err := m.marketDescriptionFactory.MarketDescriptionByIDAndSpecifiers(m.marketID, m.specifiers, []types.Locale{locale})
 	if err != nil {
 		return nil, err
 	}
@@ -163,19 +163,19 @@ func (m marketDataImpl) makeMarketName(marketName string, locale protocols.Local
 	return &template, nil
 }
 
-func (m marketDataImpl) getPropsName(entityID string, groups []string, locale protocols.Locale) (string, bool) {
-	if !slices.Contains(groups, protocols.MarketGroupPlayerProps) {
+func (m marketDataImpl) getPropsName(entityID string, groups []string, locale types.Locale) (string, bool) {
+	if !slices.Contains(groups, types.MarketGroupPlayerProps) {
 		return "", false
 	}
 
-	urn, err := protocols.ParseURN(entityID)
+	urn, err := types.ParseURN(entityID)
 	if err != nil {
 		return "", false
 	}
 
 	//nolint:gocritic // for simpler extension
 	switch urn.Type {
-	case string(protocols.PlayerEventType):
+	case string(types.PlayerEventType):
 		player, err := m.marketDescriptionFactory.playerCache.GetPlayer(
 			context.Background(),
 			cache.PlayerCacheKey{

@@ -6,13 +6,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 )
 
 // --- Handle ---
 
 func TestHandle_StartsPending(t *testing.T) {
-	urn, _ := protocols.ParseURN("od:match:1")
+	urn, _ := types.ParseURN("od:match:1")
 	h := NewHandle(7, 1, *urn, time.Now())
 	if h.RequestID() != 7 {
 		t.Errorf("RequestID = %d, want 7", h.RequestID())
@@ -23,7 +23,7 @@ func TestHandle_StartsPending(t *testing.T) {
 	if h.EventID() != *urn {
 		t.Errorf("EventID = %v, want %v", h.EventID(), *urn)
 	}
-	if h.Status() != protocols.RecoveryStatusPending {
+	if h.Status() != types.RecoveryStatusPending {
 		t.Errorf("Status = %v, want Pending", h.Status())
 	}
 	if h.IsTerminal() {
@@ -37,9 +37,9 @@ func TestHandle_StartsPending(t *testing.T) {
 }
 
 func TestHandle_Complete_ClosesDone(t *testing.T) {
-	urn, _ := protocols.ParseURN("od:match:1")
+	urn, _ := types.ParseURN("od:match:1")
 	h := NewHandle(7, 1, *urn, time.Now())
-	h.complete(protocols.RecoveryStatusCompleted, nil, time.Now())
+	h.complete(types.RecoveryStatusCompleted, nil, time.Now())
 
 	if !h.IsTerminal() {
 		t.Error("IsTerminal should be true after complete")
@@ -49,17 +49,17 @@ func TestHandle_Complete_ClosesDone(t *testing.T) {
 	default:
 		t.Error("Done() should be closed after complete")
 	}
-	if h.Status() != protocols.RecoveryStatusCompleted {
+	if h.Status() != types.RecoveryStatusCompleted {
 		t.Errorf("Status = %v, want Completed", h.Status())
 	}
 }
 
 func TestHandle_Result_BlocksUntilDone(t *testing.T) {
-	urn, _ := protocols.ParseURN("od:match:1")
+	urn, _ := types.ParseURN("od:match:1")
 	started := time.Now()
 	h := NewHandle(7, 1, *urn, started)
 
-	resultCh := make(chan protocols.RecoveryResult, 1)
+	resultCh := make(chan types.RecoveryResult, 1)
 	go func() {
 		resultCh <- h.Result()
 	}()
@@ -73,11 +73,11 @@ func TestHandle_Result_BlocksUntilDone(t *testing.T) {
 
 	bang := errors.New("boom")
 	endTime := time.Now()
-	h.complete(protocols.RecoveryStatusFailed, bang, endTime)
+	h.complete(types.RecoveryStatusFailed, bang, endTime)
 
 	select {
 	case res := <-resultCh:
-		if res.RequestID != 7 || res.Status != protocols.RecoveryStatusFailed || res.Err != bang {
+		if res.RequestID != 7 || res.Status != types.RecoveryStatusFailed || res.Err != bang {
 			t.Errorf("res = %+v", res)
 		}
 		if !res.StartedAt.Equal(started) {
@@ -89,12 +89,12 @@ func TestHandle_Result_BlocksUntilDone(t *testing.T) {
 }
 
 func TestHandle_CompleteIsIdempotent(t *testing.T) {
-	urn, _ := protocols.ParseURN("od:match:1")
+	urn, _ := types.ParseURN("od:match:1")
 	h := NewHandle(7, 1, *urn, time.Now())
-	h.complete(protocols.RecoveryStatusCompleted, nil, time.Now())
+	h.complete(types.RecoveryStatusCompleted, nil, time.Now())
 	// Second call must not panic from a duplicate close.
-	h.complete(protocols.RecoveryStatusFailed, errors.New("late"), time.Now())
-	if h.Status() != protocols.RecoveryStatusCompleted {
+	h.complete(types.RecoveryStatusFailed, errors.New("late"), time.Now())
+	if h.Status() != types.RecoveryStatusCompleted {
 		t.Errorf("status changed after second complete: %v", h.Status())
 	}
 }
@@ -102,7 +102,7 @@ func TestHandle_CompleteIsIdempotent(t *testing.T) {
 // TestHandle_ConcurrentCompleteAndRead exercises the race detector with
 // many goroutines reading and one completing.
 func TestHandle_ConcurrentCompleteAndRead(t *testing.T) {
-	urn, _ := protocols.ParseURN("od:match:1")
+	urn, _ := types.ParseURN("od:match:1")
 	h := NewHandle(7, 1, *urn, time.Now())
 
 	const readers = 32
@@ -118,17 +118,17 @@ func TestHandle_ConcurrentCompleteAndRead(t *testing.T) {
 		}()
 	}
 
-	go h.complete(protocols.RecoveryStatusCompleted, nil, time.Now())
+	go h.complete(types.RecoveryStatusCompleted, nil, time.Now())
 
 	wg.Wait()
 }
 
 func TestHandle_StatusString(t *testing.T) {
-	cases := map[protocols.RecoveryRequestStatus]string{
-		protocols.RecoveryStatusPending:   "pending",
-		protocols.RecoveryStatusCompleted: "completed",
-		protocols.RecoveryStatusFailed:    "failed",
-		protocols.RecoveryStatusTimedOut:  "timed_out",
+	cases := map[types.RecoveryRequestStatus]string{
+		types.RecoveryStatusPending:   "pending",
+		types.RecoveryStatusCompleted: "completed",
+		types.RecoveryStatusFailed:    "failed",
+		types.RecoveryStatusTimedOut:  "timed_out",
 	}
 	for s, want := range cases {
 		if got := s.String(); got != want {
@@ -148,7 +148,7 @@ func newTestManager(t *testing.T) *Manager {
 
 func TestManager_RegisterAndLookup(t *testing.T) {
 	m := newTestManager(t)
-	urn, _ := protocols.ParseURN("od:match:1")
+	urn, _ := types.ParseURN("od:match:1")
 	h := NewHandle(42, 1, *urn, time.Now())
 	m.registerHandle(h)
 
@@ -163,37 +163,37 @@ func TestManager_RegisterAndLookup(t *testing.T) {
 
 func TestManager_CompleteHandle(t *testing.T) {
 	m := newTestManager(t)
-	urn, _ := protocols.ParseURN("od:match:1")
+	urn, _ := types.ParseURN("od:match:1")
 	h := NewHandle(42, 1, *urn, time.Now())
 	m.registerHandle(h)
 
-	got := m.completeHandle(42, protocols.RecoveryStatusCompleted, nil)
+	got := m.completeHandle(42, types.RecoveryStatusCompleted, nil)
 	if got != h {
 		t.Errorf("completeHandle returned %v, want the registered handle", got)
 	}
 	if !h.IsTerminal() {
 		t.Error("handle not terminal after completeHandle")
 	}
-	if h.Status() != protocols.RecoveryStatusCompleted {
+	if h.Status() != types.RecoveryStatusCompleted {
 		t.Errorf("Status = %v, want Completed", h.Status())
 	}
 
 	// Unknown id is a no-op (returns nil).
-	if got := m.completeHandle(99, protocols.RecoveryStatusCompleted, nil); got != nil {
+	if got := m.completeHandle(99, types.RecoveryStatusCompleted, nil); got != nil {
 		t.Errorf("completeHandle(99) = %v, want nil", got)
 	}
 }
 
 func TestManager_GcCompletedHandles(t *testing.T) {
 	m := newTestManager(t)
-	urn, _ := protocols.ParseURN("od:match:1")
+	urn, _ := types.ParseURN("od:match:1")
 
 	old := NewHandle(1, 1, *urn, time.Now())
-	old.complete(protocols.RecoveryStatusCompleted, nil, time.Now().Add(-2*HandleGCGracePeriod))
+	old.complete(types.RecoveryStatusCompleted, nil, time.Now().Add(-2*HandleGCGracePeriod))
 	m.registerHandle(old)
 
 	recent := NewHandle(2, 1, *urn, time.Now())
-	recent.complete(protocols.RecoveryStatusCompleted, nil, time.Now())
+	recent.complete(types.RecoveryStatusCompleted, nil, time.Now())
 	m.registerHandle(recent)
 
 	pending := NewHandle(3, 1, *urn, time.Now().Add(-2*HandleGCGracePeriod))
@@ -214,26 +214,26 @@ func TestManager_GcCompletedHandles(t *testing.T) {
 
 func TestManager_FailPendingHandles(t *testing.T) {
 	m := newTestManager(t)
-	urn, _ := protocols.ParseURN("od:match:1")
+	urn, _ := types.ParseURN("od:match:1")
 
 	pending := NewHandle(1, 1, *urn, time.Now())
 	m.registerHandle(pending)
 
 	completed := NewHandle(2, 1, *urn, time.Now())
-	completed.complete(protocols.RecoveryStatusCompleted, nil, time.Now())
+	completed.complete(types.RecoveryStatusCompleted, nil, time.Now())
 	m.registerHandle(completed)
 
 	bang := errors.New("manager closed")
 	m.failPendingHandles(bang)
 
-	if pending.Status() != protocols.RecoveryStatusFailed {
+	if pending.Status() != types.RecoveryStatusFailed {
 		t.Errorf("pending Status = %v, want Failed", pending.Status())
 	}
 	if pending.Snapshot().Err != bang {
 		t.Errorf("pending Err = %v, want %v", pending.Snapshot().Err, bang)
 	}
 	// The already-completed handle stays Completed.
-	if completed.Status() != protocols.RecoveryStatusCompleted {
+	if completed.Status() != types.RecoveryStatusCompleted {
 		t.Errorf("completed Status changed to %v after failPending", completed.Status())
 	}
 }

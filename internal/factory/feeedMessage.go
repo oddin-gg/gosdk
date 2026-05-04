@@ -8,24 +8,24 @@ import (
 
 	feedXML "github.com/oddin-gg/gosdk/internal/feed/xml"
 	"github.com/oddin-gg/gosdk/internal/producer"
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 )
 
 // FeedMessageFactory ...
 //
 // producerManager is the concrete *producer.Manager (not the
-// protocols.ProducerManager interface) so this hot-path code can do a
+// types.ProducerManager interface) so this hot-path code can do a
 // pure-cache lookup via producerCached — avoiding hidden HTTP calls
 // from inside AMQP message processing.
 type FeedMessageFactory struct {
 	entityFactory         *EntityFactory
 	marketFactory         *MarketFactory
 	producerManager       *producer.Manager
-	oddsFeedConfiguration protocols.OddsFeedConfiguration
+	oddsFeedConfiguration types.OddsFeedConfiguration
 }
 
 // BuildMessage ...
-func (f *FeedMessageFactory) BuildMessage(feedMessage *protocols.FeedMessage) (interface{}, error) {
+func (f *FeedMessageFactory) BuildMessage(feedMessage *types.FeedMessage) (interface{}, error) {
 	if feedMessage.Message == nil || feedMessage.RawMessage == nil {
 		return nil, errors.New("message and raw message is required")
 	}
@@ -34,17 +34,17 @@ func (f *FeedMessageFactory) BuildMessage(feedMessage *protocols.FeedMessage) (i
 	timestamp.Published = time.Now()
 
 	var event interface{}
-	switch protocols.EventType(feedMessage.RoutingKey.EventID.Type) {
-	case protocols.TournamentEventType:
+	switch types.EventType(feedMessage.RoutingKey.EventID.Type) {
+	case types.TournamentEventType:
 		// Hot path: AMQP message decode. Uses context.Background() because
 		// BuildMessage doesn't carry a caller ctx today; the data is
 		// expected to be cached after the first encounter.
-		t, err := f.entityFactory.BuildTournament(context.Background(), *feedMessage.RoutingKey.EventID, *feedMessage.RoutingKey.SportID, []protocols.Locale{f.oddsFeedConfiguration.DefaultLocale()})
+		t, err := f.entityFactory.BuildTournament(context.Background(), *feedMessage.RoutingKey.EventID, *feedMessage.RoutingKey.SportID, []types.Locale{f.oddsFeedConfiguration.DefaultLocale()})
 		if err == nil && t != nil {
 			event = *t
 		}
-	case protocols.MatchEventType:
-		match, err := f.entityFactory.BuildMatch(context.Background(), *feedMessage.RoutingKey.EventID, []protocols.Locale{f.oddsFeedConfiguration.DefaultLocale()}, feedMessage.RoutingKey.SportID)
+	case types.MatchEventType:
+		match, err := f.entityFactory.BuildMatch(context.Background(), *feedMessage.RoutingKey.EventID, []types.Locale{f.oddsFeedConfiguration.DefaultLocale()}, feedMessage.RoutingKey.SportID)
 		if err == nil && match != nil {
 			event = *match
 		}
@@ -123,22 +123,22 @@ func (f *FeedMessageFactory) BuildMessage(feedMessage *protocols.FeedMessage) (i
 }
 
 // BuildUnparsableMessage ...
-func (f *FeedMessageFactory) BuildUnparsableMessage(feedMessage *protocols.FeedMessage) protocols.UnparsableMessage {
+func (f *FeedMessageFactory) BuildUnparsableMessage(feedMessage *types.FeedMessage) types.UnparsableMessage {
 	timestamp := feedMessage.Timestamp
 	timestamp.Published = time.Now()
 
 	var event interface{}
-	switch protocols.EventType(feedMessage.RoutingKey.EventID.Type) {
-	case protocols.TournamentEventType:
+	switch types.EventType(feedMessage.RoutingKey.EventID.Type) {
+	case types.TournamentEventType:
 		// Hot path: AMQP message decode. Uses context.Background() because
 		// BuildMessage doesn't carry a caller ctx today; the data is
 		// expected to be cached after the first encounter.
-		t, err := f.entityFactory.BuildTournament(context.Background(), *feedMessage.RoutingKey.EventID, *feedMessage.RoutingKey.SportID, []protocols.Locale{f.oddsFeedConfiguration.DefaultLocale()})
+		t, err := f.entityFactory.BuildTournament(context.Background(), *feedMessage.RoutingKey.EventID, *feedMessage.RoutingKey.SportID, []types.Locale{f.oddsFeedConfiguration.DefaultLocale()})
 		if err == nil && t != nil {
 			event = *t
 		}
-	case protocols.MatchEventType:
-		match, err := f.entityFactory.BuildMatch(context.Background(), *feedMessage.RoutingKey.EventID, []protocols.Locale{f.oddsFeedConfiguration.DefaultLocale()}, feedMessage.RoutingKey.SportID)
+	case types.MatchEventType:
+		match, err := f.entityFactory.BuildMatch(context.Background(), *feedMessage.RoutingKey.EventID, []types.Locale{f.oddsFeedConfiguration.DefaultLocale()}, feedMessage.RoutingKey.SportID)
 		if err == nil && match != nil {
 			event = *match
 		}
@@ -146,13 +146,13 @@ func (f *FeedMessageFactory) BuildUnparsableMessage(feedMessage *protocols.FeedM
 
 	return unparsableMessageImpl{
 		event:      event,
-		timestamp:  protocols.MessageTimestamp{},
+		timestamp:  types.MessageTimestamp{},
 		rawMessage: feedMessage.RawMessage,
 	}
 }
 
 // BuildProducerStatus ...
-func (f *FeedMessageFactory) BuildProducerStatus(producerID uint, producerStatusReason protocols.ProducerStatusReason, isDown bool, isDelayed bool, timestamp time.Time) (protocols.ProducerStatus, error) {
+func (f *FeedMessageFactory) BuildProducerStatus(producerID uint, producerStatusReason types.ProducerStatusReason, isDown bool, isDelayed bool, timestamp time.Time) (types.ProducerStatus, error) {
 	producer, err := f.producerManager.GetProducerCached(producerID)
 	if err != nil {
 		return nil, err
@@ -160,7 +160,7 @@ func (f *FeedMessageFactory) BuildProducerStatus(producerID uint, producerStatus
 
 	return producerStatusImpl{
 		producer: producer,
-		timestamp: protocols.MessageTimestamp{
+		timestamp: types.MessageTimestamp{
 			Created:   timestamp,
 			Sent:      timestamp,
 			Received:  timestamp,
@@ -173,7 +173,7 @@ func (f *FeedMessageFactory) BuildProducerStatus(producerID uint, producerStatus
 }
 
 // NewFeedMessageFactory ...
-func NewFeedMessageFactory(entityFactory *EntityFactory, marketFactory *MarketFactory, producerManager *producer.Manager, oddsFeedConfiguration protocols.OddsFeedConfiguration) *FeedMessageFactory {
+func NewFeedMessageFactory(entityFactory *EntityFactory, marketFactory *MarketFactory, producerManager *producer.Manager, oddsFeedConfiguration types.OddsFeedConfiguration) *FeedMessageFactory {
 	return &FeedMessageFactory{
 		entityFactory:         entityFactory,
 		marketFactory:         marketFactory,
@@ -183,18 +183,18 @@ func NewFeedMessageFactory(entityFactory *EntityFactory, marketFactory *MarketFa
 }
 
 type producerStatusImpl struct {
-	producer             protocols.Producer
-	timestamp            protocols.MessageTimestamp
+	producer             types.Producer
+	timestamp            types.MessageTimestamp
 	isDown               bool
 	isDelayed            bool
-	producerStatusReason protocols.ProducerStatusReason
+	producerStatusReason types.ProducerStatusReason
 }
 
-func (p producerStatusImpl) Producer() protocols.Producer {
+func (p producerStatusImpl) Producer() types.Producer {
 	return p.producer
 }
 
-func (p producerStatusImpl) Timestamp() protocols.MessageTimestamp {
+func (p producerStatusImpl) Timestamp() types.MessageTimestamp {
 	return p.timestamp
 }
 
@@ -206,14 +206,14 @@ func (p producerStatusImpl) IsDelayed() bool {
 	return p.isDelayed
 }
 
-func (p producerStatusImpl) ProducerStatusReason() protocols.ProducerStatusReason {
+func (p producerStatusImpl) ProducerStatusReason() types.ProducerStatusReason {
 	return p.producerStatusReason
 }
 
 type unparsableMessageImpl struct {
 	event      interface{}
-	producer   protocols.Producer
-	timestamp  protocols.MessageTimestamp
+	producer   types.Producer
+	timestamp  types.MessageTimestamp
 	rawMessage []byte
 }
 
@@ -221,11 +221,11 @@ func (u unparsableMessageImpl) Event() interface{} {
 	return u.event
 }
 
-func (u unparsableMessageImpl) Producer() protocols.Producer {
+func (u unparsableMessageImpl) Producer() types.Producer {
 	return u.producer
 }
 
-func (u unparsableMessageImpl) Timestamp() protocols.MessageTimestamp {
+func (u unparsableMessageImpl) Timestamp() types.MessageTimestamp {
 	return u.timestamp
 }
 
@@ -234,20 +234,20 @@ func (u unparsableMessageImpl) RawMessage() []byte {
 }
 
 type oddsChangeImpl struct {
-	producer      protocols.Producer
-	timestamp     protocols.MessageTimestamp
+	producer      types.Producer
+	timestamp     types.MessageTimestamp
 	rawMessage    []byte
 	message       *feedXML.OddsChange
 	event         interface{}
 	marketFactory *MarketFactory
-	markets       []protocols.MarketWithOdds
+	markets       []types.MarketWithOdds
 }
 
-func (m oddsChangeImpl) Producer() protocols.Producer {
+func (m oddsChangeImpl) Producer() types.Producer {
 	return m.producer
 }
 
-func (m oddsChangeImpl) Timestamp() protocols.MessageTimestamp {
+func (m oddsChangeImpl) Timestamp() types.MessageTimestamp {
 	return m.timestamp
 }
 
@@ -263,9 +263,9 @@ func (m oddsChangeImpl) Event() interface{} {
 	return m.event
 }
 
-func (m oddsChangeImpl) Markets() []protocols.MarketWithOdds {
+func (m oddsChangeImpl) Markets() []types.MarketWithOdds {
 	if m.markets == nil {
-		m.markets = make([]protocols.MarketWithOdds, len(m.message.Odds.Markets))
+		m.markets = make([]types.MarketWithOdds, len(m.message.Odds.Markets))
 		for i := range m.message.Odds.Markets {
 			market := m.message.Odds.Markets[i]
 			m.markets[i] = m.marketFactory.BuildMarketWithOdds(m.event, market)
@@ -276,18 +276,18 @@ func (m oddsChangeImpl) Markets() []protocols.MarketWithOdds {
 }
 
 type betStopImpl struct {
-	producer   protocols.Producer
-	timestamp  protocols.MessageTimestamp
+	producer   types.Producer
+	timestamp  types.MessageTimestamp
 	requestID  *uint
 	rawMessage []byte
 	event      interface{}
 }
 
-func (b betStopImpl) Producer() protocols.Producer {
+func (b betStopImpl) Producer() types.Producer {
 	return b.producer
 }
 
-func (b betStopImpl) Timestamp() protocols.MessageTimestamp {
+func (b betStopImpl) Timestamp() types.MessageTimestamp {
 	return b.timestamp
 }
 
@@ -304,20 +304,20 @@ func (b betStopImpl) Event() interface{} {
 }
 
 type betSettlementImpl struct {
-	producer      protocols.Producer
-	timestamp     protocols.MessageTimestamp
+	producer      types.Producer
+	timestamp     types.MessageTimestamp
 	rawMessage    []byte
 	message       *feedXML.BetSettlement
 	event         interface{}
 	marketFactory *MarketFactory
-	markets       []protocols.MarketWithSettlement
+	markets       []types.MarketWithSettlement
 }
 
-func (m betSettlementImpl) Producer() protocols.Producer {
+func (m betSettlementImpl) Producer() types.Producer {
 	return m.producer
 }
 
-func (m betSettlementImpl) Timestamp() protocols.MessageTimestamp {
+func (m betSettlementImpl) Timestamp() types.MessageTimestamp {
 	return m.timestamp
 }
 
@@ -333,9 +333,9 @@ func (m betSettlementImpl) Event() interface{} {
 	return m.event
 }
 
-func (m betSettlementImpl) Markets() []protocols.MarketWithSettlement {
+func (m betSettlementImpl) Markets() []types.MarketWithSettlement {
 	if m.markets == nil {
-		m.markets = make([]protocols.MarketWithSettlement, len(m.message.Markets.Markets))
+		m.markets = make([]types.MarketWithSettlement, len(m.message.Markets.Markets))
 		for i := range m.message.Markets.Markets {
 			market := m.message.Markets.Markets[i]
 			m.markets[i] = m.marketFactory.BuildMarketWithSettlement(m.event, market)
@@ -346,20 +346,20 @@ func (m betSettlementImpl) Markets() []protocols.MarketWithSettlement {
 }
 
 type betCancelImpl struct {
-	producer      protocols.Producer
-	timestamp     protocols.MessageTimestamp
+	producer      types.Producer
+	timestamp     types.MessageTimestamp
 	rawMessage    []byte
 	message       *feedXML.BetCancel
 	event         interface{}
 	marketFactory *MarketFactory
-	markets       []protocols.MarketCancel
+	markets       []types.MarketCancel
 }
 
-func (m betCancelImpl) Producer() protocols.Producer {
+func (m betCancelImpl) Producer() types.Producer {
 	return m.producer
 }
 
-func (m betCancelImpl) Timestamp() protocols.MessageTimestamp {
+func (m betCancelImpl) Timestamp() types.MessageTimestamp {
 	return m.timestamp
 }
 
@@ -375,9 +375,9 @@ func (m betCancelImpl) Event() interface{} {
 	return m.event
 }
 
-func (m betCancelImpl) Markets() []protocols.MarketCancel {
+func (m betCancelImpl) Markets() []types.MarketCancel {
 	if m.markets == nil {
-		m.markets = make([]protocols.MarketCancel, len(m.message.Markets))
+		m.markets = make([]types.MarketCancel, len(m.message.Markets))
 		for i := range m.message.Markets {
 			market := m.message.Markets[i]
 			m.markets[i] = m.marketFactory.BuildMarketCancel(m.event, market)
@@ -404,18 +404,18 @@ func (m betCancelImpl) EndTime() *time.Time {
 }
 
 type fixtureChangeImpl struct {
-	producer   protocols.Producer
-	timestamp  protocols.MessageTimestamp
+	producer   types.Producer
+	timestamp  types.MessageTimestamp
 	rawMessage []byte
 	message    *feedXML.FixtureChange
 	event      interface{}
 }
 
-func (f fixtureChangeImpl) Producer() protocols.Producer {
+func (f fixtureChangeImpl) Producer() types.Producer {
 	return f.producer
 }
 
-func (f fixtureChangeImpl) Timestamp() protocols.MessageTimestamp {
+func (f fixtureChangeImpl) Timestamp() types.MessageTimestamp {
 	return f.timestamp
 }
 
@@ -431,38 +431,38 @@ func (f fixtureChangeImpl) Event() interface{} {
 	return f.event
 }
 
-func (f fixtureChangeImpl) ChangeType() protocols.FixtureChangeType {
+func (f fixtureChangeImpl) ChangeType() types.FixtureChangeType {
 	switch f.message.ChangeType {
 	case feedXML.FixtureChangeTypeNew:
-		return protocols.NewFixtureChangeType
+		return types.NewFixtureChangeType
 	case feedXML.FixtureChangeTypeDateTime:
-		return protocols.TimeUpdateChangeType
+		return types.TimeUpdateChangeType
 	case feedXML.FixtureChangeTypeCancelled:
-		return protocols.CancelledFixtureChangeType
+		return types.CancelledFixtureChangeType
 	case feedXML.FixtureChangeTypeCoverage:
-		return protocols.CoverageFixtureChangeType
+		return types.CoverageFixtureChangeType
 	case feedXML.FixtureChangeTypeStreamURL:
-		return protocols.StreamURLFixtureChangeType
+		return types.StreamURLFixtureChangeType
 	default:
-		return protocols.UnknownFixtureChangeType
+		return types.UnknownFixtureChangeType
 	}
 }
 
 type rollbackBetSettlementImpl struct {
-	producer      protocols.Producer
-	timestamp     protocols.MessageTimestamp
+	producer      types.Producer
+	timestamp     types.MessageTimestamp
 	rawMessage    []byte
 	message       *feedXML.RollbackBetSettlement
 	event         interface{}
 	marketFactory *MarketFactory
-	markets       []protocols.Market
+	markets       []types.Market
 }
 
-func (m rollbackBetSettlementImpl) Producer() protocols.Producer {
+func (m rollbackBetSettlementImpl) Producer() types.Producer {
 	return m.producer
 }
 
-func (m rollbackBetSettlementImpl) Timestamp() protocols.MessageTimestamp {
+func (m rollbackBetSettlementImpl) Timestamp() types.MessageTimestamp {
 	return m.timestamp
 }
 
@@ -478,9 +478,9 @@ func (m rollbackBetSettlementImpl) Event() interface{} {
 	return m.event
 }
 
-func (m rollbackBetSettlementImpl) RolledBackSettledMarkets() []protocols.Market {
+func (m rollbackBetSettlementImpl) RolledBackSettledMarkets() []types.Market {
 	if m.markets == nil {
-		m.markets = make([]protocols.Market, len(m.message.Markets))
+		m.markets = make([]types.Market, len(m.message.Markets))
 		for i, market := range m.message.Markets {
 			m.markets[i] = m.marketFactory.BuildMarket(m.event, &market.MarketAttributes)
 		}
@@ -490,20 +490,20 @@ func (m rollbackBetSettlementImpl) RolledBackSettledMarkets() []protocols.Market
 }
 
 type rollbackBetCancelImpl struct {
-	producer      protocols.Producer
-	timestamp     protocols.MessageTimestamp
+	producer      types.Producer
+	timestamp     types.MessageTimestamp
 	rawMessage    []byte
 	message       *feedXML.RollbackBetCancel
 	event         interface{}
 	marketFactory *MarketFactory
-	markets       []protocols.Market
+	markets       []types.Market
 }
 
-func (m rollbackBetCancelImpl) Producer() protocols.Producer {
+func (m rollbackBetCancelImpl) Producer() types.Producer {
 	return m.producer
 }
 
-func (m rollbackBetCancelImpl) Timestamp() protocols.MessageTimestamp {
+func (m rollbackBetCancelImpl) Timestamp() types.MessageTimestamp {
 	return m.timestamp
 }
 
@@ -519,9 +519,9 @@ func (m rollbackBetCancelImpl) Event() interface{} {
 	return m.event
 }
 
-func (m rollbackBetCancelImpl) RolledBackCanceledMarkets() []protocols.Market {
+func (m rollbackBetCancelImpl) RolledBackCanceledMarkets() []types.Market {
 	if m.markets == nil {
-		m.markets = make([]protocols.Market, len(m.message.Markets))
+		m.markets = make([]types.Market, len(m.message.Markets))
 		for i, market := range m.message.Markets {
 			m.markets[i] = m.marketFactory.BuildMarket(m.event, &market.MarketAttributes)
 		}

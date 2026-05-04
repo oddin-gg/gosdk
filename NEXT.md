@@ -36,7 +36,7 @@ This document is the source of truth for the rewrite. Update it as decisions cha
 - Backward source compatibility with v0.0.x. We get one breaking change; we use it.
 - A separate `/v2` module or `v2` branch. Same import path, beta tags during rewrite, `v1.0.0` at cutover.
 - Forcing consumers off Go 1.24. Module directive sits at the consumer floor; we do not chase 1.26-only features unless they materially simplify a critical path.
-- Sealing `protocols.Message` (or any other public interface) with unexported methods. Internal consumers already mock these interfaces in their tests; aggressive sealing would break that workflow without payoff.
+- Sealing `types.Message` (or any other public interface) with unexported methods. Internal consumers already mock these interfaces in their tests; aggressive sealing would break that workflow without payoff.
 
 ## 3. Architectural principles
 
@@ -51,7 +51,7 @@ This document is the source of truth for the rewrite. Update it as decisions cha
 
 ## 4. Public API surface
 
-The new top-level package is still `github.com/oddin-gg/gosdk`. The `protocols/` subpackage retains all current entity types (Match, Tournament, Competitor, Player, OddsChange, BetSettlement, BookmakerDetail, Producer, ProducerScope, MessageInterest, URN, Locale, Environment, Region, …). Field shapes and method signatures on these types stay source-compatible where possible — both consumers (kollector-esport, ots-odds-bridge) import them widely.
+The new top-level package is still `github.com/oddin-gg/gosdk`. The `types/` subpackage retains all current entity types (Match, Tournament, Competitor, Player, OddsChange, BetSettlement, BookmakerDetail, Producer, ProducerScope, MessageInterest, URN, Locale, Environment, Region, …). Field shapes and method signatures on these types stay source-compatible where possible — both consumers (kollector-esport, ots-odds-bridge) import them widely.
 
 Top-level package replaces the manager-of-managers shape with a flat `Client`:
 
@@ -59,7 +59,7 @@ Top-level package replaces the manager-of-managers shape with a flat `Client`:
 package gosdk
 
 // Construction — does API + cache + producer setup; does NOT open AMQP.
-func NewConfig(token string, env protocols.Environment, opts ...Option) Config
+func NewConfig(token string, env types.Environment, opts ...Option) Config
 func New(ctx context.Context, cfg Config) (*Client, error)
 
 // Lifecycle
@@ -71,28 +71,28 @@ func (*Client) Close(ctx context.Context) error    // idempotent; safe to call r
 func (*Client) Subscribe(ctx context.Context, opts ...SubscribeOption) (*Subscription, error)
 
 // Subscription — returned from Subscribe. All methods safe for concurrent use.
-// (*Subscription).Messages() <-chan protocols.Message  // closed after graceful drain or abrupt termination
+// (*Subscription).Messages() <-chan types.Message  // closed after graceful drain or abrupt termination
 // (*Subscription).Close(ctx context.Context) error     // graceful drain; ctx is the drain deadline; safe to call repeatedly
 // (*Subscription).Done() <-chan struct{}               // closed when subscription terminates (any reason)
 // (*Subscription).Err() error                          // nil on graceful close; non-nil on ctx-cancel / terminal error
 
 // Bookmaker / connection state
-func (*Client) BookmakerDetails(ctx context.Context) (protocols.BookmakerDetail, error)
+func (*Client) BookmakerDetails(ctx context.Context) (types.BookmakerDetail, error)
 func (*Client) ConnectionState() ConnectionState         // current state, polling-friendly
 func (*Client) ConnectionEvents() <-chan ConnectionEvent // state-change events; lossy on overflow
 func (*Client) APIEvents() <-chan APIEvent               // raw HTTP request/response events (opt-in via WithAPICallLogging)
 
 // Producers
-func (*Client) Producers(ctx context.Context) ([]protocols.Producer, error)
-func (*Client) ActiveProducers(ctx context.Context) ([]protocols.Producer, error)
-func (*Client) ProducersInScope(ctx context.Context, scope protocols.ProducerScope) ([]protocols.Producer, error)
-func (*Client) Producer(ctx context.Context, id uint) (protocols.Producer, error)
+func (*Client) Producers(ctx context.Context) ([]types.Producer, error)
+func (*Client) ActiveProducers(ctx context.Context) ([]types.Producer, error)
+func (*Client) ProducersInScope(ctx context.Context, scope types.ProducerScope) ([]types.Producer, error)
+func (*Client) Producer(ctx context.Context, id uint) (types.Producer, error)
 func (*Client) SetProducerEnabled(ctx context.Context, id uint, enabled bool) error
 func (*Client) SetProducerRecoveryFromTimestamp(ctx context.Context, id uint, t time.Time) error  // NEW (parity)
 
 // Recovery — every initiate call returns a handle for reliable per-request completion.
-func (*Client) RecoverEventOdds(ctx context.Context, producerID uint, eventID protocols.URN) (*RecoveryHandle, error)
-func (*Client) RecoverEventStateful(ctx context.Context, producerID uint, eventID protocols.URN) (*RecoveryHandle, error)
+func (*Client) RecoverEventOdds(ctx context.Context, producerID uint, eventID types.URN) (*RecoveryHandle, error)
+func (*Client) RecoverEventStateful(ctx context.Context, producerID uint, eventID types.URN) (*RecoveryHandle, error)
 func (*Client) RecoveryEvents() <-chan RecoveryEvent           // ProducerStatus + EventRecoveryComplete stream; lossy on overflow
 func (*Client) ProducerStatus(producerID uint) ProducerStatus  // current snapshot, polling-friendly
 func (*Client) EventRecoveryStatus(requestID uint) (RecoveryStatus, bool) // by request ID; second result false when unknown / GC'd
@@ -104,39 +104,39 @@ func (*Client) EventRecoveryStatus(requestID uint) (RecoveryStatus, bool) // by 
 // (*RecoveryHandle).Status() RecoveryStatus       // non-blocking snapshot
 
 // Sports info
-func (*Client) Sports(ctx context.Context, locales ...protocols.Locale) ([]protocols.Sport, error)
-func (*Client) Sport(ctx context.Context, id protocols.URN, locales ...protocols.Locale) (protocols.Sport, error)
-func (*Client) ActiveTournaments(ctx context.Context, locales ...protocols.Locale) ([]protocols.Tournament, error)
-func (*Client) AvailableTournaments(ctx context.Context, sportID protocols.URN, locales ...protocols.Locale) ([]protocols.Tournament, error)
-func (*Client) Match(ctx context.Context, id protocols.URN, locales ...protocols.Locale) (protocols.Match, error)
-func (*Client) MatchesFor(ctx context.Context, t time.Time, locales ...protocols.Locale) ([]protocols.Match, error)
-func (*Client) LiveMatches(ctx context.Context, locales ...protocols.Locale) ([]protocols.Match, error)
-func (*Client) ListMatches(ctx context.Context, start, limit int, locales ...protocols.Locale) ([]protocols.Match, error)
-func (*Client) Competitor(ctx context.Context, id protocols.URN, locales ...protocols.Locale) (protocols.Competitor, error)
-func (*Client) Player(ctx context.Context, id protocols.URN, locales ...protocols.Locale) (protocols.Player, error)
-func (*Client) FixtureChanges(ctx context.Context, after time.Time, locales ...protocols.Locale) ([]protocols.FixtureChange, error)
+func (*Client) Sports(ctx context.Context, locales ...types.Locale) ([]types.Sport, error)
+func (*Client) Sport(ctx context.Context, id types.URN, locales ...types.Locale) (types.Sport, error)
+func (*Client) ActiveTournaments(ctx context.Context, locales ...types.Locale) ([]types.Tournament, error)
+func (*Client) AvailableTournaments(ctx context.Context, sportID types.URN, locales ...types.Locale) ([]types.Tournament, error)
+func (*Client) Match(ctx context.Context, id types.URN, locales ...types.Locale) (types.Match, error)
+func (*Client) MatchesFor(ctx context.Context, t time.Time, locales ...types.Locale) ([]types.Match, error)
+func (*Client) LiveMatches(ctx context.Context, locales ...types.Locale) ([]types.Match, error)
+func (*Client) ListMatches(ctx context.Context, start, limit int, locales ...types.Locale) ([]types.Match, error)
+func (*Client) Competitor(ctx context.Context, id types.URN, locales ...types.Locale) (types.Competitor, error)
+func (*Client) Player(ctx context.Context, id types.URN, locales ...types.Locale) (types.Player, error)
+func (*Client) FixtureChanges(ctx context.Context, after time.Time, locales ...types.Locale) ([]types.FixtureChange, error)
 
 // Cache invalidation (NEW — parity with .NET/Java).
 // `variant *string`: nil means "the base description with no variant"; non-nil with empty value is rejected.
-func (*Client) ClearMatch(id protocols.URN)
-func (*Client) ClearTournament(id protocols.URN)
-func (*Client) ClearCompetitor(id protocols.URN)
-func (*Client) ClearPlayer(id protocols.URN)
+func (*Client) ClearMatch(id types.URN)
+func (*Client) ClearTournament(id types.URN)
+func (*Client) ClearCompetitor(id types.URN)
+func (*Client) ClearPlayer(id types.URN)
 func (*Client) ClearMarketDescription(marketID uint, variant *string)
 func (*Client) ClearMarketVoidReasons()
 
 // Market descriptions. `variant *string` preserves the nil-vs-empty distinction the wire protocol cares about.
-func (*Client) MarketDescriptions(ctx context.Context, locales ...protocols.Locale) ([]protocols.MarketDescription, error)
-func (*Client) MarketDescription(ctx context.Context, id uint, variant *string, locales ...protocols.Locale) (protocols.MarketDescription, error)
-func (*Client) MarketVoidReasons(ctx context.Context) ([]protocols.MarketVoidReason, error)
+func (*Client) MarketDescriptions(ctx context.Context, locales ...types.Locale) ([]types.MarketDescription, error)
+func (*Client) MarketDescription(ctx context.Context, id uint, variant *string, locales ...types.Locale) (types.MarketDescription, error)
+func (*Client) MarketVoidReasons(ctx context.Context) ([]types.MarketVoidReason, error)
 
 // Replay (kept verbatim — surface drives the underlying API the same way as Java/.NET)
 func (*Client) Replay() *Replay
 
 type Replay struct{ /* methods below */ }
-func (*Replay) List(ctx context.Context) ([]protocols.SportEvent, error)
-func (*Replay) AddEvent(ctx context.Context, eventID protocols.URN) error
-func (*Replay) RemoveEvent(ctx context.Context, eventID protocols.URN) error
+func (*Replay) List(ctx context.Context) ([]types.SportEvent, error)
+func (*Replay) AddEvent(ctx context.Context, eventID types.URN) error
+func (*Replay) RemoveEvent(ctx context.Context, eventID types.URN) error
 func (*Replay) Start(ctx context.Context, opts ...ReplayOption) error
 func (*Replay) Stop(ctx context.Context) error
 func (*Replay) Clear(ctx context.Context) error
@@ -149,11 +149,11 @@ func (*Replay) Status(ctx context.Context) (string, error)  // NEW (parity with 
 Replaces the broken value-receiver setter chain:
 
 ```go
-cfg := gosdk.NewConfig(token, protocols.TestEnvironment,
+cfg := gosdk.NewConfig(token, types.TestEnvironment,
     gosdk.WithNodeID(1),
-    gosdk.WithDefaultLocale(protocols.EnLocale),
-    gosdk.WithPreloadLocales(protocols.EnLocale, protocols.RuLocale),
-    gosdk.WithRegion(protocols.RegionDefault),
+    gosdk.WithDefaultLocale(types.EnLocale),
+    gosdk.WithPreloadLocales(types.EnLocale, types.RuLocale),
+    gosdk.WithRegion(types.RegionDefault),
     gosdk.WithAPIURL("..."),
     gosdk.WithMQURL("..."),
     gosdk.WithMessagingPort(5672),
@@ -176,26 +176,26 @@ cfg := gosdk.NewConfig(token, protocols.TestEnvironment,
 
 ```go
 sub, err := client.Subscribe(ctx,
-    gosdk.WithMessageInterest(protocols.AllMessageInterest),
+    gosdk.WithMessageInterest(types.AllMessageInterest),
     gosdk.WithSpecificEvents(eventA, eventB), // optional
     gosdk.WithReplay(),                        // marks as replay session
 )
 
 for msg := range sub.Messages() {
     switch m := msg.(type) {
-    case protocols.OddsChange:    ...
-    case protocols.BetStop:       ...
-    case protocols.BetSettlement: ...
+    case types.OddsChange:    ...
+    case types.BetStop:       ...
+    case types.BetSettlement: ...
     // ... all message types
-    case protocols.Unparsable:    ...  // surfaced when SDK can't parse
-    case protocols.RawFeed:       ...  // surfaced when WithExtendedDataReporting(true)
+    case types.Unparsable:    ...  // surfaced when SDK can't parse
+    case types.RawFeed:       ...  // surfaced when WithExtendedDataReporting(true)
     }
 }
 // Subscription closes automatically when ctx is cancelled or client.Close is called.
 err := sub.Err()  // sticky, set on terminal failure
 ```
 
-`Subscription.Messages()` returns `<-chan protocols.Message`. `protocols.Message` is an **open interface** — the SDK ships concrete types (`OddsChange`, `BetStop`, `BetSettlement`, `BetCancel`, `RollbackBetCancel`, `RollbackBetSettlement`, `FixtureChange`, `Unparsable`, `RawFeed`) that implement it, but consumers can implement the interface in their own tests/mocks. No unexported sealing methods.
+`Subscription.Messages()` returns `<-chan types.Message`. `types.Message` is an **open interface** — the SDK ships concrete types (`OddsChange`, `BetStop`, `BetSettlement`, `BetCancel`, `RollbackBetCancel`, `RollbackBetSettlement`, `FixtureChange`, `Unparsable`, `RawFeed`) that implement it, but consumers can implement the interface in their own tests/mocks. No unexported sealing methods.
 
 The session-vs-global split disappears — recovery and connection events surface on `client.RecoveryEvents()` and `client.ConnectionEvents()`, message data on the subscription.
 
@@ -213,7 +213,7 @@ for ev := range client.ConnectionEvents() { ... }
 
 Closes the gap vs Java's `onConnectionDown` and .NET's `ConnectionException` / `Disconnected` / `Closed`.
 
-### What stays unchanged in `protocols/`
+### What stays unchanged in `types/`
 
 All entity interfaces (`Match`, `Tournament`, `Competitor`, `Player`, `Sport`, `Fixture`, `Scoreboard`, `MatchStatus`, `MarketDescription`, `MarketVoidReason`, `OutcomeDescription`, `Specifier`, etc.) keep their current method signatures. Both consumers depend on these widely (~40 files combined); this is the source-compatibility line.
 
@@ -241,7 +241,7 @@ Layered, with no upward dependencies:
 +------------------------------------------------+
 |              internal/xml (decoders)           |
 +------------------------------------------------+
-|             protocols (entity types)           |
+|              types (entity types)              |
 +------------------------------------------------+
 ```
 
@@ -269,7 +269,7 @@ import (
     "golang.org/x/sync/singleflight"
 )
 
-type Loader[K comparable, V any] func(ctx context.Context, key K, locales []protocols.Locale) (V, error)
+type Loader[K comparable, V any] func(ctx context.Context, key K, locales []types.Locale) (V, error)
 
 type EventCache[K comparable, V any] struct {
     lru    *lru.LRU[K, V]
@@ -277,7 +277,7 @@ type EventCache[K comparable, V any] struct {
     loader Loader[K, V]
 }
 
-func (c *EventCache[K, V]) Get(ctx context.Context, key K, locales []protocols.Locale) (V, error)
+func (c *EventCache[K, V]) Get(ctx context.Context, key K, locales []types.Locale) (V, error)
 func (c *EventCache[K, V]) Clear(key K)
 func (c *EventCache[K, V]) Purge()
 ```
@@ -295,8 +295,8 @@ For: base `MarketDescriptionCache` (non-variant), `MarketVoidReasonsCache`, `Mat
 ```go
 type StaticCache[K comparable, V any] struct {
     mu     sync.RWMutex
-    perLocale map[protocols.Locale]*staticEntry[K, V]
-    loader func(ctx context.Context, locale protocols.Locale) (map[K]V, error)
+    perLocale map[types.Locale]*staticEntry[K, V]
+    loader func(ctx context.Context, locale types.Locale) (map[K]V, error)
 }
 
 type staticEntry[K comparable, V any] struct {
@@ -328,8 +328,8 @@ Variant market descriptions (`/descriptions/{locale}/markets/{id}/variants/{vari
 ### Configuration
 
 ```go
-gosdk.WithDefaultLocale(protocols.EnLocale)
-gosdk.WithPreloadLocales(protocols.EnLocale, protocols.RuLocale, protocols.DeLocale)
+gosdk.WithDefaultLocale(types.EnLocale)
+gosdk.WithPreloadLocales(types.EnLocale, types.RuLocale, types.DeLocale)
 ```
 
 `WithPreloadLocales` controls which locales the SDK fetches eagerly when warming static catalogs (sports, market descriptions). Per-event entities are still fetched lazily per locale on first request.
@@ -342,12 +342,12 @@ New enum matches .NET/Java's 12: `en`, `br`, `de`, `es`, `fi`, `fr`, `pl`, `pt`,
 
 ### Per-call locale plumbing
 
-Every public query method takes `locales ...protocols.Locale` (variadic, defaults to configured default if empty):
+Every public query method takes `locales ...types.Locale` (variadic, defaults to configured default if empty):
 
 ```go
 match, err := client.Match(ctx, urn)                              // default locale
-match, err := client.Match(ctx, urn, protocols.RuLocale)          // explicit
-match, err := client.Match(ctx, urn, protocols.EnLocale, protocols.RuLocale)  // multi
+match, err := client.Match(ctx, urn, types.RuLocale)          // explicit
+match, err := client.Match(ctx, urn, types.EnLocale, types.RuLocale)  // multi
 ```
 
 Inside the cache, `Get` is called with the requested locale slice. If any requested locale is missing from the entry, the loader fetches *only the missing locales* (one API call per missing locale, deduplicated across concurrent callers via singleflight).
@@ -364,15 +364,15 @@ For feed messages (`OddsChange`, `BetSettlement`, …) the same rule applies: me
 
 ```go
 // Sample usage with explicit prefetch:
-match, err := client.Match(ctx, urn, protocols.EnLocale, protocols.RuLocale)
-ru, _ := match.LocalizedName(protocols.RuLocale)  // cached → instant
-de, err := match.LocalizedName(protocols.DeLocale) // err == ErrLocaleNotAvailable
+match, err := client.Match(ctx, urn, types.EnLocale, types.RuLocale)
+ru, _ := match.LocalizedName(types.RuLocale)  // cached → instant
+de, err := match.LocalizedName(types.DeLocale) // err == ErrLocaleNotAvailable
 
 // Sample feed-message usage:
-cfg := gosdk.NewConfig(token, env, gosdk.WithPreloadLocales(protocols.EnLocale, protocols.RuLocale))
+cfg := gosdk.NewConfig(token, env, gosdk.WithPreloadLocales(types.EnLocale, types.RuLocale))
 // ... in message loop ...
 markets := oddsChange.Markets()                          // OddsChange.Markets() — no locale param (matches existing protocols)
-name, err := markets[0].LocalizedName(protocols.RuLocale) // locale lives on the per-market accessor; cached at startup → instant; never blocks
+name, err := markets[0].LocalizedName(types.RuLocale) // locale lives on the per-market accessor; cached at startup → instant; never blocks
 ```
 
 This differs from .NET's "sync fetch on demand" but is the right Go idiom: synchronous I/O without `ctx` from a hot message-processing goroutine is a deadlock waiting to happen. Migration cost: callers that want non-default locales must enumerate them up front. Documented in `MIGRATION.md`.
@@ -584,7 +584,7 @@ Three independent layers:
        Status    int
        Latency   time.Duration
        Attempt   int                  // for retried calls
-       Locale    *protocols.Locale    // when applicable
+       Locale    *types.Locale    // when applicable
        Request   []byte               // populated only when level == APILogFull; redacted + capped
        Response  []byte               // populated when level >= APILogResponses; redacted + capped
        Truncated bool                 // true if Request or Response was truncated at WithAPICallBodyLimit
@@ -662,7 +662,7 @@ Single goroutine per producer. Owns all state for that producer. Communicates vi
 type recoveryActor struct {
     producerID uint
     inbox      chan recoveryEvent  // alive, snapshotComplete, processingStarted, processingEnded, recoverEvent, tick, arm, shutdown
-    out        chan<- protocols.RecoveryEvent
+    out        chan<- types.RecoveryEvent
     handles    map[uint]*recoveryHandle  // requestID → per-request handle for RecoverEvent* callers
     state      recoveryState  // private, only accessed from the goroutine
     armed      bool           // false until first AMQP-related event; dormant actors don't tick or emit producer-down
@@ -714,11 +714,11 @@ Options listed in §4.
 ### Environment helpers
 
 ```go
-func SelectIntegration(region protocols.Region) protocols.Environment
-func SelectProduction(region protocols.Region) protocols.Environment
-func SelectTest(region protocols.Region) protocols.Environment
-func SelectReplay() protocols.Environment        // NEW (parity)
-func SelectCustom(host, apiHost string, port int) protocols.Environment  // NEW (parity)
+func SelectIntegration(region types.Region) types.Environment
+func SelectProduction(region types.Region) types.Environment
+func SelectTest(region types.Region) types.Environment
+func SelectReplay() types.Environment        // NEW (parity)
+func SelectCustom(host, apiHost string, port int) types.Environment  // NEW (parity)
 ```
 
 Closes the `SelectReplay` and `SelectEnvironment(host, apiHost, port)` parity gaps. Region typo (`DefaulRegion` → `RegionDefault`) fixed; old name kept as deprecated alias for one release.
@@ -734,7 +734,7 @@ Both internal consumers (`kollector-esport`, `ots-odds-bridge`) need ~30 lines o
 -cfg = cfg.SetAPIURL(c.apiURL).SetMQURL(c.mqURL).SetMessagingPort(c.mqPort)
 -c.feed = gosdk.NewOddsFeed(cfg)
 -sb, err := c.feed.SessionBuilder()
--sCh, err := sb.SetMessageInterest(protocols.AllMessageInterest).Build()
+-sCh, err := sb.SetMessageInterest(types.AllMessageInterest).Build()
 -fCh, err := c.feed.Open()
 +cfg := gosdk.NewConfig(token.Token.String(), feedEnv,
 +    gosdk.WithNodeID(rand.IntN(1000)),
@@ -743,7 +743,7 @@ Both internal consumers (`kollector-esport`, `ots-odds-bridge`) need ~30 lines o
 +    gosdk.WithMessagingPort(c.mqPort),
 +)
 +c.client, err = gosdk.New(ctx, cfg)
-+sub, err := c.client.Subscribe(ctx, gosdk.WithMessageInterest(protocols.AllMessageInterest))
++sub, err := c.client.Subscribe(ctx, gosdk.WithMessageInterest(types.AllMessageInterest))
 ```
 
 Then the consumption loop changes from a 3-channel select (session/feed/close) to:
@@ -784,7 +784,7 @@ A `MIGRATION.md` in the repo root with a side-by-side table of every old API →
 
 ### Source compatibility
 
-`protocols/*` types stay source-compatible. Both consumers' protocol-level imports keep working without change.
+`types/*` types stay source-compatible. Both consumers' protocol-level imports keep working without change.
 
 ### Migration is not just bootstrap — recovery loops change
 
@@ -809,7 +809,7 @@ The first **consumer-facing beta** is `v1.0.0-beta.1`, cut at the end of **Phase
 
 ### Required coverage gates
 
-- `protocols/`: 80%+ — pure data types, table-driven tests for URN parsing, locale handling, etc.
+- `types/`: 80%+ — pure data types, table-driven tests for URN parsing, locale handling, etc.
 - `internal/xml/`: 90%+ — golden-file decode tests for every message type, captured from the test environment smoke run (`/tmp/gosdk_run.log` already provides real samples).
 - `internal/api/`: 80%+ — every endpoint tested against `httptest.Server` with happy path, 4xx, 5xx, network error, and retry scenarios.
 - `internal/cache/`: 90%+ — concurrency stress test (`go test -race`), TTL expiry, LRU eviction, single-flight dedup, cache invalidation, multi-locale fill-in.
@@ -897,7 +897,7 @@ The branch must compile and pass CI at the end of every phase, including this on
 
 ### Phase 1 — Pure types & decode (2–3 days)
 
-- Stabilize `protocols/*` — extend `Locale` to 12 values, fix `RegionDefault` typo, add `MessageInterest` constants if any are missing.
+- Stabilize `types/*` — extend `Locale` to 12 values, fix `RegionDefault` typo, add `MessageInterest` constants if any are missing.
 - Rewrite `internal/xml/` with proper struct tags, no `<envelope>` synthesis.
 - Golden-file tests for every message type using captures from the test-env smoke log.
 - URN, routing-key parsing in `internal/feed/` — table-driven tests.
@@ -1041,14 +1041,14 @@ Phases 1–4 are mostly independent and can run in parallel across two engineers
 | (no equivalent) | `client.ClearMatch/Tournament/Competitor/Player(...)` (NEW) |
 | (no equivalent) | `client.SetProducerRecoveryFromTimestamp(...)` (NEW; was internal-only) |
 
-**Note:** Appendix A is illustrative, not exhaustive. Methods like `Player`, `MatchesFor`, `LiveMatches`, `ListMatches`, `AvailableTournaments`, `Sport(id)`, etc. follow the same mechanical mapping (manager → direct method on `Client`, with `ctx` first and `locales ...protocols.Locale` last). Likewise every config option moves from `cfg.SetX(...)` chained-setter form to `gosdk.WithX(...)` functional-option form. The full list is in §4.
+**Note:** Appendix A is illustrative, not exhaustive. Methods like `Player`, `MatchesFor`, `LiveMatches`, `ListMatches`, `AvailableTournaments`, `Sport(id)`, etc. follow the same mechanical mapping (manager → direct method on `Client`, with `ctx` first and `locales ...types.Locale` last). Likewise every config option moves from `cfg.SetX(...)` chained-setter form to `gosdk.WithX(...)` functional-option form. The full list is in §4.
 
 ## Appendix B — Verified parity gaps closed by this rewrite
 
 (From the cross-SDK audit captured under `/Users/dsaiko/.claude/projects/.../memory/sdk_caching_localization.md` and the `next`-branch analysis.)
 
 1. ✅ Per-call locale on every query method.
-2. ✅ Per-message locale — `oddsChange.Markets()` is unchanged (no locale param, matching the existing `protocols.OddsChange` shape); locale lives on the per-market accessor `market.LocalizedName(locale)`, which reads from preloaded/prefetched cache. Returns `ErrLocaleNotAvailable` if absent (consumer must list locales in `WithPreloadLocales(...)` or prefetch via `client.MarketDescription(ctx, ...)`). No hidden synchronous I/O from message accessors.
+2. ✅ Per-message locale — `oddsChange.Markets()` is unchanged (no locale param, matching the existing `types.OddsChange` shape); locale lives on the per-market accessor `market.LocalizedName(locale)`, which reads from preloaded/prefetched cache. Returns `ErrLocaleNotAvailable` if absent (consumer must list locales in `WithPreloadLocales(...)` or prefetch via `client.MarketDescription(ctx, ...)`). No hidden synchronous I/O from message accessors.
 3. ✅ Public cache invalidation on managers.
 4. ✅ Wider locale enum (12 values vs current 3).
 5. ✅ Maintained cache library (`golang-lru/v2` vs unmaintained `go-cache`).

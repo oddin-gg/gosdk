@@ -6,7 +6,7 @@ import (
 
 	"github.com/oddin-gg/gosdk/internal/api"
 	data "github.com/oddin-gg/gosdk/internal/api/xml"
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 )
 
 // MarketVoidReasonsCache caches the singleton list of market void reasons.
@@ -60,7 +60,7 @@ func newMarketVoidReasonsCache(client *api.Client) *MarketVoidReasonsCache {
 	return &MarketVoidReasonsCache{apiClient: client}
 }
 
-// NewMarketVoidReason constructs a value-typed protocols.MarketVoidReason.
+// NewMarketVoidReason constructs a value-typed types.MarketVoidReason.
 // Phase 6.1 reshape: returns the value struct directly (the
 // marketVoidReasonImpl wrapper is gone).
 func NewMarketVoidReason(
@@ -69,8 +69,8 @@ func NewMarketVoidReason(
 	description *string,
 	template *string,
 	params []string,
-) protocols.MarketVoidReason {
-	return protocols.MarketVoidReason{
+) types.MarketVoidReason {
+	return types.MarketVoidReason{
 		ID:          id,
 		Name:        name,
 		Description: description,
