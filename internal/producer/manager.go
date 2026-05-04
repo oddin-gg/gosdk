@@ -55,6 +55,37 @@ func (m *Manager) producer(ctx context.Context, id uint) (*data, error) {
 	return producer, nil
 }
 
+// producerCached returns a producer by id WITHOUT triggering a lazy Open.
+// Callers must have ensured Open was called first (recovery hot path
+// guarantees this). Returns an error if Open has not been called yet —
+// preferable to a hidden context.Background() lookup that fires HTTP
+// from inside the AMQP message-processing path.
+func (m *Manager) producerCached(id uint) (*data, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.producerMap == nil {
+		return nil, fmt.Errorf("producer manager: not opened (call Open first)")
+	}
+	p, ok := m.producerMap[id]
+	if !ok {
+		return nil, fmt.Errorf("missing producer %d", id)
+	}
+	return p, nil
+}
+
+// GetProducerCached is the no-ctx variant of GetProducer for hot-path
+// callers (FeedMessageFactory). Uses only in-memory state — fails if
+// Open has not been called. Mirrors the public GetProducer return type.
+func (m *Manager) GetProducerCached(id uint) (protocols.Producer, error) {
+	d, err := m.producerCached(id)
+	if err != nil {
+		// Fall back to the unknown-producer placeholder, matching
+		// GetProducer's behavior when an id is not in the catalog.
+		return buildProducerImplFromUnknown(id, m.cfg)
+	}
+	return buildProducerImpl(d)
+}
+
 // Open fetches the producer list from the API and populates the in-memory map.
 // Safe to call multiple times; subsequent calls re-fetch and overwrite.
 func (m *Manager) Open(ctx context.Context) error {
@@ -81,7 +112,7 @@ func (m *Manager) Open(ctx context.Context) error {
 
 // SetProducerDown ...
 func (m *Manager) SetProducerDown(id uint, flaggedDown bool) error {
-	producer, err := m.producer(context.Background(), id)
+	producer, err := m.producerCached(id)
 	if err != nil {
 		return err
 	}
@@ -94,7 +125,7 @@ func (m *Manager) SetProducerLastMessageTimestamp(id uint, timestamp time.Time) 
 	if timestamp.IsZero() {
 		return errors.New("required non zero timestamp")
 	}
-	producer, err := m.producer(context.Background(), id)
+	producer, err := m.producerCached(id)
 	if err != nil {
 		return err
 	}
@@ -104,7 +135,7 @@ func (m *Manager) SetProducerLastMessageTimestamp(id uint, timestamp time.Time) 
 
 // SetLastProcessedMessageGenTimestamp ...
 func (m *Manager) SetLastProcessedMessageGenTimestamp(id uint, timestamp time.Time) error {
-	producer, err := m.producer(context.Background(), id)
+	producer, err := m.producerCached(id)
 	if err != nil {
 		return err
 	}
@@ -114,7 +145,7 @@ func (m *Manager) SetLastProcessedMessageGenTimestamp(id uint, timestamp time.Ti
 
 // SetLastAliveReceivedGenTimestamp ...
 func (m *Manager) SetLastAliveReceivedGenTimestamp(id uint, timestamp time.Time) error {
-	producer, err := m.producer(context.Background(), id)
+	producer, err := m.producerCached(id)
 	if err != nil {
 		return err
 	}
@@ -124,7 +155,7 @@ func (m *Manager) SetLastAliveReceivedGenTimestamp(id uint, timestamp time.Time)
 
 // SetProducerRecoveryInfo ...
 func (m *Manager) SetProducerRecoveryInfo(id uint, recoveryInfo protocols.RecoveryInfo) error {
-	producer, err := m.producer(context.Background(), id)
+	producer, err := m.producerCached(id)
 	if err != nil {
 		return err
 	}

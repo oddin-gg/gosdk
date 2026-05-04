@@ -23,6 +23,13 @@ import (
 // Phase 5 v2 (deferred) replaces this struct with a per-producer actor
 // goroutine per NEXT.md §11.
 type producerRecoveryData struct {
+	// ctx is the manager-lifetime context, supplied by the recovery
+	// Manager at construction. Internal accessors use it for
+	// producer-manager lookups so a Close() request cancels in-flight
+	// work instead of stranding the goroutine on an unbounded
+	// p.ctx.
+	ctx context.Context
+
 	producerID      uint
 	producerManager *producer.Manager
 
@@ -45,8 +52,12 @@ type producerRecoveryData struct {
 	producerStatusReason protocols.ProducerStatusReason
 }
 
-func newProducerRecoveryData(producerID uint, producerManager *producer.Manager) *producerRecoveryData {
+func newProducerRecoveryData(ctx context.Context, producerID uint, producerManager *producer.Manager) *producerRecoveryData {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	return &producerRecoveryData{
+		ctx:             ctx,
 		producerID:      producerID,
 		producerManager: producerManager,
 		eventRecoveries: make(map[uint]*eventRecovery),
@@ -135,7 +146,7 @@ func (p *producerRecoveryData) isPerformingRecovery() bool {
 
 // isFlaggedDown delegates to the producer manager (its own state).
 func (p *producerRecoveryData) isFlaggedDown() bool {
-	down, err := p.producerManager.IsProducerDown(context.Background(), p.producerID)
+	down, err := p.producerManager.IsProducerDown(p.ctx, p.producerID)
 	if err != nil {
 		return true
 	}
@@ -144,7 +155,7 @@ func (p *producerRecoveryData) isFlaggedDown() bool {
 
 // isDisabled delegates to the producer manager.
 func (p *producerRecoveryData) isDisabled() bool {
-	enabled, err := p.producerManager.IsProducerEnabled(context.Background(), p.producerID)
+	enabled, err := p.producerManager.IsProducerEnabled(p.ctx, p.producerID)
 	if err != nil {
 		return true
 	}
@@ -236,7 +247,7 @@ func (p *producerRecoveryData) isKnownRecovery(requestID uint) bool {
 // validateProducerSnapshotCompletes calls into the producer manager which
 // has its own locking — must NOT hold p.lock here.
 func (p *producerRecoveryData) validateProducerSnapshotCompletes(receivedSnapshotCompletes []protocols.MessageInterest) (bool, error) {
-	prod, err := p.producerManager.GetProducer(context.Background(), p.producerID)
+	prod, err := p.producerManager.GetProducer(p.ctx, p.producerID)
 	if err != nil {
 		return false, err
 	}
@@ -283,7 +294,7 @@ func (p *producerRecoveryData) lastRecoveryStartedAt() time.Time {
 }
 
 func (p *producerRecoveryData) timestampForRecovery() (time.Time, error) {
-	prod, err := p.producerManager.GetProducer(context.Background(), p.producerID)
+	prod, err := p.producerManager.GetProducer(p.ctx, p.producerID)
 	if err != nil {
 		return time.Time{}, err
 	}
@@ -298,7 +309,7 @@ func (p *producerRecoveryData) setLastMessageReceivedTimestamp(timestamp time.Ti
 }
 
 func (p *producerRecoveryData) lastProcessedMessageGenTimestamp() (time.Time, error) {
-	prod, err := p.producerManager.GetProducer(context.Background(), p.producerID)
+	prod, err := p.producerManager.GetProducer(p.ctx, p.producerID)
 	if err != nil {
 		return time.Time{}, err
 	}
@@ -313,7 +324,7 @@ func (p *producerRecoveryData) setLastProcessedMessageGenTimestamp(timestamp tim
 }
 
 func (p *producerRecoveryData) producerName() (string, error) {
-	prod, err := p.producerManager.GetProducer(context.Background(), p.producerID)
+	prod, err := p.producerManager.GetProducer(p.ctx, p.producerID)
 	if err != nil {
 		return "", err
 	}

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/xml"
 	"errors"
@@ -32,6 +33,38 @@ type Observer interface {
 	OnAPIResponse(apiResponse protocols.Response)
 }
 
+// APIEvent describes a single HTTP attempt the API client made: the
+// successful response, a 4xx terminal error, or a transport failure.
+// One event per attempt — retries produce multiple events with
+// incrementing Attempt numbers. URL is redacted to scheme://host/path
+// (no query string) so tokens in querystrings never reach observers.
+type APIEvent struct {
+	At        time.Time
+	Method    string
+	URL       string
+	Status    int // 0 on transport-level errors (no HTTP response)
+	Latency   time.Duration
+	Attempt   int
+	Locale    *protocols.Locale
+	Request   []byte // empty unless EventCapture.RequestBody is set
+	Response  []byte // empty unless EventCapture.ResponseBody is set
+	Truncated bool
+	Err       error
+}
+
+// APIEventEmitter is invoked synchronously from inside do() with one
+// event per HTTP attempt. The emitter MUST NOT block — gosdk wraps the
+// callback with a select+default lossy push.
+type APIEventEmitter func(APIEvent)
+
+// EventCapture tunes which payload bytes flow into APIEvents.
+type EventCapture struct {
+	Emit         APIEventEmitter
+	RequestBody  bool
+	ResponseBody bool
+	BodyLimit    int // > 0 caps captured body size; <=0 disables capture
+}
+
 // Client ...
 type Client struct {
 	cfg         protocols.OddsFeedConfiguration
@@ -41,6 +74,7 @@ type Client struct {
 	mu          sync.RWMutex
 	msgCh       chan protocols.Response
 	observers   []Observer
+	capture     EventCapture
 	closed      bool
 }
 
@@ -78,6 +112,26 @@ func (c *Client) SubscribeWithAPIObserver(o Observer) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.observers = append(c.observers, o)
+}
+
+// SetHTTPClient replaces the underlying http.Client. Used by gosdk's
+// WithHTTPClient option (custom TLS, transport instrumentation) and by
+// tests. Must be called before the first request.
+func (c *Client) SetHTTPClient(h *http.Client) {
+	if h == nil {
+		return
+	}
+	c.mu.Lock()
+	c.httpClient = h
+	c.mu.Unlock()
+}
+
+// SetEventCapture installs the APIEvent emission callback. Pass a zero
+// EventCapture to disable.
+func (c *Client) SetEventCapture(ec EventCapture) {
+	c.mu.Lock()
+	c.capture = ec
+	c.mu.Unlock()
 }
 
 // Close releases observer slots and closes the response channel if Open was called.
@@ -479,6 +533,7 @@ func (c *Client) do(ctx context.Context, method, path string) (*http.Response, e
 		if err != nil {
 			// Network error: retry unless the context is canceled.
 			if ctx.Err() != nil {
+				c.emitEvent(req, 0, time.Since(started), int(attempts), nil, ctx.Err())
 				return nil, backoff.Permanent(ctx.Err())
 			}
 			c.logger.Debug("api: request failed, will retry",
@@ -487,30 +542,46 @@ func (c *Client) do(ctx context.Context, method, path string) (*http.Response, e
 				slog.Uint64("attempt", uint64(attempts)),
 				slog.String("error", err.Error()),
 			)
+			c.emitEvent(req, 0, time.Since(started), int(attempts), nil, err)
 			return nil, err
 		}
 
+		latency := time.Since(started)
 		c.logger.Debug("api: response",
 			slog.String("method", method),
 			slog.String("path", path),
 			slog.Int("status", r.StatusCode),
-			slog.Int64("latency_ms", time.Since(started).Milliseconds()),
+			slog.Int64("latency_ms", latency.Milliseconds()),
 			slog.Uint64("attempt", uint64(attempts)),
 		)
 
 		switch {
 		case r.StatusCode == http.StatusOK:
+			// Capture response body bytes when requested. We tee the body
+			// into a buffer and replace r.Body so the downstream xml
+			// decoder still works.
+			respBytes, truncated, ok := c.captureBody(r)
+			if ok {
+				c.emitEventBytes(req, r.StatusCode, latency, int(attempts), respBytes, truncated, nil)
+			} else {
+				c.emitEvent(req, r.StatusCode, latency, int(attempts), nil, nil)
+			}
 			resp = r
 			return r, nil
 		case r.StatusCode >= 400 && r.StatusCode < 500:
 			// Client error — read body, decode, and return permanent error.
+			respBytes, truncated, _ := c.captureBody(r)
 			err := c.toAPIError(method, path, r)
 			_ = r.Body.Close()
+			c.emitEventBytes(req, r.StatusCode, latency, int(attempts), respBytes, truncated, err)
 			return nil, backoff.Permanent(err)
 		default:
 			// Server error or unexpected status — retry.
+			respBytes, truncated, _ := c.captureBody(r)
 			_ = r.Body.Close()
-			return nil, fmt.Errorf("api: %s %s: status %d", method, path, r.StatusCode)
+			retryErr := fmt.Errorf("api: %s %s: status %d", method, path, r.StatusCode)
+			c.emitEventBytes(req, r.StatusCode, latency, int(attempts), respBytes, truncated, retryErr)
+			return nil, retryErr
 		}
 	}
 
@@ -527,6 +598,76 @@ func (c *Client) do(ctx context.Context, method, path string) (*http.Response, e
 		return nil, err
 	}
 	return r, nil
+}
+
+// captureBody slurps r.Body up to the configured limit when response
+// capture is enabled, replacing r.Body with a re-readable buffer so the
+// downstream decoder still works. Returns (bytes, truncated, captured).
+// captured=false means the body was left untouched (no capture configured).
+func (c *Client) captureBody(r *http.Response) ([]byte, bool, bool) {
+	c.mu.RLock()
+	cap := c.capture
+	c.mu.RUnlock()
+	if cap.Emit == nil || !cap.ResponseBody || cap.BodyLimit <= 0 || r.Body == nil {
+		return nil, false, false
+	}
+	limit := cap.BodyLimit
+	// Read up to limit+1 bytes so we can detect overflow without slurping
+	// arbitrarily large payloads into memory.
+	buf := make([]byte, limit+1)
+	n, _ := io.ReadFull(r.Body, buf)
+	rest, _ := io.ReadAll(r.Body)
+	_ = r.Body.Close()
+	combined := append(buf[:n], rest...)
+	truncated := len(combined) > limit
+	captured := combined
+	if truncated {
+		captured = combined[:limit]
+	}
+	r.Body = io.NopCloser(bytes.NewReader(combined))
+	return captured, truncated, true
+}
+
+// emitEvent fires a metadata-only APIEvent (no bytes).
+func (c *Client) emitEvent(req *http.Request, status int, latency time.Duration, attempt int, locale *protocols.Locale, err error) {
+	c.emitEventBytes(req, status, latency, attempt, nil, false, err)
+}
+
+// emitEventBytes fires an APIEvent including the supplied response body
+// bytes. Snapshots the emitter under RLock so a concurrent SetEventCapture
+// race doesn't deliver to a torn callback.
+func (c *Client) emitEventBytes(req *http.Request, status int, latency time.Duration, attempt int, body []byte, truncated bool, err error) {
+	c.mu.RLock()
+	emit := c.capture.Emit
+	c.mu.RUnlock()
+	if emit == nil {
+		return
+	}
+	emit(APIEvent{
+		At:        time.Now(),
+		Method:    req.Method,
+		URL:       redactURL(req.URL),
+		Status:    status,
+		Latency:   latency,
+		Attempt:   attempt,
+		Response:  body,
+		Truncated: truncated,
+		Err:       err,
+	})
+}
+
+// redactURL strips query strings before emitting events. The X-Access-Token
+// is sent in a header (already not in the URL), but query strings can carry
+// other sensitive identifiers (e.g., recovery `request_id`, replay node
+// scoping) and we keep them out of observability streams by default.
+func redactURL(u *url.URL) string {
+	if u == nil {
+		return ""
+	}
+	if u.Host == "" && u.Scheme == "" {
+		return u.Path
+	}
+	return u.Scheme + "://" + u.Host + u.Path
 }
 
 // toAPIError decodes the body of a non-2xx response into a structured error

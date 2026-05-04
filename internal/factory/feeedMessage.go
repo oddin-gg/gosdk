@@ -1,20 +1,25 @@
 package factory
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"time"
 
 	feedXML "github.com/oddin-gg/gosdk/internal/feed/xml"
+	"github.com/oddin-gg/gosdk/internal/producer"
 	"github.com/oddin-gg/gosdk/protocols"
 )
 
 // FeedMessageFactory ...
+//
+// producerManager is the concrete *producer.Manager (not the
+// protocols.ProducerManager interface) so this hot-path code can do a
+// pure-cache lookup via producerCached — avoiding hidden HTTP calls
+// from inside AMQP message processing.
 type FeedMessageFactory struct {
 	entityFactory         *EntityFactory
 	marketFactory         *MarketFactory
-	producerManager       protocols.ProducerManager
+	producerManager       *producer.Manager
 	oddsFeedConfiguration protocols.OddsFeedConfiguration
 }
 
@@ -35,7 +40,7 @@ func (f *FeedMessageFactory) BuildMessage(feedMessage *protocols.FeedMessage) (i
 		event = f.entityFactory.BuildMatch(*feedMessage.RoutingKey.EventID, []protocols.Locale{f.oddsFeedConfiguration.DefaultLocale()}, feedMessage.RoutingKey.SportID)
 	}
 
-	producer, err := f.producerManager.GetProducer(context.Background(), feedMessage.Message.Product())
+	producer, err := f.producerManager.GetProducerCached(feedMessage.Message.Product())
 	if err != nil {
 		return nil, err
 	}
@@ -129,7 +134,7 @@ func (f *FeedMessageFactory) BuildUnparsableMessage(feedMessage *protocols.FeedM
 
 // BuildProducerStatus ...
 func (f *FeedMessageFactory) BuildProducerStatus(producerID uint, producerStatusReason protocols.ProducerStatusReason, isDown bool, isDelayed bool, timestamp time.Time) (protocols.ProducerStatus, error) {
-	producer, err := f.producerManager.GetProducer(context.Background(), producerID)
+	producer, err := f.producerManager.GetProducerCached(producerID)
 	if err != nil {
 		return nil, err
 	}
@@ -149,7 +154,7 @@ func (f *FeedMessageFactory) BuildProducerStatus(producerID uint, producerStatus
 }
 
 // NewFeedMessageFactory ...
-func NewFeedMessageFactory(entityFactory *EntityFactory, marketFactory *MarketFactory, producerManager protocols.ProducerManager, oddsFeedConfiguration protocols.OddsFeedConfiguration) *FeedMessageFactory {
+func NewFeedMessageFactory(entityFactory *EntityFactory, marketFactory *MarketFactory, producerManager *producer.Manager, oddsFeedConfiguration protocols.OddsFeedConfiguration) *FeedMessageFactory {
 	return &FeedMessageFactory{
 		entityFactory:         entityFactory,
 		marketFactory:         marketFactory,

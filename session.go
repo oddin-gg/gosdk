@@ -15,9 +15,14 @@ import (
 	log "github.com/oddin-gg/gosdk/internal/log"
 )
 
+// sdkOddsFeedSession is the internal interface the legacy session impl
+// satisfies. It used to embed a public protocols.OddsFeedSession; that
+// public interface was retired alongside the manager-of-managers shape.
 type sdkOddsFeedSession interface {
-	protocols.OddsFeedSession
+	ID() uuid.UUID
+	RespCh() protocols.SessionMessageDelivery
 	Open(
+		ctx context.Context,
 		routingKeys []string,
 		messageInterest *protocols.MessageInterest,
 		reportExtendedData bool,
@@ -50,6 +55,7 @@ func (o *oddsFeedSessionImpl) IsReplay() bool {
 }
 
 func (o *oddsFeedSessionImpl) Open(
+	ctx context.Context,
 	routingKeys []string,
 	messageInterest *protocols.MessageInterest,
 	reportExtendedData bool) error {
@@ -57,7 +63,7 @@ func (o *oddsFeedSessionImpl) Open(
 		return errors.New("session is already opened")
 	}
 
-	ch, err := o.channelConsumer.Open(context.Background(), routingKeys, messageInterest)
+	ch, err := o.channelConsumer.Open(ctx, routingKeys, messageInterest)
 	if err != nil {
 		return err
 	}

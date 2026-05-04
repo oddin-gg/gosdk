@@ -33,6 +33,13 @@ type Manager struct {
 	msgCh                  chan protocols.RecoveryMessage
 	sequence               *generator
 
+	// ctx is the manager-lifetime context, derived from the ctx supplied
+	// to Open. Internal sites that need to call API/producer methods use
+	// this so a Close() request cancels in-flight work. Cancelled by
+	// runShutdown via cancelCtx.
+	ctx       context.Context
+	cancelCtx context.CancelFunc
+
 	// closeOnce guards a single shutdown sequence; further Close calls are no-ops.
 	// Phase 5b lite-fix replaces the prior `m.closeCh <- true` (unbuffered send
 	// that deadlocked when timerTick was blocked sending on msgCh) with a
@@ -147,14 +154,26 @@ func (m *Manager) InitiateEventStatefulMessagesRecovery(ctx context.Context, pro
 }
 
 // Open ...
-func (m *Manager) Open() (<-chan protocols.RecoveryMessage, error) {
+//
+// The supplied ctx is the manager-lifetime context: it gates internal
+// API/producer calls from the recovery loop and from the producerRecoveryData
+// accessors. Close() cancels a derived child of this ctx, propagating
+// cancellation to in-flight work. Pass context.Background() if no upstream
+// ctx is available; the typical caller is gosdk.Client.Connect, which
+// supplies its internal lifetime ctx.
+func (m *Manager) Open(ctx context.Context) (<-chan protocols.RecoveryMessage, error) {
 	if m.msgCh != nil {
 		return nil, errors.New("already opened")
 	}
 
-	activeProducers, err := m.producerManager.ActiveProducers(context.Background())
+	mgrCtx, cancel := context.WithCancel(ctx)
+	m.ctx = mgrCtx
+	m.cancelCtx = cancel
+
+	activeProducers, err := m.producerManager.ActiveProducers(mgrCtx)
 	switch {
 	case err != nil:
+		cancel()
 		return nil, err
 	case len(activeProducers) == 0:
 		m.logger.Warn("no active producers")
@@ -163,7 +182,7 @@ func (m *Manager) Open() (<-chan protocols.RecoveryMessage, error) {
 	m.lock.Lock()
 	m.producerRecoveryData = make(map[uint]*producerRecoveryData)
 	for id := range activeProducers {
-		m.producerRecoveryData[id] = newProducerRecoveryData(id, m.producerManager)
+		m.producerRecoveryData[id] = newProducerRecoveryData(mgrCtx, id, m.producerManager)
 	}
 	m.lock.Unlock()
 
@@ -195,9 +214,13 @@ func (m *Manager) Open() (<-chan protocols.RecoveryMessage, error) {
 //
 // Phase 5b lite-fix: replaces unbuffered `closeCh <- true` (which deadlocked
 // when timerTick was mid-send on msgCh) with a close-broadcast; protects
-// msgCh close via closeOnce.
+// msgCh close via closeOnce. Also cancels the manager-lifetime ctx so
+// in-flight producer/API calls fail fast instead of stranding goroutines.
 func (m *Manager) Close() {
 	m.closeOnce.Do(func() {
+		if m.cancelCtx != nil {
+			m.cancelCtx()
+		}
 		if m.ticker != nil {
 			m.ticker.Stop()
 		}
@@ -241,7 +264,7 @@ func (m *Manager) findOrMakeProducerRecoveryData(producerID uint) *producerRecov
 
 	data, ok := m.producerRecoveryData[producerID]
 	if !ok {
-		data = newProducerRecoveryData(producerID, m.producerManager)
+		data = newProducerRecoveryData(m.ctx, producerID, m.producerManager)
 		m.producerRecoveryData[producerID] = data
 	}
 
@@ -342,7 +365,7 @@ func (m *Manager) notifyProducerChangedState(data *producerRecoveryData, reason 
 
 	data.setProducerStatusReason(reason)
 
-	producerData, err := m.producerManager.GetProducer(context.Background(), data.producerID)
+	producerData, err := m.producerManager.GetProducer(m.ctx, data.producerID)
 	if err != nil {
 		return err
 	}
@@ -475,7 +498,7 @@ func (m *Manager) eventRecoveryFinished(id uint, data *producerRecoveryData) err
 	finished := time.Now()
 	m.logger.Infof("event %s recovery finished for request %d in %d ms", eventRecovery.eventID.ToString(), id, finished.Sub(started).Milliseconds())
 
-	producerData, err := m.producerManager.GetProducer(context.Background(), data.producerID)
+	producerData, err := m.producerManager.GetProducer(m.ctx, data.producerID)
 	if err != nil {
 		return err
 	}
@@ -523,7 +546,7 @@ func (m *Manager) makeSnapshotRecovery(data *producerRecoveryData, timestamp tim
 	m.logger.Infof("recovery started for request %d", requestID)
 
 	success, err := m.apiClient.PostRecovery(
-		context.Background(),
+		m.ctx,
 		producerName,
 		requestID,
 		m.cfg.SdkNodeID(),

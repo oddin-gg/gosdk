@@ -2,6 +2,7 @@ package gosdk
 
 import (
 	"log/slog"
+	"net/http"
 	"time"
 
 	"github.com/oddin-gg/gosdk/protocols"
@@ -37,6 +38,7 @@ type Config struct {
 	apiCallBodyLimit     int
 	amqpPrefetch         int
 	subscriptionBuffer   int
+	httpClient           *http.Client
 }
 
 // Option mutates a Config draft inside NewConfig. Closures don't escape
@@ -212,6 +214,17 @@ func WithAMQPPrefetch(n int) Option { return func(c *Config) { c.amqpPrefetch = 
 // WithSubscriptionBuffer sets the size of the in-process subscription
 // channel buffer. Default 256.
 func WithSubscriptionBuffer(n int) Option { return func(c *Config) { c.subscriptionBuffer = n } }
+
+// WithHTTPClient overrides the *http.Client used for REST API calls.
+// Useful for custom TLS config, transport-level instrumentation, or
+// integration tests that route through an httptest.Server. Pass nil to
+// keep the default.
+func WithHTTPClient(h *http.Client) Option {
+	return func(c *Config) { c.httpClient = h }
+}
+
+// HTTPClient returns the configured custom http.Client (nil when unset).
+func (c Config) HTTPClient() *http.Client { return c.httpClient }
 
 // --- Read-only accessors (some are needed across packages once Client lands) ---
 
