@@ -77,9 +77,11 @@ func (e *EntityFactory) BuildCompetitor(id protocols.URN, locales []protocols.Lo
 	return cache.NewCompetitor(id, e.cacheManager.CompetitorCache, e, locales)
 }
 
-// BuildPlayer ...
-func (e *EntityFactory) BuildPlayer(id protocols.URN, locale protocols.Locale) protocols.Player {
-	return cache.NewPlayer(id, e.cacheManager.PlayersCache, locale)
+// BuildPlayer resolves a Player snapshot from the cache, fetching if
+// missing. Returns a populated value or an error from the underlying
+// fetch — never returns nil with nil error.
+func (e *EntityFactory) BuildPlayer(ctx context.Context, id protocols.URN, locale protocols.Locale) (*protocols.Player, error) {
+	return cache.BuildPlayer(ctx, e.cacheManager.PlayersCache, id, locale)
 }
 
 // BuildFixture ...

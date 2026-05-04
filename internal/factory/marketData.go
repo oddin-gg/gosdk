@@ -70,7 +70,7 @@ func (m marketDataImpl) OutcomeName(outcomeID string, locale protocols.Locale) (
 			if err != nil {
 				return nil, fmt.Errorf("derivation of outcome name for dynamic player outcome failed for id [%s]: %w", outcomeID, err)
 			}
-			outcomeName = &player.LocalizedName
+			outcomeName = &player.Name
 
 		case competitorOutcomeType:
 			urn, err := protocols.ParseURN(outcomeID)
@@ -217,7 +217,7 @@ func (m marketDataImpl) getPropsName(entityID string, groups []string, locale pr
 		if err != nil {
 			return "", false
 		}
-		return player.LocalizedName, true
+		return player.Name, true
 	}
 	return "", false
 }

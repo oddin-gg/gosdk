@@ -320,7 +320,11 @@ func (c competitorImpl) Players() (map[protocols.Locale][]protocols.Player, erro
 	for _, locale := range c.locales {
 		players := make([]protocols.Player, 0, len(urns))
 		for _, urn := range urns {
-			players = append(players, c.entityFactory.BuildPlayer(urn, locale))
+			p, err := c.entityFactory.BuildPlayer(context.Background(), urn, locale)
+			if err != nil {
+				return nil, fmt.Errorf("build player %s/%s: %w", urn.ToString(), locale, err)
+			}
+			players = append(players, *p)
 		}
 		out[locale] = players
 	}
@@ -342,7 +346,11 @@ func (c competitorImpl) LocalizedPlayers(locale protocols.Locale) ([]protocols.P
 	}
 	players := make([]protocols.Player, 0, len(urns))
 	for _, urn := range urns {
-		players = append(players, c.entityFactory.BuildPlayer(urn, locale))
+		p, err := c.entityFactory.BuildPlayer(context.Background(), urn, locale)
+		if err != nil {
+			return nil, fmt.Errorf("build player %s/%s: %w", urn.ToString(), locale, err)
+		}
+		players = append(players, *p)
 	}
 	return players, nil
 }
