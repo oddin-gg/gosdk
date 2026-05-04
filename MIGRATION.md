@@ -631,16 +631,31 @@ if !ok { /* unknown / GC'd */ }
 Handles stay queryable for `recovery.HandleGCGracePeriod` (default 5
 minutes) after they reach a terminal state.
 
-### What's deferred to v1.2
+### 11.4 Phase 5 v2 — per-producer actor model
 
-- **Per-producer actor goroutine model (NEXT.md §11).** The current
-  mutex-hygiene `producerRecoveryData` (Phase 5b) is correct under
-  `-race` and supports `RecoveryHandle` cleanly. The full actor
-  rewrite is architectural cleanup — it makes per-producer state
-  ownership single-threaded — but doesn't unlock additional v1.x
-  user-visible behavior. Better tackled as a focused refactor when
-  there's a concrete need (e.g., a Phase 11 expansion that benefits
-  from actor-per-producer concurrency).
+The recovery state machine moved to one goroutine per producer
+(NEXT.md §11). State-machine semantics are preserved exactly —
+verified against the Java/Kotlin and .NET reference SDKs — but the
+implementation no longer needs locks on per-producer state.
+
+This is invisible to consumers: `Client.RecoverEventOdds` still
+returns a `*RecoveryHandle`, `RecoveryEvents()` still emits
+`ProducerStatus` and event-recovery completions, the lossy semantics
+on the channel are unchanged. The only observable effect is that
+deadlocks-in-principle are now deadlocks-impossible-by-construction:
+no two locks to acquire in the wrong order because there are no
+locks on per-producer state.
+
+For maintainers, the layout changed:
+- `internal/recovery/actor.go` — per-producer `recoveryActor` with
+  inbox + run loop + handler methods.
+- `internal/recovery/actor_events.go` — typed event messages on the
+  inbox.
+- `internal/recovery/manager.go` — thin dispatcher: receives feed
+  events, looks up the actor, pushes to its inbox; owns the handle
+  registry + output channel + request-id generator.
+- `internal/recovery/recovery_data.go` — gone. Its state lives in
+  the actor as plain fields.
 
 ## Questions
 
