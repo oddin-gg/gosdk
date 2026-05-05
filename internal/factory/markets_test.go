@@ -1,6 +1,7 @@
 package factory
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -17,7 +18,7 @@ type stubMarketData struct {
 	outcomeErr  error
 }
 
-func (s *stubMarketData) MarketName(locale types.Locale) (*string, error) {
+func (s *stubMarketData) MarketName(_ context.Context, _ types.Locale) (*string, error) {
 	if s.marketErr != nil {
 		return nil, s.marketErr
 	}
@@ -27,7 +28,7 @@ func (s *stubMarketData) MarketName(locale types.Locale) (*string, error) {
 	return &s.marketName, nil
 }
 
-func (s *stubMarketData) OutcomeName(id string, locale types.Locale) (*string, error) {
+func (s *stubMarketData) OutcomeName(_ context.Context, _ string, _ types.Locale) (*string, error) {
 	if s.outcomeErr != nil {
 		return nil, s.outcomeErr
 	}
@@ -64,33 +65,35 @@ func TestConvertFeedMarketStatus(t *testing.T) {
 // --- resolveMarketName / resolveOutcomeName ---
 
 func TestResolveMarketName(t *testing.T) {
-	if got := resolveMarketName(nil, types.EnLocale); got != "" {
+	ctx := t.Context()
+	if got := resolveMarketName(ctx, nil, types.EnLocale); got != "" {
 		t.Errorf("nil md should return empty, got %q", got)
 	}
 	md := &stubMarketData{marketName: "1x2"}
-	if got := resolveMarketName(md, types.EnLocale); got != "1x2" {
+	if got := resolveMarketName(ctx, md, types.EnLocale); got != "1x2" {
 		t.Errorf("got %q, want 1x2", got)
 	}
 	mdErr := &stubMarketData{marketErr: errors.New("boom")}
-	if got := resolveMarketName(mdErr, types.EnLocale); got != "" {
+	if got := resolveMarketName(ctx, mdErr, types.EnLocale); got != "" {
 		t.Errorf("error path should return empty, got %q", got)
 	}
 	mdNil := &stubMarketData{}
-	if got := resolveMarketName(mdNil, types.EnLocale); got != "" {
+	if got := resolveMarketName(ctx, mdNil, types.EnLocale); got != "" {
 		t.Errorf("nil-name path should return empty, got %q", got)
 	}
 }
 
 func TestResolveOutcomeName(t *testing.T) {
-	if got := resolveOutcomeName(nil, "1", types.EnLocale); got != "" {
+	ctx := t.Context()
+	if got := resolveOutcomeName(ctx, nil, "1", types.EnLocale); got != "" {
 		t.Error("nil md should return empty")
 	}
 	md := &stubMarketData{outcomeName: "home"}
-	if got := resolveOutcomeName(md, "1", types.EnLocale); got != "home" {
+	if got := resolveOutcomeName(ctx, md, "1", types.EnLocale); got != "home" {
 		t.Errorf("got %q, want home", got)
 	}
 	mdErr := &stubMarketData{outcomeErr: errors.New("boom")}
-	if got := resolveOutcomeName(mdErr, "1", types.EnLocale); got != "" {
+	if got := resolveOutcomeName(ctx, mdErr, "1", types.EnLocale); got != "" {
 		t.Errorf("error should return empty, got %q", got)
 	}
 }
@@ -149,7 +152,7 @@ func TestMarketFactory_BuildOutcomeOdds(t *testing.T) {
 	prob := float32(0.6)
 	active := uint(1)
 
-	got := mf.buildOutcomeOdds(feedXML.Outcome{
+	got := mf.buildOutcomeOdds(t.Context(), feedXML.Outcome{
 		ID:            "1",
 		Odds:          &odds,
 		Probabilities: &prob,
@@ -176,7 +179,7 @@ func TestMarketFactory_BuildOutcomeOdds(t *testing.T) {
 func TestMarketFactory_BuildOutcomeOdds_InactiveDefault(t *testing.T) {
 	mf := MarketFactory{logger: log.New(nil)}
 	md := &stubMarketData{}
-	got := mf.buildOutcomeOdds(feedXML.Outcome{ID: "1"}, md, types.EnLocale)
+	got := mf.buildOutcomeOdds(t.Context(), feedXML.Outcome{ID: "1"}, md, types.EnLocale)
 	if got.IsActive {
 		t.Error("IsActive should default to false when Active is nil")
 	}
@@ -200,7 +203,7 @@ func TestMarketFactory_BuildOutcomeSettlement(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := mf.buildOutcomeSettlement(feedXML.Outcome{ID: "1", Result: c.feedResult}, md, types.EnLocale)
+			got := mf.buildOutcomeSettlement(t.Context(), feedXML.Outcome{ID: "1", Result: c.feedResult}, md, types.EnLocale)
 			if got.OutcomeResult != c.want {
 				t.Errorf("got %v, want %v", got.OutcomeResult, c.want)
 			}
@@ -227,7 +230,7 @@ func TestMarketFactory_BuildOutcomeSettlement_VoidFactor(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := mf.buildOutcomeSettlement(feedXML.Outcome{ID: "1", VoidFactor: c.vf}, md, types.EnLocale)
+			got := mf.buildOutcomeSettlement(t.Context(), feedXML.Outcome{ID: "1", VoidFactor: c.vf}, md, types.EnLocale)
 			switch {
 			case c.want == nil && got.VoidFactor != nil:
 				t.Errorf("want nil, got %v", *got.VoidFactor)

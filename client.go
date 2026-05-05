@@ -32,6 +32,11 @@ const defaultEventBuffer = 64
 // messages. The trailing field is the SDK node id (or "-" when unset).
 const snapshotKeyTemplate = "-.-.-.snapshot_complete.-.-.-."
 
+// shutdownBudget caps the total time runShutdown spends waiting for
+// session + broker cleanup. Single shared budget across both so a
+// stuck broker doesn't compound across sub-shutdowns.
+const shutdownBudget = 5 * time.Second
+
 // Client is the flat v1.0.0 SDK entry-point. It replaces the legacy
 // OddsFeed + manager-of-managers shape with direct methods.
 //
@@ -128,7 +133,7 @@ func New(ctx context.Context, cfg Config) (*Client, error) {
 	c.logger = log.New(logger).WithField("client_id", details.BookmakerID())
 
 	c.producerManager = producer.NewManager(c.cfgAdpt, c.apiClient, c.logger)
-	c.cacheManager = cache.NewManager(c.apiClient, c.cfgAdpt, c.logger)
+	c.cacheManager = cache.NewManager(ctx, c.apiClient, c.cfgAdpt, c.logger)
 
 	entityFactory := factory.NewEntityFactory(c.cacheManager)
 	marketDescriptionFactory := factory.NewMarketDescriptionFactory(
@@ -222,15 +227,23 @@ func (c *Client) Connect(ctx context.Context) error {
 	}
 
 	// Internal ctx is the lifetime ctx for pumps + recovery — cancelled
-	// on Close. Created here so the recovery manager and the recovery
-	// pump goroutine share the same cancellation root.
-	internalCtx, cancel := context.WithCancel(context.Background())
+	// on Close (via internalCancel) and never on caller-ctx expiry.
+	// Use WithoutCancel(ctx) instead of Background() so caller metadata
+	// (slog logger fields, OTel trace ids, etc.) propagates into the
+	// recovery actor + pump goroutines, but the cancellation chain from
+	// the caller's ctx is severed: a 5 s Connect timeout must NOT tear
+	// down the recovery loop that's meant to live for the Client's
+	// lifetime.
+	internalCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	c.internalCancel = cancel
 
 	recoveryCh, err := c.recoveryManager.Open(internalCtx)
 	if err != nil {
 		// AMQP is up; attempt rollback so retry from scratch is clean.
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		// 5 s cap keeps a stuck broker from hanging Connect indefinitely;
+		// WithoutCancel(ctx) preserves caller metadata while preventing
+		// the rollback from inheriting an already-cancelled caller ctx.
+		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		_ = c.rabbitMQClient.Close(shutdownCtx)
 		cancel()
 		return fmt.Errorf("gosdk: recovery open: %w", err)
@@ -252,7 +265,10 @@ func (c *Client) Connect(ctx context.Context) error {
 	)
 	aliveInterest := types.SystemAliveOnly
 	if err := alive.Open(ctx, []string{string(types.SystemAliveOnly)}, &aliveInterest, false); err != nil {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		// Same rollback shape as the recovery-open error path above:
+		// bound at 5 s, parented on WithoutCancel(ctx) so a cancelled
+		// caller ctx doesn't prevent rollback while metadata propagates.
+		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		_ = c.rabbitMQClient.Close(shutdownCtx)
 		cancel()
 		c.recoveryManager.Close()
@@ -339,8 +355,18 @@ func (c *Client) runShutdown() {
 		<-s.Done()
 	}
 
+	// runShutdown executes in its own goroutine spawned by Close; the
+	// caller's ctx (passed to Close) bounds the caller's *wait*, not
+	// the work itself, and isn't propagated here. Background() is the
+	// intentional root: shutdown work proceeds regardless of upstream
+	// cancellation, capped at shutdownBudget so a stuck broker doesn't
+	// keep the Client alive forever. The same ctx is shared across
+	// session and broker shutdowns so the cap applies to total work.
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownBudget)
+	defer cancel()
+
 	if c.aliveSession != nil {
-		c.aliveSession.Close()
+		c.aliveSession.Close(shutdownCtx)
 	}
 
 	if c.apiClient != nil {
@@ -352,9 +378,7 @@ func (c *Client) runShutdown() {
 	}
 
 	if c.rabbitMQClient != nil {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		_ = c.rabbitMQClient.Close(shutdownCtx)
-		cancel()
 	}
 
 	c.wg.Wait()

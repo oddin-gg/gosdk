@@ -91,7 +91,10 @@ func (c *ChannelConsumer) Open(ctx context.Context, routingKeys []string, messag
 	c.messageInterest = messageInterest
 	c.outgoing = make(chan *types.QueueMessage, c.bufferSize)
 
-	loopCtx, cancel := context.WithCancel(context.Background())
+	// Loop ctx must outlive the caller's Open ctx (which bounds queue
+	// declaration only). WithoutCancel propagates caller metadata while
+	// severing the cancellation chain; closeFn cancels at Close() time.
+	loopCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	c.loopCtx = loopCtx
 	c.closeFn = cancel
 	out := c.outgoing
@@ -99,7 +102,6 @@ func (c *ChannelConsumer) Open(ctx context.Context, routingKeys []string, messag
 
 	c.wg.Add(1)
 	go c.run(loopCtx)
-	_ = ctx // open() is non-blocking — the caller's ctx applies to subsequent broker calls inside run().
 	return out, nil
 }
 
@@ -189,7 +191,7 @@ func (c *ChannelConsumer) consume(ctx context.Context, deliveries <-chan amqp.De
 				// Channel closed (connection drop or broker close).
 				return
 			}
-			qm := c.processDelivery(d)
+			qm := c.processDelivery(ctx, d)
 			if qm == nil {
 				// processDelivery already nack'd or ack'd as appropriate.
 				continue
@@ -215,7 +217,7 @@ func (c *ChannelConsumer) consume(ctx context.Context, deliveries <-chan amqp.De
 // On decode failure or routing-key parse failure it returns an unparsable
 // message; the caller still admits it to the buffer (consumer wants to know).
 // Returns nil only in the empty-body fast path that ack's and skips.
-func (c *ChannelConsumer) processDelivery(d amqp.Delivery) *types.QueueMessage {
+func (c *ChannelConsumer) processDelivery(ctx context.Context, d amqp.Delivery) *types.QueueMessage {
 	timestamp := types.MessageTimestamp{
 		Created:  d.Timestamp,
 		Sent:     d.Timestamp,
@@ -234,7 +236,7 @@ func (c *ChannelConsumer) processDelivery(d amqp.Delivery) *types.QueueMessage {
 
 	if len(d.Body) == 0 {
 		c.logger.Warnf("received message without proper body from %s", d.RoutingKey)
-		queueMessage.UnparsableMessage = c.feedMessageFactory.BuildUnparsableMessage(&types.FeedMessage{
+		queueMessage.UnparsableMessage = c.feedMessageFactory.BuildUnparsableMessage(ctx, &types.FeedMessage{
 			BasicFeedMessage: types.BasicFeedMessage{
 				RawMessage: d.Body,
 				RoutingKey: routingKeyInfo,
@@ -252,7 +254,7 @@ func (c *ChannelConsumer) processDelivery(d amqp.Delivery) *types.QueueMessage {
 		default:
 			c.logger.WithError(err).Errorf("failed to unmarshall %s", string(d.Body))
 		}
-		queueMessage.UnparsableMessage = c.feedMessageFactory.BuildUnparsableMessage(&types.FeedMessage{
+		queueMessage.UnparsableMessage = c.feedMessageFactory.BuildUnparsableMessage(ctx, &types.FeedMessage{
 			BasicFeedMessage: types.BasicFeedMessage{
 				RawMessage: d.Body,
 				RoutingKey: routingKeyInfo,

@@ -47,8 +47,11 @@ func (m Manager) Close() {
 	m.LocalizedStaticMatchStatus.Close()
 }
 
-// NewManager ...
-func NewManager(client *api.Client, oddsFeedConfiguration types.OddsFeedConfiguration, logger *log.Logger) *Manager {
+// NewManager constructs the cache manager. ctx becomes the lifecycle
+// root for caches that run periodic-refresh goroutines (e.g. the
+// localized static data cache). The cache outlives ctx's cancellation
+// (WithoutCancel inside) — Close() is the canonical shutdown signal.
+func NewManager(ctx context.Context, client *api.Client, oddsFeedConfiguration types.OddsFeedConfiguration, logger *log.Logger) *Manager {
 	manager := &Manager{
 		MarketDescriptionCache: newMarketDescriptionCache(client),
 		CompetitorCache:        newCompetitorCache(client, logger),
@@ -60,8 +63,8 @@ func NewManager(client *api.Client, oddsFeedConfiguration types.OddsFeedConfigur
 		MarketVoidReasonsCache: newMarketVoidReasonsCache(client),
 		PlayersCache:           newPlayersCache(client, logger),
 
-		LocalizedStaticMatchStatus: newLocalizedStaticDataCache(oddsFeedConfiguration, func(locale types.Locale) ([]types.StaticData, error) {
-			data, err := client.FetchMatchStatusDescriptions(context.Background(), locale)
+		LocalizedStaticMatchStatus: newLocalizedStaticDataCache(ctx, oddsFeedConfiguration, logger, func(ctx context.Context, locale types.Locale) ([]types.StaticData, error) {
+			data, err := client.FetchMatchStatusDescriptions(ctx, locale)
 			if err != nil {
 				return nil, err
 			}

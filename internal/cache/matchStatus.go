@@ -428,7 +428,7 @@ func BuildMatchStatus(
 	out.HomeScore = &hs
 	out.AwayScore = &as
 	if entry.matchStatusID != nil && staticCache != nil {
-		desc, err := staticCache.LocalizedItem(*entry.matchStatusID, locales)
+		desc, err := staticCache.LocalizedItem(ctx, *entry.matchStatusID, locales)
 		if err == nil {
 			out.StatusDescription = &desc
 		}

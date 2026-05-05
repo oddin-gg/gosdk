@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"context"
 	"sync"
 	"time"
 
@@ -19,18 +20,18 @@ const (
 // directly (the previous wrapper impl is gone).
 type LocalizedStaticDataCache struct {
 	oddsFeedConfiguration types.OddsFeedConfiguration
-	fetcher               func(locale types.Locale) ([]types.StaticData, error)
+	fetcher               func(ctx context.Context, locale types.Locale) ([]types.StaticData, error)
 	locales               []types.Locale
 	internalCache         map[uint]map[types.Locale]string
-	ticker                *time.Ticker
-	closeCh               chan bool
+	lifeCtx               context.Context
+	closeFn               context.CancelFunc
 	logger                *log.Logger
 	mux                   sync.Mutex
 }
 
 // LocalizedItem returns a populated LocalizedStaticData for the given
 // id, fetching missing locales as needed.
-func (l *LocalizedStaticDataCache) LocalizedItem(id uint, locales []types.Locale) (types.LocalizedStaticData, error) {
+func (l *LocalizedStaticDataCache) LocalizedItem(ctx context.Context, id uint, locales []types.Locale) (types.LocalizedStaticData, error) {
 	l.mux.Lock()
 	defer l.mux.Unlock()
 
@@ -42,7 +43,7 @@ func (l *LocalizedStaticDataCache) LocalizedItem(id uint, locales []types.Locale
 		}
 	}
 	if len(missing) > 0 {
-		if err := l.fetchData(missing); err != nil {
+		if err := l.fetchData(ctx, missing); err != nil {
 			return types.LocalizedStaticData{}, err
 		}
 	}
@@ -62,21 +63,21 @@ func (l *LocalizedStaticDataCache) LocalizedItem(id uint, locales []types.Locale
 }
 
 // Item returns the entry in the configured default locale.
-func (l *LocalizedStaticDataCache) Item(id uint) (types.LocalizedStaticData, error) {
-	return l.LocalizedItem(id, l.locales)
+func (l *LocalizedStaticDataCache) Item(ctx context.Context, id uint) (types.LocalizedStaticData, error) {
+	return l.LocalizedItem(ctx, id, l.locales)
 }
 
-// Close ...
+// Close cancels the periodic-refresh goroutine. Idempotent.
 func (l *LocalizedStaticDataCache) Close() {
-	if l.closeCh != nil {
-		l.closeCh <- true
+	if l.closeFn != nil {
+		l.closeFn()
+		l.closeFn = nil
 	}
-	l.closeCh = nil
 }
 
-func (l *LocalizedStaticDataCache) fetchData(locales []types.Locale) error {
+func (l *LocalizedStaticDataCache) fetchData(ctx context.Context, locales []types.Locale) error {
 	for _, locale := range locales {
-		data, err := l.fetcher(locale)
+		data, err := l.fetcher(ctx, locale)
 		if err != nil {
 			return err
 		}
@@ -104,7 +105,7 @@ func (l *LocalizedStaticDataCache) fetchedLocales() map[types.Locale]struct{} {
 	return result
 }
 
-func (l *LocalizedStaticDataCache) timerTick() {
+func (l *LocalizedStaticDataCache) timerTick(ctx context.Context) {
 	l.mux.Lock()
 	defer l.mux.Unlock()
 
@@ -114,33 +115,51 @@ func (l *LocalizedStaticDataCache) timerTick() {
 		locales = append(locales, k)
 	}
 
-	if err := l.fetchData(locales); err != nil {
+	if err := l.fetchData(ctx, locales); err != nil {
 		l.logger.WithError(err).Errorf("failed to periodically fetch static data")
 	}
 }
 
 func (l *LocalizedStaticDataCache) startTimer() {
-	l.closeCh = make(chan bool, 1)
 	go func() {
-		time.Sleep(initialDelay)
-		l.ticker = time.NewTicker(tickPeriod)
+		select {
+		case <-time.After(initialDelay):
+		case <-l.lifeCtx.Done():
+			return
+		}
+		ticker := time.NewTicker(tickPeriod)
+		defer ticker.Stop()
 		for {
 			select {
-			case <-l.ticker.C:
-				l.timerTick()
-			case <-l.closeCh:
+			case <-ticker.C:
+				l.timerTick(l.lifeCtx)
+			case <-l.lifeCtx.Done():
 				return
 			}
 		}
 	}()
 }
 
-func newLocalizedStaticDataCache(oddsFeedConfiguration types.OddsFeedConfiguration, fetcher func(locale types.Locale) ([]types.StaticData, error)) *LocalizedStaticDataCache {
+// newLocalizedStaticDataCache constructs the cache. ctx is used to
+// derive a lifecycle context (via WithoutCancel + WithCancel): caller
+// metadata propagates into the periodic refresh goroutine, but its
+// cancellation is severed so the cache outlives the construction-time
+// ctx. Close() cancels the lifecycle.
+func newLocalizedStaticDataCache(
+	ctx context.Context,
+	oddsFeedConfiguration types.OddsFeedConfiguration,
+	logger *log.Logger,
+	fetcher func(ctx context.Context, locale types.Locale) ([]types.StaticData, error),
+) *LocalizedStaticDataCache {
+	lifeCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	ca := &LocalizedStaticDataCache{
 		oddsFeedConfiguration: oddsFeedConfiguration,
 		fetcher:               fetcher,
 		locales:               []types.Locale{oddsFeedConfiguration.DefaultLocale()},
 		internalCache:         make(map[uint]map[types.Locale]string),
+		lifeCtx:               lifeCtx,
+		closeFn:               cancel,
+		logger:                logger,
 	}
 	ca.startTimer()
 	return ca

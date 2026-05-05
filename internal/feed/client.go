@@ -150,7 +150,11 @@ func (c *Client) Open(ctx context.Context) error {
 	c.emit(EventConnected, nil)
 
 	// Spawn reconnect goroutine for the lifetime of the connection.
-	loopCtx, cancel := context.WithCancel(context.Background())
+	// WithoutCancel(ctx) preserves caller metadata (logger fields,
+	// trace ids) on the loop ctx but severs the cancellation chain:
+	// the loop must outlive Open's caller ctx (which only bounds the
+	// dial) and is cancelled by closeFn at Close() time.
+	loopCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	c.mu.Lock()
 	c.closeFn = cancel
 	c.opened = true

@@ -20,6 +20,7 @@ type MarketDescriptionFactory struct {
 // MarketDescriptionByIDAndSpecifiers returns the cached market
 // description by marketID, specifiers, and locales.
 func (m MarketDescriptionFactory) MarketDescriptionByIDAndSpecifiers(
+	ctx context.Context,
 	marketID uint,
 	specifiers map[string]string,
 	locales []types.Locale,
@@ -28,18 +29,19 @@ func (m MarketDescriptionFactory) MarketDescriptionByIDAndSpecifiers(
 	if specifier, ok := specifiers["variant"]; ok {
 		variant = &specifier
 	}
-	return m.MarketDescriptionByIDAndVariant(marketID, variant, locales)
+	return m.MarketDescriptionByIDAndVariant(ctx, marketID, variant, locales)
 }
 
 // MarketDescriptionByIDAndVariant returns the cached market description
 // by (marketID, variant, locales). Always returns a populated value or
 // an error.
 func (m MarketDescriptionFactory) MarketDescriptionByIDAndVariant(
+	ctx context.Context,
 	marketID uint,
 	variant *string,
 	locales []types.Locale,
 ) (*types.MarketDescription, error) {
-	mds, err := m.marketDescriptionCache.MarketDescriptionByID(context.Background(), marketID, variant, locales)
+	mds, err := m.marketDescriptionCache.MarketDescriptionByID(ctx, marketID, variant, locales)
 	if err != nil {
 		return nil, fmt.Errorf("get market description by id failed: %w", err)
 	}
@@ -51,8 +53,8 @@ func (m MarketDescriptionFactory) MarketDescriptionByIDAndVariant(
 }
 
 // MarketVoidReasons returns the void-reasons catalog.
-func (m MarketDescriptionFactory) MarketVoidReasons() ([]types.MarketVoidReason, error) {
-	data, err := m.marketVoidReasonsCache.MarketVoidReasons(context.Background())
+func (m MarketDescriptionFactory) MarketVoidReasons(ctx context.Context) ([]types.MarketVoidReason, error) {
+	data, err := m.marketVoidReasonsCache.MarketVoidReasons(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -74,16 +76,16 @@ func (m MarketDescriptionFactory) MarketVoidReasons() ([]types.MarketVoidReason,
 }
 
 // ReloadMarketVoidReasons forces a refresh and returns the new list.
-func (m MarketDescriptionFactory) ReloadMarketVoidReasons() ([]types.MarketVoidReason, error) {
-	if err := m.marketVoidReasonsCache.ReloadMarketVoidReasons(context.Background()); err != nil {
+func (m MarketDescriptionFactory) ReloadMarketVoidReasons(ctx context.Context) ([]types.MarketVoidReason, error) {
+	if err := m.marketVoidReasonsCache.ReloadMarketVoidReasons(ctx); err != nil {
 		return nil, err
 	}
-	return m.MarketVoidReasons()
+	return m.MarketVoidReasons(ctx)
 }
 
 // MarketDescriptions returns every market description for the locale.
-func (m MarketDescriptionFactory) MarketDescriptions(locale types.Locale) ([]types.MarketDescription, error) {
-	mds, err := m.marketDescriptionCache.LocalizedMarketDescriptions(context.Background(), locale)
+func (m MarketDescriptionFactory) MarketDescriptions(ctx context.Context, locale types.Locale) ([]types.MarketDescription, error) {
+	mds, err := m.marketDescriptionCache.LocalizedMarketDescriptions(ctx, locale)
 	if err != nil {
 		return nil, err
 	}

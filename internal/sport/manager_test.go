@@ -111,7 +111,7 @@ func newSportManager(t *testing.T, srv *httptest.Server) *Manager {
 		},
 		Timeout: 2 * time.Second,
 	})
-	cm := cache.NewManager(apiClient, cfg, log.New(nil))
+	cm := cache.NewManager(t.Context(), apiClient, cfg, log.New(nil))
 	ef := factory.NewEntityFactory(cm)
 	return NewManager(ef, apiClient, cm, cfg)
 }

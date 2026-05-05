@@ -106,7 +106,7 @@ func newMarketManager(t *testing.T, srv *httptest.Server) *Manager {
 	t.Helper()
 	cfg := &minimalCfg{}
 	apiClient := newAPIClient(t, srv)
-	cm := cache.NewManager(apiClient, cfg, log.New(nil))
+	cm := cache.NewManager(t.Context(), apiClient, cfg, log.New(nil))
 	mdf := factory.NewMarketDescriptionFactory(
 		cm.MarketDescriptionCache,
 		cm.MarketVoidReasonsCache,

@@ -41,8 +41,8 @@ type marketDataImpl struct {
 	event                    interface{}
 }
 
-func (m marketDataImpl) OutcomeName(outcomeID string, locale types.Locale) (*string, error) {
-	marketDescription, err := m.marketDescriptionFactory.MarketDescriptionByIDAndSpecifiers(m.marketID, m.specifiers, []types.Locale{locale})
+func (m marketDataImpl) OutcomeName(ctx context.Context, outcomeID string, locale types.Locale) (*string, error) {
+	marketDescription, err := m.marketDescriptionFactory.MarketDescriptionByIDAndSpecifiers(ctx, m.marketID, m.specifiers, []types.Locale{locale})
 	if err != nil {
 		return nil, err
 	}
@@ -61,7 +61,7 @@ func (m marketDataImpl) OutcomeName(outcomeID string, locale types.Locale) (*str
 	if !found && marketDescription.OutcomeType != nil {
 		switch outcomeType(*marketDescription.OutcomeType) {
 		case playerOutcomeType:
-			player, err := m.marketDescriptionFactory.playerCache.GetPlayer(context.Background(), cache.PlayerCacheKey{PlayerID: outcomeID, Locale: locale})
+			player, err := m.marketDescriptionFactory.playerCache.GetPlayer(ctx, cache.PlayerCacheKey{PlayerID: outcomeID, Locale: locale})
 			if err != nil {
 				return nil, fmt.Errorf("derivation of outcome name for dynamic player outcome failed for id [%s]: %w", outcomeID, err)
 			}
@@ -72,7 +72,7 @@ func (m marketDataImpl) OutcomeName(outcomeID string, locale types.Locale) (*str
 			if err != nil {
 				return nil, fmt.Errorf("unsupported competitor id in outcome %s: %w", outcomeID, err)
 			}
-			competitor, err := m.marketDescriptionFactory.competitorCache.Competitor(context.Background(), *urn, []types.Locale{locale})
+			competitor, err := m.marketDescriptionFactory.competitorCache.Competitor(ctx, *urn, []types.Locale{locale})
 			if err != nil {
 				return nil, fmt.Errorf("derivation of outcome name for dynamic player outcome failed for id [%s]: %w", outcomeID, err)
 			}
@@ -91,8 +91,8 @@ func (m marketDataImpl) OutcomeName(outcomeID string, locale types.Locale) (*str
 	return m.makeOutcomeName(outcomeName, locale)
 }
 
-func (m marketDataImpl) MarketName(locale types.Locale) (*string, error) {
-	marketDescription, err := m.marketDescriptionFactory.MarketDescriptionByIDAndSpecifiers(m.marketID, m.specifiers, []types.Locale{locale})
+func (m marketDataImpl) MarketName(ctx context.Context, locale types.Locale) (*string, error) {
+	marketDescription, err := m.marketDescriptionFactory.MarketDescriptionByIDAndSpecifiers(ctx, m.marketID, m.specifiers, []types.Locale{locale})
 	if err != nil {
 		return nil, err
 	}
@@ -102,7 +102,7 @@ func (m marketDataImpl) MarketName(locale types.Locale) (*string, error) {
 		return nil, fmt.Errorf("missing locale %s for market %d", locale, m.marketID)
 	}
 
-	return m.makeMarketName(*name, locale)
+	return m.makeMarketName(ctx, *name, locale)
 }
 
 func (m marketDataImpl) makeOutcomeName(outcomeName *string, locale types.Locale) (*string, error) {
@@ -126,13 +126,13 @@ func (m marketDataImpl) makeOutcomeName(outcomeName *string, locale types.Locale
 	}
 }
 
-func (m marketDataImpl) makeMarketName(marketName string, locale types.Locale) (*string, error) {
+func (m marketDataImpl) makeMarketName(ctx context.Context, marketName string, locale types.Locale) (*string, error) {
 	if len(m.specifiers) == 0 {
 		return &marketName, nil
 	}
 
 	match, isMatch := m.event.(types.Match)
-	marketDescription, err := m.marketDescriptionFactory.MarketDescriptionByIDAndSpecifiers(m.marketID, m.specifiers, []types.Locale{locale})
+	marketDescription, err := m.marketDescriptionFactory.MarketDescriptionByIDAndSpecifiers(ctx, m.marketID, m.specifiers, []types.Locale{locale})
 	if err != nil {
 		return nil, err
 	}
@@ -153,7 +153,7 @@ func (m marketDataImpl) makeMarketName(marketName string, locale types.Locale) (
 		}
 
 		// handle props markets
-		if name, isPropsMarket := m.getPropsName(value, groups, locale); isPropsMarket {
+		if name, isPropsMarket := m.getPropsName(ctx, value, groups, locale); isPropsMarket {
 			value = name
 		}
 
@@ -163,7 +163,7 @@ func (m marketDataImpl) makeMarketName(marketName string, locale types.Locale) (
 	return &template, nil
 }
 
-func (m marketDataImpl) getPropsName(entityID string, groups []string, locale types.Locale) (string, bool) {
+func (m marketDataImpl) getPropsName(ctx context.Context, entityID string, groups []string, locale types.Locale) (string, bool) {
 	if !slices.Contains(groups, types.MarketGroupPlayerProps) {
 		return "", false
 	}
@@ -177,7 +177,7 @@ func (m marketDataImpl) getPropsName(entityID string, groups []string, locale ty
 	switch urn.Type {
 	case string(types.PlayerEventType):
 		player, err := m.marketDescriptionFactory.playerCache.GetPlayer(
-			context.Background(),
+			ctx,
 			cache.PlayerCacheKey{
 				PlayerID: entityID,
 				Locale:   locale,

@@ -1,6 +1,7 @@
 package factory
 
 import (
+	"context"
 	"strings"
 
 	feedXML "github.com/oddin-gg/gosdk/internal/feed/xml"
@@ -16,29 +17,29 @@ type MarketFactory struct {
 }
 
 // BuildMarket ...
-func (m MarketFactory) BuildMarket(event interface{}, market *feedXML.MarketAttributes) types.Market {
+func (m MarketFactory) BuildMarket(ctx context.Context, event interface{}, market *feedXML.MarketAttributes) types.Market {
 	specs := m.extractSpecifiers(market.Specifiers)
 	md := m.marketDataFactory.BuildMarketData(event, market.ID, specs)
 	return types.Market{
 		ID:         market.ID,
 		Specifiers: specs,
-		Name:       resolveMarketName(md, m.locales[0]),
+		Name:       resolveMarketName(ctx, md, m.locales[0]),
 	}
 }
 
 // BuildMarketWithOdds ...
-func (m MarketFactory) BuildMarketWithOdds(event interface{}, market *feedXML.MarketWithOutcome) types.MarketWithOdds {
+func (m MarketFactory) BuildMarketWithOdds(ctx context.Context, event interface{}, market *feedXML.MarketWithOutcome) types.MarketWithOdds {
 	specs := m.extractSpecifiers(market.Specifiers)
 	md := m.marketDataFactory.BuildMarketData(event, market.ID, specs)
 	odds := make([]types.OutcomeOdds, len(market.Outcomes))
 	for i := range market.Outcomes {
-		odds[i] = m.buildOutcomeOdds(market.Outcomes[i], md, m.locales[0])
+		odds[i] = m.buildOutcomeOdds(ctx, market.Outcomes[i], md, m.locales[0])
 	}
 	return types.MarketWithOdds{
 		Market: types.Market{
 			ID:         market.ID,
 			Specifiers: specs,
-			Name:       resolveMarketName(md, m.locales[0]),
+			Name:       resolveMarketName(ctx, md, m.locales[0]),
 		},
 		Status:      ConvertFeedMarketStatus(market.Status),
 		IsFavourite: market.Favourite,
@@ -47,32 +48,32 @@ func (m MarketFactory) BuildMarketWithOdds(event interface{}, market *feedXML.Ma
 }
 
 // BuildMarketWithSettlement ...
-func (m MarketFactory) BuildMarketWithSettlement(event interface{}, market *feedXML.MarketWithOutcome) types.MarketWithSettlement {
+func (m MarketFactory) BuildMarketWithSettlement(ctx context.Context, event interface{}, market *feedXML.MarketWithOutcome) types.MarketWithSettlement {
 	specs := m.extractSpecifiers(market.Specifiers)
 	md := m.marketDataFactory.BuildMarketData(event, market.ID, specs)
 	settlements := make([]types.OutcomeSettlement, len(market.Outcomes))
 	for i := range market.Outcomes {
-		settlements[i] = m.buildOutcomeSettlement(market.Outcomes[i], md, m.locales[0])
+		settlements[i] = m.buildOutcomeSettlement(ctx, market.Outcomes[i], md, m.locales[0])
 	}
 	return types.MarketWithSettlement{
 		Market: types.Market{
 			ID:         market.ID,
 			Specifiers: specs,
-			Name:       resolveMarketName(md, m.locales[0]),
+			Name:       resolveMarketName(ctx, md, m.locales[0]),
 		},
 		OutcomeSettlements: settlements,
 	}
 }
 
 // BuildMarketCancel ...
-func (m MarketFactory) BuildMarketCancel(event interface{}, market *feedXML.MarketWithoutOutcome) types.MarketCancel {
+func (m MarketFactory) BuildMarketCancel(ctx context.Context, event interface{}, market *feedXML.MarketWithoutOutcome) types.MarketCancel {
 	specs := m.extractSpecifiers(market.Specifiers)
 	md := m.marketDataFactory.BuildMarketData(event, market.ID, specs)
 	return types.MarketCancel{
 		Market: types.Market{
 			ID:         market.ID,
 			Specifiers: specs,
-			Name:       resolveMarketName(md, m.locales[0]),
+			Name:       resolveMarketName(ctx, md, m.locales[0]),
 		},
 		VoidReasonID:     market.VoidReasonID,
 		VoidReasonParams: market.VoidReasonParams,
@@ -96,12 +97,12 @@ func (m MarketFactory) extractSpecifiers(specifiers *string) map[string]string {
 	return result
 }
 
-func (m MarketFactory) buildOutcomeOdds(outcome feedXML.Outcome, md types.MarketData, locale types.Locale) types.OutcomeOdds {
+func (m MarketFactory) buildOutcomeOdds(ctx context.Context, outcome feedXML.Outcome, md types.MarketData, locale types.Locale) types.OutcomeOdds {
 	active := outcome.Active != nil && *outcome.Active == 1
 	return types.OutcomeOdds{
 		Outcome: types.Outcome{
 			ID:   outcome.ID,
-			Name: resolveOutcomeName(md, outcome.ID, locale),
+			Name: resolveOutcomeName(ctx, md, outcome.ID, locale),
 		},
 		IsActive:    active,
 		Probability: outcome.Probabilities,
@@ -109,7 +110,7 @@ func (m MarketFactory) buildOutcomeOdds(outcome feedXML.Outcome, md types.Market
 	}
 }
 
-func (m MarketFactory) buildOutcomeSettlement(outcome feedXML.Outcome, md types.MarketData, locale types.Locale) types.OutcomeSettlement {
+func (m MarketFactory) buildOutcomeSettlement(ctx context.Context, outcome feedXML.Outcome, md types.MarketData, locale types.Locale) types.OutcomeSettlement {
 	var result types.OutcomeResult
 	if outcome.Result != nil {
 		switch *outcome.Result {
@@ -139,7 +140,7 @@ func (m MarketFactory) buildOutcomeSettlement(outcome feedXML.Outcome, md types.
 	return types.OutcomeSettlement{
 		Outcome: types.Outcome{
 			ID:   outcome.ID,
-			Name: resolveOutcomeName(md, outcome.ID, locale),
+			Name: resolveOutcomeName(ctx, md, outcome.ID, locale),
 		},
 		OutcomeResult: result,
 		VoidFactor:    voidFactor,
@@ -151,22 +152,22 @@ func (m MarketFactory) buildOutcomeSettlement(outcome feedXML.Outcome, md types.
 // factory is on the AMQP hot path and a missing description shouldn't
 // fail the entire message decode; consumers can fetch the description
 // directly via Client.MarketDescription if needed.
-func resolveMarketName(md types.MarketData, locale types.Locale) string {
+func resolveMarketName(ctx context.Context, md types.MarketData, locale types.Locale) string {
 	if md == nil {
 		return ""
 	}
-	name, err := md.MarketName(locale)
+	name, err := md.MarketName(ctx, locale)
 	if err != nil || name == nil {
 		return ""
 	}
 	return *name
 }
 
-func resolveOutcomeName(md types.MarketData, outcomeID string, locale types.Locale) string {
+func resolveOutcomeName(ctx context.Context, md types.MarketData, outcomeID string, locale types.Locale) string {
 	if md == nil {
 		return ""
 	}
-	name, err := md.OutcomeName(outcomeID, locale)
+	name, err := md.OutcomeName(ctx, outcomeID, locale)
 	if err != nil || name == nil {
 		return ""
 	}
@@ -205,4 +206,3 @@ func ConvertFeedMarketStatus(status *feedXML.MarketStatus) types.MarketStatus {
 		return types.UnknownMarketStatus
 	}
 }
-

@@ -123,7 +123,13 @@ func (s *Subscription) abortWithErr(err error) {
 func (s *Subscription) runShutdown(terminalErr error) {
 	s.closeErr = terminalErr
 	if s.underlying != nil {
-		s.underlying.Close()
+		// Subscription's runShutdown runs in its own goroutine spawned by
+		// abortWithErr / Close, with no caller ctx to propagate. Background
+		// is the intentional root, capped at shutdownBudget so a stuck
+		// session doesn't keep the subscription alive forever.
+		ctx, cancel := context.WithTimeout(context.Background(), shutdownBudget)
+		s.underlying.Close(ctx)
+		cancel()
 	}
 	if s.pumpDone != nil {
 		// Wait for the pump goroutine to finish observing the session's
@@ -131,7 +137,7 @@ func (s *Subscription) runShutdown(terminalErr error) {
 		// hang forever on a stuck legacy session.
 		select {
 		case <-s.pumpDone:
-		case <-time.After(5 * time.Second):
+		case <-time.After(shutdownBudget):
 		}
 	}
 	close(s.messages)

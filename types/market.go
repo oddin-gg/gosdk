@@ -7,8 +7,8 @@ import "context"
 // cache. Not consumer-facing; consumers see resolved names on the
 // Market / OutcomeOdds value structs.
 type MarketData interface {
-	MarketName(locale Locale) (*string, error)
-	OutcomeName(id string, locale Locale) (*string, error)
+	MarketName(ctx context.Context, locale Locale) (*string, error)
+	OutcomeName(ctx context.Context, id string, locale Locale) (*string, error)
 }
 
 // Market is the base market shape carried inside messages.

@@ -27,7 +27,7 @@ type sdkOddsFeedSession interface {
 		messageInterest *types.MessageInterest,
 		reportExtendedData bool,
 	) error
-	Close()
+	Close(ctx context.Context)
 	IsReplay() bool
 }
 
@@ -41,7 +41,7 @@ type oddsFeedSessionImpl struct {
 	sportIDPrefix            string
 	sessionID                uuid.UUID
 	logger                   *log.Logger
-	closeCh                  chan bool
+	closeFn                  context.CancelFunc
 	msgCh                    chan types.SessionMessage
 	isReplay                 bool
 }
@@ -59,7 +59,7 @@ func (o *oddsFeedSessionImpl) Open(
 	routingKeys []string,
 	messageInterest *types.MessageInterest,
 	reportExtendedData bool) error {
-	if o.closeCh != nil {
+	if o.closeFn != nil {
 		return errors.New("session is already opened")
 	}
 
@@ -68,15 +68,20 @@ func (o *oddsFeedSessionImpl) Open(
 		return err
 	}
 
-	o.closeCh = make(chan bool, 1)
+	// Loop ctx must outlive the caller's Open ctx (which only bounds the
+	// consumer's queue declaration). WithoutCancel propagates caller
+	// metadata while severing the cancellation chain; closeFn cancels at
+	// Close() time.
+	loopCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	o.closeFn = cancel
 
 	go func(messageInterest *types.MessageInterest) {
 		for {
 			select {
-			case <-o.closeCh:
+			case <-loopCtx.Done():
 				return
 			case msg := <-ch:
-				o.processMessage(msg, messageInterest, reportExtendedData)
+				o.processMessage(loopCtx, msg, messageInterest, reportExtendedData)
 			}
 		}
 	}(messageInterest)
@@ -84,27 +89,28 @@ func (o *oddsFeedSessionImpl) Open(
 	return nil
 }
 
-func (o *oddsFeedSessionImpl) Close() {
+// Close drains the consumer and tears down the session. ctx bounds
+// the wait for the consumer goroutine to exit (cancellation of the
+// session's loop ctx is unconditional; ctx only caps how long we
+// wait for cleanup to complete).
+func (o *oddsFeedSessionImpl) Close(ctx context.Context) {
 	o.cacheManager.Close()
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	_ = o.channelConsumer.Close(shutdownCtx)
-	cancel()
+	_ = o.channelConsumer.Close(ctx)
 	if o.msgCh != nil {
 		close(o.msgCh)
 	}
 
-	if o.closeCh != nil {
-		o.closeCh <- true
+	if o.closeFn != nil {
+		o.closeFn()
 	}
-
-	o.closeCh = nil
+	o.closeFn = nil
 }
 
 func (o *oddsFeedSessionImpl) ID() uuid.UUID {
 	return o.sessionID
 }
 
-func (o *oddsFeedSessionImpl) processMessage(msg *types.QueueMessage, messageInterest *types.MessageInterest, reportExtendedData bool) {
+func (o *oddsFeedSessionImpl) processMessage(ctx context.Context, msg *types.QueueMessage, messageInterest *types.MessageInterest, reportExtendedData bool) {
 	if msg.UnparsableMessage != nil {
 		o.msgCh <- types.SessionMessage{
 			UnparsableMessage: msg.UnparsableMessage,
@@ -123,16 +129,15 @@ func (o *oddsFeedSessionImpl) processMessage(msg *types.QueueMessage, messageInt
 	}
 
 	producerID := msg.FeedMessage.Message.Product()
-	// Hot path: producers map is populated at SDK startup; these calls are
-	// in-memory cache reads after init. context.Background() is acceptable
-	// here because the call paths cannot block on I/O at message-processing time.
-	bg := context.Background()
-	producerData, err := o.producerManager.GetProducer(bg, producerID)
+	// Producers map is populated at SDK startup; these are in-memory
+	// cache reads after init, but ctx is still propagated so any future
+	// I/O fallback or instrumentation hooks observe the loop ctx.
+	producerData, err := o.producerManager.GetProducer(ctx, producerID)
 	if err != nil {
 		o.logger.WithError(err).Errorf("failed to get producer %d", producerID)
 	}
 
-	isProducerEnabled, err := o.producerManager.IsProducerEnabled(bg, producerID)
+	isProducerEnabled, err := o.producerManager.IsProducerEnabled(ctx, producerID)
 	switch {
 	case err != nil:
 		o.logger.WithError(err).Errorf("failed to check if producer is enabled %d", producerID)
@@ -142,11 +147,11 @@ func (o *oddsFeedSessionImpl) processMessage(msg *types.QueueMessage, messageInt
 		return
 	}
 
-	o.processFeedMessage(msg.FeedMessage, *messageInterest)
+	o.processFeedMessage(ctx, msg.FeedMessage, *messageInterest)
 
 }
 
-func (o *oddsFeedSessionImpl) processFeedMessage(feedMessage *types.FeedMessage, messageInterest types.MessageInterest) {
+func (o *oddsFeedSessionImpl) processFeedMessage(ctx context.Context, feedMessage *types.FeedMessage, messageInterest types.MessageInterest) {
 	producerID := feedMessage.Message.Product()
 	o.recoveryMessageProcessor.OnMessageProcessingStarted(o.sessionID, producerID, time.Now())
 
@@ -163,10 +168,10 @@ func (o *oddsFeedSessionImpl) processFeedMessage(feedMessage *types.FeedMessage,
 		return
 	}
 
-	message, err := o.feedMessageFactory.BuildMessage(feedMessage)
+	message, err := o.feedMessageFactory.BuildMessage(ctx, feedMessage)
 	if err != nil {
 		o.logger.WithError(err).Errorf("failed to build message from feed message %v", feedMessage)
-		unparsableMsg := o.feedMessageFactory.BuildUnparsableMessage(feedMessage)
+		unparsableMsg := o.feedMessageFactory.BuildUnparsableMessage(ctx, feedMessage)
 		o.msgCh <- types.SessionMessage{
 			UnparsableMessage: unparsableMsg,
 		}
@@ -206,7 +211,7 @@ func (o *oddsFeedSessionImpl) processFeedMessage(feedMessage *types.FeedMessage,
 			Message: msg,
 		}
 	default:
-		unparsableMsg := o.feedMessageFactory.BuildUnparsableMessage(feedMessage)
+		unparsableMsg := o.feedMessageFactory.BuildUnparsableMessage(ctx, feedMessage)
 		o.msgCh <- types.SessionMessage{
 			UnparsableMessage: unparsableMsg,
 		}
