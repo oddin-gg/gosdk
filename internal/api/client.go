@@ -405,8 +405,7 @@ func (c *Client) PostReplayStart(nodeID *int, speed *int, maxDelay *int, useRepl
 		queryParams["run_parallel"] = *runParallel
 	}
 
-	params := make([]string, len(queryParams))
-	var count int
+	params := make([]string, 0, len(queryParams))
 	for key, value := range queryParams {
 		var arg string
 		switch val := value.(type) {
@@ -418,7 +417,7 @@ func (c *Client) PostReplayStart(nodeID *int, speed *int, maxDelay *int, useRepl
 			arg = strconv.FormatBool(val)
 		}
 
-		params[count] = fmt.Sprintf("%s=%s", key, arg)
+		params = append(params, fmt.Sprintf("%s=%s", key, arg))
 	}
 
 	query := strings.Join(params, "&")
