@@ -7,6 +7,12 @@ import (
 	"time"
 )
 
+const tokenExpiryWarningWindow = 7 * 24 * time.Hour
+
+func tokenExpiringSoon(exp, now time.Time) bool {
+	return exp.Sub(now) < tokenExpiryWarningWindow
+}
+
 type bookmakerDetailImpl struct {
 	expireAt    time.Time
 	bookmakerID uint
@@ -30,14 +36,15 @@ type Manager struct {
 	bookmakerDetails protocols.BookmakerDetail
 	cfg              protocols.OddsFeedConfiguration
 	apiClient        *api.Client
-	logger           *log.Logger
+	logger           *log.Entry
 }
 
 // NewManager ...
-func NewManager(cfg protocols.OddsFeedConfiguration, client *api.Client) protocols.WhoAmIManager {
+func NewManager(cfg protocols.OddsFeedConfiguration, client *api.Client, logger *log.Entry) protocols.WhoAmIManager {
 	return &Manager{
 		cfg:       cfg,
 		apiClient: client,
+		logger:    logger,
 	}
 }
 
@@ -60,7 +67,7 @@ func (m *Manager) fetchBookmakerDetails() (protocols.BookmakerDetail, error) {
 	}
 
 	exp := time.Time(details.ExpireAt)
-	if exp.After(exp.Add(7 * 24 * time.Hour)) {
+	if tokenExpiringSoon(exp, time.Now()) {
 		m.logger.Warn("access token will expire soon")
 	}
 
