@@ -124,6 +124,7 @@ type Category struct {
 	ID          string  `xml:"id,attr"`
 	Name        string  `xml:"name,attr"`
 	CountryCode *string `xml:"country_code,attr,omitempty"`
+	IconPath    *string `xml:"icon_path,attr,omitempty"`
 }
 
 // TournamentExtended ...

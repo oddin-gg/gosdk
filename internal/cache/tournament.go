@@ -471,6 +471,7 @@ type categoryImpl struct {
 	id          string
 	name        string
 	countryCode *string
+	iconPath    *string
 }
 
 func (c *categoryImpl) ID() string {
@@ -483,6 +484,10 @@ func (c *categoryImpl) Name() string {
 
 func (c *categoryImpl) CountryCode() *string {
 	return c.countryCode
+}
+
+func (c *categoryImpl) IconPath() *string {
+	return c.iconPath
 }
 
 func (t tournamentImpl) Category() (protocols.Category, error) {
@@ -500,6 +505,7 @@ func (t tournamentImpl) Category() (protocols.Category, error) {
 		id:          category.ID,
 		name:        category.Name,
 		countryCode: category.CountryCode,
+		iconPath:    category.IconPath,
 	}, nil
 }
 
