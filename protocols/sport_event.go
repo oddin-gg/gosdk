@@ -196,6 +196,7 @@ type Category interface {
 	ID() string
 	Name() string
 	CountryCode() *string
+	IconPath() *string
 }
 
 // SportSummary ...
