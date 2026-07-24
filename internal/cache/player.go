@@ -1,254 +1,331 @@
 package cache
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 
 	"github.com/oddin-gg/gosdk/internal/api"
 	"github.com/oddin-gg/gosdk/internal/api/xml"
-	"github.com/oddin-gg/gosdk/protocols"
-	"github.com/patrickmn/go-cache"
-	log "github.com/sirupsen/logrus"
+	"github.com/oddin-gg/gosdk/internal/cache/lru"
+	log "github.com/oddin-gg/gosdk/internal/log"
+	"github.com/oddin-gg/gosdk/types"
 )
 
-// PlayerCacheKey represent cache key
+// PlayerCacheKey identifies a (player, locale) entry in the cache.
 type PlayerCacheKey struct {
 	PlayerID string
-	Locale   protocols.Locale
+	Locale   types.Locale
 }
 
+// String renders the key as "<playerID>/<locale>" for log + error messages.
+// Without this, fmt.Errorf("%v", key) emits the raw struct dump
+// "{od:player:42 en}" which is hard to grep for.
+func (k PlayerCacheKey) String() string { return k.PlayerID + "/" + string(k.Locale) }
+
+// playersCacheSize bounds the player cache. Player profiles form a long
+// tail (one entry per (playerID, locale), fed by competitor rosters), so
+// the cap is above the per-event default; eviction is safe — a missing
+// player is re-fetched on next access.
+const playersCacheSize = 10000
+
+// PlayersCache stores types.Player snapshots keyed by (id, locale).
+//
+// Player data is flat per (id, locale) — no per-locale subfields, so the
+// EventCache fill-in primitive isn't a fit; a bounded expirable LRU with
+// singleflight-deduplicated loads is enough. Previously a plain map:
+// one entry per (player, locale) ever seen, never evicted — one of the
+// unbounded-growth paths behind the "SDK cache taking too much space"
+// consumer report.
+//
+// Phase 6 reshape: now stores types.Player (value struct) directly
+// instead of an internal LocalizedPlayer wrapper.
 type PlayersCache struct {
-	internalCache *cache.Cache
-	apiClient     *api.Client
-	mux           sync.Mutex
-	logger        *log.Entry
+	apiClient *api.Client
+	logger    *log.Logger
+	// lifetime is the detach root for singleflight profile loads —
+	// cancelled by Manager.Close so no fetch outlives the owner.
+	lifetime context.Context
+
+	players *lru.TTL[PlayerCacheKey, types.Player]
+	// loadGroup deduplicates concurrent fetches of the same
+	// PlayerCacheKey (one in-flight FetchPlayerProfile call per
+	// key). Pre-v2.24 a global loadMu serialised every miss across
+	// every key, so unrelated player IDs / locales couldn't load
+	// concurrently — a 4-locale preload of N players ran 4N
+	// sequential HTTP calls instead of N parallel batches.
+	loadGroup singleflight.Group
+
+	// clearMu + clearedIDsAt + purgedAt: the clear-vs-in-flight-load
+	// tombstone (same invariant as lru.EventCache). A loader snapshots
+	// time.Now() before fetching; the store — mutually exclusive with
+	// Clear under clearMu — is skipped when a Clear for THAT player id
+	// (or a Purge) landed after the snapshot, so Clear/ClearByID cannot
+	// be silently undone by a fetch that started before them. Keyed by
+	// PlayerID rather than (id, locale): ClearByID must also suppress
+	// in-flight loads for locales not yet present in the cache, and
+	// over-suppressing a sibling locale of the SAME player costs one
+	// refetch while never disturbing other players. The map is pruned
+	// once entries are older than any possible in-flight fetch.
+	clearMu      sync.Mutex
+	clearedIDsAt map[string]time.Time
+	purgedAt     time.Time
+
+	// flightGen is folded into every singleflight key. Tombstones stop
+	// a pre-clear flight from REPOPULATING the cache, but without a
+	// generation a caller arriving AFTER the clear could still JOIN
+	// that flight and be handed its pre-clear result directly.
+	// Advancing the generation on every Clear/ClearByID/Purge detaches
+	// all future callers from all in-flight loads (deliberately
+	// coarse: clears are rare, and the cost of an early detach is one
+	// duplicate fetch — never staleness).
+	flightGen atomic.Uint64
 }
 
-// OnAPIResponse ...
-func (c *PlayersCache) OnAPIResponse(apiResponse protocols.Response) {
-	if apiResponse.Locale == nil || apiResponse.Data == nil {
-		return
-	}
+// playerTombstonePruneLen / MaxAge bound the tombstone map (see the
+// matching constants on the other caches).
+const (
+	playerTombstonePruneLen = 1024
+	playerTombstoneMaxAge   = 2 * time.Minute
+)
 
-	players := make([]xml.Player, 0)
-	if data, ok := apiResponse.Data.(*xml.CompetitorResponse); ok {
-		players = append(players, data.Players...)
+// storeIfNotCleared admits a loaded player unless a Clear for its id
+// (or a Purge) landed after the load started. Returns false when the
+// store was suppressed.
+func (c *PlayersCache) storeIfNotCleared(key PlayerCacheKey, p types.Player, loadStarted time.Time) bool {
+	c.clearMu.Lock()
+	defer c.clearMu.Unlock()
+	if c.clearedIDsAt[key.PlayerID].After(loadStarted) || c.purgedAt.After(loadStarted) {
+		return false
 	}
+	c.players.Add(key, p)
+	return true
+}
 
-	if len(players) == 0 {
-		return
+// markCleared records the per-player tombstone; callers must follow
+// with the actual removal while still holding clearMu.
+func (c *PlayersCache) markCleared(playerID string) {
+	c.flightGen.Add(1) // detach future callers from in-flight loads
+	now := time.Now()
+	c.clearedIDsAt[playerID] = now
+	if len(c.clearedIDsAt) > playerTombstonePruneLen {
+		cutoff := now.Add(-playerTombstoneMaxAge)
+		for k, t := range c.clearedIDsAt {
+			if t.Before(cutoff) {
+				delete(c.clearedIDsAt, k)
+			}
+		}
 	}
+}
 
-	err := c.handlePlayerData(*apiResponse.Locale, players)
+// GetPlayer returns a single cached Player, fetching if missing.
+func (c *PlayersCache) GetPlayer(ctx context.Context, id PlayerCacheKey) (*types.Player, error) {
+	players, err := c.GetPlayers(ctx, []PlayerCacheKey{id})
 	if err != nil {
-		c.logger.WithError(err).Errorf("failed to process api data %v", apiResponse)
-	}
-}
-
-// GetPlayer returns cached LocalizedPlayer if is in cache, if it is not then the team is fetched via api and stored in cache.
-// If Player does not exist then ErrItemNotFoundInCache error is returned
-func (c *PlayersCache) GetPlayer(id PlayerCacheKey) (*LocalizedPlayer, error) {
-	players, err := c.GetPlayers([]PlayerCacheKey{id})
-	switch {
-	case err != nil:
 		return nil, fmt.Errorf("get player from cache failed: %w", err)
-	case len(players) == 0:
-		return nil, fmt.Errorf("player %s not found: %w", id, ErrItemNotFoundInCache)
-	case len(players) > 1:
-		return nil, fmt.Errorf("get player from cache failed - more than one player found for id: %s", id)
 	}
-
-	player, found := players[id]
-	if !found {
-		return nil, fmt.Errorf("get player from cache - player found for id %q in player hash map: %w", id, ErrItemNotFoundInCache)
-	}
-	return &player, nil
-}
-
-// GetPlayers returns map of cached LocalizedPlayer if they are in cache, if any Player is missing then it is fetched via
-// api and stored in cache.
-func (c *PlayersCache) GetPlayers(ids []PlayerCacheKey) (map[PlayerCacheKey]LocalizedPlayer, error) {
-	resultPlayers, missingPlayersIDs := c.getPlayersFromCache(ids)
-	if len(missingPlayersIDs) == 0 {
-		return resultPlayers, nil
-	}
-
-	// run just one api fetch
-	c.mux.Lock()
-	defer c.mux.Unlock()
-
-	resultPlayers, missingPlayersIDs = c.getPlayersFromCache(ids)
-	if len(missingPlayersIDs) == 0 {
-		return resultPlayers, nil
-	}
-
-	dbPlayers, err := c.fetchPlayersFromAPI(missingPlayersIDs)
-	if err != nil {
-		return nil, fmt.Errorf("GetPlayers failed: %w", err)
-	}
-
-	for key, playerProfile := range dbPlayers {
-		convertedPlayer := LocalizedPlayer{
-			ID:            playerProfile.Player.ID,
-			LocalizedName: playerProfile.Player.Name,
-			FullName:      playerProfile.Player.FullName,
-			SportID:       playerProfile.Player.SportID,
-			locale:        key.Locale,
-		}
-		c.setPlayer(key, convertedPlayer)
-	}
-
-	resultPlayers, missingPlayersIDs = c.getPlayersFromCache(ids)
-	if len(missingPlayersIDs) == 0 {
-		return resultPlayers, nil
-	}
-
-	return nil, fmt.Errorf("get player from cache - some players %v not found in db: %w", missingPlayersIDs, ErrItemNotFoundInCache)
-}
-
-func (c *PlayersCache) handlePlayerData(locale protocols.Locale, players []xml.Player) error {
-	for i := range players {
-		err := c.refreshOrInsertItem(players[i], locale)
-		if err != nil {
-			return fmt.Errorf("refreshing or inserting player: %w", err)
-		}
-	}
-
-	return nil
-}
-
-func (c *PlayersCache) refreshOrInsertItem(player xml.Player, locale protocols.Locale) error {
-	key := PlayerCacheKey{PlayerID: player.ID, Locale: locale}
-
-	result, ok := c.getPlayer(key)
+	p, ok := players[id]
 	if !ok {
-		result = LocalizedPlayer{}
+		return nil, fmt.Errorf("player %s not found: %w", id, ErrItemNotFoundInCache)
 	}
-
-	result.ID = player.ID
-	result.LocalizedName = player.Name
-	result.FullName = player.FullName
-	result.SportID = player.SportID
-	result.locale = locale
-
-	c.setPlayer(key, result)
-
-	return nil
+	return &p, nil
 }
 
-func (c *PlayersCache) getPlayersFromCache(
-	ids []PlayerCacheKey,
-) (map[PlayerCacheKey]LocalizedPlayer, []PlayerCacheKey) {
-	var missingPlayersIDs []PlayerCacheKey
-	foundPlayers := make(map[PlayerCacheKey]LocalizedPlayer, len(ids))
-
-	for _, id := range ids {
-		if res, found := c.getPlayer(id); found {
-			foundPlayers[id] = res
-		} else {
-			missingPlayersIDs = append(missingPlayersIDs, id)
-		}
+// GetPlayers returns a map of cached Player values, fetching any missing
+// ones from the API. Concurrent callers requesting different
+// (PlayerID, Locale) keys load in parallel; concurrent callers
+// requesting the SAME key share a single in-flight HTTP call via
+// lru.LoadCoalesced — the shared fetch runs under WithoutCancel so a
+// short-deadline leader can't fail every coalesced follower with ITS
+// cancellation, and each caller's own ctx still bounds its wait.
+func (c *PlayersCache) GetPlayers(ctx context.Context, ids []PlayerCacheKey) (map[PlayerCacheKey]types.Player, error) {
+	result, missing := c.snapshot(ids)
+	if len(missing) == 0 {
+		return result, nil
 	}
-	return foundPlayers, missingPlayersIDs
-}
 
-func (c *PlayersCache) fetchPlayersFromAPI(keys []PlayerCacheKey) (map[PlayerCacheKey]xml.PlayerProfile, error) {
-	res := make(map[PlayerCacheKey]xml.PlayerProfile, len(keys))
-
-	for _, key := range keys {
-		data, err := c.apiClient.FetchPlayerProfile(key.PlayerID, key.Locale)
-
-		if err != nil {
-			return nil, fmt.Errorf("fetch player profiles failed: %w", err)
-		}
-		if data == nil {
+	for _, key := range missing {
+		// Fast-path: another goroutine may have populated this key
+		// between the snapshot above and now. Re-check before paying
+		// the singleflight join cost.
+		if p, ok := c.lookup(key); ok {
+			result[key] = p
 			continue
 		}
-		res[key] = *data
+		var p types.Player
+		for {
+			gen := c.flightGen.Load()
+			var err error
+			p, err = lru.LoadCoalesced(ctx, c.lifetime, &c.loadGroup, c.flightKey(gen, key), func(loadCtx context.Context) (types.Player, error) {
+				// Stale-generation guard — see errStaleFlight for the
+				// register-vs-clear window this closes.
+				if c.flightGen.Load() != gen {
+					return types.Player{}, errStaleFlight
+				}
+				// Snapshot the flight's start BEFORE fetching: the store
+				// below is suppressed if a Clear lands after this point
+				// (see clearMu/clearedIDsAt).
+				loadStarted := time.Now()
+				// Re-check under the singleflight gate — the leader of a
+				// duplicate-call group may already have stored the value
+				// before the follower entered the closure.
+				if p, ok := c.lookup(key); ok {
+					return p, nil
+				}
+				data, err := c.apiClient.FetchPlayerProfile(loadCtx, key.PlayerID, key.Locale)
+				if err != nil {
+					return types.Player{}, fmt.Errorf("fetch player profile %s/%s: %w", key.PlayerID, key.Locale, err)
+				}
+				if data == nil {
+					return types.Player{}, nil
+				}
+				p := types.Player{
+					ID:       data.Player.ID,
+					Name:     data.Player.Name,
+					FullName: data.Player.FullName,
+					SportID:  data.Player.SportID,
+					Locale:   key.Locale,
+				}
+				// Caller still receives p; a suppressed store just means
+				// the next read refetches (post-clear freshness wins).
+				c.storeIfNotCleared(key, p, loadStarted)
+				return p, nil
+			})
+			if errors.Is(err, errStaleFlight) {
+				continue // re-register under the fresh generation
+			}
+			if err != nil {
+				// A by-id 404 is definitive absence — classify it as
+				// ErrItemNotFound (the ErrItemNotFound docs name Player)
+				// while keeping the APIError in the chain.
+				return nil, notFoundIfAbsent(err)
+			}
+			break
+		}
+		// Use the flight's return value directly rather than relying on
+		// a cache re-read: when a Clear raced the load, the store was
+		// suppressed (tombstone) but the freshly-fetched player is still
+		// the correct answer for THIS caller. Zero value = upstream had
+		// no such player.
+		if p != (types.Player{}) {
+			result[key] = p
+		}
 	}
 
-	return res, nil
-}
-
-func (c *PlayersCache) key(id PlayerCacheKey) string {
-	return id.PlayerID + ":" + string(id.Locale)
-}
-
-func (c *PlayersCache) getPlayer(id PlayerCacheKey) (LocalizedPlayer, bool) {
-	res, found := c.internalCache.Get(c.key(id))
-	if !found {
-		return LocalizedPlayer{}, found
+	// Success = every requested key resolved. Compare against the map,
+	// not len(ids): duplicate keys in the input collapse to one map
+	// entry, and a length comparison mis-reported [key, key] as a
+	// failure with an EMPTY not-found list.
+	var notFound []PlayerCacheKey
+	for _, id := range ids {
+		if _, ok := result[id]; !ok {
+			notFound = append(notFound, id)
+		}
 	}
-	return res.(LocalizedPlayer), found
-}
-
-func (c *PlayersCache) setPlayer(id PlayerCacheKey, obj LocalizedPlayer) {
-	c.internalCache.Set(c.key(id), obj, cache.DefaultExpiration)
-}
-
-func newPlayersCache(apiClient *api.Client, logger *log.Entry) *PlayersCache {
-	playersCache := &PlayersCache{
-		internalCache: cache.New(12*time.Hour, 1*time.Hour),
-		apiClient:     apiClient,
-		logger:        logger,
+	if len(notFound) == 0 {
+		return result, nil
 	}
-
-	apiClient.SubscribeWithAPIObserver(playersCache)
-
-	return playersCache
+	return nil, fmt.Errorf("get player from cache - some players %v not found: %w", notFound, ErrItemNotFoundInCache)
 }
 
-type LocalizedPlayer struct {
-	ID            string
-	LocalizedName string
-	FullName      string
-	SportID       string
-	locale        protocols.Locale
+// lookup is the single-key snapshot helper used by the singleflight
+// closure to short-circuit before issuing an HTTP call.
+func (c *PlayersCache) lookup(id PlayerCacheKey) (types.Player, bool) {
+	return c.players.Get(id)
 }
 
-type playerImpl struct {
-	key         PlayerCacheKey
-	playerCache *PlayersCache
+// Clear evicts the cache entry for the given (id, locale). The
+// tombstone guarantees an in-flight load that started before this call
+// cannot re-admit its result afterwards.
+func (c *PlayersCache) Clear(id PlayerCacheKey) {
+	c.clearMu.Lock()
+	c.markCleared(id.PlayerID)
+	c.players.Remove(id)
+	c.clearMu.Unlock()
 }
 
-func (p playerImpl) ID() string {
-	return p.key.PlayerID
-}
-
-func (p playerImpl) LocalizedName() (string, error) {
-	item, err := p.playerCache.GetPlayer(p.key)
-	if err != nil {
-		return "", fmt.Errorf("getting player from cache: %w", err)
+// ClearByID evicts every entry for the player ID across all locales.
+func (c *PlayersCache) ClearByID(playerID string) {
+	c.clearMu.Lock()
+	c.markCleared(playerID)
+	for _, k := range c.players.Keys() {
+		if k.PlayerID == playerID {
+			c.players.Remove(k)
+		}
 	}
-
-	return item.LocalizedName, nil
+	c.clearMu.Unlock()
 }
 
-func (p playerImpl) FullName() (string, error) {
-	item, err := p.playerCache.GetPlayer(p.key)
-	if err != nil {
-		return "", fmt.Errorf("getting player from cache: %w", err)
-	}
-
-	return item.FullName, nil
+// Purge clears the entire cache.
+func (c *PlayersCache) Purge() {
+	c.clearMu.Lock()
+	c.flightGen.Add(1) // detach future callers from in-flight loads
+	c.purgedAt = time.Now()
+	c.clearedIDsAt = make(map[string]time.Time)
+	c.players.Purge()
+	c.clearMu.Unlock()
 }
 
-func (p playerImpl) SportID() (string, error) {
-	item, err := p.playerCache.GetPlayer(p.key)
-	if err != nil {
-		return "", fmt.Errorf("getting player from cache: %w", err)
+func (c *PlayersCache) snapshot(ids []PlayerCacheKey) (map[PlayerCacheKey]types.Player, []PlayerCacheKey) {
+	found := make(map[PlayerCacheKey]types.Player, len(ids))
+	var missing []PlayerCacheKey
+	for _, id := range ids {
+		if v, ok := c.players.Get(id); ok {
+			found[id] = v
+		} else {
+			missing = append(missing, id)
+		}
 	}
-
-	return item.SportID, nil
+	return found, missing
 }
 
-// NewPlayer ...
-func NewPlayer(id protocols.URN, playerCache *PlayersCache, locale protocols.Locale) protocols.Player {
-	key := PlayerCacheKey{PlayerID: id.ToString(), Locale: locale}
+func (c *PlayersCache) set(id PlayerCacheKey, p types.Player) {
+	c.players.Add(id, p)
+}
 
-	return &playerImpl{
-		key:         key,
-		playerCache: playerCache,
+// MergePlayers folds an XML.Player slice into the cache (used by code paths
+// that already fetched a parent entity and want to pre-populate players).
+func (c *PlayersCache) MergePlayers(locale types.Locale, players []xml.Player) {
+	for _, p := range players {
+		key := PlayerCacheKey{PlayerID: p.ID, Locale: locale}
+		c.set(key, types.Player{
+			ID:       p.ID,
+			Name:     p.Name,
+			FullName: p.FullName,
+			SportID:  p.SportID,
+			Locale:   locale,
+		})
 	}
+}
+
+func newPlayersCache(lifeCtx context.Context, apiClient *api.Client, logger *log.Logger) *PlayersCache {
+	return &PlayersCache{
+		apiClient:    apiClient,
+		logger:       logger,
+		lifetime:     lifeCtx,
+		players:      lru.NewTTL[PlayerCacheKey, types.Player](playersCacheSize, nil, lru.DefaultEventCacheTTL),
+		clearedIDsAt: make(map[string]time.Time),
+	}
+}
+
+// BuildPlayer is a convenience constructor used by entity factories. It
+// resolves the (id, locale) snapshot from the cache, fetching if missing,
+// and returns the populated value. Errors propagate from the underlying
+// fetch.
+func BuildPlayer(ctx context.Context, c *PlayersCache, id types.URN, locale types.Locale) (*types.Player, error) {
+	return c.GetPlayer(ctx, PlayerCacheKey{PlayerID: id.ToString(), Locale: locale})
+}
+
+// flightKey builds the generation-prefixed singleflight key (see
+// flightGen). The generation is passed in, not read here: the caller
+// must capture it ONCE and re-check it inside the flight closure, so a
+// Clear landing between capture and registration is detected
+// (errStaleFlight) instead of silently splitting the flight.
+func (c *PlayersCache) flightKey(gen uint64, key PlayerCacheKey) string {
+	return fmt.Sprintf("%d|%s", gen, key.String())
 }

@@ -23,7 +23,7 @@ func (o RollbackBetSettlement) GetEventID() string {
 }
 
 // Product ...
-func (o RollbackBetSettlement) Product() uint {
+func (o RollbackBetSettlement) Product() int {
 	return o.MessageAttributes.Product
 }
 

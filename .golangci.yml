@@ -1,29 +1,111 @@
+version: "2"
+
 run:
   timeout: 5m
-output:
-  formats:
-    - format: colored-line-number
-  print-issued-lines: true
-  print-linter-name: true
+  tests: true
+  modules-download-mode: readonly
 
 linters:
-  disable-all: true
-  enable: # https://golangci-lint.run/usage/linters/
-    - gocritic      # Provides diagnostics that check for bugs, performance and style issues.
-    - prealloc
-    - gosec         # Inspects source code for security problems.
-    - bodyclose     # Checks whether HTTP response body is closed successfully.
-    - gofmt         # Gofmt checks whether code was gofmt-ed. By default this tool runs with -s option to check for code simplification
-    - unconvert     # Remove unnecessary type conversions.
-    - nolintlint    # Reports ill-formed or insufficient nolint directives.
-    - rowserrcheck  # Checks whether Rows.Err of rows is checked successfully.
-    - revive        # Replacement for golint.
-linters-settings:
-  revive:
-    severity: warning
-  misspell:
-    locale: US
-  gosec:
-    excludes:
-      - G404 # Use of weak random number generator
-      - G115 # Temporary excluded, will be fixed
+  # Default "standard" set is errcheck, govet, ineffassign, staticcheck, unused.
+  # We extend it with quality + security + style linters proven on this repo.
+  default: standard
+  enable:
+    # --- correctness / bug-catchers ---
+    - bodyclose                  # http.Response.Body must be closed.
+    - contextcheck               # Inheritance of context.Context.
+    - copyloopvar                # Loop-var copies (Go 1.22+ semantics).
+    - durationcheck              # Suspicious time.Duration multiplications.
+    - errorlint                  # errors.Is/As + %w usage.
+    - exhaustive                 # switch on enum types covers all cases.
+    - gocheckcompilerdirectives  # //go: directives sanity.
+    - makezero                   # slices made with non-zero length then appended.
+    - nilerr                     # returning nil where an err exists.
+    - noctx                      # HTTP requests / SQL without ctx.
+    - reassign                   # package-level var reassignment after init.
+    - rowserrcheck               # database/sql Rows.Err.
+    - wastedassign               # assignments whose value is never used.
+
+    # --- security / hygiene ---
+    - asciicheck                 # non-ASCII identifiers (typo bait).
+    - bidichk                    # UTF-8 bidi control chars (Trojan-Source CVE-2021-42574).
+    - gosec                      # Security audit.
+    - predeclared               # shadowing of predeclared identifiers (len, error, …).
+
+    # --- style / quality ---
+    - gocritic                   # Opinionated diagnostics (perf + style + bugs).
+    - misspell                   # English spelling typos.
+    - nolintlint                 # Ill-formed //nolint directives.
+    - prealloc                   # Preallocate slices when length is known.
+    - revive                     # Replacement for golint; doc comments + naming.
+    - thelper                    # t.Helper() in test helpers.
+    - unconvert                  # Removes unnecessary conversions.
+    - usestdlibvars              # Use stdlib enums/consts (http.MethodGet, etc.).
+  settings:
+    gosec:
+      excludes:
+        - G404 # weak RNG — request IDs aren't security-sensitive.
+        - G115 # integer overflow conversions — covered case-by-case.
+    revive:
+      severity: warning
+      rules:
+        - name: package-comments  # Disabled: many small internal packages.
+          disabled: true
+    # Note on misspell: enabled at line 36 with no settings block. The
+    # codebase mixes British protocol identifiers (Cancelled, Favourite —
+    # matching the wire format) with American technical comments
+    # (localized, behavior). Default settings = no `locale` set =
+    # "accept both dialects"; only unambiguous typos are flagged. We
+    # explicitly do NOT pin to 'US' or 'UK' (the only two values the
+    # v2 jsonschema accepts for `locale`) because that would flag the
+    # opposite dialect as a typo.
+    staticcheck:
+      # SA = correctness; S = simplifications; ST = stylistic; QF = quickfixes.
+      # Drop QF (noise on settled code) and ST1000 (package comments).
+      checks:
+        - all
+        - "-QF*"
+        - "-ST1000"
+    gocritic:
+      disabled-checks:
+        - ifElseChain        # Style preference; we have several legitimate chains.
+    exhaustive:
+      default-signifies-exhaustive: true
+    nolintlint:
+      require-specific: true   # //nolint directives must name the linter.
+      require-explanation: true
+  exclusions:
+    presets:
+      - common-false-positives
+    rules:
+      # Test files: relax bug-catchers that don't fit test idioms.
+      - path: _test\.go
+        linters:
+          - bodyclose
+          - gosec
+          - noctx
+          - thelper
+          - contextcheck
+      # Examples: illustrative, not production-grade. log.Fatal patterns
+      # naturally fail exitAfterDefer; we accept that for clarity.
+      - path: ^examples/
+        linters:
+          - errcheck
+          - gocritic
+          - gosec
+      # XML decode types are mechanical wrappers around protocol fields.
+      - path: internal/(api|feed)/xml/
+        linters:
+          - revive
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/oddin-gg/gosdk
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

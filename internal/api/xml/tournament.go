@@ -37,10 +37,9 @@ type TournamentsResponse struct {
 
 // Tournament ...
 type Tournament struct {
-	XMLName xml.Name `xml:"tournament"`
-	ID      string   `xml:"id,attr"`
-	// Deprecated: do not use this property, it will be removed in future
-	RefID            *string            `xml:"ref_id,attr,omitempty"`
+	XMLName          xml.Name           `xml:"tournament"`
+	ID               string             `xml:"id,attr"`
+	RefID            *string            `xml:"ref_id,attr,omitempty"` // wire-format only; not exposed
 	Name             string             `xml:"name,attr"`
 	Scheduled        *utils.DateTime    `xml:"scheduled,attr,omitempty"`
 	ScheduledEnd     *utils.DateTime    `xml:"scheduled_end,attr,omitempty"`
@@ -64,12 +63,6 @@ func (t Tournament) GetAbbreviation() string {
 // GetID ...
 func (t Tournament) GetID() string {
 	return t.ID
-}
-
-// GetRefID ...
-// Deprecated: do not use this method, it will be removed in future
-func (t Tournament) GetRefID() *string {
-	return t.RefID
 }
 
 // GetSportID ...
@@ -146,25 +139,4 @@ func (t TournamentExtended) GetCompetitors() []Team {
 // CompetitorsWrapper ...
 type CompetitorsWrapper struct {
 	Competitor []Team `xml:"competitor,omitempty"`
-}
-
-// TournamentResponse ...
-type TournamentResponse struct {
-	XMLName     xml.Name            `xml:"tournament_info"`
-	GeneratedAt utils.DateTime      `xml:"generated_at,attr"`
-	Tournament  TournamentExtended  `xml:"tournament"`
-	Competitors *CompetitorsWrapper `xml:"competitors,omitempty"`
-}
-
-// TournamentScheduleResponse ...
-type TournamentScheduleResponse struct {
-	XMLName     xml.Name           `xml:"tournament_schedule"`
-	GeneratedAt utils.DateTime     `xml:"generated_at,attr"`
-	Tournament  TournamentExtended `xml:"tournament"`
-	SportEvents Events             `xml:"sport_events"`
-}
-
-// Events ...
-type Events struct {
-	List []SportEvent `xml:"sport_event"`
 }
