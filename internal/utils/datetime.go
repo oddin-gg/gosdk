@@ -3,6 +3,7 @@ package utils
 import (
 	"bytes"
 	"encoding/xml"
+	"errors"
 	"strconv"
 	"time"
 )
@@ -22,18 +23,24 @@ type Date time.Time
 func _unmarshalTime(text []byte, t *time.Time, format string) (err error) {
 	s := string(bytes.TrimSpace(text))
 	*t, err = time.Parse(format, s)
-	if _, ok := err.(*time.ParseError); ok {
+	parseError := &time.ParseError{}
+	if errors.As(err, &parseError) {
 		*t, err = time.Parse(format+"Z07:00", s)
 	}
 	return err
 }
 
 func _unmarshalUnixTime(text []byte, t *time.Time) error {
-	sec, err := strconv.ParseInt(string(text), 10, 64)
+	ms, err := strconv.ParseInt(string(text), 10, 64)
 	if err != nil {
 		return err
 	}
-	*t = time.Unix(sec/1000, 0)
+	// time.UnixMilli preserves millisecond precision. The previous
+	// `time.Unix(sec/1000, 0)` form discarded milliseconds, which mattered
+	// for XML feed message timestamps where Java/.NET expose the full
+	// millisecond resolution and consumers compare timestamps across
+	// SDKs (e.g., dedup by Created).
+	*t = time.UnixMilli(ms)
 	return nil
 }
 
@@ -129,7 +136,11 @@ func (d Timestamp) MarshalText() ([]byte, error) {
 		return nil, nil
 	}
 
-	timestamp := time.Time(d).UnixNano() / int64(time.Millisecond)
+	// UnixMilli, not UnixNano()/1e6: UnixNano overflows int64 for valid
+	// time.Time values outside ~1678–2262 (and pre-epoch sub-millisecond
+	// values truncated toward zero instead of flooring). UnixMilli is
+	// exact across the full time.Time range the SDK can encounter.
+	timestamp := time.Time(d).UnixMilli()
 	return []byte(strconv.FormatInt(timestamp, 10)), nil
 }
 

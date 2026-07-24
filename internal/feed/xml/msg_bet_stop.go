@@ -13,8 +13,16 @@ type BetStop struct {
 	Status MarketStatus `xml:"market_status,attr,omitempty"`
 }
 
+// GetEventID returns the event id the payload itself carries — the
+// route/payload identity cross-check and feed-driven cache invalidation
+// both key on this accessor; its absence silently exempted bet_stop
+// from both (Codex P2).
+func (b BetStop) GetEventID() string {
+	return b.MessageAttributes.EventID
+}
+
 // Product ...
-func (b BetStop) Product() uint {
+func (b BetStop) Product() int {
 	return b.MessageAttributes.Product
 }
 

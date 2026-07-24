@@ -9,12 +9,12 @@ import (
 type SnapshotComplete struct {
 	MessageWithTimestamp
 	XMLName   xml.Name `xml:"snapshot_complete"`
-	ProductID uint     `xml:"product,attr"`
-	RequestID uint     `xml:"request_id,attr"`
+	ProductID int      `xml:"product,attr"`
+	RequestID int      `xml:"request_id,attr"`
 }
 
 // Product ...
-func (s SnapshotComplete) Product() uint {
+func (s SnapshotComplete) Product() int {
 	return s.ProductID
 }
 

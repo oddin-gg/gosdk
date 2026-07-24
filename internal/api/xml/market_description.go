@@ -3,7 +3,7 @@ package xml
 import (
 	"encoding/xml"
 
-	"github.com/oddin-gg/gosdk/protocols"
+	"github.com/oddin-gg/gosdk/types"
 )
 
 // MarketDescriptionResponse ...
@@ -14,15 +14,14 @@ type MarketDescriptionResponse struct {
 }
 
 // Code ...
-func (m MarketDescriptionResponse) Code() protocols.ResponseCode {
-	return protocols.ResponseCode(m.ResponseCode)
+func (m MarketDescriptionResponse) Code() types.ResponseCode {
+	return types.ResponseCode(m.ResponseCode)
 }
 
 // MarketDescription represents market type
 type MarketDescription struct {
-	ID uint `xml:"id,attr"`
-	// Deprecated: do not use this property, it will be removed in future
-	RefID                  *uint              `xml:"ref_id,attr,omitempty"`
+	ID                     int                `xml:"id,attr"`
+	RefID                  *int               `xml:"ref_id,attr,omitempty"`
 	Name                   string             `xml:"name,attr"`
 	IncludesOutcomesOfType *string            `xml:"includes_outcomes_of_type,attr"`
 	OutcomeType            *string            `xml:"outcome_type,attr"`
@@ -51,9 +50,8 @@ type OutcomesWrapper struct {
 
 // MarketDescriptionOutcome ...
 type MarketDescriptionOutcome struct {
-	ID string `xml:"id,attr"`
-	// Deprecated: do not use this property, it will be removed in future
-	RefID       *uint   `xml:"ref_id,attr,omitempty"`
+	ID          string  `xml:"id,attr"`
+	RefID       *int    `xml:"ref_id,attr,omitempty"`
 	Name        string  `xml:"name,attr"`
 	Description *string `xml:"description,attr,omitempty"`
 }

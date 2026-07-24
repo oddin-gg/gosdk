@@ -13,6 +13,10 @@
 # Output of the go coverage tool, specifically when used with LiteIDE
 *.out
 
+# `make test` / `make coverage` outputs (Makefile `clean` removes these).
+coverage.txt
+coverage.html
+
 # Dependency directories (remove the comment below to include it)
 vendor/
 
@@ -23,5 +27,6 @@ test/
 
 .idea
 .vscode
+.claude/
 
 *.iml

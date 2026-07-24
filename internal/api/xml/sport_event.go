@@ -6,8 +6,7 @@ import (
 
 // SportEvent represents our Match
 type SportEvent struct {
-	ID string `xml:"id,attr"`
-	// Deprecated: do not use this property, it will be removed in future
+	ID           string               `xml:"id,attr"`
 	RefID        *string              `xml:"ref_id,attr,omitempty"`
 	Name         string               `xml:"name,attr"`
 	Scheduled    *utils.DateTime      `xml:"scheduled,attr,omitempty"`
@@ -21,10 +20,14 @@ type SportEvent struct {
 	ExtraInfo    *ExtraInfoWrapper      `xml:"extra_info,omitempty"`
 }
 
+// ReferenceIDs is the XML wrapper for an event's reference-id list,
+// surfaced on the public Match as a name→value map. Forward-ported
+// from main commit fcc3c0d (PR #38).
 type ReferenceIDs struct {
 	ReferenceID []ReferenceID `xml:"reference_id"`
 }
 
+// ReferenceID is a single (name, value) entry inside ReferenceIDs.
 type ReferenceID struct {
 	Name  string `xml:"name,attr"`
 	Value string `xml:"value,attr"`

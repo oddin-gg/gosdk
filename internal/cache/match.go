@@ -1,493 +1,578 @@
 package cache
 
 import (
-	"errors"
+	"context"
 	"fmt"
 	"sync"
 	"time"
 
 	"github.com/oddin-gg/gosdk/internal/api"
 	apiXML "github.com/oddin-gg/gosdk/internal/api/xml"
+	"github.com/oddin-gg/gosdk/internal/cache/lru"
 	feedXML "github.com/oddin-gg/gosdk/internal/feed/xml"
+	log "github.com/oddin-gg/gosdk/internal/log"
 	"github.com/oddin-gg/gosdk/internal/utils"
-	"github.com/oddin-gg/gosdk/protocols"
-	"github.com/patrickmn/go-cache"
-	log "github.com/sirupsen/logrus"
+	"github.com/oddin-gg/gosdk/types"
 )
 
-// MatchCache ...
+// MatchCache stores match summaries per (URN, locale).
+//
+// Phase 3 rewrite: lru.EventCache primitive + per-entry mutex covering
+// every field (was: partial-mutex with named fields racing). The
+// previous OnAPIResponse cross-population pattern is removed — lazy
+// loading + singleflight gives equivalent results with cleaner semantics.
 type MatchCache struct {
-	apiClient     *api.Client
-	internalCache *cache.Cache
-	logger        *log.Entry
+	apiClient *api.Client
+	logger    *log.Logger
+	lru       *lru.EventCache[types.URN, types.Locale, *LocalizedMatch]
 }
 
-// OnAPIResponse ...
-func (m *MatchCache) OnAPIResponse(apiResponse protocols.Response) {
-	if apiResponse.Locale == nil || apiResponse.Data == nil {
-		return
-	}
+// LocalizedMatch is the cached representation of a match. All fields are
+// guarded by mu. Locales() reports which locales currently have a name set.
+type LocalizedMatch struct {
+	mu sync.RWMutex
 
-	var events []apiXML.SportEvent
-	switch data := apiResponse.Data.(type) {
-	case *apiXML.FixtureResponse:
-		events = append(events, data.Fixture.SportEvent)
-	case *apiXML.ScheduleResponse:
-		events = data.SportEvents
-	case *apiXML.TournamentScheduleResponse:
-		events = data.SportEvents.List
-	}
+	id types.URN
 
-	if len(events) == 0 {
-		return
-	}
+	// Locale-independent fields (set on first load; later loads re-set them).
+	scheduledTime        *time.Time
+	scheduledEndTime     *time.Time
+	sportID              types.URN
+	tournamentID         types.URN
+	competitors          []competitor
+	liveOddsAvailability *types.LiveOddsAvailability
+	sportFormat          types.SportFormat
 
-	err := m.handleMatchData(*apiResponse.Locale, events)
+	// Per-locale fields.
+	name      map[types.Locale]string
+	extraInfo map[types.Locale]map[string]string
+
+	// Locale-independent (the API returns the same reference-id set
+	// across locales). Populated from SportEvent.ReferenceIDs;
+	// forward-ported from main commit fcc3c0d (PR #38).
+	referenceIDs map[string]string
+}
+
+type competitor struct {
+	urn       types.URN
+	qualifier string
+}
+
+// Locales implements lru.LocalizedEntry.
+func (m *LocalizedMatch) Locales() []types.Locale {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]types.Locale, 0, len(m.name))
+	for l := range m.name {
+		out = append(out, l)
+	}
+	return out
+}
+
+// cloneForUpdate returns a copy the loader can merge into without
+// mutating the live cached entry (copy-on-write): a failed later-locale
+// fetch must not leave earlier locales of the SAME load visible to
+// concurrent readers — the load/admit transaction admits the clone only
+// after every locale and the coverage validation succeed. Top-level maps
+// are copied one level deep; inner maps, slices, and pointers are safe
+// to alias because merge() only ever REPLACES them wholesale.
+func (m *LocalizedMatch) cloneForUpdate() *LocalizedMatch {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	c := &LocalizedMatch{
+		id:                   m.id,
+		scheduledTime:        m.scheduledTime,
+		scheduledEndTime:     m.scheduledEndTime,
+		sportID:              m.sportID,
+		tournamentID:         m.tournamentID,
+		competitors:          m.competitors,
+		liveOddsAvailability: m.liveOddsAvailability,
+		sportFormat:          m.sportFormat,
+		name:                 make(map[types.Locale]string, len(m.name)+1),
+		extraInfo:            make(map[types.Locale]map[string]string, len(m.extraInfo)+1),
+		referenceIDs:         m.referenceIDs,
+	}
+	for k, v := range m.name {
+		c.name[k] = v
+	}
+	for k, v := range m.extraInfo {
+		c.extraInfo[k] = v
+	}
+	return c
+}
+
+// Accessors are pure-data reads under RLock — no I/O.
+
+func (m *LocalizedMatch) ID() types.URN { return m.id }
+
+func (m *LocalizedMatch) Name(locale types.Locale) (string, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	v, ok := m.name[locale]
+	return v, ok
+}
+
+func (m *LocalizedMatch) ScheduledTime() *time.Time {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.scheduledTime
+}
+
+func (m *LocalizedMatch) ScheduledEndTime() *time.Time {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.scheduledEndTime
+}
+
+func (m *LocalizedMatch) SportID() types.URN {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.sportID
+}
+
+func (m *LocalizedMatch) TournamentID() types.URN {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.tournamentID
+}
+
+func (m *LocalizedMatch) Competitors() []competitor {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]competitor, len(m.competitors))
+	copy(out, m.competitors)
+	return out
+}
+
+func (m *LocalizedMatch) LiveOddsAvailability() *types.LiveOddsAvailability {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.liveOddsAvailability
+}
+
+func (m *LocalizedMatch) SportFormat() types.SportFormat {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.sportFormat
+}
+
+// ExtraInfo returns a copy of the locale's extra-info map (or nil).
+func (m *LocalizedMatch) ExtraInfo(locale types.Locale) map[string]string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	src := m.extraInfo[locale]
+	if src == nil {
+		return nil
+	}
+	out := make(map[string]string, len(src))
+	for k, v := range src {
+		out[k] = v
+	}
+	return out
+}
+
+// Match returns a populated LocalizedMatch, fetching missing locales as needed.
+func (m *MatchCache) Match(ctx context.Context, id types.URN, locales []types.Locale) (*LocalizedMatch, error) {
+	v, _, err := m.lru.Get(ctx, id, locales)
 	if err != nil {
-		m.logger.WithError(err).Errorf("failed to process api response %v", apiResponse)
+		return nil, notFoundIfAbsent(err)
 	}
+	return v, nil
 }
 
-// OnFeedMessage ...
-func (m *MatchCache) OnFeedMessage(id protocols.URN, feedMessage *protocols.FeedMessage) {
+// OnFeedMessage clears the cache entry on a FixtureChange for a match.
+func (m *MatchCache) OnFeedMessage(id types.URN, feedMessage *types.FeedMessage) {
 	if feedMessage.Message == nil {
 		return
 	}
-
-	_, ok := feedMessage.Message.(*feedXML.FixtureChange)
-	if !ok || id.Type != "match" {
+	if _, ok := feedMessage.Message.(*feedXML.FixtureChange); !ok || id.Type != "match" {
 		return
 	}
-
 	m.ClearCacheItem(id)
 }
 
-// ClearCacheItem ...
-func (m *MatchCache) ClearCacheItem(id protocols.URN) {
-	m.internalCache.Delete(id.ToString())
-}
+// ClearCacheItem is the public invalidation hook.
+func (m *MatchCache) ClearCacheItem(id types.URN) { m.lru.Clear(id) }
 
-// Match ...
-func (m *MatchCache) Match(id protocols.URN, locales []protocols.Locale) (*LocalizedMatch, error) {
-	item, _ := m.internalCache.Get(id.ToString())
-	result, ok := item.(*LocalizedMatch)
-
-	var missingLocales []protocols.Locale
-	if !ok {
-		missingLocales = locales
-	} else {
-		for i := range locales {
-			locale := locales[i]
-			result.mux.Lock()
-			_, ok := result.name[locale]
-			result.mux.Unlock()
-
-			if !ok {
-				missingLocales = append(missingLocales, locale)
+func newMatchCache(lifeCtx context.Context, client *api.Client, logger *log.Logger) *MatchCache {
+	mc := &MatchCache{apiClient: client, logger: logger}
+	mc.lru = lru.NewEventCache[types.URN, types.Locale, *LocalizedMatch](
+		lru.Config{Lifetime: lifeCtx},
+		func(
+			ctx context.Context,
+			id types.URN,
+			missing []types.Locale,
+			existing *LocalizedMatch,
+			hasExisting bool,
+		) (*LocalizedMatch, error) {
+			var entry *LocalizedMatch
+			if hasExisting {
+				// Copy-on-write: merge into a clone so a failed
+				// later-locale fetch can't leave this load's earlier
+				// locales visible on the live cached entry (admitted
+				// only after coverage validation).
+				entry = existing.cloneForUpdate()
+			} else {
+				entry = &LocalizedMatch{
+					id:        id,
+					name:      make(map[types.Locale]string),
+					extraInfo: make(map[types.Locale]map[string]string),
+				}
 			}
-		}
-	}
-
-	if len(missingLocales) != 0 {
-		err := m.loadAndCacheItem(id, locales)
-		if err != nil {
-			return nil, err
-		}
-
-		item, _ = m.internalCache.Get(id.ToString())
-		result, ok = item.(*LocalizedMatch)
-		if !ok {
-			return nil, errors.New("item missing")
-		}
-	}
-
-	return result, nil
+			for _, locale := range missing {
+				data, err := client.FetchMatchSummary(ctx, id, locale)
+				if err != nil {
+					return nil, fmt.Errorf("fetch match summary %s/%s: %w", id.ToString(), locale, err)
+				}
+				if err := entry.merge(locale, data.SportEvent); err != nil {
+					return nil, fmt.Errorf("merge match %s locale %s: %w", id.ToString(), locale, err)
+				}
+			}
+			return entry, nil
+		},
+	)
+	return mc
 }
 
-func (m *MatchCache) loadAndCacheItem(id protocols.URN, locales []protocols.Locale) error {
-	for i := range locales {
-		locale := locales[i]
-		data, err := m.apiClient.FetchMatchSummary(id, locale)
-		if err != nil {
-			return err
-		}
-
-		err = m.refreshOrInsertItem(id, locale, data.SportEvent)
-		if err != nil {
-			return err
-		}
+// merge folds a freshly fetched match summary into the entry under mu.
+func (m *LocalizedMatch) merge(locale types.Locale, match apiXML.SportEvent) error {
+	tournamentID, err := unwrapURN(&match.Tournament.ID)
+	if err != nil {
+		return err
+	}
+	if tournamentID == nil {
+		return fmt.Errorf("match %s has no tournament id", match.ID)
+	}
+	sportID, err := unwrapURN(&match.Tournament.Sport.ID)
+	if err != nil {
+		return err
+	}
+	if sportID == nil {
+		return fmt.Errorf("match %s has no sport id", match.ID)
 	}
 
-	return nil
-}
-
-func (m *MatchCache) handleMatchData(locale protocols.Locale, matches []apiXML.SportEvent) error {
-	for i := range matches {
-		id, err := protocols.ParseURN(matches[i].ID)
-		if err != nil {
-			return err
-		}
-
-		err = m.refreshOrInsertItem(*id, locale, matches[i])
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func (m *MatchCache) refreshOrInsertItem(id protocols.URN, locale protocols.Locale, match apiXML.SportEvent) error {
-	item, _ := m.internalCache.Get(id.ToString())
-	result, ok := item.(*LocalizedMatch)
-
-	if !ok {
-		refID, err := m.unwrapURN(match.RefID)
-		if err != nil {
-			return err
-		}
-
-		result = &LocalizedMatch{
-			id:    id,
-			refID: refID,
-			name:  make(map[protocols.Locale]string),
-		}
-	}
-
-	result.sportFormat = protocols.SportFormatClassic
-	result.extraInfo = make(map[string]string)
+	// An absent sport_format key keeps the legacy default (classic) —
+	// the upstream catalog omits it for head-to-head sports.
+	var sportFormat types.SportFormat = types.SportFormatClassic
+	extraInfo := make(map[string]string)
 	if match.ExtraInfo != nil && match.ExtraInfo.List != nil {
 		for _, info := range match.ExtraInfo.List {
 			if info.Key == apiXML.ExtraInfoSportFormatKey && len(info.Value) > 0 {
 				switch info.Value {
-				case protocols.SportFormatRace:
-					result.sportFormat = protocols.SportFormatRace
-				case protocols.SportFormatClassic:
-					result.sportFormat = protocols.SportFormatClassic
+				case types.SportFormatRace:
+					sportFormat = types.SportFormatRace
+				case types.SportFormatClassic:
+					sportFormat = types.SportFormatClassic
 				default:
-					return fmt.Errorf("unknown sport format for match %s: %s", match.ID, info.Value)
+					// Forward-compat: a newly introduced upstream format
+					// must NOT abort match construction (pre-fix this
+					// returned an error, breaking Client.Match, the
+					// match-list queries, and feed enrichment for every
+					// match carrying the new value — feed delivery then
+					// continued with Event()==nil). Public model defines
+					// SportFormatUnknown for exactly this; the raw value
+					// stays readable via ExtraInfo["sport_format"].
+					sportFormat = types.SportFormatUnknown
 				}
 			}
-			result.extraInfo[info.Key] = info.Value
+			extraInfo[info.Key] = info.Value
 		}
 	}
 
 	var competitors []competitor
 	if match.Competitors != nil && len(match.Competitors.Competitor) > 0 {
+		competitors = make([]competitor, 0, len(match.Competitors.Competitor))
 		for _, c := range match.Competitors.Competitor {
-			urn, err := protocols.ParseURN(c.ID)
-			switch {
-			case err != nil:
+			urn, err := types.ParseURN(c.ID)
+			if err != nil {
 				return err
-			case urn == nil:
-				return fmt.Errorf("invalid or empty urn: %s", c.ID)
 			}
-
-			competitors = append(competitors, competitor{
-				urn:       *urn,
-				qualifier: c.Qualifier,
-			})
+			if urn == nil {
+				return fmt.Errorf("invalid or empty competitor urn: %s", c.ID)
+			}
+			competitors = append(competitors, competitor{urn: *urn, qualifier: c.Qualifier})
 		}
 	}
-	result.competitors = competitors
 
-	tournamentID, err := m.unwrapURN(&match.Tournament.ID)
-	if err != nil {
-		return err
-	}
-	result.tournamentID = *tournamentID
-
-	sportID, err := m.unwrapURN(&match.Tournament.Sport.ID)
-	if err != nil {
-		return err
-	}
-	result.sportID = *sportID
-
-	var liveOdds protocols.LiveOddsAvailability
+	var liveOdds types.LiveOddsAvailability
 	switch match.LiveOdds {
+	case apiXML.LiveOddsBooked, apiXML.LiveOddsBookable, apiXML.LiveOddsBuyable:
+		liveOdds = types.AvailableLiveOddsAvailability
 	case apiXML.LiveOddsNotAvailable:
-		liveOdds = protocols.NotAvailableLiveOddsAvailability
+		liveOdds = types.NotAvailableLiveOddsAvailability
 	default:
-		liveOdds = protocols.AvailableLiveOddsAvailability
+		// Fail CLOSED: an absent attribute (""), a malformed value, or
+		// a future enum value the SDK doesn't know must not report live
+		// odds as available — pre-fix the default branch did exactly
+		// that, and consumers could enable live behavior for events
+		// with no confirmed availability. The known wire values are
+		// enumerated above; anything else is conservatively
+		// not-available until the upstream schema (and this mapping)
+		// says otherwise.
+		liveOdds = types.NotAvailableLiveOddsAvailability
 	}
 
-	result.liveOddsAvailability = &liveOdds
-
-	scheduledTime, err := m.unwrapTime(match.Scheduled)
+	scheduledTime, err := unwrapTime(match.Scheduled)
 	if err != nil {
 		return err
 	}
-	result.scheduledTime = scheduledTime
-
-	scheduledEndTime, err := m.unwrapTime(match.ScheduledEnd)
+	scheduledEndTime, err := unwrapTime(match.ScheduledEnd)
 	if err != nil {
 		return err
 	}
-	result.scheduledEndTime = scheduledEndTime
 
+	// Reference IDs (locale-independent). Built outside the lock so a
+	// nil ReferenceIDs payload doesn't clobber a previously-populated
+	// map; only refresh when the API actually returned the block.
+	var refIDs map[string]string
 	if match.ReferenceIDs != nil {
-		result.referenceIDs = make(map[string]string)
+		refIDs = make(map[string]string, len(match.ReferenceIDs.ReferenceID))
 		for _, ref := range match.ReferenceIDs.ReferenceID {
-			result.referenceIDs[ref.Name] = ref.Value
+			refIDs[ref.Name] = ref.Value
 		}
 	}
 
-	result.mux.Lock()
-	defer result.mux.Unlock()
-
-	result.name[locale] = match.Name
-
-	m.internalCache.Set(id.ToString(), result, 0)
-
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sportID = *sportID
+	m.tournamentID = *tournamentID
+	m.competitors = competitors
+	m.liveOddsAvailability = &liveOdds
+	m.sportFormat = sportFormat
+	m.scheduledTime = scheduledTime
+	m.scheduledEndTime = scheduledEndTime
+	m.name[locale] = match.Name
+	m.extraInfo[locale] = extraInfo
+	if refIDs != nil {
+		m.referenceIDs = refIDs
+	}
 	return nil
 }
 
-func (m *MatchCache) unwrapURN(id *string) (*protocols.URN, error) {
-	if id == nil {
-		return nil, nil
+// snapshot projects the cached match entry into the field shapes used
+// by types.Match (data-copy under the entry's read lock).
+func (m *LocalizedMatch) snapshot() (
+	names map[types.Locale]string,
+	extraInfo map[types.Locale]map[string]string,
+	scheduledTime, scheduledEndTime *time.Time,
+	sportID, tournamentID types.URN,
+	competitors []competitor,
+	liveOddsAvailability types.LiveOddsAvailability,
+	sportFormat types.SportFormat,
+	referenceIDs map[string]string,
+) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	names = make(map[types.Locale]string, len(m.name))
+	for k, v := range m.name {
+		names[k] = v
 	}
-
-	return protocols.ParseURN(*id)
-}
-
-func (m *MatchCache) unwrapTime(dateTime *utils.DateTime) (*time.Time, error) {
-	if dateTime == nil {
-		return nil, nil
+	extraInfo = make(map[types.Locale]map[string]string, len(m.extraInfo))
+	for locale, src := range m.extraInfo {
+		dst := make(map[string]string, len(src))
+		for k, v := range src {
+			dst[k] = v
+		}
+		extraInfo[locale] = dst
 	}
-
-	parsed := (time.Time)(*dateTime)
-	return &parsed, nil
-}
-
-func newMatchCache(client *api.Client, logger *log.Entry) *MatchCache {
-	matchCache := &MatchCache{
-		apiClient:     client,
-		internalCache: cache.New(12*time.Hour, 10*time.Minute),
-		logger:        logger,
+	if m.scheduledTime != nil {
+		t := *m.scheduledTime
+		scheduledTime = &t
 	}
-
-	client.SubscribeWithAPIObserver(matchCache)
-
-	return matchCache
+	if m.scheduledEndTime != nil {
+		t := *m.scheduledEndTime
+		scheduledEndTime = &t
+	}
+	sportID = m.sportID
+	tournamentID = m.tournamentID
+	competitors = make([]competitor, len(m.competitors))
+	copy(competitors, m.competitors)
+	if m.liveOddsAvailability != nil {
+		liveOddsAvailability = *m.liveOddsAvailability
+	}
+	sportFormat = m.sportFormat
+	if m.referenceIDs != nil {
+		// Decouple from the cache so caller mutations on the returned
+		// map don't leak into the cached entry.
+		referenceIDs = make(map[string]string, len(m.referenceIDs))
+		for k, v := range m.referenceIDs {
+			referenceIDs[k] = v
+		}
+	}
+	return
 }
 
-// LocalizedMatch ...
-type LocalizedMatch struct {
-	id                   protocols.URN
-	refID                *protocols.URN
-	scheduledTime        *time.Time
-	scheduledEndTime     *time.Time
-	sportID              protocols.URN
-	tournamentID         protocols.URN
-	competitors          []competitor
-	liveOddsAvailability *protocols.LiveOddsAvailability
-	name                 map[protocols.Locale]string
-	sportFormat          protocols.SportFormat
-	extraInfo            map[string]string
-	referenceIDs         map[string]string
-
-	mux sync.Mutex
-}
-
-type competitor struct {
-	urn       protocols.URN
-	qualifier string
-}
-
-type matchImpl struct {
-	id            protocols.URN
-	localSportID  *protocols.URN
-	matchCache    *MatchCache
-	entityFactory protocols.EntityFactory
-	locales       []protocols.Locale
-}
-
-func (m matchImpl) ID() protocols.URN {
-	return m.id
-}
-
-// Deprecated: do not use this method, it will be removed in future
-func (m matchImpl) RefID() (*protocols.URN, error) {
-	item, err := m.matchCache.Match(m.id, m.locales)
+// BuildMatch resolves a *types.Match snapshot. Eagerly loads:
+//   - the per-locale match summary (entry + name + extra-info)
+//   - the tournament (with its embedded sport summary)
+//   - per-competitor profiles (across the requested locales)
+//   - home/away team competitors when the sport format is "classic"
+//   - the fixture (in the primary locale)
+//   - the live status snapshot (with localized status-code description)
+//
+// sportID overrides the cached sportID when non-nil — used by feed
+// message decode where the routing key carries the sport.
+func BuildMatch(
+	ctx context.Context,
+	mc *MatchCache,
+	factory entityFactory,
+	id types.URN,
+	sportID *types.URN,
+	locales []types.Locale,
+) (*types.Match, error) {
+	if len(locales) == 0 {
+		return nil, fmt.Errorf("BuildMatch: no locales supplied")
+	}
+	entry, err := mc.Match(ctx, id, locales)
 	if err != nil {
 		return nil, err
 	}
-
-	return item.refID, nil
-}
-
-func (m matchImpl) LocalizedName(locale protocols.Locale) (*string, error) {
-	item, err := m.matchCache.Match(m.id, m.locales)
-	if err != nil {
-		return nil, err
-	}
-
-	item.mux.Lock()
-	defer item.mux.Unlock()
-
-	name, ok := item.name[locale]
-	if !ok {
-		return nil, fmt.Errorf("missing locale %s", locale)
-	}
-
-	return &name, nil
-}
-
-func (m matchImpl) SportID() (*protocols.URN, error) {
-	if m.localSportID != nil {
-		return m.localSportID, nil
-	}
-
-	item, err := m.matchCache.Match(m.id, m.locales)
-	if err != nil {
-		return nil, err
-	}
-
-	m.localSportID = &item.sportID
-	return m.localSportID, nil
-}
-
-func (m matchImpl) ScheduledTime() (*time.Time, error) {
-	item, err := m.matchCache.Match(m.id, m.locales)
-	if err != nil {
-		return nil, err
-	}
-
-	return item.scheduledTime, nil
-}
-
-func (m matchImpl) ScheduledEndTime() (*time.Time, error) {
-	item, err := m.matchCache.Match(m.id, m.locales)
-	if err != nil {
-		return nil, err
-	}
-
-	return item.scheduledEndTime, nil
-}
-
-func (m matchImpl) ReferenceIDs() (map[string]string, error) {
-	item, err := m.matchCache.Match(m.id, m.locales)
-	if err != nil {
-		return nil, err
-	}
-
-	return item.referenceIDs, nil
-}
-
-func (m matchImpl) LiveOddsAvailability() (*protocols.LiveOddsAvailability, error) {
-	item, err := m.matchCache.Match(m.id, m.locales)
-	if err != nil {
-		return nil, err
-	}
-
-	return item.liveOddsAvailability, nil
-}
-
-func (m matchImpl) Competitors() ([]protocols.Competitor, error) {
-	item, err := m.matchCache.Match(m.id, m.locales)
-	if err != nil {
-		return nil, err
-	}
-
-	if len(item.competitors) < 2 {
-		return nil, fmt.Errorf("match %s has less than 2 competitors", m.id.ToString())
-	}
-
-	competitors := make([]protocols.Competitor, 0, len(item.competitors))
-	for _, team := range item.competitors {
-		competitors = append(competitors, teamCompetitorImpl{
-			qualifier:  &team.qualifier,
-			competitor: m.entityFactory.BuildCompetitor(team.urn, m.locales),
-		})
-	}
-
-	return competitors, nil
-}
-
-func (m matchImpl) SportFormat() (protocols.SportFormat, error) {
-	item, err := m.matchCache.Match(m.id, m.locales)
-	if err != nil {
-		return protocols.SportFormatUnknown, err
-	}
-
-	return item.sportFormat, nil
-}
-
-func (m matchImpl) ExtraInfo() (map[string]string, error) {
-	item, err := m.matchCache.Match(m.id, m.locales)
-	if err != nil {
-		return nil, err
-	}
-
-	return item.extraInfo, nil
-}
-
-func (m matchImpl) Status() protocols.MatchStatus {
-	return m.entityFactory.BuildMatchStatus(m.id, m.locales)
-}
-
-func (m matchImpl) Tournament() (protocols.Tournament, error) {
-	sportID, err := m.SportID()
-	if err != nil {
-		return nil, err
-	}
-
-	item, err := m.matchCache.Match(m.id, m.locales)
-	if err != nil {
-		return nil, err
-	}
-
-	return m.entityFactory.BuildTournament(item.tournamentID, *sportID, m.locales), nil
-}
-
-func (m matchImpl) homeAwayCompetitor(home bool) (protocols.TeamCompetitor, error) {
-	item, err := m.matchCache.Match(m.id, m.locales)
-	if err != nil {
-		return nil, err
-	}
-
-	var team competitor
-
-	switch {
-	case len(item.competitors) < 2:
-		return nil, fmt.Errorf("match %s has less than 2 competitors", m.id.ToString())
-	case item.sportFormat != protocols.SportFormatClassic:
-		return nil, fmt.Errorf("match %s is not a classic sport format", m.id.ToString())
-	case len(item.competitors) > 2:
-		return nil, fmt.Errorf("classic sport match %s has more than 2 competitors", m.id.ToString())
-	default:
-		if home {
-			team = item.competitors[0]
-		} else {
-			team = item.competitors[1]
+	names, extraInfo, sched, schedEnd, cachedSport, tournID, comps, liveAvail, format, refIDs := entry.snapshot()
+	// The cached sport comes from the API summary and is AUTHORITATIVE;
+	// the sportID argument comes from a feed message's ROUTING KEY.
+	// Pre-fix the route value replaced the cached sport without
+	// comparison — a mis-routed (or malicious) delivery could relabel a
+	// known match under a conflicting sport identity. The route value
+	// is used only when the cache carries no sport yet; a conflict
+	// keeps the cached identity and logs.
+	resolvedSport := cachedSport
+	if sportID != nil {
+		switch {
+		case cachedSport == (types.URN{}):
+			resolvedSport = *sportID
+		case *sportID != cachedSport:
+			if mc.logger != nil {
+				mc.logger.WithField("match_id", id.ToString()).
+					WithField("cached_sport", cachedSport.ToString()).
+					WithField("route_sport", sportID.ToString()).
+					Warn("cache: routing-key sport conflicts with cached sport; keeping cached identity")
+			}
 		}
 	}
 
-	return teamCompetitorImpl{
-		qualifier:  &team.qualifier,
-		competitor: m.entityFactory.BuildCompetitor(team.urn, m.locales),
+	// Tournament (eager).
+	tournament, err := factory.BuildTournament(ctx, tournID, resolvedSport, locales)
+	if err != nil {
+		return nil, fmt.Errorf("build tournament %s: %w", tournID.ToString(), err)
+	}
+
+	// Competitors (eager). For classic sports the home/away pair is
+	// projected into TeamCompetitor pointers as well.
+	competitors := make([]types.Competitor, 0, len(comps))
+	for _, t := range comps {
+		c, err := factory.BuildCompetitor(ctx, t.urn, locales)
+		if err != nil {
+			return nil, fmt.Errorf("build competitor %s: %w", t.urn.ToString(), err)
+		}
+		competitors = append(competitors, *c)
+	}
+
+	// Classic-format home/away assignment is keyed on the per-competitor
+	// `qualifier` ("home"/"away"), NOT on slice position. The API does
+	// not guarantee ordering: an [away, home] response would silently
+	// produce swapped competitors under the previous index-based code.
+	// If neither qualifier is recognized, leave home/away nil rather
+	// than guessing — downstream consumers tolerate the missing pointers.
+	var home, away *types.TeamCompetitor
+	if format == types.SportFormatClassic && len(comps) == 2 {
+		var homeIdx, awayIdx = -1, -1
+		for i, c := range comps {
+			switch c.qualifier {
+			case "home":
+				homeIdx = i
+			case "away":
+				awayIdx = i
+			}
+		}
+		if homeIdx >= 0 && awayIdx >= 0 {
+			hq := comps[homeIdx].qualifier
+			aq := comps[awayIdx].qualifier
+			h, err := factory.BuildTeamCompetitor(ctx, comps[homeIdx].urn, &hq, locales)
+			if err != nil {
+				return nil, err
+			}
+			home = h
+			a, err := factory.BuildTeamCompetitor(ctx, comps[awayIdx].urn, &aq, locales)
+			if err != nil {
+				return nil, err
+			}
+			away = a
+		}
+	}
+
+	// Fixture (primary locale).
+	fixture, err := factory.BuildFixture(ctx, id, locales[0])
+	if err != nil {
+		return nil, fmt.Errorf("build fixture %s: %w", id.ToString(), err)
+	}
+
+	// Status (cache-fed; FetchMatchSummary already populated it as part
+	// of mc.Match above via the cache observer).
+	status, err := factory.BuildMatchStatus(ctx, id, locales)
+	if err != nil {
+		return nil, fmt.Errorf("build match status %s: %w", id.ToString(), err)
+	}
+
+	return &types.Match{
+		ID:                   id,
+		Names:                names,
+		SportID:              resolvedSport,
+		ScheduledTime:        sched,
+		ScheduledEndTime:     schedEnd,
+		LiveOddsAvailability: liveAvail,
+		SportFormat:          format,
+		ExtraInfo:            extraInfo,
+		ReferenceIDs:         refIDs,
+		Tournament:           *tournament,
+		Competitors:          competitors,
+		HomeCompetitor:       home,
+		AwayCompetitor:       away,
+		Fixture:              *fixture,
+		Status:               *status,
 	}, nil
 }
 
-func (m matchImpl) HomeCompetitor() (protocols.TeamCompetitor, error) {
-	return m.homeAwayCompetitor(true)
-}
+// shared helpers used across this package's caches.
 
-func (m matchImpl) AwayCompetitor() (protocols.TeamCompetitor, error) {
-	return m.homeAwayCompetitor(false)
-}
-
-func (m matchImpl) Fixture() protocols.Fixture {
-	return m.entityFactory.BuildFixture(m.id, m.locales)
-}
-
-// NewMatch ...
-func NewMatch(id protocols.URN, sportID *protocols.URN, matchCache *MatchCache, entityFactory protocols.EntityFactory, locales []protocols.Locale) protocols.Match {
-	return &matchImpl{
-		id:            id,
-		localSportID:  sportID,
-		matchCache:    matchCache,
-		entityFactory: entityFactory,
-		locales:       locales,
+func unwrapURN(id *string) (*types.URN, error) {
+	if id == nil {
+		return nil, nil
 	}
+	return types.ParseURN(*id)
+}
+
+// clonePtr returns a fresh *T whose pointee equals *p, or nil when
+// p is nil. Used by Build* helpers to defensively decouple returned
+// snapshots from cache-owned pointer fields — a caller mutating the
+// pointee of a snapshot must not corrupt the cache's value, and a
+// second read must return the cache's current state, not the
+// caller-mutated value.
+func clonePtr[T any](p *T) *T {
+	if p == nil {
+		return nil
+	}
+	v := *p
+	return &v
+}
+
+// cloneStringMap returns a shallow copy of m, or nil when m is nil.
+// Strings are immutable in Go so a shallow copy fully decouples
+// caller and cache.
+func cloneStringMap(m map[string]string) map[string]string {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+func unwrapTime(dateTime *utils.DateTime) (*time.Time, error) {
+	if dateTime == nil {
+		return nil, nil
+	}
+	t := (time.Time)(*dateTime)
+	return &t, nil
 }

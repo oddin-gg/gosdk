@@ -10,31 +10,36 @@ on:
     branches:
       - 'main'
       - 'develop'
+      - 'next'
     tags:
       - 'v*'
 
+# Least-privilege default for every job: read-only contents. Jobs that
+# genuinely need more (golangci's check annotations, coverage's PR
+# comment, release's asset upload) elevate PER JOB below — a global
+# checks:write would hand write scopes to every job that executes
+# checked-out repository code.
 permissions:
-  # Required: allow read access to the content for analysis.
   contents: read
-  # Optional: allow read access to pull request. Use with `only-new-issues` option.
-  pull-requests: read
-  # Optional: Allow to write access to checks to allow the action to annotate code in the PR.
-  checks: write
 
 jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          # No job pushes with git credentials; don't persist the token
+          # into .git/config where checked-out repo code could read it.
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: 'go.mod'
           cache-dependency-path: 'go.sum'
       - run: go version
       - name: Build
         run: make build
-      - name: Check generated code
+      - name: Verify build leaves the tree clean
         run: git diff --exit-code
 
   tests:
@@ -42,16 +47,20 @@ jobs:
     needs: [ build ]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          # No job pushes with git credentials; don't persist the token
+          # into .git/config where checked-out repo code could read it.
+          persist-credentials: false
       - name: Prepare go environment
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: 'go.mod'
           cache-dependency-path: 'go.sum'
       - name: Run tests
         run: make test
       - name: Archive code coverage results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: code-coverage
           path: coverage.txt
@@ -66,7 +75,10 @@ jobs:
       actions: read  # to download code coverage results from "test" job
       pull-requests: write # write permission needed to comment on PR
     steps:
-      - uses: fgrosse/go-coverage-report@v1.2.0 # Consider using a Git revision for maximum security
+      # Third-party action pinned to a full commit SHA (immutable) rather
+      # than a mutable tag, so a compromised/retagged release can't inject
+      # code into CI. Bump both the SHA and the version comment together.
+      - uses: fgrosse/go-coverage-report@cbeb2ab2e32591d690337146ba02a911cc566f3f # v1.3.0
         continue-on-error: true
         with:
           coverage-artifact-name: "code-coverage" # can be omitted if you used this default value
@@ -76,9 +88,17 @@ jobs:
     name: Static code check
     needs: [ build ]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read # only-new-issues resolution
+      checks: write       # inline check annotations on the PR
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          # No job pushes with git credentials; don't persist the token
+          # into .git/config where checked-out repo code could read it.
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: 'go.mod'
           cache: false
@@ -87,35 +107,93 @@ jobs:
           VERSION=$(make golangci-lint-version)
           echo "golangci_version=$VERSION" >> $GITHUB_ENV
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        # v6 of this action does NOT support golangci-lint v2.x
+        # ("invalid version string 'v2.12.1'"); v7+ is required for v2.
+        # v8 explicitly requires golangci-lint >= v2.1.0 (we use v2.12.1).
+        # v9 bumps the action runtime to node24. The pinned binary version
+        # is in the Makefile (GOLANGCI_LINT_VERSION).
+        #
+        # Note on args: golangci-lint v2 removed the --exclude-dirs CLI
+        # flag. Path-based exclusions belong in .golangci.yml under
+        # linters.exclusions.paths. This repo never commits vendor/, so
+        # we don't need any path-exclude.
+        # Third-party action pinned to a full commit SHA (see coverage job).
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: ${{ env.golangci_version }}
-          args: --config .golangci.yml --timeout=5m --exclude-dirs vendor
+          args: --config .golangci.yml --timeout=5m
 
   dep-vulnerability:
     name: Dependency vulnerability scanner
-    continue-on-error: true
+    # Gates PRs and releases: a reachable vulnerability must fail the
+    # check, not just annotate it (release below depends on this job).
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          # No job pushes with git credentials; don't persist the token
+          # into .git/config where checked-out repo code could read it.
+          persist-credentials: false
       - name: Prepare go environment
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: 'go.mod'
           cache: false
       - name: Check
         run: make govulncheck
 
+  version_guard:
+    name: Tag matches SDK version
+    # Only meaningful on a version tag push; skipped on branch/PR runs.
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          # No job pushes with git credentials; don't persist the token
+          # into .git/config where checked-out repo code could read it.
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: 'go.mod'
+          cache-dependency-path: 'go.sum'
+      - name: Validate SDK is a Go-compatible module version
+        # Canonical validation via golang.org/x/mod: module.Check verifies
+        # semver correctness AND the major-version-vs-module-path rule (so
+        # "2.0.0" on the bare, non-/v2 path is rejected), plus a
+        # build-metadata rejection that closes the "+incompatible" escape.
+        # No hand-rolled semver regex to drift.
+        run: go test -run '^TestSDK_IsValidModuleVersion$|^TestReleasableVersion_RejectsInvalid$' ./internal/version/
+      - name: Tag must equal v<SDK>
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          SDK=$(grep -oE 'const SDK = "[^"]+"' internal/version/version.go | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "internal/version.SDK = ${SDK}"
+          echo "git tag              = ${TAG}"
+          # Exact string equality only (semver validity is proven by the
+          # module.Check test above); no version parsing here.
+          if [ "${TAG}" != "v${SDK}" ]; then
+            echo "::error::tag ${TAG} does not match v${SDK} — bump internal/version.SDK to ${TAG#v} before tagging"
+            exit 1
+          fi
+
   release:
     name: Create GitHub Release
-    needs: [build, tests]
+    needs: [build, tests, golangci, version_guard, dep-vulnerability]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          # No job pushes with git credentials; don't persist the token
+          # into .git/config where checked-out repo code could read it.
+          persist-credentials: false
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        # Third-party action pinned to a full commit SHA (see coverage job).
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           generate_release_notes: true

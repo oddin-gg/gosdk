@@ -2,7 +2,8 @@ package xml
 
 import (
 	"encoding/xml"
-	"github.com/oddin-gg/gosdk/protocols"
+
+	"github.com/oddin-gg/gosdk/types"
 )
 
 // MatchStatusDescriptionResponse ...
@@ -13,18 +14,18 @@ type MatchStatusDescriptionResponse struct {
 }
 
 // Code ...
-func (m MatchStatusDescriptionResponse) Code() protocols.ResponseCode {
-	return protocols.ResponseCode(m.ResponseCode)
+func (m MatchStatusDescriptionResponse) Code() types.ResponseCode {
+	return types.ResponseCode(m.ResponseCode)
 }
 
 // MatchStatus ...
 type MatchStatus struct {
-	ID          uint    `xml:"id,attr"`
+	ID          int     `xml:"id,attr"`
 	Description *string `xml:"description,attr"`
 }
 
 // GetID ...
-func (m MatchStatus) GetID() uint {
+func (m MatchStatus) GetID() int {
 	return m.ID
 }
 

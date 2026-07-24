@@ -2,7 +2,8 @@ package xml
 
 import (
 	"encoding/xml"
-	"github.com/oddin-gg/gosdk/protocols"
+
+	"github.com/oddin-gg/gosdk/types"
 )
 
 // MQSubscriptionTypeName ...
@@ -31,17 +32,17 @@ type ProducersResponse struct {
 }
 
 // Code ...
-func (p ProducersResponse) Code() protocols.ResponseCode {
-	return protocols.ResponseCode(p.ResponseCode)
+func (p ProducersResponse) Code() types.ResponseCode {
+	return types.ResponseCode(p.ResponseCode)
 }
 
 // Producer ...
 type Producer struct {
-	ID             uint                   `xml:"id,attr"`
+	ID             int                    `xml:"id,attr"`
 	Name           MQSubscriptionTypeName `xml:"name,attr"`
 	Description    string                 `xml:"description,attr"`
 	APIEndpoint    string                 `xml:"api_url,attr"`
 	Active         bool                   `xml:"active,attr"`
 	Scope          Scope                  `xml:"scope,attr"`
-	RecoveryWindow uint                   `xml:"stateful_recovery_window_in_minutes,attr"`
+	RecoveryWindow int                    `xml:"stateful_recovery_window_in_minutes,attr"`
 }

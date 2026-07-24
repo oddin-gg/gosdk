@@ -15,8 +15,7 @@ type FixtureChangesResponse struct {
 
 // FixtureChange ...
 type FixtureChange struct {
-	SportEventID string `xml:"sport_event_id,attr"`
-	// Deprecated: do not use this property, it will be removed in future
+	SportEventID    string         `xml:"sport_event_id,attr"`
 	SportEventRefID *string        `xml:"sport_event_ref_id,attr,omitempty"`
 	UpdatedAt       utils.DateTime `xml:"update_time,attr"`
 }

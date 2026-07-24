@@ -9,8 +9,8 @@ import (
 type RollbackBetCancel struct {
 	MessageAttributes
 	XMLName   xml.Name                  `xml:"rollback_bet_cancel"`
-	StartTime *uint                     `xml:"start_time,attr,omitempty"`
-	EndTime   *uint                     `xml:"end_time,attr,omitempty"`
+	StartTime *int64                    `xml:"start_time,attr,omitempty"`
+	EndTime   *int64                    `xml:"end_time,attr,omitempty"`
 	Markets   []RollbackBetCancelMarket `xml:"market"`
 }
 
@@ -25,7 +25,7 @@ func (o RollbackBetCancel) GetEventID() string {
 }
 
 // Product ...
-func (o RollbackBetCancel) Product() uint {
+func (o RollbackBetCancel) Product() int {
 	return o.MessageAttributes.Product
 }
 

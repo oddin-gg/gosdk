@@ -9,13 +9,21 @@ import (
 type BetCancel struct {
 	XMLName xml.Name `xml:"bet_cancel"`
 	MessageAttributes
-	StartTime *uint                   `xml:"start_time,attr,omitempty"`
-	EndTime   *uint                   `xml:"end_time,attr,omitempty"`
+	StartTime *int64                  `xml:"start_time,attr,omitempty"`
+	EndTime   *int64                  `xml:"end_time,attr,omitempty"`
 	Markets   []*MarketWithoutOutcome `xml:"market"`
 }
 
+// GetEventID returns the event id the payload itself carries — the
+// route/payload identity cross-check and feed-driven cache invalidation
+// both key on this accessor; its absence silently exempted bet_cancel
+// from both (Codex P2).
+func (b BetCancel) GetEventID() string {
+	return b.MessageAttributes.EventID
+}
+
 // Product ...
-func (b BetCancel) Product() uint {
+func (b BetCancel) Product() int {
 	return b.MessageAttributes.Product
 }
 

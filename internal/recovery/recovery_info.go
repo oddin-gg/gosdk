@@ -1,16 +1,17 @@
 package recovery
 
 import (
-	"github.com/oddin-gg/gosdk/protocols"
 	"time"
+
+	"github.com/oddin-gg/gosdk/types"
 )
 
 type recoveryInfoImpl struct {
 	after      time.Time
 	timestamp  time.Time
-	requestID  uint
+	requestID  int
 	successful bool
-	nodeID     *int
+	nodeID     types.Optional[int]
 }
 
 func (r recoveryInfoImpl) After() time.Time {
@@ -21,7 +22,7 @@ func (r recoveryInfoImpl) Timestamp() time.Time {
 	return r.timestamp
 }
 
-func (r recoveryInfoImpl) RequestID() uint {
+func (r recoveryInfoImpl) RequestID() int {
 	return r.requestID
 }
 
@@ -29,21 +30,23 @@ func (r recoveryInfoImpl) Successful() bool {
 	return r.successful
 }
 
-func (r recoveryInfoImpl) NodeID() *int {
+func (r recoveryInfoImpl) NodeID() types.Optional[int] {
 	return r.nodeID
 }
 
+// newRecoveryInfoImpl accepts *int from upstream call sites
+// (cfg.SdkNodeID() returns *int) and converts at the boundary.
 func newRecoveryInfoImpl(
 	after time.Time,
 	timestamp time.Time,
-	requestID uint,
+	requestID int,
 	successful bool,
-	nodeID *int) protocols.RecoveryInfo {
+	nodeID *int) types.RecoveryInfo {
 	return &recoveryInfoImpl{
 		after:      after,
 		timestamp:  timestamp,
 		requestID:  requestID,
 		successful: successful,
-		nodeID:     nodeID,
+		nodeID:     types.FromPtr(nodeID),
 	}
 }
