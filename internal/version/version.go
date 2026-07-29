@@ -27,7 +27,7 @@ import (
 // tag equals "v"+SDK — and MUST be valid semver. It is the fallback
 // reported (suffixed "-dev") when build info carries no real module
 // version.
-const SDK = "1.0.1"
+const SDK = "1.0.0"
 
 // devSuffix marks a version derived from the compiled-in fallback rather
 // than resolved from build info — i.e. an unstamped / dev build.
