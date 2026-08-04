@@ -2,12 +2,14 @@ package cache
 
 import (
 	"context"
+	encodingxml "encoding/xml"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
+	feedXML "github.com/oddin-gg/gosdk/internal/feed/xml"
 	log "github.com/oddin-gg/gosdk/internal/log"
 	"github.com/oddin-gg/gosdk/types"
 )
@@ -92,5 +94,80 @@ func TestBuildMatchStatus_PeriodScoreGames(t *testing.T) {
 				t.Errorf("sets-won tally = %v:%v, want 1:0", ps.HomeScore, ps.AwayScore)
 			}
 		})
+	}
+}
+
+// TestOnFeedMessage_PeriodScoreGames covers the same attribute on the feed path,
+// which is where set scores actually move: odds_change arrives on every point,
+// while the API summary is only refetched occasionally. The payload is a live
+// tennis message as published on the live stream — note the feed spells the
+// status attributes differently from the API (status="1", match_status="201").
+func TestOnFeedMessage_PeriodScoreGames(t *testing.T) {
+	raw := `<odds_change event_id="od:match:11" product="1" timestamp="1785831336922">
+  <sport_event_status status="1" match_status="201" scoreboard_available="true" home_score="1" away_score="0">
+    <period_scores>
+      <period_score type="set" number="1" match_status_code="200" home_score="1" away_score="0" home_games="6" away_games="4"/>
+      <period_score type="set" number="2" match_status_code="201" home_score="1" away_score="0" home_games="0" away_games="1"/>
+      <period_score type="set" number="3" match_status_code="202" home_score="1" away_score="0" home_games="0" away_games="0"/>
+    </period_scores>
+    <scoreboard home_points="40" away_points="40" home_games="0" away_games="1"/>
+  </sport_event_status>
+  <odds/>
+</odds_change>`
+
+	var oddsChange feedXML.OddsChange
+	if err := encodingxml.Unmarshal([]byte(raw), &oddsChange); err != nil {
+		t.Fatalf("unmarshal odds_change: %v", err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	apiC := newAPIClientForTest(t, srv)
+	cfg := &minimalCfg{apiURL: srv.URL, token: "tok"}
+	c := newMatchStatusCache(t.Context(), apiC, cfg, log.New(nil))
+
+	urn, _ := types.ParseURN("od:match:11")
+	c.OnFeedMessage(*urn, &types.FeedMessage{
+		BasicFeedMessage: types.BasicFeedMessage{
+			Timestamp: types.MessageTimestamp{Created: time.Unix(1785831336, 0)},
+		},
+		Message: &oddsChange,
+	})
+
+	item, ok := c.lookup(*urn)
+	if !ok {
+		t.Fatal("match status not cached after OnFeedMessage")
+	}
+	if len(item.periodScores) != 3 {
+		t.Fatalf("periodScores length = %d, want 3", len(item.periodScores))
+	}
+
+	wantGames := [][2]int{{6, 4}, {0, 1}, {0, 0}}
+	for i, want := range wantGames {
+		ps := item.periodScores[i]
+		home, homeSet := ps.HomeGames.Get()
+		away, awaySet := ps.AwayGames.Get()
+		if !homeSet || !awaySet {
+			t.Errorf("set %d: games unset, want %d:%d", i+1, want[0], want[1])
+			continue
+		}
+		if home != want[0] || away != want[1] {
+			t.Errorf("set %d: games = %d:%d, want %d:%d", i+1, home, away, want[0], want[1])
+		}
+		// Same row, different meaning: the tally must not be confused with games.
+		if ps.HomeScore != 1 || ps.AwayScore != 0 {
+			t.Errorf("set %d: sets-won tally = %v:%v, want 1:0", i+1, ps.HomeScore, ps.AwayScore)
+		}
+	}
+
+	// The scoreboard keeps reporting the set in progress, unchanged by this.
+	if item.scoreboard == nil {
+		t.Fatal("scoreboard nil")
+	}
+	if games, set := item.scoreboard.AwayGames.Get(); !set || games != 1 {
+		t.Errorf("scoreboard away games = %v (set=%v), want 1", games, set)
 	}
 }
