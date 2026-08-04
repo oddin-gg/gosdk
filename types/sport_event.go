@@ -71,6 +71,9 @@ type PeriodScore struct {
 	HomePoints Optional[int]
 	AwayPoints Optional[int]
 
+	HomeGames Optional[int]
+	AwayGames Optional[int]
+
 	HomeRuns          Optional[int]
 	AwayRuns          Optional[int]
 	HomeWicketsFallen Optional[int]

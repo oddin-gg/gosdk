@@ -50,6 +50,7 @@ type PeriodScore struct {
 	KillsPeriodsScore
 	GoalsPeriodsScore
 	PointsPeriodScore
+	GamesPeriodScore
 	RunPeriodsScore
 }
 
@@ -63,6 +64,14 @@ type RoundsPeriodScore struct {
 type PointsPeriodScore struct {
 	HomePoints *int `xml:"home_points,attr,omitempty"`
 	AwayPoints *int `xml:"away_points,attr,omitempty"`
+}
+
+// GamesPeriodScore carries the games won inside one period. Set-based classic
+// sports (tennis, volleyball) report them per set, alongside the period's
+// home_score/away_score, which is the running sets-won tally.
+type GamesPeriodScore struct {
+	HomeGames *int `xml:"home_games,attr,omitempty"`
+	AwayGames *int `xml:"away_games,attr,omitempty"`
 }
 
 // KillsPeriodsScore ...
