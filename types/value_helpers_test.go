@@ -54,6 +54,42 @@ func TestMatch_NameAndExtraInfoFor(t *testing.T) {
 	}
 }
 
+// --- LiveOddsAvailability ---
+
+func TestLiveOddsAvailability_UnknownIsTheZeroValue(t *testing.T) {
+	var zero LiveOddsAvailability
+	if zero != UnknownLiveOddsAvailability {
+		t.Errorf("zero value = %q, want %q", zero, UnknownLiveOddsAvailability)
+	}
+	// A Match nobody populated must not claim live odds.
+	if (Match{}).LiveOddsAvailability.IsAvailable() {
+		t.Error("zero-value Match reports live odds as available")
+	}
+	if UnknownLiveOddsAvailability == NotAvailableLiveOddsAvailability {
+		t.Error("Unknown and NotAvailable must stay distinguishable")
+	}
+}
+
+func TestLiveOddsAvailability_Predicates(t *testing.T) {
+	cases := []struct {
+		in          LiveOddsAvailability
+		isAvailable bool
+		isKnown     bool
+	}{
+		{AvailableLiveOddsAvailability, true, true},
+		{NotAvailableLiveOddsAvailability, false, true},
+		{UnknownLiveOddsAvailability, false, false},
+	}
+	for _, tc := range cases {
+		if got := tc.in.IsAvailable(); got != tc.isAvailable {
+			t.Errorf("%q.IsAvailable() = %v, want %v", tc.in, got, tc.isAvailable)
+		}
+		if got := tc.in.IsKnown(); got != tc.isKnown {
+			t.Errorf("%q.IsKnown() = %v, want %v", tc.in, got, tc.isKnown)
+		}
+	}
+}
+
 // --- Tournament ---
 
 func TestTournament_NameAndAbbreviation(t *testing.T) {

@@ -578,7 +578,7 @@ collapsed into one explicit idiom.
 | `match.LocalizedName(loc)` | `match.Name(loc)` (returns `Optional[string]`; use `.ValueOr("")` or `.Get()`) |
 | `match.SportID()` (returns `(*URN, error)`) | `match.SportID` |
 | `match.ScheduledTime()` | `match.ScheduledTime` |
-| `match.LiveOddsAvailability()` | `match.LiveOddsAvailability` |
+| `match.LiveOddsAvailability()` | `match.LiveOddsAvailability` (an event with no `liveodds` attribute now reports `UnknownLiveOddsAvailability`, the zero value — branch on `.IsAvailable()`) |
 | `match.SportFormat()` | `match.SportFormat` |
 | `match.ExtraInfo()` | `match.ExtraInfoFor(loc)` (per-locale) |
 | `match.Status()` | `match.Status` (value, not interface) |

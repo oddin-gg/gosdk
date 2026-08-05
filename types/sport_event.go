@@ -13,14 +13,45 @@ const (
 	AwaySideType SideType = 2
 )
 
-// LiveOddsAvailability ...
+// LiveOddsAvailability is what the upstream `liveodds` attribute says
+// about live-trading availability for an event.
+//
+// The attribute is optional on the wire, so "upstream said nothing" is a
+// state of its own — see UnknownLiveOddsAvailability. Use IsAvailable()
+// rather than comparing against NotAvailable when the question is "may I
+// enable live behaviour": that predicate stays fail-closed if the wire
+// grows further states.
 type LiveOddsAvailability string
 
 // LiveOddsAvailabilities
 const (
+	// UnknownLiveOddsAvailability is the zero value and means the event
+	// carried NO `liveodds` attribute — upstream stated nothing, which
+	// is not the same as the explicit "no" of NotAvailable. Feeds differ
+	// in what an omission means (some omit the attribute exactly for the
+	// live-capable events), so the SDK reports the omission as-is and
+	// leaves the interpretation to the consumer. Anything other than an
+	// explicit bookable state stays not-live by default: IsAvailable()
+	// is false here.
+	UnknownLiveOddsAvailability LiveOddsAvailability = ""
+
 	NotAvailableLiveOddsAvailability LiveOddsAvailability = "not_available"
 	AvailableLiveOddsAvailability    LiveOddsAvailability = "available"
 )
+
+// IsAvailable reports whether upstream CONFIRMED live odds for the
+// event (a booked / bookable / buyable state). It is false for both
+// NotAvailable and Unknown, so it is the fail-closed check to branch
+// live behaviour on.
+func (a LiveOddsAvailability) IsAvailable() bool {
+	return a == AvailableLiveOddsAvailability
+}
+
+// IsKnown reports whether upstream stated an availability at all, i.e.
+// whether the `liveodds` attribute was present on the event.
+func (a LiveOddsAvailability) IsKnown() bool {
+	return a != UnknownLiveOddsAvailability
+}
 
 // SportFormat distinguishes between scoring shapes (classic head-to-head
 // vs race-style) so consumers can branch their UI/scoring logic.

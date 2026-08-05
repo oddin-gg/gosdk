@@ -300,15 +300,28 @@ func (m *LocalizedMatch) merge(locale types.Locale, match apiXML.SportEvent) err
 		liveOdds = types.AvailableLiveOddsAvailability
 	case apiXML.LiveOddsNotAvailable:
 		liveOdds = types.NotAvailableLiveOddsAvailability
+	case "":
+		// The attribute was ABSENT — upstream stated nothing. Reported
+		// as Unknown rather than folded into NotAvailable: the two are
+		// different wire states, and collapsing them left consumers
+		// unable to tell an omission from an explicit "no". That matters
+		// because the meaning of an omission is feed-specific — a feed
+		// we consume sets the attribute only for prematch-only events,
+		// so every live-capable event arrives with no attribute at all
+		// and read as prematch-only under the collapsed mapping.
+		//
+		// Still fail-closed by default: Unknown is not Available, and
+		// LiveOddsAvailability.IsAvailable() is false for it.
+		liveOdds = types.UnknownLiveOddsAvailability
 	default:
-		// Fail CLOSED: an absent attribute (""), a malformed value, or
-		// a future enum value the SDK doesn't know must not report live
-		// odds as available — pre-fix the default branch did exactly
-		// that, and consumers could enable live behavior for events
-		// with no confirmed availability. The known wire values are
-		// enumerated above; anything else is conservatively
-		// not-available until the upstream schema (and this mapping)
-		// says otherwise.
+		// Fail CLOSED: a malformed value or a future enum value the SDK
+		// doesn't know must not report live odds as available — pre-fix
+		// the default branch did exactly that, and consumers could
+		// enable live behavior for events with no confirmed
+		// availability. Unlike an absent attribute, a value we cannot
+		// parse is upstream having SAID something we don't understand;
+		// it stays conservatively not-available until the upstream
+		// schema (and this mapping) says otherwise.
 		liveOdds = types.NotAvailableLiveOddsAvailability
 	}
 

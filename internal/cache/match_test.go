@@ -276,7 +276,13 @@ func contains(s, sub string) bool {
 // attribute, a malformed value, and future enum values — defaulted to
 // Available, so consumers could enable live behavior with no confirmed
 // availability. Post-fix the known bookable states map to Available and
-// everything else fails closed.
+// nothing else does.
+//
+// The absent attribute is its own state (Unknown): upstream saying
+// NOTHING is not upstream saying "no", and the two used to be
+// indistinguishable on the public model. A malformed / future value
+// still fails closed onto NotAvailable — upstream said something we
+// cannot parse, which is not the same as it saying nothing.
 func TestMatchCache_LiveOddsMapping(t *testing.T) {
 	cases := []struct {
 		liveodds string // raw attribute; "" = omitted
@@ -286,17 +292,63 @@ func TestMatchCache_LiveOddsMapping(t *testing.T) {
 		{"bookable", types.AvailableLiveOddsAvailability},
 		{"buyable", types.AvailableLiveOddsAvailability},
 		{"not_available", types.NotAvailableLiveOddsAvailability},
-		{"", types.NotAvailableLiveOddsAvailability},                  // absent attribute
+		{"", types.UnknownLiveOddsAvailability},                       // absent attribute
 		{"some_future_state", types.NotAvailableLiveOddsAvailability}, // unknown enum
 	}
 	for i, tc := range cases {
-		matchURN := fmt.Sprintf("od:match:%d", 9100+i)
-		urn, _ := types.ParseURN(matchURN)
-		attr := ""
-		if tc.liveodds != "" {
-			attr = fmt.Sprintf(` liveodds="%s"`, tc.liveodds)
+		got := liveOddsForAttr(t, 9100+i, tc.liveodds)
+		if got != tc.want {
+			t.Errorf("liveodds=%q mapped to %q, want %q", tc.liveodds, got, tc.want)
 		}
-		body := fmt.Sprintf(`<?xml version="1.0"?>
+		// Whatever the state, only a confirmed bookable one may read as
+		// available — the fail-closed guarantee for consumers.
+		if want := tc.want == types.AvailableLiveOddsAvailability; got.IsAvailable() != want {
+			t.Errorf("liveodds=%q: IsAvailable() = %v, want %v", tc.liveodds, got.IsAvailable(), want)
+		}
+	}
+}
+
+// TestMatchCache_LiveOddsAbsentDistinctFromNotAvailable pins the point
+// of the fix: a consumer must be able to tell the two wire states
+// apart. A feed that omits `liveodds` for its live-capable events (we
+// consume one — it sets the attribute only for prematch-only events)
+// read as explicitly prematch-only while both states shared a value.
+func TestMatchCache_LiveOddsAbsentDistinctFromNotAvailable(t *testing.T) {
+	absent := liveOddsForAttr(t, 9200, "")
+	explicit := liveOddsForAttr(t, 9201, "not_available")
+
+	if absent == explicit {
+		t.Fatalf("absent and explicit not_available both mapped to %q — the states are indistinguishable", absent)
+	}
+	if absent != types.UnknownLiveOddsAvailability {
+		t.Errorf("absent attribute mapped to %q, want %q", absent, types.UnknownLiveOddsAvailability)
+	}
+	if absent.IsKnown() {
+		t.Error("absent attribute reports IsKnown() = true")
+	}
+	if !explicit.IsKnown() {
+		t.Error("explicit not_available reports IsKnown() = false")
+	}
+	if absent.IsAvailable() {
+		t.Error("absent attribute must not read as available")
+	}
+}
+
+// liveOddsForAttr drives one match summary through the cache and
+// returns the mapped availability. attr == "" omits the attribute.
+func liveOddsForAttr(t *testing.T, id int, attr string) types.LiveOddsAvailability {
+	t.Helper()
+
+	matchURN := fmt.Sprintf("od:match:%d", id)
+	urn, err := types.ParseURN(matchURN)
+	if err != nil {
+		t.Fatalf("ParseURN(%s): %v", matchURN, err)
+	}
+	liveOddsAttr := ""
+	if attr != "" {
+		liveOddsAttr = fmt.Sprintf(` liveodds="%s"`, attr)
+	}
+	body := fmt.Sprintf(`<?xml version="1.0"?>
 <match_summary generated_at="2026-01-01T00:00:00Z">
   <sport_event id="%s" name="M" scheduled="2026-01-01T12:00:00Z"%s>
     <tournament id="od:tournament:7">
@@ -304,22 +356,22 @@ func TestMatchCache_LiveOddsMapping(t *testing.T) {
     </tournament>
   </sport_event>
   <sport_event_status status="not_started" match_status_code="0" scoreboard_available="false"/>
-</match_summary>`, matchURN, attr)
+</match_summary>`, matchURN, liveOddsAttr)
 
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/xml")
-			_, _ = io.WriteString(w, body)
-		}))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = io.WriteString(w, body)
+	}))
+	defer srv.Close()
 
-		mc := newMatchCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
-		got, err := mc.Match(t.Context(), *urn, []types.Locale{types.EnLocale})
-		if err != nil {
-			srv.Close()
-			t.Fatalf("liveodds=%q: Match: %v", tc.liveodds, err)
-		}
-		if la := got.LiveOddsAvailability(); la == nil || *la != tc.want {
-			t.Errorf("liveodds=%q mapped to %v, want %v", tc.liveodds, la, tc.want)
-		}
-		srv.Close()
+	mc := newMatchCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	got, err := mc.Match(t.Context(), *urn, []types.Locale{types.EnLocale})
+	if err != nil {
+		t.Fatalf("liveodds=%q: Match: %v", attr, err)
 	}
+	la := got.LiveOddsAvailability()
+	if la == nil {
+		t.Fatalf("liveodds=%q: cached availability is nil", attr)
+	}
+	return *la
 }
