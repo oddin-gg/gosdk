@@ -192,8 +192,8 @@ func (l *LocalizedTournament) merge(locale types.Locale, t TournamentWrapper) er
 		}
 	}
 
-	// Only refresh when the payload carried the block: list payloads omit
-	// it and must not blank what /info already told us.
+	// The block is optional on the wire, so an absent one means "nothing
+	// new", not "cleared" — refresh only when the payload sent it.
 	var refIDs map[string]string
 	if block := t.GetReferenceIDs(); block != nil {
 		refIDs = make(map[string]string, len(block.ReferenceID))
