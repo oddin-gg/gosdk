@@ -48,6 +48,9 @@ type Tournament struct {
 	Abbreviation     string             `xml:"abbreviation,attr"`
 	RiskTier         int                `xml:"risk_tier,attr"`
 	Category         *Category          `xml:"category"`
+	// Only the single-tournament endpoints (/info, /schedule) send this;
+	// the tournament-list endpoints omit it.
+	ReferenceIDs *ReferenceIDs `xml:"reference_ids,omitempty"`
 }
 
 // GetName ...
@@ -104,6 +107,11 @@ func (t Tournament) GetRiskTier() int {
 
 func (t Tournament) GetCategory() *Category {
 	return t.Category
+}
+
+// GetReferenceIDs ...
+func (t Tournament) GetReferenceIDs() *ReferenceIDs {
+	return t.ReferenceIDs
 }
 
 // TournamentLength ...

@@ -27,6 +27,7 @@ type TournamentWrapper interface {
 	GetAbbreviation() string
 	GetRiskTier() int
 	GetCategory() *apiXML.Category
+	GetReferenceIDs() *apiXML.ReferenceIDs
 }
 
 // TournamentExtendedWrapper extends TournamentWrapper with the optional
@@ -72,6 +73,9 @@ type LocalizedTournament struct {
 
 	name         map[types.Locale]string
 	abbreviation map[types.Locale]string
+
+	// Locale-independent — the API returns the same set across locales.
+	referenceIDs map[string]string
 
 	// stagedIcon holds the icon path gathered by the loader while the
 	// load is still in flight. It is committed to the cache's icon map
@@ -119,9 +123,9 @@ func (l *LocalizedTournament) Locales() []types.Locale {
 // concurrent readers — the load/admit transaction admits the clone only
 // after every locale and the coverage validation succeed. Top-level maps
 // are copied one level deep; pointers are safe to alias because merge()
-// only ever REPLACES them wholesale (competitorIDs included — extended
-// payloads swap in a fresh map). Staged-icon fields start zeroed:
-// staging belongs to the in-flight load, and the source's staged icon
+// only ever REPLACES them wholesale (competitorIDs and referenceIDs
+// included — a payload swaps in a fresh map). Staged-icon fields start
+// zeroed: staging belongs to the in-flight load, and the source's staged icon
 // (if any) was already consumed at its own admission.
 func (l *LocalizedTournament) cloneForUpdate() *LocalizedTournament {
 	l.mu.RLock()
@@ -139,6 +143,7 @@ func (l *LocalizedTournament) cloneForUpdate() *LocalizedTournament {
 		competitorsLoaded: l.competitorsLoaded,
 		name:              make(map[types.Locale]string, len(l.name)+1),
 		abbreviation:      make(map[types.Locale]string, len(l.abbreviation)+1),
+		referenceIDs:      l.referenceIDs,
 	}
 	for k := range l.competitorIDs {
 		c.competitorIDs[k] = struct{}{}
@@ -187,6 +192,16 @@ func (l *LocalizedTournament) merge(locale types.Locale, t TournamentWrapper) er
 		}
 	}
 
+	// Only refresh when the payload carried the block: list payloads omit
+	// it and must not blank what /info already told us.
+	var refIDs map[string]string
+	if block := t.GetReferenceIDs(); block != nil {
+		refIDs = make(map[string]string, len(block.ReferenceID))
+		for _, ref := range block.ReferenceID {
+			refIDs[ref.Name] = ref.Value
+		}
+	}
+
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.id = ifZeroURN(l.id, urnFromString(t.GetID()))
@@ -199,6 +214,9 @@ func (l *LocalizedTournament) merge(locale types.Locale, t TournamentWrapper) er
 	l.category = t.GetCategory()
 	l.name[locale] = t.GetName()
 	l.abbreviation[locale] = t.GetAbbreviation()
+	if refIDs != nil {
+		l.referenceIDs = refIDs
+	}
 	if extendedPayload {
 		// Replace the competitor set (the API is authoritative) AND
 		// flag the tournament as competitor-loaded so BuildTournament
@@ -449,6 +467,14 @@ func (l *LocalizedTournament) tournamentSnapshot(
 		competitorIDs = append(competitorIDs, k)
 	}
 	sortURNs(competitorIDs) // deterministic public ordering (see sortURNs)
+	// nil stays nil: "never sent" differs from "sent empty".
+	var referenceIDs map[string]string
+	if l.referenceIDs != nil {
+		referenceIDs = make(map[string]string, len(l.referenceIDs))
+		for k, v := range l.referenceIDs {
+			referenceIDs[k] = v
+		}
+	}
 	var category *types.Category
 	if l.category != nil {
 		category = &types.Category{
@@ -473,6 +499,7 @@ func (l *LocalizedTournament) tournamentSnapshot(
 		Category:         category,
 		Sport:            sportSummary,
 		CompetitorIDs:    competitorIDs,
+		ReferenceIDs:     referenceIDs,
 	}
 }
 
