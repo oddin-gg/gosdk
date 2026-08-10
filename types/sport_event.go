@@ -292,6 +292,10 @@ type Tournament struct {
 	Category         *Category
 	Sport            SportSummary
 	CompetitorIDs    []URN
+
+	// ReferenceIDs maps the upstream `reference_ids` block, e.g.
+	// {"oddin": "od:tournament:14342"}. Nil when the API sent none.
+	ReferenceIDs map[string]string
 }
 
 // Name returns the localized name, or None if the tournament wasn't
