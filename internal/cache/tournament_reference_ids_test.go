@@ -94,8 +94,40 @@ func TestBuildTournament_ReferenceIDsSurfaceOnSnapshot(t *testing.T) {
 	}
 }
 
-// A list payload carries no reference_ids, so merging one after /info
-// must leave the known mapping intact.
+// An empty block is a statement ("no mappings"), an absent one isn't, so
+// it must project a non-nil empty map. Guards the `block != nil` test in
+// merge() against being narrowed to `len(block.ReferenceID) > 0`.
+func TestBuildTournament_EmptyReferenceIDsBlockProjectsEmptyMap(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = io.WriteString(w, `<?xml version="1.0"?>
+<tournament_info generated_at="2026-01-01T00:00:00Z">
+  <tournament id="od:tournament:7" name="T">
+    <sport id="od:sport:1" name="Football"/>
+    <reference_ids></reference_ids>
+  </tournament>
+  <competitors><competitor id="od:competitor:1"/></competitors>
+</tournament_info>`)
+	}))
+	defer srv.Close()
+
+	tc := newTournamentCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	id := types.URN{Prefix: "od", Type: "tournament", ID: 7}
+	sportID := types.URN{Prefix: "od", Type: "sport", ID: 1}
+
+	out, err := BuildTournament(t.Context(), tc, &recordingSportFactory{}, id, sportID, []types.Locale{types.EnLocale})
+	if err != nil {
+		t.Fatalf("BuildTournament: %v", err)
+	}
+	if out.ReferenceIDs == nil {
+		t.Fatal("ReferenceIDs = nil, want a non-nil empty map (an empty block is not an absent one)")
+	}
+	if got := len(out.ReferenceIDs); got != 0 {
+		t.Errorf("len(ReferenceIDs) = %d, want 0", got)
+	}
+}
+
+// A payload with no reference_ids must leave a known mapping intact.
 func TestMerge_MissingReferenceIDsDoesNotClobber(t *testing.T) {
 	l := newTestLocalizedTournament()
 
