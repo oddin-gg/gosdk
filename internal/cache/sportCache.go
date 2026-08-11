@@ -36,9 +36,21 @@ type SportCache struct {
 	// cancelled by Manager.Close so no fetch outlives the owner.
 	lifetime context.Context
 
-	mu            sync.RWMutex
-	loadedLocales map[types.Locale]struct{}
+	mu sync.RWMutex
+	// loadedLocales records WHEN each locale's sport catalog was last
+	// fetched (the fetch's start instant, so the age measures data
+	// freshness rather than transfer time). The mark EXPIRES after
+	// catalogTTL: it used to be permanent for the process lifetime, so
+	// the catalog was downloaded exactly once and a sport added
+	// upstream stayed invisible to a long-running consumer until it
+	// restarted.
+	loadedLocales map[types.Locale]time.Time
 	sports        map[types.URN]*LocalizedSport
+
+	// catalogTTL is defaultCatalogTTL, held as a field so tests can
+	// compress the window. It bounds both the loadedLocales marks and
+	// the per-sport tournament lists (LocalizedSport.tournamentsLoadedAt).
+	catalogTTL time.Duration
 
 	// Clear-vs-in-flight-load protection, mirroring the market cache:
 	//   - clearedAt (per sport) + purgedAt suppress stores from loads
@@ -74,22 +86,27 @@ func (s *SportCache) storeSuppressedLocked(id types.URN, loadStarted time.Time) 
 
 // LocalizedSport holds per-sport data; mu guards every field.
 //
-// tournamentsLoaded distinguishes "this sport genuinely has zero
-// tournaments" (true, tournamentIDs empty) from "tournaments not yet
-// fetched" (false). Pre-fix the cache only had `tournamentIDs` and
+// tournamentsLoadedAt distinguishes "this sport genuinely has zero
+// tournaments" (non-zero, tournamentIDs empty) from "tournaments not
+// yet fetched" (zero). The cache once only had `tournamentIDs` and
 // SportTournaments / BuildSport keyed off `len(...) > 0`, so a sport
 // with a legitimate empty result re-fetched on every call. Mirrors
 // the LocalizedTournament.competitorsLoaded pattern (see
 // internal/cache/tournament.go).
+//
+// It is a TIMESTAMP rather than a bool because the flag also has to
+// expire: as a permanent bool, a sport's tournament list was fetched
+// once per process, so a tournament added upstream — a new weekly
+// league, say — never appeared to a long-running consumer.
 type LocalizedSport struct {
 	mu sync.RWMutex
 
-	id                types.URN
-	tournamentIDs     map[types.URN]struct{}
-	tournamentsLoaded bool
-	name              map[types.Locale]string
-	abbreviation      map[types.Locale]string
-	iconPath          *string
+	id                  types.URN
+	tournamentIDs       map[types.URN]struct{}
+	tournamentsLoadedAt time.Time
+	name                map[types.Locale]string
+	abbreviation        map[types.Locale]string
+	iconPath            *string
 }
 
 func (l *LocalizedSport) makeTournamentIDsList() []types.URN {
@@ -103,10 +120,16 @@ func (l *LocalizedSport) makeTournamentIDsList() []types.URN {
 	return out
 }
 
-func (l *LocalizedSport) tournamentsAreLoaded() bool {
+// tournamentsAreFresh reports whether this sport's tournament list was
+// fetched recently enough to serve from cache. ttl <= 0 disables
+// expiry (the list is then loaded-once, the old behaviour).
+func (l *LocalizedSport) tournamentsAreFresh(ttl time.Duration) bool {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
-	return l.tournamentsLoaded
+	if l.tournamentsLoadedAt.IsZero() {
+		return false
+	}
+	return ttl <= 0 || time.Since(l.tournamentsLoadedAt) < ttl
 }
 
 // missingLocales reports which requested locales this sport does NOT
@@ -126,9 +149,23 @@ func (l *LocalizedSport) missingLocales(locales []types.Locale) []types.Locale {
 	return missing
 }
 
-func (l *LocalizedSport) markTournamentsLoaded() {
+// replaceTournaments swaps in the freshly fetched tournament set and
+// stamps the refresh time.
+//
+// REPLACE, not merge: now that tournamentsLoadedAt expires, the same
+// sport is re-fetched periodically, and merging would accumulate every
+// tournament the sport has ever had — one removed upstream would
+// linger in SportTournaments/Sports views forever. This mirrors the
+// atomic per-locale replace LocalizedStaticDataCache.timerTick does
+// for the same reason.
+func (l *LocalizedSport) replaceTournaments(ids []types.URN, loadedAt time.Time) {
+	set := make(map[types.URN]struct{}, len(ids))
+	for _, id := range ids {
+		set[id] = struct{}{}
+	}
 	l.mu.Lock()
-	l.tournamentsLoaded = true
+	l.tournamentIDs = set
+	l.tournamentsLoadedAt = loadedAt
 	l.mu.Unlock()
 }
 
@@ -187,19 +224,23 @@ func (s *SportCache) Sports(ctx context.Context, locales []types.Locale) ([]type
 	return out, nil
 }
 
-// SportTournaments returns the tournament URN list for the sport, fetching
-// from the API and merging into the cached entry.
+// SportTournaments returns the tournament URN list for the sport,
+// fetching from the API and replacing the cached list.
 //
 // Empty-result handling: a sport that genuinely has zero tournaments is
-// served from cache after the first successful fetch (tournamentsLoaded=
-// true on the entry). Pre-fix every call re-fetched because the empty
-// list was indistinguishable from "not yet loaded".
+// served from cache after the first successful fetch
+// (tournamentsLoadedAt set on the entry). Pre-fix every call re-fetched
+// because the empty list was indistinguishable from "not yet loaded".
+//
+// The cached list is served only while it is FRESH (catalogTTL); past
+// that the sport is re-fetched, so tournaments added upstream reach a
+// long-running consumer without a restart.
 func (s *SportCache) SportTournaments(ctx context.Context, sportID types.URN, locale types.Locale) ([]types.URN, error) {
 	s.mu.RLock()
 	entry, ok := s.sports[sportID]
 	s.mu.RUnlock()
 
-	if ok && entry.tournamentsAreLoaded() {
+	if ok && entry.tournamentsAreFresh(s.catalogTTL) {
 		return entry.makeTournamentIDsList(), nil
 	}
 
@@ -224,23 +265,17 @@ func (s *SportCache) SportTournaments(ctx context.Context, sportID types.URN, lo
 		}
 		tournamentIDs = append(tournamentIDs, *id)
 	}
-	for _, id := range tournamentIDs {
-		if err := s.recordTournament(sportID, id, loadStarted); err != nil {
-			return nil, fmt.Errorf("sport %s record tournament %s: %w", sportID.ToString(), id.ToString(), err)
-		}
-	}
-	// Mark tournamentsLoaded even when the list was empty — parity
-	// with LocalizedTournament.competitorsLoaded; prevents repeated
-	// API calls for sports that genuinely have zero tournaments.
-	// Use ensureSportEntry so the marker survives even on first
-	// access for a sport never previously loaded via Sports() — the
-	// non-empty path already creates the entry inside recordTournament,
-	// but the empty path bypasses that loop. Suppressed when an
-	// invalidation raced this fetch: recreating the cleared sport as a
-	// stub would resurrect it into Sports() views. The caller still
-	// gets the freshly fetched list.
+	// Commit the COMPLETE list in one step, stamping the refresh time
+	// even when the list was empty — parity with
+	// LocalizedTournament.competitorsLoaded; prevents repeated API calls
+	// for sports that genuinely have zero tournaments. ensureSportEntry
+	// creates the entry when this is the first access for a sport never
+	// loaded via Sports(). Suppressed when an invalidation raced this
+	// fetch: recreating the cleared sport as a stub would resurrect it
+	// into Sports() views. The caller still gets the freshly fetched
+	// list.
 	if entry := s.ensureSportEntry(sportID, loadStarted); entry != nil {
-		entry.markTournamentsLoaded()
+		entry.replaceTournaments(tournamentIDs, loadStarted)
 	}
 	return tournamentIDs, nil
 }
@@ -307,7 +342,7 @@ func (s *SportCache) ensureLocalesLoaded(ctx context.Context, locales []types.Lo
 				loadStarted := time.Now()
 				// Double-check: peer goroutine may already have loaded.
 				s.mu.RLock()
-				_, alreadyLoaded := s.loadedLocales[loc]
+				alreadyLoaded := s.localeLoadedLocked(loc)
 				s.mu.RUnlock()
 				if alreadyLoaded {
 					return struct{}{}, nil
@@ -356,21 +391,34 @@ func (s *SportCache) findMissingLocales(locales []types.Locale) []types.Locale {
 	defer s.mu.RUnlock()
 	var missing []types.Locale
 	for _, l := range locales {
-		if _, ok := s.loadedLocales[l]; !ok {
+		if !s.localeLoadedLocked(l) {
 			missing = append(missing, l)
 		}
 	}
 	return missing
 }
 
+// localeLoadedLocked reports whether the locale's catalog was fetched
+// recently enough to skip a refetch. Caller must hold s.mu.
+func (s *SportCache) localeLoadedLocked(locale types.Locale) bool {
+	loadedAt, ok := s.loadedLocales[locale]
+	if !ok {
+		return false
+	}
+	return s.catalogTTL <= 0 || time.Since(loadedAt) < s.catalogTTL
+}
+
 // markLocaleLoaded records the locale as loaded unless any
 // invalidation landed after the load began — the cleared sport's row
 // was suppressed, so the locale must stay unmarked to force the bulk
 // refetch that restores it.
+//
+// Stamped with the fetch's START, not its completion: the freshness
+// window must cover the age of the DATA, not of the transfer.
 func (s *SportCache) markLocaleLoaded(locale types.Locale, loadStarted time.Time) {
 	s.mu.Lock()
 	if !s.lastClearAt.After(loadStarted) {
-		s.loadedLocales[locale] = struct{}{}
+		s.loadedLocales[locale] = loadStarted
 	}
 	s.mu.Unlock()
 }
@@ -403,30 +451,6 @@ func (s *SportCache) upsertSport(id types.URN, locale types.Locale, sport *xml.S
 	return nil
 }
 
-func (s *SportCache) recordTournament(sportID types.URN, tournamentID types.URN, loadStarted time.Time) error {
-	s.mu.Lock()
-	if s.storeSuppressedLocked(sportID, loadStarted) {
-		s.mu.Unlock()
-		return nil
-	}
-	entry, ok := s.sports[sportID]
-	if !ok {
-		entry = &LocalizedSport{
-			id:            sportID,
-			tournamentIDs: make(map[types.URN]struct{}),
-			name:          make(map[types.Locale]string),
-			abbreviation:  make(map[types.Locale]string),
-		}
-		s.sports[sportID] = entry
-	}
-	s.mu.Unlock()
-
-	entry.mu.Lock()
-	entry.tournamentIDs[tournamentID] = struct{}{}
-	entry.mu.Unlock()
-	return nil
-}
-
 // Clear evicts a single sport AND invalidates every loaded-locale
 // marker. Without the locale invalidation, a subsequent Sport(ctx,id)
 // would see "sport not found" and skip the refetch (because the locale
@@ -449,7 +473,7 @@ func (s *SportCache) Clear(id types.URN) {
 		}
 	}
 	delete(s.sports, id)
-	s.loadedLocales = make(map[types.Locale]struct{})
+	s.loadedLocales = make(map[types.Locale]time.Time)
 	s.mu.Unlock()
 }
 
@@ -462,7 +486,7 @@ func (s *SportCache) Purge() {
 	s.lastClearAt = now
 	s.clearedAt = make(map[types.URN]time.Time)
 	s.sports = make(map[types.URN]*LocalizedSport)
-	s.loadedLocales = make(map[types.Locale]struct{})
+	s.loadedLocales = make(map[types.Locale]time.Time)
 	s.mu.Unlock()
 }
 
@@ -471,7 +495,8 @@ func newSportDataCache(lifeCtx context.Context, client *api.Client, logger *log.
 		apiClient:     client,
 		logger:        logger,
 		lifetime:      lifeCtx,
-		loadedLocales: make(map[types.Locale]struct{}),
+		loadedLocales: make(map[types.Locale]time.Time),
+		catalogTTL:    defaultCatalogTTL,
 		sports:        make(map[types.URN]*LocalizedSport),
 		clearedAt:     make(map[types.URN]time.Time),
 	}
@@ -504,14 +529,15 @@ func (l *LocalizedSport) summarySnapshot() types.SportSummary {
 // locales and tournament IDs as needed. The first call for a sport
 // triggers a tournament fetch even when the resulting list is empty;
 // subsequent calls return the cached (possibly-empty) list without
-// re-fetching, gated by tournamentsAreLoaded().
+// re-fetching, gated by tournamentsAreFresh() until the list goes
+// stale (catalogTTL), at which point the next call re-fetches.
 func BuildSport(ctx context.Context, sc *SportCache, id types.URN, locales []types.Locale) (*types.Sport, error) {
 	item, err := sc.Sport(ctx, id, locales)
 	if err != nil {
 		return nil, err
 	}
 	tournamentIDs := item.makeTournamentIDsList()
-	if !item.tournamentsAreLoaded() && len(locales) > 0 {
+	if !item.tournamentsAreFresh(sc.catalogTTL) && len(locales) > 0 {
 		tournamentIDs, err = sc.SportTournaments(ctx, id, locales[0])
 		if err != nil {
 			return nil, err

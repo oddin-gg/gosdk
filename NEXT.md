@@ -472,7 +472,10 @@ type staticEntry[K comparable, V any] struct {
 }
 ```
 
-- Loaded once per locale on first access; subsequent reads hit the map under RLock.
+- Loaded per locale on first access; subsequent reads hit the map under RLock.
+- **The loaded-per-locale mark expires** (`defaultCatalogTTL`, 12h), so the catalog is re-fetched at most once per window. It was originally permanent for the process lifetime, which meant each catalog was downloaded exactly once and anything **added or renamed upstream** stayed invisible to a long-running consumer until it restarted — a new market, a new sport, or a new tournament for an existing sport. `SportCache` applies the same window to its per-sport tournament lists (`LocalizedSport.tournamentsLoadedAt`), and refreshing those **replaces** the tournament set rather than merging it, so a tournament removed upstream also disappears.
+- `LocalizedStaticDataCache` is deliberately outside this scheme: it already refreshes every loaded locale from a 24h background ticker (`timerTick`), which solves the same staleness problem by a different mechanism, including an atomic per-locale replace that drops ids absent from the fresh response.
+- Known gap: the sport catalog itself merges on refresh, so a sport **removed** upstream lingers until `Clear`/`Purge`. Sports are a fixed, ~50-entry set that effectively never shrinks, so this is left as-is rather than risking a wholesale swap of entries that also carry per-sport tournament state.
 - **No `sync.Once`.** Failed loads (network error, 5xx) reset `loaded=false` so the next access retries. `sync.Once` is a footgun here — a transient failure would otherwise poison the cache forever.
 - `Clear` resets the entry for that locale, forcing a refresh on next access.
 - No size limit — these catalogs are small (hundreds of entries).

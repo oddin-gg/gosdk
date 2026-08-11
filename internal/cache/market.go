@@ -75,18 +75,25 @@ func (k CompositeKey) isDynamicVariant() bool {
 // Static variants are NOT counted here; see isDynamicVariant.
 const variantCacheSize = 5000
 
-// marketCatalogTTL bounds how long a locale stays flagged "loaded".
+// defaultCatalogTTL bounds how long a locale stays flagged "loaded" in
+// the bulk-catalog caches — MarketDescriptionCache here, SportCache in
+// sportCache.go (which also uses it for its per-sport tournament
+// lists).
 //
-// Without it the flag was permanent for the process lifetime, so the
-// bulk catalog was fetched exactly once and never again: markets added
-// or renamed upstream stayed invisible until restart, and any entry
-// lost from a bounded store could never be restored. It also gives the
-// static-variant fix a second, independent safety net — even a key that
-// somehow goes missing now refetches once the window lapses.
+// Without it the flag was permanent for the process lifetime, so each
+// catalog was fetched exactly once and never again: entities added or
+// renamed upstream stayed invisible until the process restarted, and
+// any entry lost from a bounded store could never be restored. For the
+// market cache it also gives the static-variant fix a second,
+// independent safety net — even a key that somehow goes missing now
+// refetches once the window lapses.
 //
 // 12h matches the entry TTL of the bounded caches and the expiry the
-// legacy SDK applied to this catalog.
-const marketCatalogTTL = 12 * time.Hour
+// legacy SDK applied to these catalogs. LocalizedStaticDataCache is
+// deliberately NOT in this list: it already refreshes every loaded
+// locale from a 24h background ticker, which solves the same staleness
+// problem by a different mechanism.
+const defaultCatalogTTL = 12 * time.Hour
 
 // variantKey builds the cache key from (marketID, variant). An
 // empty-string variant is normalised to "no variant" — NEXT.md §0
@@ -131,7 +138,7 @@ type MarketDescriptionCache struct {
 	// fetched (the fetch's start instant, so the age measures data
 	// freshness rather than transfer time). A locale counts as loaded
 	// only while that timestamp is within catalogTTL — see
-	// marketCatalogTTL for why the mark is not permanent.
+	// defaultCatalogTTL for why the mark is not permanent.
 	loadedLocales map[types.Locale]time.Time
 	// base holds every description the BULK catalog returns: plain
 	// market rows AND static variants. Bounded by the upstream catalog
@@ -144,7 +151,7 @@ type MarketDescriptionCache struct {
 	// safe for it. See CompositeKey.isDynamicVariant.
 	variants *lru.TTL[CompositeKey, *LocalizedMarketDescription]
 
-	// catalogTTL is marketCatalogTTL, held as a field so tests can
+	// catalogTTL is defaultCatalogTTL, held as a field so tests can
 	// compress the window (same pattern as the static-data cache's
 	// refresh timings).
 	catalogTTL time.Duration
@@ -595,7 +602,7 @@ func newMarketDescriptionCache(lifeCtx context.Context, client *api.Client, logg
 		logger:        logger,
 		lifetime:      lifeCtx,
 		loadedLocales: make(map[types.Locale]time.Time),
-		catalogTTL:    marketCatalogTTL,
+		catalogTTL:    defaultCatalogTTL,
 		base:          make(map[CompositeKey]*LocalizedMarketDescription),
 		clearedAt:     make(map[CompositeKey]time.Time),
 		malformed:     make(map[CompositeKey]error),
