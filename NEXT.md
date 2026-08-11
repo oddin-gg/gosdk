@@ -455,7 +455,7 @@ func (c *EventCache[K, V]) Purge()
 
 ### Static-catalog caches (map + RWMutex)
 
-For: base `MarketDescriptionCache` (non-variant), `MarketVoidReasonsCache`, `MatchStatusDescriptionCache`, `SportsCache`.
+For: base `MarketDescriptionCache` (everything the bulk catalog returns — see the correction under "Variant / dynamic market descriptions" below), `MarketVoidReasonsCache`, `MatchStatusDescriptionCache`, `SportsCache`.
 
 ```go
 type StaticCache[K comparable, V any] struct {
@@ -479,7 +479,14 @@ type staticEntry[K comparable, V any] struct {
 
 ### Variant / dynamic market descriptions (LRU, not static)
 
-Variant market descriptions (`/descriptions/{locale}/markets/{id}/variants/{variant}`) are NOT in the static catalog. They form an unbounded long tail (one entry per `(marketID, variant, locale)` tuple, where `variant` may include things like `mapnr=1`, `setnr=3`, etc.). They live in their own bounded LRU + singleflight, same shape as the per-event caches. Default capacity: 5000 entries.
+**CORRECTED — this section as originally written was the source of a production defect.** It claimed that *any* description carrying a variant is outside the static catalog, and the implementation followed by routing on "does the key have a variant string". That is false: a large minority of the bulk catalog carries a **static** variant. The live test-env catalog is 229 rows, of which **47 carry a variant and all 47 are static** (`way:*`, `best_of:*`, `best_of_games:*`, `best_of_rounds:*`, `gnr:*`, `mr:*`, `st:*`); it contains **zero** `od:dynamic_outcomes:` rows. Putting those 47 in a 12h-TTL LRU made them unrecoverable once they expired, because the by-id refill path short-circuits on the already-loaded locale flag — consumers dropped every odds change carrying such a market ~12h after each restart.
+
+The split is by **provenance**, not by key shape:
+
+- **Bulk catalog** (`/descriptions/{locale}/markets`) — plain rows *and* static variants. Permanent map, no eviction, restorable only by another bulk load.
+- **Per-variant endpoint** (`/descriptions/{locale}/markets/{id}/variants/{variant}`) — the `od:dynamic_outcomes:` family only. This is the genuine unbounded long tail (one entry per `(marketID, variant, locale)` tuple, `variant` encoding things like `mapnr=1`, `setnr=3`), and it is the only family safe in a bounded LRU: its by-id miss re-fetches that single key and is not gated on the loaded-locale flag. Bounded LRU + singleflight, same shape as the per-event caches. Default capacity: 5000 entries.
+
+The loaded-locale mark itself also expires (`marketCatalogTTL`, 12h). It was permanent for the process lifetime, so the bulk catalog was downloaded exactly once and markets added or renamed upstream never appeared until restart.
 
 ### Cache invalidation triggers
 

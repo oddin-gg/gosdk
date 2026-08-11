@@ -43,15 +43,50 @@ func (k CompositeKey) String() string {
 	return fmt.Sprintf("%d-%s", k.MarketID, v)
 }
 
-// isVariant reports whether the key addresses the dynamic variant
-// long tail rather than a base catalog description.
-func (k CompositeKey) isVariant() bool { return k.Variant != "" }
+// isDynamicVariant reports whether the key addresses the DYNAMIC
+// variant long tail — the `od:dynamic_outcomes:` family, fetched one
+// key at a time from the per-variant endpoint.
+//
+// This, and NOT "the key has a variant string", decides which store
+// backs the key: storage is split by PROVENANCE, not by key shape.
+// Everything the BULK catalog returns — base rows and static variants
+// alike (`way:three`, `best_of:5`, `gnr:0to15`, `mr:12`, `st:2p2o`) —
+// belongs in the permanent map, because a bulk load is the only thing
+// that can repopulate it, and loadOne skips the bulk load whenever the
+// locale is already flagged loaded.
+//
+// Routing static variants into the bounded, TTL'd LRU made them
+// permanently unrecoverable: ~12h after the first catalog load every
+// one of them expired, the by-id miss short-circuited on the
+// loaded-locale flag without refetching, and MarketDescriptionByID
+// returned ErrItemNotFoundInCache for the rest of the process
+// lifetime — consumers dropped every odds change carrying such a
+// market. Only the dynamic family is safe in the LRU, because its
+// by-id miss re-fetches from the per-variant endpoint and is not
+// gated on loadedLocales at all.
+func (k CompositeKey) isDynamicVariant() bool {
+	return utils.IsMarketVariantWithDynamicOutcomes(k.Variant)
+}
 
-// variantCacheSize bounds the variant-description LRU. Variants form an
-// unbounded long tail — one entry per (marketID, variant) tuple, where
-// the variant may encode map/set numbers etc. (NEXT.md §6 prescribes a
-// bounded LRU, default 5000, for exactly this data).
+// variantCacheSize bounds the DYNAMIC-variant LRU. Dynamic variants
+// form an unbounded long tail — one entry per (marketID, variant)
+// tuple, where the variant may encode map/set numbers etc. (NEXT.md §6
+// prescribes a bounded LRU, default 5000, for exactly this data).
+// Static variants are NOT counted here; see isDynamicVariant.
 const variantCacheSize = 5000
+
+// marketCatalogTTL bounds how long a locale stays flagged "loaded".
+//
+// Without it the flag was permanent for the process lifetime, so the
+// bulk catalog was fetched exactly once and never again: markets added
+// or renamed upstream stayed invisible until restart, and any entry
+// lost from a bounded store could never be restored. It also gives the
+// static-variant fix a second, independent safety net — even a key that
+// somehow goes missing now refetches once the window lapses.
+//
+// 12h matches the entry TTL of the bounded caches and the expiry the
+// legacy SDK applied to this catalog.
+const marketCatalogTTL = 12 * time.Hour
 
 // variantKey builds the cache key from (marketID, variant). An
 // empty-string variant is normalised to "no variant" — NEXT.md §0
@@ -68,10 +103,14 @@ func variantKey(marketID int, variant types.Optional[string]) CompositeKey {
 // MarketDescriptionCache stores market descriptions per (marketID, variant)
 // composite key. Each entry holds per-locale name/outcome data.
 //
-// Storage is split by shape: base-catalog descriptions (no variant) live
-// in a plain map — bounded by the upstream catalog size, hundreds of
-// entries. Dynamic variant descriptions live in a bounded expirable LRU
-// (variantCacheSize) because they form an unbounded long tail.
+// Storage is split by PROVENANCE, not by key shape. Everything the bulk
+// catalog returns — plain rows AND static variants — lives in a plain
+// map, bounded by the upstream catalog size (hundreds of entries) and
+// restorable only by another bulk load. Only the `od:dynamic_outcomes:`
+// family, which is an unbounded long tail fetched one key at a time from
+// the per-variant endpoint, lives in a bounded expirable LRU
+// (variantCacheSize). See CompositeKey.isDynamicVariant for what went
+// wrong when the split keyed on "does this key have a variant string".
 //
 // Concurrent-load safety (v2.24): replaces a single global loadMu —
 // which serialized every concurrent loader regardless of key/locale —
@@ -87,10 +126,28 @@ type MarketDescriptionCache struct {
 	// cancelled by Manager.Close so no fetch outlives the owner.
 	lifetime context.Context
 
-	mu            sync.RWMutex
-	loadedLocales map[types.Locale]struct{}
-	base          map[CompositeKey]*LocalizedMarketDescription
-	variants      *lru.TTL[CompositeKey, *LocalizedMarketDescription]
+	mu sync.RWMutex
+	// loadedLocales records WHEN each locale's bulk catalog was last
+	// fetched (the fetch's start instant, so the age measures data
+	// freshness rather than transfer time). A locale counts as loaded
+	// only while that timestamp is within catalogTTL — see
+	// marketCatalogTTL for why the mark is not permanent.
+	loadedLocales map[types.Locale]time.Time
+	// base holds every description the BULK catalog returns: plain
+	// market rows AND static variants. Bounded by the upstream catalog
+	// (hundreds of entries) and never expired, because a bulk load is
+	// the only thing that can restore an entry here.
+	base map[CompositeKey]*LocalizedMarketDescription
+	// variants holds ONLY the `od:dynamic_outcomes:` long tail, which is
+	// unbounded and individually re-fetchable from the per-variant
+	// endpoint — the two properties that make a bounded, expiring store
+	// safe for it. See CompositeKey.isDynamicVariant.
+	variants *lru.TTL[CompositeKey, *LocalizedMarketDescription]
+
+	// catalogTTL is marketCatalogTTL, held as a field so tests can
+	// compress the window (same pattern as the static-data cache's
+	// refresh timings).
+	catalogTTL time.Duration
 
 	// Clear-vs-in-flight-load tombstones (same invariant as
 	// lru.EventCache), guarded by mu like the stores they gate.
@@ -148,7 +205,7 @@ const (
 // LRU is internally synchronized but kept under the same discipline for
 // consistency with the upsert path.
 func (m *MarketDescriptionCache) lookupLocked(key CompositeKey) (*LocalizedMarketDescription, bool) {
-	if key.isVariant() {
+	if key.isDynamicVariant() {
 		return m.variants.Get(key)
 	}
 	entry, ok := m.base[key]
@@ -297,13 +354,13 @@ func (m *MarketDescriptionCache) ClearCacheItem(marketID int, variant types.Opti
 			}
 		}
 	}
-	if key.isVariant() {
+	if key.isDynamicVariant() {
 		m.variants.Remove(key)
 	} else {
 		delete(m.base, key)
 	}
 	delete(m.malformed, key)
-	m.loadedLocales = make(map[types.Locale]struct{})
+	m.loadedLocales = make(map[types.Locale]time.Time)
 	m.mu.Unlock()
 }
 
@@ -318,15 +375,22 @@ func (m *MarketDescriptionCache) Purge() {
 	m.malformed = make(map[CompositeKey]error)
 	m.base = make(map[CompositeKey]*LocalizedMarketDescription)
 	m.variants.Purge()
-	m.loadedLocales = make(map[types.Locale]struct{})
+	m.loadedLocales = make(map[types.Locale]time.Time)
 	m.mu.Unlock()
 }
 
+// localeLoaded reports whether the locale's bulk catalog was fetched
+// recently enough to skip a refetch. The mark EXPIRES (catalogTTL): a
+// permanent flag meant the catalog was downloaded once per process and
+// never refreshed, so upstream additions and renames never landed.
 func (m *MarketDescriptionCache) localeLoaded(locale types.Locale) bool {
 	m.mu.RLock()
-	_, ok := m.loadedLocales[locale]
-	m.mu.RUnlock()
-	return ok
+	defer m.mu.RUnlock()
+	loadedAt, ok := m.loadedLocales[locale]
+	if !ok {
+		return false
+	}
+	return m.catalogTTL <= 0 || time.Since(loadedAt) < m.catalogTTL
 }
 
 func (m *MarketDescriptionCache) loadAll(ctx context.Context, locales []types.Locale) error {
@@ -427,7 +491,10 @@ func (m *MarketDescriptionCache) loadOne(ctx context.Context, marketID *int, var
 				if !isDynamicVariant {
 					m.mu.Lock()
 					if !m.lastClearAt.After(loadStarted) {
-						m.loadedLocales[loc] = struct{}{}
+						// Timestamped with the fetch's START, not its
+						// completion: the freshness window must cover the
+						// age of the DATA, not of the transfer.
+						m.loadedLocales[loc] = loadStarted
 					}
 					m.mu.Unlock()
 				}
@@ -487,7 +554,7 @@ func (m *MarketDescriptionCache) upsert(description data.MarketDescription, loca
 			name:                   make(map[types.Locale]string),
 			groups:                 splitGroups(description.Groups),
 		}
-		if key.isVariant() {
+		if key.isDynamicVariant() {
 			m.variants.Add(key, entry)
 		} else {
 			m.base[key] = entry
@@ -527,7 +594,8 @@ func newMarketDescriptionCache(lifeCtx context.Context, client *api.Client, logg
 		apiClient:     client,
 		logger:        logger,
 		lifetime:      lifeCtx,
-		loadedLocales: make(map[types.Locale]struct{}),
+		loadedLocales: make(map[types.Locale]time.Time),
+		catalogTTL:    marketCatalogTTL,
 		base:          make(map[CompositeKey]*LocalizedMarketDescription),
 		clearedAt:     make(map[CompositeKey]time.Time),
 		malformed:     make(map[CompositeKey]error),
