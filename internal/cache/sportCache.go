@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -150,7 +151,7 @@ func (l *LocalizedSport) missingLocales(locales []types.Locale) []types.Locale {
 }
 
 // replaceTournaments swaps in the freshly fetched tournament set and
-// stamps the refresh time.
+// stamps the refresh time. Reports whether the snapshot was committed.
 //
 // REPLACE, not merge: now that tournamentsLoadedAt expires, the same
 // sport is re-fetched periodically, and merging would accumulate every
@@ -158,15 +159,28 @@ func (l *LocalizedSport) missingLocales(locales []types.Locale) []types.Locale {
 // linger in SportTournaments/Sports views forever. This mirrors the
 // atomic per-locale replace LocalizedStaticDataCache.timerTick does
 // for the same reason.
-func (l *LocalizedSport) replaceTournaments(ids []types.URN, loadedAt time.Time) {
+//
+// MONOTONIC: a snapshot no newer than the committed one is REJECTED.
+// Replacement and expiry together open a lost-update window that
+// neither opens alone — post-expiry refreshes for one sport can run
+// concurrently (different locales are different singleflight keys), and
+// an earlier-STARTED fetch that finishes LAST would otherwise reinstall
+// its older set over a newer one and stamp it fresh, serving data
+// already known to be superseded for up to a full catalogTTL. Same
+// only-advance discipline as the producer cursors.
+func (l *LocalizedSport) replaceTournaments(ids []types.URN, loadedAt time.Time) bool {
 	set := make(map[types.URN]struct{}, len(ids))
 	for _, id := range ids {
 		set[id] = struct{}{}
 	}
 	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.tournamentsLoadedAt.IsZero() && !loadedAt.After(l.tournamentsLoadedAt) {
+		return false
+	}
 	l.tournamentIDs = set
 	l.tournamentsLoadedAt = loadedAt
-	l.mu.Unlock()
+	return true
 }
 
 // Sport returns a sport entry, loading missing locales as needed.
@@ -235,6 +249,14 @@ func (s *SportCache) Sports(ctx context.Context, locales []types.Locale) ([]type
 // The cached list is served only while it is FRESH (catalogTTL); past
 // that the sport is re-fetched, so tournaments added upstream reach a
 // long-running consumer without a restart.
+// Concurrency: refreshes are COALESCED per (sport, locale) through the
+// same singleflight the catalog load uses. Expiry turns a once-per-
+// process fetch into a recurring one, so without coalescing every
+// caller that finds the list stale at the same moment issues its own
+// FetchTournaments — a thundering herd on each expiry rather than the
+// single first-load race the permanent flag allowed. replaceTournaments
+// additionally rejects out-of-order commits, which coalescing alone
+// cannot prevent (different locales are different flight keys).
 func (s *SportCache) SportTournaments(ctx context.Context, sportID types.URN, locale types.Locale) ([]types.URN, error) {
 	s.mu.RLock()
 	entry, ok := s.sports[sportID]
@@ -244,40 +266,76 @@ func (s *SportCache) SportTournaments(ctx context.Context, sportID types.URN, lo
 		return entry.makeTournamentIDsList(), nil
 	}
 
-	loadStarted := time.Now()
-	tournaments, err := s.apiClient.FetchTournaments(ctx, sportID, locale)
-	if err != nil {
-		return nil, fmt.Errorf("fetch tournaments for sport %s/%s: %w", sportID.ToString(), locale, err)
-	}
+	for {
+		gen := s.flightGen.Load()
+		// Distinct from the catalog flight key ("<gen>|<locale>"): the
+		// "tournaments" segment plus the sport id can never collide with
+		// it, since a locale never contains '|'.
+		flightKey := fmt.Sprintf("%d|tournaments|%s|%s", gen, sportID.ToString(), locale)
+		ids, err := lru.LoadCoalesced(ctx, s.lifetime, &s.sf, flightKey, func(loadCtx context.Context) ([]types.URN, error) {
+			// Stale-generation guard — see errStaleFlight for the
+			// register-vs-clear window this closes.
+			if s.flightGen.Load() != gen {
+				return nil, errStaleFlight
+			}
+			// Double-check inside the flight: a peer may have refreshed
+			// this sport while this caller waited to register.
+			s.mu.RLock()
+			cached, hit := s.sports[sportID]
+			s.mu.RUnlock()
+			if hit && cached.tournamentsAreFresh(s.catalogTTL) {
+				return cached.makeTournamentIDsList(), nil
+			}
 
-	// Stage-then-commit: parse and validate the COMPLETE response
-	// before touching cache state. Pre-fix each tournament was recorded
-	// as it parsed, so a malformed id mid-response aborted AFTER
-	// committing the earlier rows — a retry then merged the
-	// authoritative list ON TOP of the partial commit, and rows the
-	// failed response contained but the new one doesn't lingered in
-	// SportTournaments/Sports views until explicit invalidation.
-	tournamentIDs := make([]types.URN, 0, len(tournaments))
-	for i := range tournaments {
-		id, err := types.ParseURN(tournaments[i].ID)
-		if err != nil {
-			return nil, fmt.Errorf("sport %s tournaments: parse tournament id %q: %w", sportID.ToString(), tournaments[i].ID, err)
+			loadStarted := time.Now()
+			tournaments, err := s.apiClient.FetchTournaments(loadCtx, sportID, locale)
+			if err != nil {
+				return nil, fmt.Errorf("fetch tournaments for sport %s/%s: %w", sportID.ToString(), locale, err)
+			}
+
+			// Stage-then-commit: parse and validate the COMPLETE response
+			// before touching cache state. Pre-fix each tournament was
+			// recorded as it parsed, so a malformed id mid-response
+			// aborted AFTER committing the earlier rows — a retry then
+			// merged the authoritative list ON TOP of the partial commit,
+			// and rows the failed response contained but the new one
+			// doesn't lingered in SportTournaments/Sports views until
+			// explicit invalidation.
+			tournamentIDs := make([]types.URN, 0, len(tournaments))
+			for i := range tournaments {
+				id, err := types.ParseURN(tournaments[i].ID)
+				if err != nil {
+					return nil, fmt.Errorf("sport %s tournaments: parse tournament id %q: %w", sportID.ToString(), tournaments[i].ID, err)
+				}
+				tournamentIDs = append(tournamentIDs, *id)
+			}
+			// Commit the COMPLETE list in one step, stamping the refresh
+			// time even when the list was empty — parity with
+			// LocalizedTournament.competitorsLoaded; prevents repeated API
+			// calls for sports that genuinely have zero tournaments.
+			// ensureSportEntry creates the entry when this is the first
+			// access for a sport never loaded via Sports(). Suppressed
+			// when an invalidation raced this fetch: recreating the
+			// cleared sport as a stub would resurrect it into Sports()
+			// views. The caller still gets the freshly fetched list even
+			// when the commit is suppressed or rejected as out-of-order —
+			// it is what THIS fetch observed upstream.
+			if entry := s.ensureSportEntry(sportID, loadStarted); entry != nil {
+				entry.replaceTournaments(tournamentIDs, loadStarted)
+			}
+			return tournamentIDs, nil
+		})
+		if errors.Is(err, errStaleFlight) {
+			continue // re-register under the fresh generation
 		}
-		tournamentIDs = append(tournamentIDs, *id)
+		if err != nil {
+			return nil, err
+		}
+		// Coalesced waiters all receive the SAME slice from singleflight;
+		// hand each caller its own copy so one caller's mutation can't
+		// reach another's result.
+		return slices.Clone(ids), nil
 	}
-	// Commit the COMPLETE list in one step, stamping the refresh time
-	// even when the list was empty — parity with
-	// LocalizedTournament.competitorsLoaded; prevents repeated API calls
-	// for sports that genuinely have zero tournaments. ensureSportEntry
-	// creates the entry when this is the first access for a sport never
-	// loaded via Sports(). Suppressed when an invalidation raced this
-	// fetch: recreating the cleared sport as a stub would resurrect it
-	// into Sports() views. The caller still gets the freshly fetched
-	// list.
-	if entry := s.ensureSportEntry(sportID, loadStarted); entry != nil {
-		entry.replaceTournaments(tournamentIDs, loadStarted)
-	}
-	return tournamentIDs, nil
 }
 
 // ensureSportEntry returns the existing entry for sportID or creates a

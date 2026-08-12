@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -238,5 +239,133 @@ func TestSportCache_ClearStillForcesRefetch(t *testing.T) {
 	}
 	if got := srv.sportHits.Load(); got != 2 {
 		t.Fatalf("catalog hits = %d, want 2", got)
+	}
+}
+
+// TestSportCache_StaleTournamentCommitRejected is the focused
+// regression for the lost-update window that REPLACE + expiry open
+// together (neither opens it alone).
+//
+// Post-expiry refreshes for one sport can run concurrently, and an
+// earlier-STARTED fetch that finishes LAST would reinstall its older
+// set over a newer one and stamp it fresh — serving a set already known
+// to be superseded for up to a full catalogTTL. The commit is
+// monotonic: a snapshot no newer than the committed one is rejected.
+func TestSportCache_StaleTournamentCommitRejected(t *testing.T) {
+	entry := &LocalizedSport{
+		id:            sportOne,
+		tournamentIDs: make(map[types.URN]struct{}),
+		name:          make(map[types.Locale]string),
+		abbreviation:  make(map[types.Locale]string),
+	}
+	older := time.Now()
+	newer := older.Add(time.Second)
+	tournamentEleven := types.URN{Prefix: "od", Type: "tournament", ID: 11}
+
+	// The newer fetch commits first (it finished first).
+	if !entry.replaceTournaments([]types.URN{tournamentEleven}, newer) {
+		t.Fatal("newer snapshot was rejected")
+	}
+	// The older fetch, started earlier, finishes last.
+	if entry.replaceTournaments([]types.URN{tournamentTen}, older) {
+		t.Fatal("older snapshot was committed over a newer one")
+	}
+
+	got := entry.makeTournamentIDsList()
+	if len(got) != 1 || got[0] != tournamentEleven {
+		t.Fatalf("tournaments = %v, want only %s (newer snapshot must win)", got, tournamentEleven.ToString())
+	}
+	// The freshness stamp must not travel backwards either — an older
+	// stamp would expire the entry early and re-open the window.
+	entry.mu.RLock()
+	stamp := entry.tournamentsLoadedAt
+	entry.mu.RUnlock()
+	if !stamp.Equal(newer) {
+		t.Fatalf("tournamentsLoadedAt = %v, want %v (stamp must only advance)", stamp, newer)
+	}
+}
+
+// TestSportCache_OutOfOrderRefreshKeepsNewest exercises the same race
+// end to end. Two locales are two singleflight keys, so they are the
+// mechanism for getting two concurrent in-flight refreshes of ONE
+// sport's tournament list; the differing bodies stand in for an
+// upstream change between the two fetches.
+//
+// The "en" fetch starts first and is held open until the "de" fetch has
+// completed and committed, so the older fetch commits last.
+func TestSportCache_OutOfOrderRefreshKeepsNewest(t *testing.T) {
+	release := make(chan struct{})
+	enStarted := make(chan struct{})
+	var enOnce sync.Once
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		if !strings.Contains(r.URL.Path, "/tournaments") {
+			_, _ = io.WriteString(w, oneSportCatalog)
+			return
+		}
+		if strings.Contains(r.URL.Path, "/en/") {
+			enOnce.Do(func() { close(enStarted) })
+			<-release // hold the OLDER fetch open
+			_, _ = io.WriteString(w, twoTournaments)
+			return
+		}
+		_, _ = io.WriteString(w, oneTournament) // the NEWER snapshot
+	}))
+	defer srv.Close()
+
+	sc := newSportDataCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if _, err := sc.SportTournaments(t.Context(), sportOne, types.EnLocale); err != nil {
+			t.Errorf("en SportTournaments: %v", err)
+		}
+	}()
+
+	<-enStarted // the older fetch is in flight
+	if _, err := sc.SportTournaments(t.Context(), sportOne, types.Locale("de")); err != nil {
+		t.Fatalf("de SportTournaments: %v", err)
+	}
+	close(release) // now let the older fetch finish and commit
+	wg.Wait()
+
+	sc.mu.RLock()
+	entry := sc.sports[sportOne]
+	sc.mu.RUnlock()
+	got := entry.makeTournamentIDsList()
+	if len(got) != 1 || got[0] != tournamentTen {
+		t.Fatalf("cached tournaments = %v, want only %s (the newer snapshot must survive)", got, tournamentTen.ToString())
+	}
+}
+
+// TestSportCache_ConcurrentRefreshCoalesced pins the herd control.
+// Expiry turns a once-per-process fetch into a recurring one, so
+// without coalescing every caller finding the list stale at the same
+// moment issues its own FetchTournaments.
+func TestSportCache_ConcurrentRefreshCoalesced(t *testing.T) {
+	srv := newSportSrv(t, oneSportCatalog, oneTournament)
+	sc := newSportDataCache(t.Context(), newAPIClientForTest(t, srv.Server), log.New(nil))
+
+	const callers = 12
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if _, err := sc.SportTournaments(t.Context(), sportOne, types.EnLocale); err != nil {
+				t.Errorf("SportTournaments: %v", err)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	if got := srv.tourHits.Load(); got != 1 {
+		t.Fatalf("tournament endpoint hits = %d, want 1 (%d concurrent callers must coalesce)", got, callers)
 	}
 }
