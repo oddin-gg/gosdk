@@ -455,7 +455,7 @@ func (c *EventCache[K, V]) Purge()
 
 ### Static-catalog caches (map + RWMutex)
 
-For: base `MarketDescriptionCache` (non-variant), `MarketVoidReasonsCache`, `MatchStatusDescriptionCache`, `SportsCache`.
+For: base `MarketDescriptionCache` (everything the bulk catalog returns — see the correction under "Variant / dynamic market descriptions" below), `MarketVoidReasonsCache`, `MatchStatusDescriptionCache`, `SportsCache`.
 
 ```go
 type StaticCache[K comparable, V any] struct {
@@ -472,14 +472,27 @@ type staticEntry[K comparable, V any] struct {
 }
 ```
 
-- Loaded once per locale on first access; subsequent reads hit the map under RLock.
+- Loaded per locale on first access; subsequent reads hit the map under RLock.
+- **The loaded-per-locale mark expires** (`defaultCatalogTTL`, 12h), so the catalog is re-fetched at most once per window. It was originally permanent for the process lifetime, which meant each catalog was downloaded exactly once and anything **added or renamed upstream** stayed invisible to a long-running consumer until it restarted — a new market, a new sport, or a new tournament for an existing sport. `SportCache` applies the same window to its per-sport tournament lists (`LocalizedSport.tournamentsLoadedAt`), and refreshing those **replaces** the tournament set rather than merging it, so a tournament removed upstream also disappears.
+- Making a once-per-process load **recurring** brings two concurrency obligations that a load-once flag hides, and both apply to any future cache converted this way:
+  - **Coalesce the refresh.** Every caller that finds the data stale at the same instant would otherwise issue its own fetch — a thundering herd on each expiry, rather than the single first-load race a permanent flag allowed. All refresh paths go through `lru.LoadCoalesced` with a generation-prefixed key.
+  - **Make the commit monotonic.** Replacement plus expiry opens a lost-update window that neither opens alone: concurrent post-expiry refreshes can complete out of order (different locales are different flight keys, so coalescing alone does not serialize them), and an earlier-started fetch finishing last would reinstall its older snapshot and stamp it fresh — serving data already known to be superseded for a full window. A snapshot no newer than the committed one is rejected, and the freshness stamp only ever advances. Same discipline as the producer cursors.
+- `LocalizedStaticDataCache` is deliberately outside this scheme: it already refreshes every loaded locale from a 24h background ticker (`timerTick`), which solves the same staleness problem by a different mechanism, including an atomic per-locale replace that drops ids absent from the fresh response.
+- Known gap: the sport catalog itself merges on refresh, so a sport **removed** upstream lingers until `Clear`/`Purge`. Sports are a fixed, ~50-entry set that effectively never shrinks, so this is left as-is rather than risking a wholesale swap of entries that also carry per-sport tournament state.
 - **No `sync.Once`.** Failed loads (network error, 5xx) reset `loaded=false` so the next access retries. `sync.Once` is a footgun here — a transient failure would otherwise poison the cache forever.
 - `Clear` resets the entry for that locale, forcing a refresh on next access.
 - No size limit — these catalogs are small (hundreds of entries).
 
 ### Variant / dynamic market descriptions (LRU, not static)
 
-Variant market descriptions (`/descriptions/{locale}/markets/{id}/variants/{variant}`) are NOT in the static catalog. They form an unbounded long tail (one entry per `(marketID, variant, locale)` tuple, where `variant` may include things like `mapnr=1`, `setnr=3`, etc.). They live in their own bounded LRU + singleflight, same shape as the per-event caches. Default capacity: 5000 entries.
+**CORRECTED — this section as originally written was the source of a production defect.** It claimed that *any* description carrying a variant is outside the static catalog, and the implementation followed by routing on "does the key have a variant string". That is false: a large minority of the bulk catalog carries a **static** variant. The live test-env catalog is 229 rows, of which **47 carry a variant and all 47 are static** (`way:*`, `best_of:*`, `best_of_games:*`, `best_of_rounds:*`, `gnr:*`, `mr:*`, `st:*`); it contains **zero** `od:dynamic_outcomes:` rows. Putting those 47 in a 12h-TTL LRU made them unrecoverable once they expired, because the by-id refill path short-circuits on the already-loaded locale flag — consumers dropped every odds change carrying such a market ~12h after each restart.
+
+The split is by **provenance**, not by key shape:
+
+- **Bulk catalog** (`/descriptions/{locale}/markets`) — plain rows *and* static variants. Permanent map, no eviction, restorable only by another bulk load.
+- **Per-variant endpoint** (`/descriptions/{locale}/markets/{id}/variants/{variant}`) — the `od:dynamic_outcomes:` family only. This is the genuine unbounded long tail (one entry per `(marketID, variant, locale)` tuple, `variant` encoding things like `mapnr=1`, `setnr=3`), and it is the only family safe in a bounded LRU: its by-id miss re-fetches that single key and is not gated on the loaded-locale flag. Bounded LRU + singleflight, same shape as the per-event caches. Default capacity: 5000 entries.
+
+The loaded-locale mark itself also expires (`marketCatalogTTL`, 12h). It was permanent for the process lifetime, so the bulk catalog was downloaded exactly once and markets added or renamed upstream never appeared until restart.
 
 ### Cache invalidation triggers
 
