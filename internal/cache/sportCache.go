@@ -332,7 +332,7 @@ func (s *SportCache) SportTournaments(ctx context.Context, sportID types.URN, lo
 			// views. The caller still gets the freshly fetched list even
 			// when the commit is suppressed or rejected as out-of-order —
 			// it is what THIS fetch observed upstream.
-			if entry := s.ensureSportEntry(sportID, loadStarted); entry != nil {
+			if entry := s.ensureSportEntry(sportID, locale, loadStarted); entry != nil {
 				entry.replaceTournaments(tournamentIDs, loadStarted)
 			}
 			return tournamentIDs, nil
@@ -355,8 +355,10 @@ func (s *SportCache) SportTournaments(ctx context.Context, sportID types.URN, lo
 // catalog refresh). Used by SportTournaments to attach
 // tournamentsLoaded=true even when the upstream result was empty and
 // recordTournament's create-on-miss path didn't fire.
-// Returns nil when the store was suppressed by a racing invalidation.
-func (s *SportCache) ensureSportEntry(sportID types.URN, loadStarted time.Time) *LocalizedSport {
+// Returns nil when the store was suppressed by a racing invalidation,
+// or when a NEWER catalog commit for the locale has established the
+// sport's absence.
+func (s *SportCache) ensureSportEntry(sportID types.URN, locale types.Locale, loadStarted time.Time) *LocalizedSport {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.storeSuppressedLocked(sportID, loadStarted) {
@@ -364,6 +366,19 @@ func (s *SportCache) ensureSportEntry(sportID types.URN, loadStarted time.Time) 
 	}
 	entry, ok := s.sports[sportID]
 	if !ok {
+		if s.fetchCursor[locale].After(loadStarted) {
+			// A catalog flight that STARTED after this tournament fetch
+			// has committed for this locale, and the sport is not in the
+			// map — the fresh catalog says it does not exist. Re-creating
+			// a nameless stub here would resurrect a reconciled-away
+			// sport: Sports() filters it (no names) but Sport() would
+			// report ErrSportLocaleIncomplete instead of not-found, and
+			// the stub would pin an obsolete tournament list. Skip the
+			// commit; the caller still gets its freshly fetched list, and
+			// if the sport reappears upstream the next catalog load
+			// recreates the entry.
+			return nil
+		}
 		entry = &LocalizedSport{
 			id:            sportID,
 			tournamentIDs: make(map[types.URN]struct{}),

@@ -627,6 +627,82 @@ func TestSportCache_OutOfOrderRefreshKeepsNewest(t *testing.T) {
 	}
 }
 
+// TestSportCache_TournamentCommitCannotResurrectRemovedSport pins the
+// stub-creation guard (Fixpoint i11): a tournament fetch that STARTED
+// before a catalog refresh removed its sport must not re-create the
+// sport as a nameless stub when it commits afterwards — the stub
+// pinned an obsolete tournament list and flipped Sport() from
+// not-found to ErrSportLocaleIncomplete for an entity the fresh
+// catalog says does not exist. The caller still receives its fetched
+// list; only the cache commit is skipped.
+func TestSportCache_TournamentCommitCannotResurrectRemovedSport(t *testing.T) {
+	var gateTournaments atomic.Bool
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var sportsBody atomic.Pointer[string]
+	body1 := twoSportCatalog
+	sportsBody.Store(&body1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		if strings.Contains(r.URL.Path, "/tournaments") {
+			if gateTournaments.CompareAndSwap(true, false) {
+				select {
+				case entered <- struct{}{}:
+				default:
+				}
+				<-release
+			}
+			_, _ = io.WriteString(w, `<?xml version="1.0"?>
+<sport_tournaments><sport id="od:sport:2" name="Tennis"/><tournaments>`+
+				`<tournament id="od:tournament:10" name="T10"><sport id="od:sport:2" name="Tennis"/></tournament>`+
+				`</tournaments></sport_tournaments>`)
+			return
+		}
+		_, _ = io.WriteString(w, *sportsBody.Load())
+	}))
+	t.Cleanup(srv.Close)
+	sc := newSportDataCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	sc.catalogTTL = 50 * time.Millisecond
+
+	if _, err := sc.Sports(t.Context(), []types.Locale{types.EnLocale}); err != nil {
+		t.Fatalf("seed Sports: %v", err)
+	}
+
+	// The tournament fetch for sport 2 starts and blocks.
+	gateTournaments.Store(true)
+	tDone := make(chan error, 1)
+	go func() {
+		_, err := sc.SportTournaments(t.Context(), sportTwo, types.EnLocale)
+		tDone <- err
+	}()
+	<-entered
+
+	// Meanwhile the catalog refreshes without sport 2 (removed upstream).
+	body2 := oneSportCatalog
+	sportsBody.Store(&body2)
+	time.Sleep(80 * time.Millisecond)
+	if _, err := sc.Sports(t.Context(), []types.Locale{types.EnLocale}); err != nil {
+		t.Fatalf("catalog refresh: %v", err)
+	}
+
+	// The older tournament fetch completes: its caller gets the list,
+	// but the removed sport must not come back as a stub.
+	close(release)
+	if err := <-tDone; err != nil {
+		t.Fatalf("SportTournaments: %v (the caller still gets its fetched list)", err)
+	}
+	ids, err := sc.Sports(t.Context(), []types.Locale{types.EnLocale})
+	if err != nil {
+		t.Fatalf("Sports after commit: %v", err)
+	}
+	if len(ids) != 1 || ids[0] != sportOne {
+		t.Fatalf("Sports = %v, want only %s (stub resurrected a removed sport)", ids, sportOne.ToString())
+	}
+	if _, err := sc.Sport(t.Context(), sportTwo, []types.Locale{types.EnLocale}); !errors.Is(err, ErrItemNotFoundInCache) {
+		t.Fatalf("Sport(removed) err = %v, want ErrItemNotFoundInCache (not a locale-gap error from a stub)", err)
+	}
+}
+
 // TestSportCache_ConcurrentRefreshCoalesced pins the herd control.
 // Expiry turns a once-per-process fetch into a recurring one, so
 // without coalescing every caller finding the list stale at the same
