@@ -457,20 +457,13 @@ func (c *EventCache[K, V]) Purge()
 
 For: base `MarketDescriptionCache` (everything the bulk catalog returns — see the correction under "Variant / dynamic market descriptions" below), `MarketVoidReasonsCache`, `MatchStatusDescriptionCache`, `SportsCache`.
 
-```go
-type StaticCache[K comparable, V any] struct {
-    mu     sync.RWMutex
-    perLocale map[types.Locale]*staticEntry[K, V]
-    loader func(ctx context.Context, locale types.Locale) (map[K]V, error)
-}
-
-type staticEntry[K comparable, V any] struct {
-    mu      sync.Mutex     // serializes load attempts for this locale
-    loaded  bool
-    data    map[K]V
-    lastErr error
-}
-```
+Each catalog cache implements this pattern directly (per-locale maps under an
+RWMutex, loaded lazily per locale). An earlier shared `StaticCache[K, V]`
+generic sketched here was built but never wired in, and was removed as dead
+code — its loader ran under the entry mutex (uncancellable waiters), it
+returned internal maps by reference, and its loaded flag was permanent, the
+exact staleness class the shipped caches fixed with the expiring catalog
+marks below.
 
 - Loaded per locale on first access; subsequent reads hit the map under RLock.
 - **The loaded-per-locale mark expires** (`defaultCatalogTTL`, 12h), so the catalog is re-fetched at most once per window. It was originally permanent for the process lifetime, which meant each catalog was downloaded exactly once and anything **added or renamed upstream** stayed invisible to a long-running consumer until it restarted — a new market, a new sport, or a new tournament for an existing sport. `SportCache` applies the same window to its per-sport tournament lists (`LocalizedSport.tournamentsLoadedAt`), and refreshing those **replaces** the tournament set rather than merging it, so a tournament removed upstream also disappears.
@@ -478,7 +471,7 @@ type staticEntry[K comparable, V any] struct {
   - **Coalesce the refresh.** Every caller that finds the data stale at the same instant would otherwise issue its own fetch — a thundering herd on each expiry, rather than the single first-load race a permanent flag allowed. All refresh paths go through `lru.LoadCoalesced` with a generation-prefixed key.
   - **Make the commit monotonic.** Replacement plus expiry opens a lost-update window that neither opens alone: concurrent post-expiry refreshes can complete out of order (different locales are different flight keys, so coalescing alone does not serialize them), and an earlier-started fetch finishing last would reinstall its older snapshot and stamp it fresh — serving data already known to be superseded for a full window. A snapshot no newer than the committed one is rejected, and the freshness stamp only ever advances. Same discipline as the producer cursors.
 - `LocalizedStaticDataCache` is deliberately outside this scheme: it already refreshes every loaded locale from a 24h background ticker (`timerTick`), which solves the same staleness problem by a different mechanism, including an atomic per-locale replace that drops ids absent from the fresh response.
-- Known gap: the sport catalog itself merges on refresh, so a sport **removed** upstream lingers until `Clear`/`Purge`. Sports are a fixed, ~50-entry set that effectively never shrinks, so this is left as-is rather than risking a wholesale swap of entries that also carry per-sport tournament state.
+- The catalog refresh is a **replace, not an accumulate**: each bulk load reconciles per locale — entities the complete response no longer carries lose that locale, and entries with no usable data left are dropped (`reconcileBulk` / `reconcileCatalog`). An empty-but-successful response carries no removal authority (indistinguishable from a broken one), and stores are additionally ordered by a per-locale monotonic fetch cursor so a stale pre-clear flight finishing after a newer one cannot overwrite fresh rows or resurrect reconciled-away entries.
 - **No `sync.Once`.** Failed loads (network error, 5xx) reset `loaded=false` so the next access retries. `sync.Once` is a footgun here — a transient failure would otherwise poison the cache forever.
 - `Clear` resets the entry for that locale, forcing a refresh on next access.
 - No size limit — these catalogs are small (hundreds of entries).
@@ -1253,7 +1246,7 @@ The branch must compile and pass CI at the end of every phase, including this on
 ### Phase 3 — Cache layer (3–4 days)
 
 - Generic `EventCache[K, V]` over `golang-lru/v2` + `singleflight`.
-- `StaticCache[K, V]` for catalogs.
+- Per-catalog map+RWMutex caches (a shared `StaticCache[K, V]` was prototyped, never wired in, and later removed as dead code).
 - Per-entity cache wrappers (Match, Competitor, Player, Tournament, Fixture, MarketDescription, MarketVoidReasons, Sport, MatchStatus).
 - All field access in cached entries protected by per-entry mutex (no partial locking).
 - Tests: concurrency stress (`-race`), TTL expiry, LRU eviction, single-flight dedup, locale fill-in, public Clear methods.
