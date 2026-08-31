@@ -231,7 +231,11 @@ func (c *Client) Open(ctx context.Context) (err error) {
 	if c.shutdownStarted {
 		c.mu.Unlock()
 		cancel()
-		_ = conn.Close()
+		// CloseDeadline, not Close: rejecting a late connection performs
+		// the blocking AMQP close handshake, and a broker that keeps
+		// heartbeats flowing while withholding close-ok would otherwise
+		// pin Open here indefinitely — same bound runShutdown applies.
+		_ = conn.CloseDeadline(time.Now().Add(closeHandshakeBudget))
 		return ErrAlreadyClosed
 	}
 	c.conn.Store(conn)
@@ -596,7 +600,11 @@ func (c *Client) reconnectLoop(ctx context.Context, initial *amqp.Connection) {
 		c.mu.Lock()
 		if c.shutdownStarted {
 			c.mu.Unlock()
-			_ = newConn.Close()
+			// CloseDeadline for the same reason as the late-Open reject:
+			// runShutdown JOINS this goroutine, so an unbounded close
+			// handshake here would turn a stalled broker into a shutdown
+			// timeout while retaining the connection.
+			_ = newConn.CloseDeadline(time.Now().Add(closeHandshakeBudget))
 			return
 		}
 		c.conn.Store(newConn)
