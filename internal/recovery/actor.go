@@ -924,6 +924,24 @@ func (a *recoveryActor) lastRecoveryStartedAt() time.Time {
 	return time.Time{}
 }
 
+// calculateTiming reports whether message processing and user-session
+// alives are both fresh enough (within MaxInactivity).
+//
+// Each half applies only once a baseline EXISTS (non-zero timestamp;
+// same IsZero discipline as expireStuckSnapshotRecovery). This matters
+// most for lastUserSessionAlive: it is written only by user-session
+// alives (onAlive's non-SystemAliveOnly branch), and the internal
+// alive session ensureNormal opens is SystemAliveOnly — so a client
+// that never Subscribes (Connect-only, e.g. the recovery example) or
+// subscribes with SystemAliveOnly never sets it. Pre-guard,
+// now.Sub(zero) dwarfed MaxInactivity, so once the tick loop armed the
+// inactivity check every tick flagged the producer down with
+// ProcessingQueueDelayViolation — and PERMANENTLY: the only up-path
+// for that reason (isBackFromInactivity) requires this predicate to
+// turn true, which the zero field made impossible. A missing baseline
+// therefore counts as fresh; monitoring of each half begins with its
+// first observation. Genuine alive silence is still caught by the
+// aliveInterval check in onTick, which fires before this one.
 func (a *recoveryActor) calculateTiming(now time.Time) bool {
 	maxInactivity := a.cfg.MaxInactivity()
 	lastProcessed, err := a.lastProcessedMessageGenTimestamp()
@@ -931,9 +949,11 @@ func (a *recoveryActor) calculateTiming(now time.Time) bool {
 		a.logger.WithError(err).Warn("failed to get last processed message gen timestamp")
 		return false
 	}
-	messageProcessingDelay := now.Sub(lastProcessed).Abs()
-	userAliveDelay := now.Sub(a.lastUserSessionAlive).Abs()
-	return messageProcessingDelay < maxInactivity && userAliveDelay < maxInactivity
+	processedFresh := lastProcessed.IsZero() ||
+		now.Sub(lastProcessed).Abs() < maxInactivity
+	userAliveFresh := a.lastUserSessionAlive.IsZero() ||
+		now.Sub(a.lastUserSessionAlive).Abs() < maxInactivity
+	return processedFresh && userAliveFresh
 }
 
 // producerDown matches manager.producerDown exactly. Pre-actor:

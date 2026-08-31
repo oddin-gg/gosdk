@@ -328,6 +328,52 @@ func TestActor_CalculateTiming(t *testing.T) {
 	}
 }
 
+// TestActor_CalculateTiming_NoUserSessionBaseline pins the zero-value
+// guard: a client that never opens a user session (Connect-only, or
+// Subscribe with SystemAliveOnly) never writes lastUserSessionAlive —
+// the internal alive session is SystemAliveOnly, so onAlive's user
+// branch never runs. Pre-guard, now.Sub(zero) dwarfed MaxInactivity
+// and every armed tick flagged the producer down with
+// ProcessingQueueDelayViolation; the state was PERMANENT because the
+// only up-path for that reason (isBackFromInactivity) requires
+// calculateTiming to turn true. A missing baseline must count as
+// fresh; monitoring starts with the first user-session alive.
+func TestActor_CalculateTiming_NoUserSessionBaseline(t *testing.T) {
+	srv, _ := fixtureSrv(t)
+	defer srv.Close()
+	a := newWiredActor(t, srv, newFakeManagerOps())
+
+	now := time.Now()
+	// System alives keep the processed cursor fresh even on Connect-only
+	// clients (the alive branch advances it); the user-session field
+	// stays at its zero value forever.
+	if err := a.pm.SetLastProcessedMessageGenTimestamp(1, now); err != nil {
+		t.Fatalf("SetLastProcessedMessageGenTimestamp: %v", err)
+	}
+	if a.lastUserSessionAlive != (time.Time{}) {
+		t.Fatal("precondition: lastUserSessionAlive must be unset")
+	}
+	if !a.calculateTiming(now) {
+		t.Error("timing must be ok with no user-session baseline (pre-fix: permanent ProcessingQueueDelayViolation down state)")
+	}
+
+	// The processed-cursor half gets the same guard: no baseline yet
+	// must not read as a delay violation (genuine alive silence is the
+	// aliveInterval check's job, which fires first in onTick).
+	if err := a.pm.SetLastProcessedMessageGenTimestamp(1, time.Time{}); err != nil {
+		t.Fatalf("reset SetLastProcessedMessageGenTimestamp: %v", err)
+	}
+	if !a.calculateTiming(now) {
+		t.Error("timing must be ok with no processed-message baseline")
+	}
+
+	// Once a user-session baseline EXISTS, staleness detection applies.
+	a.lastUserSessionAlive = now.Add(-time.Hour)
+	if a.calculateTiming(now) {
+		t.Error("a stale real baseline must still fail the check")
+	}
+}
+
 // --- producerDown / producerUp / notifyProducerChangedState ---
 
 func TestActor_ProducerDown_AndUp(t *testing.T) {
