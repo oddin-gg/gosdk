@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	apiXML "github.com/oddin-gg/gosdk/internal/api/xml"
 	log "github.com/oddin-gg/gosdk/internal/log"
 	"github.com/oddin-gg/gosdk/types"
 )
@@ -304,6 +305,74 @@ func TestMarketDescriptionCache_StaleFallbackRevalidatesCoverage(t *testing.T) {
 	// data the refresh itself just invalidated.
 	if _, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), []types.Locale{types.EnLocale, types.DeLocale}); err == nil {
 		t.Fatal("partially-refreshed entry served as success; want the fetch error")
+	}
+}
+
+// TestMarketDescription_StaleStartedRowHasNoCrossLocaleAuthority pins
+// the monotonic gate on merge's cross-locale mutations. Different
+// locales load under different singleflight keys and can run
+// concurrently: an earlier-STARTED response finishing LAST could
+// otherwise resurrect an outcome the newer row removed, or reinstall
+// older metadata — and with both locale marks then fresh, the rollback
+// stood for a full catalogTTL. A stale-started row may still apply its
+// own locale's strings (same-locale flights are serialized), but must
+// not add outcomes, sweep other locales, or touch metadata.
+func TestMarketDescription_StaleStartedRowHasNoCrossLocaleAuthority(t *testing.T) {
+	row := func(name, groups string, outcomes ...apiXML.MarketDescriptionOutcome) apiXML.MarketDescription {
+		return apiXML.MarketDescription{
+			ID:       9,
+			Name:     name,
+			Groups:   groups,
+			Outcomes: &apiXML.OutcomesWrapper{Outcome: outcomes},
+		}
+	}
+	d := &LocalizedMarketDescription{
+		id:       9,
+		name:     make(map[types.Locale]string),
+		outcomes: make(map[string]*LocalizedOutcomeDescription),
+	}
+
+	olderStart := time.Now()
+	newerStart := olderStart.Add(50 * time.Millisecond)
+	stale := func(types.Locale) bool { return true } // everything expired
+
+	// The NEWER en row (outcome 2 removed upstream, regrouped) applies
+	// first — it finished first.
+	d.merge(row("Plain", "handicap", apiXML.MarketDescriptionOutcome{ID: "1", Name: "o1"}), types.EnLocale, newerStart, stale)
+
+	// The OLDER de row (still carrying outcome 2, old groups) finishes
+	// last: its own locale's strings land, nothing else.
+	d.merge(row("Schlicht", "all|score",
+		apiXML.MarketDescriptionOutcome{ID: "1", Name: "a1"},
+		apiXML.MarketDescriptionOutcome{ID: "2", Name: "a2"},
+	), types.DeLocale, olderStart, stale)
+
+	snap := d.Snapshot()
+	if len(snap.Outcomes) != 1 || snap.Outcomes[0].ID != "1" {
+		t.Fatalf("outcomes = %+v, want only outcome 1 (stale-started row must not resurrect outcome 2)", snap.Outcomes)
+	}
+	if got := snap.Outcomes[0].Names[types.DeLocale]; got != "a1" {
+		t.Fatalf("outcome 1 de name = %q, want %q (own-locale strings still apply)", got, "a1")
+	}
+	if len(snap.Groups) != 1 || snap.Groups[0] != "handicap" {
+		t.Fatalf("groups = %v, want [handicap] (stale-started row must not reinstall old metadata)", snap.Groups)
+	}
+	if got := snap.Names[types.DeLocale]; got != "Schlicht" {
+		t.Fatalf("de market name = %q, want %q", got, "Schlicht")
+	}
+
+	// A genuinely newer row still advances everything.
+	newest := newerStart.Add(50 * time.Millisecond)
+	d.merge(row("Plain", "score",
+		apiXML.MarketDescriptionOutcome{ID: "1", Name: "o1"},
+		apiXML.MarketDescriptionOutcome{ID: "3", Name: "o3"},
+	), types.EnLocale, newest, stale)
+	snap = d.Snapshot()
+	if len(snap.Outcomes) != 2 {
+		t.Fatalf("outcomes = %+v, want 1 and 3 (newest row is authoritative)", snap.Outcomes)
+	}
+	if len(snap.Groups) != 1 || snap.Groups[0] != "score" {
+		t.Fatalf("groups = %v, want [score]", snap.Groups)
 	}
 }
 

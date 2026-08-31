@@ -719,7 +719,7 @@ func (m *MarketDescriptionCache) upsert(description data.MarketDescription, loca
 	// delete it while this row's merge was still pending, silently
 	// losing the row. Bulk loads are rare (once per catalogTTL), so the
 	// added hold time is irrelevant.
-	entry.merge(description, locale, staleLocale)
+	entry.merge(description, locale, loadStarted, staleLocale)
 	m.mu.Unlock()
 	return nil
 }
@@ -772,6 +772,14 @@ type LocalizedMarketDescription struct {
 	specifiers             []types.Specifier
 	name                   map[types.Locale]string
 	groups                 []string
+
+	// lastRowAt is the fetch-start instant of the newest APPLIED
+	// well-formed row — the monotonic cursor for merge's cross-locale
+	// mutations (outcome-set additions, the stale-locale sweep, and the
+	// locale-independent metadata). Same only-advance discipline as
+	// LocalizedSport.replaceTournaments and the match-status cache's
+	// apiStartedAt; see merge for the race it closes.
+	lastRowAt time.Time
 }
 
 func (d *LocalizedMarketDescription) hasLocale(locale types.Locale) bool {
@@ -875,16 +883,36 @@ func (d *LocalizedMarketDescription) coversLocaleLocked(locale types.Locale) boo
 //
 // A malformed row (no <outcomes> block) contributes only its name —
 // it carries no authority over outcomes or metadata.
-func (d *LocalizedMarketDescription) merge(description data.MarketDescription, locale types.Locale, staleLocale func(types.Locale) bool) {
+//
+// Cross-locale mutations are additionally MONOTONIC on loadStarted
+// (the fetch-start instant of the row's flight, tracked in lastRowAt):
+// different locales load under different singleflight keys and can run
+// concurrently, so an earlier-STARTED response finishing LAST could
+// otherwise resurrect outcomes a newer row had removed, or reinstall
+// older metadata — and with both locale marks then fresh, the rollback
+// stood for a full catalogTTL. A stale-started row still applies its
+// OWN locale's strings and own-locale removals (same-locale flights
+// are serialized by singleflight, so per-locale data is always
+// newest), but it cannot add outcomes, sweep other locales, or touch
+// metadata.
+func (d *LocalizedMarketDescription) merge(description data.MarketDescription, locale types.Locale, loadStarted time.Time, staleLocale func(types.Locale) bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
 	if description.Outcomes != nil {
+		newest := loadStarted.After(d.lastRowAt)
 		fresh := make(map[string]struct{}, len(description.Outcomes.Outcome))
 		for _, outcome := range description.Outcomes.Outcome {
 			fresh[outcome.ID] = struct{}{}
 			lo, ok := d.outcomes[outcome.ID]
 			if !ok {
+				if !newest {
+					// A stale-started row must not resurrect an outcome a
+					// newer row removed. A genuinely new outcome would be
+					// carried by the newer row too, so skipping loses
+					// nothing that the next refresh doesn't restore.
+					continue
+				}
 				// New outcome on a fresh fetch — add it.
 				lo = &LocalizedOutcomeDescription{
 					name:        make(map[types.Locale]string),
@@ -905,7 +933,9 @@ func (d *LocalizedMarketDescription) merge(description data.MarketDescription, l
 		}
 		// Outcomes the fresh row no longer carries: always drop this
 		// row's own locale; drop other locales only when their catalog
-		// mark is stale (see the freshness-scoped contract above).
+		// mark is stale (see the freshness-scoped contract above) AND
+		// this row is the newest applied — a stale-started row has no
+		// cross-locale authority.
 		for id, lo := range d.outcomes {
 			if _, ok := fresh[id]; ok {
 				continue
@@ -913,7 +943,7 @@ func (d *LocalizedMarketDescription) merge(description data.MarketDescription, l
 			lo.mu.Lock()
 			delete(lo.name, locale)
 			delete(lo.description, locale)
-			if staleLocale != nil {
+			if newest && staleLocale != nil {
 				for l := range lo.name {
 					if staleLocale(l) {
 						delete(lo.name, l)
@@ -928,18 +958,21 @@ func (d *LocalizedMarketDescription) merge(description data.MarketDescription, l
 			}
 		}
 
-		// Locale-independent metadata: the fresh row is authoritative.
-		d.groups = splitGroups(description.Groups)
-		d.IncludesOutcomesOfType = description.IncludesOutcomesOfType
-		d.OutcomeType = description.OutcomeType
-		var specifiers []types.Specifier
-		if description.Specifiers != nil && len(description.Specifiers.Specifier) > 0 {
-			specifiers = make([]types.Specifier, 0, len(description.Specifiers.Specifier))
-			for _, s := range description.Specifiers.Specifier {
-				specifiers = append(specifiers, types.Specifier{Name: s.Name, Type: s.Type})
+		if newest {
+			// Locale-independent metadata: the newest row is authoritative.
+			d.groups = splitGroups(description.Groups)
+			d.IncludesOutcomesOfType = description.IncludesOutcomesOfType
+			d.OutcomeType = description.OutcomeType
+			var specifiers []types.Specifier
+			if description.Specifiers != nil && len(description.Specifiers.Specifier) > 0 {
+				specifiers = make([]types.Specifier, 0, len(description.Specifiers.Specifier))
+				for _, s := range description.Specifiers.Specifier {
+					specifiers = append(specifiers, types.Specifier{Name: s.Name, Type: s.Type})
+				}
 			}
+			d.specifiers = specifiers // nil clears a set emptied upstream
+			d.lastRowAt = loadStarted
 		}
-		d.specifiers = specifiers // nil clears a set emptied upstream
 	}
 	d.name[locale] = description.Name
 }
