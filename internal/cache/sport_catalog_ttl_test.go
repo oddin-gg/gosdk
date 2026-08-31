@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -120,6 +121,71 @@ func TestSportCache_CatalogNotRefetchedWithinTTL(t *testing.T) {
 	}
 	if got := srv.sportHits.Load(); got != 1 {
 		t.Fatalf("catalog hits = %d, want 1 (no refetch inside the TTL window)", got)
+	}
+}
+
+// TestSportCache_RemovedSportReconciled pins the catalog refresh as a
+// REPLACE: a sport absent from the fresh response must stop being
+// served. Pre-fix the sports map was upsert-only — Sports() listed a
+// removed sport for the process lifetime, and building it then failed
+// on its tournament fetch.
+func TestSportCache_RemovedSportReconciled(t *testing.T) {
+	srv := newSportSrv(t, twoSportCatalog, noTournaments)
+	sc := newSportDataCache(t.Context(), newAPIClientForTest(t, srv.Server), log.New(nil))
+	sc.catalogTTL = 50 * time.Millisecond
+
+	ids, err := sc.Sports(t.Context(), []types.Locale{types.EnLocale})
+	if err != nil {
+		t.Fatalf("initial Sports: %v", err)
+	}
+	if len(ids) != 2 {
+		t.Fatalf("Sports = %v, want 2 entries", ids)
+	}
+
+	srv.serveSports(oneSportCatalog) // sport 2 removed upstream
+	time.Sleep(80 * time.Millisecond)
+
+	ids, err = sc.Sports(t.Context(), []types.Locale{types.EnLocale})
+	if err != nil {
+		t.Fatalf("Sports after removal: %v", err)
+	}
+	if len(ids) != 1 || ids[0] != sportOne {
+		t.Fatalf("Sports = %v, want only %s (removed sport must not linger)", ids, sportOne.ToString())
+	}
+	if _, err := sc.Sport(t.Context(), sportTwo, []types.Locale{types.EnLocale}); !errors.Is(err, ErrItemNotFoundInCache) {
+		t.Fatalf("Sport(removed) err = %v, want ErrItemNotFoundInCache", err)
+	}
+}
+
+// TestSportCache_ReconcilePerLocale: the catalog response is
+// authoritative for ITS locale only — a sport present in en but absent
+// from the de catalog keeps its en data and stays reachable in en;
+// multi-locale reads report the de gap as the typed incomplete.
+func TestSportCache_ReconcilePerLocale(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		if strings.Contains(r.URL.Path, "/de/") {
+			_, _ = io.WriteString(w, oneSportCatalog) // de: sport 1 only
+			return
+		}
+		_, _ = io.WriteString(w, twoSportCatalog) // en: sports 1 and 2
+	}))
+	t.Cleanup(srv.Close)
+	sc := newSportDataCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+
+	if _, err := sc.Sports(t.Context(), []types.Locale{types.EnLocale}); err != nil {
+		t.Fatalf("en Sports: %v", err)
+	}
+	if _, err := sc.Sports(t.Context(), []types.Locale{types.DeLocale}); err != nil {
+		t.Fatalf("de Sports: %v", err)
+	}
+
+	// The de reconcile must not evict sport 2's en data.
+	if _, err := sc.Sport(t.Context(), sportTwo, []types.Locale{types.EnLocale}); err != nil {
+		t.Fatalf("Sport(2, en) after de load: %v (another locale's reconcile must not evict en data)", err)
+	}
+	if _, err := sc.Sport(t.Context(), sportTwo, []types.Locale{types.EnLocale, types.DeLocale}); !errors.Is(err, ErrSportLocaleIncomplete) {
+		t.Fatalf("Sport(2, [en,de]) err = %v, want ErrSportLocaleIncomplete", err)
 	}
 }
 

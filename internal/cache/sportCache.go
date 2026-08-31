@@ -429,6 +429,9 @@ func (s *SportCache) ensureLocalesLoaded(ctx context.Context, locales []types.Lo
 						return struct{}{}, fmt.Errorf("load sport catalog locale %s: upsert %s: %w", loc, ids[k].ToString(), err)
 					}
 				}
+				// The response is the complete catalog for this locale:
+				// sports it no longer carries must stop being served.
+				s.reconcileCatalog(loc, ids, loadStarted)
 				s.markLocaleLoaded(loc, loadStarted)
 				return struct{}{}, nil
 			})
@@ -483,10 +486,10 @@ func (s *SportCache) markLocaleLoaded(locale types.Locale, loadStarted time.Time
 
 func (s *SportCache) upsertSport(id types.URN, locale types.Locale, sport *xml.Sport, loadStarted time.Time) error {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.storeSuppressedLocked(id, loadStarted) {
 		// A Clear for this sport (or a Purge) landed after the load
 		// started: skip only this row — the next read refetches.
-		s.mu.Unlock()
 		return nil
 	}
 	entry, ok := s.sports[id]
@@ -499,14 +502,71 @@ func (s *SportCache) upsertSport(id types.URN, locale types.Locale, sport *xml.S
 		}
 		s.sports[id] = entry
 	}
-	s.mu.Unlock()
 
+	// Populate UNDER s.mu (entry.mu nested inside, the same s.mu →
+	// entry.mu order Sports() uses). Populating after the unlock — the
+	// previous shape — left a window where a freshly created entry sat
+	// in the map with zero locales; reconcileCatalog (which prunes
+	// empty entries atomically under s.mu) could then delete it while
+	// this row's names were still pending, silently losing the sport.
+	// Catalog loads run once per catalogTTL, so the hold time is
+	// irrelevant.
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
 	entry.name[locale] = sport.Name
 	entry.abbreviation[locale] = sport.Abbreviation
 	entry.iconPath = sport.IconPath
 	return nil
+}
+
+// removeLocale drops one locale's name/abbreviation from the entry.
+// Reports whether the entry carries no name in any locale afterwards
+// (and should be dropped by the caller). Used by reconcileCatalog for
+// sports absent from a fresh catalog response.
+func (l *LocalizedSport) removeLocale(locale types.Locale) (empty bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.name, locale)
+	delete(l.abbreviation, locale)
+	return len(l.name) == 0
+}
+
+// reconcileCatalog removes, for one locale, every sport the fresh
+// catalog response no longer carries — the response is the complete
+// sport list for that locale, so absence is authoritative removal.
+// Sports left with no locale at all are dropped entirely: Sports()
+// stops listing them and Sport() reports not-found instead of serving
+// (or locale-gap-erroring on) an entity that no longer exists
+// upstream. Pre-fix the map was upsert-only, so a removed sport was
+// listed for the process lifetime — and building it then failed on
+// its tournament fetch. Mirrors the market cache's reconcileBulk; per
+// locale only, so a sport present in just some locales keeps those.
+//
+// Dropping a sport also drops its cached tournament list; the
+// SportTournaments stub for a sport genuinely absent from the catalog
+// is recreated (and its list refetched) on the next call — bounded,
+// once per catalogTTL. Suppressed when an invalidation raced the load
+// (the clear already reset the locale marks, so the next load
+// reconciles from fresh data). Atomic with upsertSport's
+// create+populate, which now holds s.mu throughout.
+func (s *SportCache) reconcileCatalog(locale types.Locale, fresh []types.URN, loadStarted time.Time) {
+	seen := make(map[types.URN]struct{}, len(fresh))
+	for _, id := range fresh {
+		seen[id] = struct{}{}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.lastClearAt.After(loadStarted) || s.purgedAt.After(loadStarted) {
+		return
+	}
+	for id, entry := range s.sports {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		if entry.removeLocale(locale) {
+			delete(s.sports, id)
+		}
+	}
 }
 
 // Clear evicts a single sport AND invalidates every loaded-locale
