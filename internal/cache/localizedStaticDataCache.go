@@ -91,6 +91,14 @@ func (l *LocalizedStaticDataCache) LocalizedItem(ctx context.Context, id int, lo
 	if def, ok := localeMap[primary]; ok {
 		out.Description = types.Some(def)
 	}
+	// Requested-locale coverage, computed under the same lock as the
+	// snapshot above so the two can't disagree.
+	var incomplete []types.Locale
+	for _, loc := range locales {
+		if _, ok := localeMap[loc]; !ok {
+			incomplete = append(incomplete, loc)
+		}
+	}
 	l.mux.RUnlock()
 	if !known {
 		// The id isn't in the upstream catalog even after the locales
@@ -99,6 +107,16 @@ func (l *LocalizedStaticDataCache) LocalizedItem(ctx context.Context, id int, lo
 		// documented nil-on-unknown semantics silently broken); a typed
 		// not-found lets them distinguish absent from empty.
 		return out, fmt.Errorf("static data id %d not in catalog: %w", id, ErrItemNotFoundInCache)
+	}
+	if len(incomplete) > 0 {
+		// The id exists, but some requested locale has no description
+		// (the id — or its description — is absent from that locale's
+		// catalog). Pre-fix this reported success whenever the id existed
+		// in ANY loaded locale, silently handing back a partial localized
+		// value; the market/sport caches surface exactly this condition
+		// as a typed incomplete error. The partial value is returned WITH
+		// the error so tolerant callers can attach what exists.
+		return out, fmt.Errorf("static data id %d: locales %v unavailable in upstream catalog: %w", id, incomplete, ErrStaticDataLocaleIncomplete)
 	}
 	return out, nil
 }

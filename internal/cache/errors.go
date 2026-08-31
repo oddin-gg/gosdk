@@ -61,6 +61,19 @@ var ErrMarketLocaleIncomplete = errors.New("market description missing requested
 // will not help until the upstream catalog itself changes.
 var ErrSportLocaleIncomplete = errors.New("sport missing requested locale data")
 
+// ErrStaticDataLocaleIncomplete is the static-catalog analogue of
+// ErrMarketLocaleIncomplete: the id exists in the catalog, and every
+// requested locale was loaded, but the entry carries no description in
+// some requested locale (the upstream catalog omits the id — or its
+// description — there). Pre-fix LocalizedItem reported success whenever
+// the id existed in ANY loaded locale, silently returning a partial
+// localized value for a request the cache could not fully satisfy.
+// The partially-populated value is still returned alongside this error
+// so tolerant callers (BuildMatchStatus) can attach what exists.
+// Distinct from ErrItemNotFoundInCache (id absent from every loaded
+// locale): retrying will not help until the upstream catalog changes.
+var ErrStaticDataLocaleIncomplete = errors.New("static data missing requested locale data")
+
 // errClearedDuringLoad signals that a ClearCacheItem/Purge landed while
 // a singleflight load was in flight, so the observer-driven store was
 // suppressed by the clear tombstone and the loader's final lookup came

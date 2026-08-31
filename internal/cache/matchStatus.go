@@ -704,7 +704,16 @@ func BuildMatchStatus(
 		case errors.Is(err, ErrItemNotFoundInCache):
 			// The status-code description is genuinely absent from the
 			// upstream catalog — leave StatusDescription nil (documented
-			// optional). Only THIS outcome is tolerated.
+			// optional).
+		case errors.Is(err, ErrStaticDataLocaleIncomplete):
+			// The description exists but not in every requested locale —
+			// an upstream catalog gap, not a fetch failure. Attach the
+			// partially-populated value (LocalizedItem returns it with
+			// the error): the locales that DO exist are strictly more
+			// useful than dropping the description entirely, and
+			// Description/Descriptions reflect exactly what the catalog
+			// carries. Only these two catalog-gap outcomes are tolerated.
+			out.StatusDescription = &desc
 		default:
 			// Context cancellation or a transport/API failure must NOT be
 			// silently converted to "no description": that made a
