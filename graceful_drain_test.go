@@ -128,6 +128,55 @@ func TestSubscriptionClose_DeadlineDiscardsAndReportsCtxErr(t *testing.T) {
 	}
 }
 
+// TestSubscriptionClose_CallerCtxBoundsOnlyTheWait pins the
+// background-continuation half of the Close contract: a short-lived
+// caller ctx ends the WAIT (Close returns ctx.Err()) but must not
+// abort the drain — the buffered messages were already ACKed on
+// admission and exist nowhere else, so a drain cancelled by the
+// caller's ctx silently discarded them (pre-fix the drain ctx was a
+// CHILD of the caller's). The drain finishes under its own budget, a
+// consumer can still read everything, and a second Close with a fresh
+// ctx joins the same shutdown and reports the graceful result.
+func TestSubscriptionClose_CallerCtxBoundsOnlyTheWait(t *testing.T) {
+	fake := newDrainFakeSession()
+	s := newDrainTestSubscription(fake, 3, 2*time.Second)
+
+	shortCtx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	if err := s.Close(shortCtx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Close(shortCtx) = %v, want DeadlineExceeded (the wait is bounded)", err)
+	}
+	select {
+	case <-s.Done():
+		t.Fatal("Done() closed while the consumer had read nothing — drain aborted by the caller ctx")
+	default:
+	}
+
+	// The consumer shows up late; the still-running drain must deliver
+	// every buffered message.
+	got := make(chan int, 1)
+	go func() {
+		n := 0
+		for range s.messages {
+			n++
+		}
+		got <- n
+	}()
+
+	ctx, cancel2 := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel2()
+	if err := s.Close(ctx); err != nil {
+		t.Fatalf("second Close: %v (must join the in-flight shutdown and report its result)", err)
+	}
+	close(s.messages)
+	if err := s.Err(); err != nil {
+		t.Fatalf("Err() = %v, want nil after graceful drain", err)
+	}
+	if n := <-got; n != 3 {
+		t.Fatalf("consumer read %d messages, want all 3 (drain must survive the first caller's ctx)", n)
+	}
+}
+
 // TestSubscriptionAbort_KeepsBufferReadable pins the abrupt path: Done()
 // closes with the terminal cause, and already-admitted messages stay
 // READABLE (abort discards nothing — only graceful-deadline does).
