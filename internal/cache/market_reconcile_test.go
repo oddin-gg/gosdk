@@ -110,8 +110,11 @@ func TestMarketDescriptionCache_RemovedOutcomeReconciled(t *testing.T) {
 // removed only the refreshed locale from an obsolete outcome — one
 // still named by (say) a de load from before the removal survived,
 // permanently failed en coverage, and made the market unavailable in
-// en until the de locale happened to reload. The fresh row's outcome
-// ID set is authoritative across locales.
+// en until the de locale happened to reload. Cross-locale removal is
+// freshness-scoped: the sweep fires here because de's catalog mark has
+// expired by the time en refreshes (see
+// TestMarketDescriptionCache_FreshLocaleDisagreementPreserved for the
+// both-marks-fresh case, which must NOT delete).
 func TestMarketDescriptionCache_ZombieOutcomeDroppedAcrossLocales(t *testing.T) {
 	catalog := func(outcomes string) string {
 		return `<?xml version="1.0"?>
@@ -143,6 +146,56 @@ func TestMarketDescriptionCache_ZombieOutcomeDroppedAcrossLocales(t *testing.T) 
 	// The surviving outcome keeps its other locales' names.
 	if got := snap.Outcomes[0].Names[types.DeLocale]; got == "" {
 		t.Fatalf("outcome 1 de name lost by the en refresh: %+v", snap.Outcomes[0].Names)
+	}
+}
+
+// TestMarketDescriptionCache_FreshLocaleDisagreementPreserved: a locale
+// whose catalog TEMPORARILY omits an outcome must not delete other
+// locales' still-fresh data. Pre-fix (last-row-wins outcome set) a de
+// row carrying {1} while en carried {1,2} deleted outcome 2 from en
+// globally — and the multi-locale request then PASSED coverage with
+// silently truncated outcomes. Fresh disagreement must keep both
+// sides' data and surface as the documented ErrMarketLocaleIncomplete.
+func TestMarketDescriptionCache_FreshLocaleDisagreementPreserved(t *testing.T) {
+	enCatalog := `<?xml version="1.0"?>
+<market_descriptions response_code="OK">
+  <market id="9" name="Plain"><outcomes><outcome id="1" name="o1"/><outcome id="2" name="o2"/></outcomes></market>
+</market_descriptions>`
+	deCatalog := `<?xml version="1.0"?>
+<market_descriptions response_code="OK">
+  <market id="9" name="Schlicht"><outcomes><outcome id="1" name="a1"/></outcomes></market>
+</market_descriptions>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		if strings.Contains(r.URL.Path, "/de/") {
+			_, _ = io.WriteString(w, deCatalog)
+			return
+		}
+		_, _ = io.WriteString(w, enCatalog)
+	}))
+	t.Cleanup(srv.Close)
+
+	mc := newMarketDescriptionCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	ctx := t.Context()
+
+	// Both locales load fresh, back to back: en lists {1,2}, de {1}.
+	// The asymmetry must be a typed incomplete, not a silent success.
+	if _, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), []types.Locale{types.EnLocale, types.DeLocale}); !errors.Is(err, ErrMarketLocaleIncomplete) {
+		t.Fatalf("err = %v, want ErrMarketLocaleIncomplete for a fresh outcome-set disagreement", err)
+	}
+
+	// And outcome 2's fresh en data survived the de load.
+	entry, ok := mc.lookup(CompositeKey{MarketID: 9})
+	if !ok {
+		t.Fatal("entry missing after loads")
+	}
+	snap := entry.Snapshot()
+	if len(snap.Outcomes) != 2 {
+		t.Fatalf("outcomes = %+v, want both (fresh de row must not delete en's outcome 2)", snap.Outcomes)
+	}
+	// The en-only view still works: coverage per locale is intact.
+	if _, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), []types.Locale{types.EnLocale}); err != nil {
+		t.Fatalf("en-only lookup: %v", err)
 	}
 }
 

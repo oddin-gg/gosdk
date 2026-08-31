@@ -434,6 +434,13 @@ func (m *MarketDescriptionCache) Purge() {
 func (m *MarketDescriptionCache) localeLoaded(locale types.Locale) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	return m.localeLoadedLocked(locale)
+}
+
+// localeLoadedLocked is localeLoaded for callers already holding m.mu
+// (read or write) — upsert's merge-time staleLocale predicate runs
+// under the write lock.
+func (m *MarketDescriptionCache) localeLoadedLocked(locale types.Locale) bool {
 	loadedAt, ok := m.loadedLocales[locale]
 	if !ok {
 		return false
@@ -694,15 +701,25 @@ func (m *MarketDescriptionCache) upsert(description data.MarketDescription, loca
 	// A well-formed row now backs this key — drop any malformed tombstone
 	// so a later good load reclassifies the market as present.
 	delete(m.malformed, key)
+	// staleLocale scopes merge's cross-locale outcome removal to locales
+	// whose bulk-catalog mark has expired. Only bulk-provenance rows
+	// consult the marks: dynamic-variant entries live in a TTL'd store
+	// whose whole-entry expiry already bounds their staleness, and the
+	// bulk marks say nothing about per-variant data.
+	var staleLocale func(types.Locale) bool
+	if !key.isDynamicVariant() {
+		staleLocale = func(l types.Locale) bool { return !m.localeLoadedLocked(l) }
+	}
 	// Merge UNDER m.mu (it takes the entry's own lock; the m.mu →
-	// entry.mu order matches collect/reconcileBulk). Merging after the
+	// entry.mu order matches collect/reconcileBulk — and staleLocale
+	// reads loadedLocales, which m.mu guards). Merging after the
 	// unlock — the previous shape — left a window where a freshly
 	// created entry sat in the map with zero locales; reconcileBulk
 	// (which prunes empty entries atomically under m.mu) could then
 	// delete it while this row's merge was still pending, silently
 	// losing the row. Bulk loads are rare (once per catalogTTL), so the
 	// added hold time is irrelevant.
-	entry.merge(description, locale)
+	entry.merge(description, locale, staleLocale)
 	m.mu.Unlock()
 	return nil
 }
@@ -831,19 +848,34 @@ func (d *LocalizedMarketDescription) coversLocaleLocked(locale types.Locale) boo
 //
 // REPLACE, not accumulate (mirrors LocalizedSport.replaceTournaments
 // and LocalizedStaticDataCache.timerTick): the row is authoritative for
-// its locale's strings, for the OUTCOME ID SET (locale-independent —
-// rows differ only in localized names), and for the locale-independent
-// metadata it carries. The previous additive merge turned the entry
-// into a historical union — outcomes removed upstream lingered forever
-// (and, worse, poisoned coverage: every locale loaded AFTER the removal
-// lacked the dead outcome's name, so the entry never validated for it
-// and by-id returned ErrMarketLocaleIncomplete for the rest of the
-// process lifetime); groups / outcome types were frozen at entry
-// creation; a specifier set emptied upstream never cleared.
+// its OWN locale — its strings, and which outcomes exist in that locale
+// — and for the locale-independent metadata it carries.
+//
+// For OTHER locales the row's outcome-set authority is FRESHNESS-
+// SCOPED: an outcome the row omits additionally loses every locale
+// whose catalog mark has expired (staleLocale), because that contrary
+// evidence is older than the freshness horizon; an outcome left with no
+// locale names is dropped. This sits between two wrong extremes, both
+// previously shipped:
+//
+//   - pure accumulate: outcomes removed upstream lingered forever and
+//     poisoned coverage for every locale loaded after the removal
+//     (by-id returned ErrMarketLocaleIncomplete for the rest of the
+//     process lifetime);
+//   - last-row-wins set: a locale whose catalog TEMPORARILY omitted an
+//     outcome deleted other locales' still-fresh data globally, and a
+//     multi-locale request then passed coverage with silently
+//     truncated outcomes instead of reporting the documented
+//     ErrMarketLocaleIncomplete.
+//
+// With freshness-scoped removal, fresh disagreement between locales
+// keeps both sides' data and surfaces as ErrMarketLocaleIncomplete; a
+// zombie outcome kept alive only by locales nobody refreshes is swept
+// as soon as their marks lapse — bounded by one catalogTTL.
 //
 // A malformed row (no <outcomes> block) contributes only its name —
 // it carries no authority over outcomes or metadata.
-func (d *LocalizedMarketDescription) merge(description data.MarketDescription, locale types.Locale) {
+func (d *LocalizedMarketDescription) merge(description data.MarketDescription, locale types.Locale, staleLocale func(types.Locale) bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -871,21 +903,27 @@ func (d *LocalizedMarketDescription) merge(description data.MarketDescription, l
 			}
 			lo.mu.Unlock()
 		}
-		// Outcomes the fresh row no longer carries are dropped ENTIRELY —
-		// the outcome ID set is locale-independent (rows differ only in
-		// localized names), so a well-formed row is authoritative for the
-		// set, not just for its own locale's strings. The first cut of
-		// this reconcile removed only the refreshed locale and kept the
-		// outcome while any other locale still named it: an outcome held
-		// alive by a stale locale that is never requested again (so never
-		// refreshed) then failed the refreshed locale's coverage forever
-		// — the market unavailable in the locale consumers actually use,
-		// until the zombie locale happened to reload or the entry was
-		// cleared. If upstream locales are momentarily out of sync during
-		// a catalog deploy, set membership flips to the last row loaded
-		// and converges once upstream does.
-		for id := range d.outcomes {
-			if _, ok := fresh[id]; !ok {
+		// Outcomes the fresh row no longer carries: always drop this
+		// row's own locale; drop other locales only when their catalog
+		// mark is stale (see the freshness-scoped contract above).
+		for id, lo := range d.outcomes {
+			if _, ok := fresh[id]; ok {
+				continue
+			}
+			lo.mu.Lock()
+			delete(lo.name, locale)
+			delete(lo.description, locale)
+			if staleLocale != nil {
+				for l := range lo.name {
+					if staleLocale(l) {
+						delete(lo.name, l)
+						delete(lo.description, l)
+					}
+				}
+			}
+			gone := len(lo.name) == 0
+			lo.mu.Unlock()
+			if gone {
 				delete(d.outcomes, id)
 			}
 		}
