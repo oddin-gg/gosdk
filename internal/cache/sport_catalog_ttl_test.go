@@ -738,6 +738,76 @@ func TestSportCache_IconPathSurvivesIconlessLocale(t *testing.T) {
 	}
 }
 
+// TestSportCache_ReconcileSuppressedByMidFlightClear mirrors the
+// market cache's guard proof (Fixpoint i14): a catalog response
+// fetched BEFORE a Clear must not prune sports it omits, and the
+// locale mark stays unset so the next read reconciles fresh.
+func TestSportCache_ReconcileSuppressedByMidFlightClear(t *testing.T) {
+	var body atomic.Pointer[string]
+	b1 := twoSportCatalog
+	body.Store(&b1)
+	var gateArmed atomic.Bool
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "application/xml")
+		if gateArmed.CompareAndSwap(true, false) {
+			select {
+			case entered <- struct{}{}:
+			default:
+			}
+			<-release
+			_, _ = io.WriteString(w, oneSportCatalog) // pre-clear view omitting sport 2
+			return
+		}
+		_, _ = io.WriteString(w, *body.Load())
+	}))
+	t.Cleanup(srv.Close)
+	sc := newSportDataCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	sc.catalogTTL = 50 * time.Millisecond
+
+	if _, err := sc.Sports(t.Context(), []types.Locale{types.EnLocale}); err != nil {
+		t.Fatalf("seed Sports: %v", err)
+	}
+	gateArmed.Store(true)
+	time.Sleep(80 * time.Millisecond)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := sc.Sports(t.Context(), []types.Locale{types.EnLocale})
+		done <- err
+	}()
+	<-entered
+
+	sc.Clear(sportOne) // an unrelated sport is cleared mid-flight
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("gated Sports: %v", err)
+	}
+
+	// Sport 2 (omitted by the pre-clear response) must survive.
+	sc.mu.RLock()
+	_, ok := sc.sports[sportTwo]
+	sc.mu.RUnlock()
+	if !ok {
+		t.Fatal("sport 2 pruned by a pre-clear response's reconcile (invalidation-race guard broken)")
+	}
+	// The next read refetches (mark stayed unset) and restores sport 1.
+	before := hits.Load()
+	ids, err := sc.Sports(t.Context(), []types.Locale{types.EnLocale})
+	if err != nil {
+		t.Fatalf("post-clear Sports: %v", err)
+	}
+	if hits.Load() != before+1 {
+		t.Fatalf("catalog hits = %d, want %d (a suppressed load must not mark the locale loaded)", hits.Load(), before+1)
+	}
+	if len(ids) != 2 {
+		t.Fatalf("Sports = %v, want both after the fresh refetch", ids)
+	}
+}
+
 // TestSportCache_ConcurrentRefreshCoalesced pins the herd control.
 // Expiry turns a once-per-process fetch into a recurring one, so
 // without coalescing every caller finding the list stale at the same

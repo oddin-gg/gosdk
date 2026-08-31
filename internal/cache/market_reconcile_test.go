@@ -1251,6 +1251,86 @@ func TestMarketDescriptionCache_EmptyOutcomesContainerNotCovered(t *testing.T) {
 	}
 }
 
+// TestMarketDescriptionCache_ReconcileSuppressedByMidFlightClear proves
+// the invalidation-race guard on reconcileBulk (Fixpoint i14: the
+// nearest existing test passed whether or not the guard existed,
+// because its response omitted nothing). A response fetched BEFORE a
+// ClearCacheItem carries a pre-clear view — removals driven by it are
+// as suspect as its rows, so a market it omits must NOT be pruned; the
+// locale mark stays unset so the next read reconciles from fresh data.
+func TestMarketDescriptionCache_ReconcileSuppressedByMidFlightClear(t *testing.T) {
+	v1 := `<?xml version="1.0"?>
+<market_descriptions response_code="OK">
+  <market id="1" name="1x2"><outcomes><outcome id="1" name="home"/></outcomes></market>
+  <market id="4" name="Correct score"><outcomes><outcome id="1" name="3:0"/></outcomes></market>
+  <market id="9" name="Plain"><outcomes><outcome id="1" name="o1"/></outcomes></market>
+</market_descriptions>`
+	v2 := `<?xml version="1.0"?>
+<market_descriptions response_code="OK">
+  <market id="1" name="1x2"><outcomes><outcome id="1" name="home"/></outcomes></market>
+  <market id="9" name="Plain"><outcomes><outcome id="1" name="o1"/></outcomes></market>
+</market_descriptions>`
+
+	var body atomic.Pointer[string]
+	body.Store(&v1)
+	var gateArmed atomic.Bool
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "application/xml")
+		if gateArmed.CompareAndSwap(true, false) {
+			select {
+			case entered <- struct{}{}:
+			default:
+			}
+			<-release
+			_, _ = io.WriteString(w, v2) // pre-clear view omitting market 4
+			return
+		}
+		_, _ = io.WriteString(w, *body.Load())
+	}))
+	t.Cleanup(srv.Close)
+	mc := newMarketDescriptionCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	mc.catalogTTL = 50 * time.Millisecond
+	ctx := t.Context()
+
+	if _, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), []types.Locale{types.EnLocale}); err != nil {
+		t.Fatalf("seed lookup: %v", err)
+	}
+	gateArmed.Store(true)
+	time.Sleep(80 * time.Millisecond)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), []types.Locale{types.EnLocale})
+		done <- err
+	}()
+	<-entered
+
+	// An UNRELATED market is cleared while the flight is in the fixture.
+	mc.ClearCacheItem(1, types.None[string]())
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("gated lookup: %v", err)
+	}
+
+	// The guard: the pre-clear response's removal must not have pruned
+	// market 4.
+	if !mc.baseHas(CompositeKey{MarketID: 4}) {
+		t.Fatal("market 4 pruned by a pre-clear response's reconcile (invalidation-race guard broken)")
+	}
+	// And the locale mark stayed unset: the next read refetches.
+	before := hits.Load()
+	if _, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), []types.Locale{types.EnLocale}); err != nil {
+		t.Fatalf("post-clear lookup: %v", err)
+	}
+	if hits.Load() != before+1 {
+		t.Fatalf("bulk hits = %d, want %d (a suppressed load must not mark the locale loaded)", hits.Load(), before+1)
+	}
+}
+
 // TestMarketDescriptionCache_ReconcilePerLocale: the bulk response is
 // authoritative for ITS locale only. A market present in en but absent
 // from the de catalog keeps its en data (and stays reachable by id in
