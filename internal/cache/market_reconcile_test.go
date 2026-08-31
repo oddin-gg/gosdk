@@ -104,6 +104,48 @@ func TestMarketDescriptionCache_RemovedOutcomeReconciled(t *testing.T) {
 	}
 }
 
+// TestMarketDescriptionCache_ZombieOutcomeDroppedAcrossLocales: an
+// outcome removed upstream must not be kept alive by a stale locale
+// that is never requested again. The first cut of the reconcile
+// removed only the refreshed locale from an obsolete outcome — one
+// still named by (say) a de load from before the removal survived,
+// permanently failed en coverage, and made the market unavailable in
+// en until the de locale happened to reload. The fresh row's outcome
+// ID set is authoritative across locales.
+func TestMarketDescriptionCache_ZombieOutcomeDroppedAcrossLocales(t *testing.T) {
+	catalog := func(outcomes string) string {
+		return `<?xml version="1.0"?>
+<market_descriptions response_code="OK">
+  <market id="9" name="Plain"><outcomes>` + outcomes + `</outcomes></market>
+</market_descriptions>`
+	}
+	srv := newMarketSrv(t, catalog(`<outcome id="1" name="o1"/><outcome id="2" name="o2"/>`))
+	mc, ctx := newMarketCacheForTest(t, srv)
+	mc.catalogTTL = 50 * time.Millisecond
+
+	// Seed both locales: outcome 2 gains en AND de names.
+	if _, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), []types.Locale{types.EnLocale, types.DeLocale}); err != nil {
+		t.Fatalf("seed lookup: %v", err)
+	}
+
+	// Outcome 2 is removed upstream; only en is ever requested again.
+	srv.serve(catalog(`<outcome id="1" name="o1"/>`))
+	time.Sleep(80 * time.Millisecond)
+
+	entry, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), []types.Locale{types.EnLocale})
+	if err != nil {
+		t.Fatalf("en lookup after outcome removal: %v (zombie outcome must not poison en coverage)", err)
+	}
+	snap := entry.Snapshot()
+	if len(snap.Outcomes) != 1 || snap.Outcomes[0].ID != "1" {
+		t.Fatalf("outcomes = %+v, want only outcome 1 (stale de name must not keep outcome 2 alive)", snap.Outcomes)
+	}
+	// The surviving outcome keeps its other locales' names.
+	if got := snap.Outcomes[0].Names[types.DeLocale]; got == "" {
+		t.Fatalf("outcome 1 de name lost by the en refresh: %+v", snap.Outcomes[0].Names)
+	}
+}
+
 // TestMarketDescriptionCache_MetadataRefreshedOnReload: groups, outcome
 // types, and specifiers must track the fresh row — pre-fix groups and
 // outcome types were set only at entry creation and specifiers only

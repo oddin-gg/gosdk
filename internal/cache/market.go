@@ -816,14 +816,15 @@ func (d *LocalizedMarketDescription) coversLocaleLocked(locale types.Locale) boo
 //
 // REPLACE, not accumulate (mirrors LocalizedSport.replaceTournaments
 // and LocalizedStaticDataCache.timerTick): the row is authoritative for
-// its locale AND for the locale-independent metadata it carries. The
-// previous additive merge turned the entry into a historical union —
-// outcomes removed upstream lingered forever (and, worse, poisoned
-// coverage: every locale loaded AFTER the removal lacked the dead
-// outcome's name, so the entry never validated for it and by-id
-// returned ErrMarketLocaleIncomplete for the rest of the process
-// lifetime); groups / outcome types were frozen at entry creation; a
-// specifier set emptied upstream never cleared.
+// its locale's strings, for the OUTCOME ID SET (locale-independent —
+// rows differ only in localized names), and for the locale-independent
+// metadata it carries. The previous additive merge turned the entry
+// into a historical union — outcomes removed upstream lingered forever
+// (and, worse, poisoned coverage: every locale loaded AFTER the removal
+// lacked the dead outcome's name, so the entry never validated for it
+// and by-id returned ErrMarketLocaleIncomplete for the rest of the
+// process lifetime); groups / outcome types were frozen at entry
+// creation; a specifier set emptied upstream never cleared.
 //
 // A malformed row (no <outcomes> block) contributes only its name —
 // it carries no authority over outcomes or metadata.
@@ -855,18 +856,21 @@ func (d *LocalizedMarketDescription) merge(description data.MarketDescription, l
 			}
 			lo.mu.Unlock()
 		}
-		// Outcomes the fresh row no longer carries: drop this locale from
-		// them; an outcome with no locale names left is gone entirely.
-		for id, lo := range d.outcomes {
-			if _, ok := fresh[id]; ok {
-				continue
-			}
-			lo.mu.Lock()
-			delete(lo.name, locale)
-			delete(lo.description, locale)
-			gone := len(lo.name) == 0
-			lo.mu.Unlock()
-			if gone {
+		// Outcomes the fresh row no longer carries are dropped ENTIRELY —
+		// the outcome ID set is locale-independent (rows differ only in
+		// localized names), so a well-formed row is authoritative for the
+		// set, not just for its own locale's strings. The first cut of
+		// this reconcile removed only the refreshed locale and kept the
+		// outcome while any other locale still named it: an outcome held
+		// alive by a stale locale that is never requested again (so never
+		// refreshed) then failed the refreshed locale's coverage forever
+		// — the market unavailable in the locale consumers actually use,
+		// until the zombie locale happened to reload or the entry was
+		// cleared. If upstream locales are momentarily out of sync during
+		// a catalog deploy, set membership flips to the last row loaded
+		// and converges once upstream does.
+		for id := range d.outcomes {
+			if _, ok := fresh[id]; !ok {
 				delete(d.outcomes, id)
 			}
 		}
