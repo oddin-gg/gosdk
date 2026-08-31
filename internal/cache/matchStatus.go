@@ -280,10 +280,17 @@ func (m *MatchStatusCache) lookup(id types.URN) (*LocalizedMatchStatus, bool) {
 }
 
 // shallowClone returns a fresh struct with all fields copied from src,
-// or a zero-value if src is nil.
+// or a zero-value if src is nil — except status, which starts at the
+// documented UnknownEventStatus sentinel. Both merge paths are
+// presence-preserving (they assign status only when the payload
+// carried the attribute), so a match whose FIRST observed payload
+// omits it was otherwise admitted with the zero EventStatus("") — an
+// out-of-enum value consumers can't match against any documented
+// constant, and the one path the wire-value mappers' unknown-fallback
+// didn't cover.
 func (m *MatchStatusCache) shallowClone(src *LocalizedMatchStatus) *LocalizedMatchStatus {
 	if src == nil {
-		return &LocalizedMatchStatus{}
+		return &LocalizedMatchStatus{status: types.UnknownEventStatus}
 	}
 	c := *src
 	return &c

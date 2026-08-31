@@ -204,6 +204,48 @@ func TestMatchStatusCache_FreshnessOrdering(t *testing.T) {
 	}
 }
 
+// TestMatchStatusCache_StatuslessFirstPayloadIsUnknown: a match whose
+// FIRST observed payload carries no status attribute must surface the
+// documented types.UnknownEventStatus — not the out-of-enum zero
+// EventStatus(""). Both merge paths are presence-preserving, so only
+// entry creation could produce the empty string; the wire-value
+// mappers already normalise unrecognised values to unknown.
+func TestMatchStatusCache_StatuslessFirstPayloadIsUnknown(t *testing.T) {
+	c := &MatchStatusCache{
+		logger:    log.New(nil),
+		clearedAt: map[types.URN]time.Time{},
+		entries: lru.NewTTL[types.URN, *LocalizedMatchStatus](
+			lru.DefaultEventCacheSize, nil, lru.DefaultEventCacheTTL),
+	}
+	id := types.URN{Prefix: "od", Type: "match", ID: 31}
+
+	// Feed-first: an odds change with scores but no status attribute.
+	c.refreshOrInsertFeedItem(id, &feedXML.SportEventStatus{HomeScore: ptrOf(1.0)}, time.Now())
+	entry, _ := c.entries.Get(id)
+	if entry.status != types.UnknownEventStatus {
+		t.Fatalf("feed-first status = %q, want %q", entry.status, types.UnknownEventStatus)
+	}
+
+	// API-first: a summary whose status attribute is empty.
+	id2 := types.URN{Prefix: "od", Type: "match", ID: 32}
+	if err := c.refreshOrInsertAPIItem(id2, apiXML.SportEventStatus{
+		CommonSportEventStatus: apiXML.CommonSportEventStatus{HomeScore: ptrOf(1.0)},
+	}, time.Now()); err != nil {
+		t.Fatalf("refreshOrInsertAPIItem: %v", err)
+	}
+	entry, _ = c.entries.Get(id2)
+	if entry.status != types.UnknownEventStatus {
+		t.Fatalf("API-first status = %q, want %q", entry.status, types.UnknownEventStatus)
+	}
+
+	// A later real status still lands.
+	c.refreshOrInsertFeedItem(id, &feedXML.SportEventStatus{Status: ptrOf(1)}, time.Now())
+	entry, _ = c.entries.Get(id)
+	if entry.status != types.LiveEventStatus {
+		t.Fatalf("status after real update = %q, want %q", entry.status, types.LiveEventStatus)
+	}
+}
+
 // TestBuildMatchStatus_StatusDescriptionOutcomes pins the three
 // contractual outcomes of the status-description resolution — the
 // ErrStaticDataLocaleIncomplete tolerance branch in particular, whose
