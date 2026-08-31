@@ -515,7 +515,18 @@ func (m *MarketDescriptionCache) loadOne(ctx context.Context, marketID *int, var
 					return struct{}{}, fmt.Errorf("fetch market description %s locale %s: %w", sfKey, loc, err)
 				}
 
+				// Track every key the response carries (malformed rows
+				// included — a broken row still proves the market exists
+				// upstream) so the bulk reconcile below only removes
+				// markets genuinely absent from the fresh catalog.
+				var seen map[CompositeKey]struct{}
+				if !isDynamicVariant {
+					seen = make(map[CompositeKey]struct{}, len(descriptions))
+				}
 				for k := range descriptions {
+					if seen != nil {
+						seen[variantKey(descriptions[k].ID, types.FromPtr(descriptions[k].Variant))] = struct{}{}
+					}
 					if err := m.upsert(descriptions[k], loc, loadStarted); err != nil {
 						// A malformed catalog row must not abort the whole
 						// locale load: pre-fix, one description without an
@@ -532,6 +543,14 @@ func (m *MarketDescriptionCache) loadOne(ctx context.Context, marketID *int, var
 						}
 						continue
 					}
+				}
+				if !isDynamicVariant {
+					// The bulk response is the complete catalog for this
+					// locale: markets it no longer carries must stop being
+					// served (the base map never expires on its own, so
+					// without this an upstream removal lingered for the
+					// process lifetime).
+					m.reconcileBulk(loc, seen, loadStarted)
 				}
 
 				// Only the bulk fetch counts as fully loading the locale.
@@ -561,6 +580,41 @@ func (m *MarketDescriptionCache) loadOne(ctx context.Context, marketID *int, var
 		}
 	}
 	return nil
+}
+
+// reconcileBulk removes, for one locale, every base entry the fresh
+// bulk response no longer carries — the response is the complete
+// catalog for that locale, so absence is authoritative removal, not a
+// gap. Entries left with no locale at all are dropped from the map
+// (mirrors LocalizedStaticDataCache.timerTick's atomic per-locale
+// replace; the base map has no TTL of its own, so without this an
+// upstream removal was served for the process lifetime — the same
+// retention class the tournament-list REPLACE fixed).
+//
+// Only the base map is touched: the dynamic-variant LRU is fed by the
+// per-variant endpoint, whose responses carry no catalog authority.
+//
+// Suppressed entirely when any invalidation landed after the load
+// began — this response's view may predate the clear, and removals
+// driven by it are as suspect as its rows; the invalidation already
+// reset the locale marks, so the next load reconciles from fresh data.
+// Runs under m.mu, atomic with upsert's create+merge (which holds m.mu
+// through the merge), so it can never observe — and prune — an entry
+// whose first locale is still being populated.
+func (m *MarketDescriptionCache) reconcileBulk(locale types.Locale, seen map[CompositeKey]struct{}, loadStarted time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.lastClearAt.After(loadStarted) || m.purgedAt.After(loadStarted) {
+		return
+	}
+	for key, entry := range m.base {
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		if entry.removeLocale(locale) {
+			delete(m.base, key)
+		}
+	}
 }
 
 func (m *MarketDescriptionCache) upsert(description data.MarketDescription, locale types.Locale, loadStarted time.Time) error {
@@ -614,9 +668,16 @@ func (m *MarketDescriptionCache) upsert(description data.MarketDescription, loca
 	// A well-formed row now backs this key — drop any malformed tombstone
 	// so a later good load reclassifies the market as present.
 	delete(m.malformed, key)
-	m.mu.Unlock()
-
+	// Merge UNDER m.mu (it takes the entry's own lock; the m.mu →
+	// entry.mu order matches collect/reconcileBulk). Merging after the
+	// unlock — the previous shape — left a window where a freshly
+	// created entry sat in the map with zero locales; reconcileBulk
+	// (which prunes empty entries atomically under m.mu) could then
+	// delete it while this row's merge was still pending, silently
+	// losing the row. Bulk loads are rare (once per catalogTTL), so the
+	// added hold time is irrelevant.
 	entry.merge(description, locale)
+	m.mu.Unlock()
 	return nil
 }
 
@@ -698,6 +759,28 @@ func (d *LocalizedMarketDescription) missingLocales(locales []types.Locale) []ty
 	return missing
 }
 
+// removeLocale drops every trace of one locale from the entry (market
+// name, outcome names and descriptions), deleting outcomes left with no
+// locale names at all. Reports whether the entry itself is now empty
+// (no market name in any locale) and should be dropped by the caller.
+// Used by reconcileBulk for markets absent from a fresh bulk response.
+func (d *LocalizedMarketDescription) removeLocale(locale types.Locale) (empty bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	delete(d.name, locale)
+	for id, lo := range d.outcomes {
+		lo.mu.Lock()
+		delete(lo.name, locale)
+		delete(lo.description, locale)
+		gone := len(lo.name) == 0
+		lo.mu.Unlock()
+		if gone {
+			delete(d.outcomes, id)
+		}
+	}
+	return len(d.name) == 0
+}
+
 // coversLocaleLocked reports full coverage of one locale: market name +
 // every outcome name. Outcome DESCRIPTIONS are deliberately excluded —
 // the upstream catalog marks them optional (data shape, not a coverage
@@ -718,12 +801,29 @@ func (d *LocalizedMarketDescription) coversLocaleLocked(locale types.Locale) boo
 	return true
 }
 
+// merge folds one freshly fetched catalog row into the entry.
+//
+// REPLACE, not accumulate (mirrors LocalizedSport.replaceTournaments
+// and LocalizedStaticDataCache.timerTick): the row is authoritative for
+// its locale AND for the locale-independent metadata it carries. The
+// previous additive merge turned the entry into a historical union —
+// outcomes removed upstream lingered forever (and, worse, poisoned
+// coverage: every locale loaded AFTER the removal lacked the dead
+// outcome's name, so the entry never validated for it and by-id
+// returned ErrMarketLocaleIncomplete for the rest of the process
+// lifetime); groups / outcome types were frozen at entry creation; a
+// specifier set emptied upstream never cleared.
+//
+// A malformed row (no <outcomes> block) contributes only its name —
+// it carries no authority over outcomes or metadata.
 func (d *LocalizedMarketDescription) merge(description data.MarketDescription, locale types.Locale) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
 	if description.Outcomes != nil {
+		fresh := make(map[string]struct{}, len(description.Outcomes.Outcome))
 		for _, outcome := range description.Outcomes.Outcome {
+			fresh[outcome.ID] = struct{}{}
 			lo, ok := d.outcomes[outcome.ID]
 			if !ok {
 				// New outcome on a fresh fetch — add it.
@@ -737,21 +837,43 @@ func (d *LocalizedMarketDescription) merge(description data.MarketDescription, l
 			lo.name[locale] = outcome.Name
 			if outcome.Description != nil {
 				lo.description[locale] = *outcome.Description
+			} else {
+				// Description dropped upstream: an absent attribute must
+				// not leave the old localized text behind.
+				delete(lo.description, locale)
 			}
 			lo.mu.Unlock()
 		}
+		// Outcomes the fresh row no longer carries: drop this locale from
+		// them; an outcome with no locale names left is gone entirely.
+		for id, lo := range d.outcomes {
+			if _, ok := fresh[id]; ok {
+				continue
+			}
+			lo.mu.Lock()
+			delete(lo.name, locale)
+			delete(lo.description, locale)
+			gone := len(lo.name) == 0
+			lo.mu.Unlock()
+			if gone {
+				delete(d.outcomes, id)
+			}
+		}
+
+		// Locale-independent metadata: the fresh row is authoritative.
+		d.groups = splitGroups(description.Groups)
+		d.IncludesOutcomesOfType = description.IncludesOutcomesOfType
+		d.OutcomeType = description.OutcomeType
+		var specifiers []types.Specifier
+		if description.Specifiers != nil && len(description.Specifiers.Specifier) > 0 {
+			specifiers = make([]types.Specifier, 0, len(description.Specifiers.Specifier))
+			for _, s := range description.Specifiers.Specifier {
+				specifiers = append(specifiers, types.Specifier{Name: s.Name, Type: s.Type})
+			}
+		}
+		d.specifiers = specifiers // nil clears a set emptied upstream
 	}
 	d.name[locale] = description.Name
-
-	if description.Specifiers != nil {
-		specifiers := make([]types.Specifier, 0, len(description.Specifiers.Specifier))
-		for _, s := range description.Specifiers.Specifier {
-			specifiers = append(specifiers, types.Specifier{Name: s.Name, Type: s.Type})
-		}
-		if len(specifiers) > 0 {
-			d.specifiers = specifiers
-		}
-	}
 }
 
 // Snapshot projects the cached entry into a types.MarketDescription
