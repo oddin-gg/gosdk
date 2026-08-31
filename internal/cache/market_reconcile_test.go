@@ -309,14 +309,14 @@ func TestMarketDescriptionCache_StaleFallbackRevalidatesCoverage(t *testing.T) {
 }
 
 // TestMarketDescription_StaleStartedRowHasNoCrossLocaleAuthority pins
-// the monotonic gate on merge's cross-locale mutations. Different
+// the monotonic gate on merge's CROSS-LOCALE mutations. Different
 // locales load under different singleflight keys and can run
-// concurrently: an earlier-STARTED response finishing LAST could
-// otherwise resurrect an outcome the newer row removed, or reinstall
-// older metadata — and with both locale marks then fresh, the rollback
-// stood for a full catalogTTL. A stale-started row may still apply its
-// own locale's strings (same-locale flights are serialized), but must
-// not add outcomes, sweep other locales, or touch metadata.
+// concurrently: an earlier-STARTED response finishing LAST must not
+// run the cross-locale stale sweep or reinstall older metadata. Its
+// OWN locale stays fully authoritative — strings, removals, and
+// outcome additions (see the completion-order test below for why adds
+// are not gated): a re-added outcome carries only that locale's name,
+// reading as a typed fresh disagreement rather than silent data.
 func TestMarketDescription_StaleStartedRowHasNoCrossLocaleAuthority(t *testing.T) {
 	row := func(name, groups string, outcomes ...apiXML.MarketDescriptionOutcome) apiXML.MarketDescription {
 		return apiXML.MarketDescription{
@@ -341,18 +341,36 @@ func TestMarketDescription_StaleStartedRowHasNoCrossLocaleAuthority(t *testing.T
 	d.merge(row("Plain", "handicap", apiXML.MarketDescriptionOutcome{ID: "1", Name: "o1"}), types.EnLocale, newerStart, stale)
 
 	// The OLDER de row (still carrying outcome 2, old groups) finishes
-	// last: its own locale's strings land, nothing else.
+	// last: everything about ITS locale lands — including re-adding
+	// outcome 2 as de-only evidence — but metadata stays untouched.
 	d.merge(row("Schlicht", "all|score",
 		apiXML.MarketDescriptionOutcome{ID: "1", Name: "a1"},
 		apiXML.MarketDescriptionOutcome{ID: "2", Name: "a2"},
 	), types.DeLocale, olderStart, stale)
 
 	snap := d.Snapshot()
-	if len(snap.Outcomes) != 1 || snap.Outcomes[0].ID != "1" {
-		t.Fatalf("outcomes = %+v, want only outcome 1 (stale-started row must not resurrect outcome 2)", snap.Outcomes)
+	if len(snap.Outcomes) != 2 {
+		t.Fatalf("outcomes = %+v, want 1 and 2 (own-locale membership always lands)", snap.Outcomes)
 	}
-	if got := snap.Outcomes[0].Names[types.DeLocale]; got != "a1" {
-		t.Fatalf("outcome 1 de name = %q, want %q (own-locale strings still apply)", got, "a1")
+	var o2 *types.OutcomeDescription
+	for i := range snap.Outcomes {
+		if snap.Outcomes[i].ID == "2" {
+			o2 = &snap.Outcomes[i]
+		}
+	}
+	if o2 == nil {
+		t.Fatalf("outcome 2 missing: %+v", snap.Outcomes)
+	}
+	// The re-added outcome is de-only evidence — a typed disagreement,
+	// never a silently complete en outcome.
+	if _, ok := o2.Names[types.EnLocale]; ok {
+		t.Fatalf("outcome 2 gained an en name from a de row: %+v", o2.Names)
+	}
+	if got := o2.Names[types.DeLocale]; got != "a2" {
+		t.Fatalf("outcome 2 de name = %q, want %q", got, "a2")
+	}
+	if missing := d.missingLocales([]types.Locale{types.EnLocale}); len(missing) != 1 {
+		t.Fatalf("missingLocales(en) = %v, want [en] (disagreement must surface, not read as complete)", missing)
 	}
 	if len(snap.Groups) != 1 || snap.Groups[0] != "handicap" {
 		t.Fatalf("groups = %v, want [handicap] (stale-started row must not reinstall old metadata)", snap.Groups)
@@ -361,7 +379,9 @@ func TestMarketDescription_StaleStartedRowHasNoCrossLocaleAuthority(t *testing.T
 		t.Fatalf("de market name = %q, want %q", got, "Schlicht")
 	}
 
-	// A genuinely newer row still advances everything.
+	// A genuinely newer row still advances everything: outcome 2's
+	// de-only evidence is swept (de's mark is stale here) and metadata
+	// follows the newest row.
 	newest := newerStart.Add(50 * time.Millisecond)
 	d.merge(row("Plain", "score",
 		apiXML.MarketDescriptionOutcome{ID: "1", Name: "o1"},
@@ -373,6 +393,60 @@ func TestMarketDescription_StaleStartedRowHasNoCrossLocaleAuthority(t *testing.T
 	}
 	if len(snap.Groups) != 1 || snap.Groups[0] != "score" {
 		t.Fatalf("groups = %v, want [score]", snap.Groups)
+	}
+}
+
+// TestMarketDescription_OutcomeSetIndependentOfCompletionOrder pins the
+// round-3 regression: with en carrying {1,2} and de carrying {1}
+// loaded concurrently, the outcome set must not depend on which
+// response FINISHES first. Pre-fix the add-gate skipped outcome 2 when
+// the en row (started first) finished last — both locales then passed
+// coverage with silently truncated data — while the reverse order kept
+// it and reported the disagreement. Same responses, same typed result,
+// either order.
+func TestMarketDescription_OutcomeSetIndependentOfCompletionOrder(t *testing.T) {
+	enRow := apiXML.MarketDescription{
+		ID: 9, Name: "Plain",
+		Outcomes: &apiXML.OutcomesWrapper{Outcome: []apiXML.MarketDescriptionOutcome{
+			{ID: "1", Name: "o1"}, {ID: "2", Name: "o2"},
+		}},
+	}
+	deRow := apiXML.MarketDescription{
+		ID: 9, Name: "Schlicht",
+		Outcomes: &apiXML.OutcomesWrapper{Outcome: []apiXML.MarketDescriptionOutcome{
+			{ID: "1", Name: "a1"},
+		}},
+	}
+	newEntry := func() *LocalizedMarketDescription {
+		return &LocalizedMarketDescription{
+			id:       9,
+			name:     make(map[types.Locale]string),
+			outcomes: make(map[string]*LocalizedOutcomeDescription),
+		}
+	}
+	enStart := time.Now()
+	deStart := enStart.Add(10 * time.Millisecond)
+	fresh := func(types.Locale) bool { return false } // both marks fresh
+
+	// Order A: en finishes first, de second.
+	a := newEntry()
+	a.merge(enRow, types.EnLocale, enStart, fresh)
+	a.merge(deRow, types.DeLocale, deStart, fresh)
+
+	// Order B: de finishes first, the earlier-started en row last.
+	b := newEntry()
+	b.merge(deRow, types.DeLocale, deStart, fresh)
+	b.merge(enRow, types.EnLocale, enStart, fresh)
+
+	for name, d := range map[string]*LocalizedMarketDescription{"en-first": a, "de-first": b} {
+		snap := d.Snapshot()
+		if len(snap.Outcomes) != 2 {
+			t.Fatalf("%s: outcomes = %+v, want both (completion order must not truncate the set)", name, snap.Outcomes)
+		}
+		missing := d.missingLocales([]types.Locale{types.EnLocale, types.DeLocale})
+		if len(missing) != 1 || missing[0] != types.DeLocale {
+			t.Fatalf("%s: missingLocales = %v, want [de] (the disagreement must surface as incomplete)", name, missing)
+		}
 	}
 }
 

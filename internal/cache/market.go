@@ -917,13 +917,26 @@ func (d *LocalizedMarketDescription) coversLocaleLocked(locale types.Locale) boo
 // (the fetch-start instant of the row's flight, tracked in lastRowAt):
 // different locales load under different singleflight keys and can run
 // concurrently, so an earlier-STARTED response finishing LAST could
-// otherwise resurrect outcomes a newer row had removed, or reinstall
-// older metadata — and with both locale marks then fresh, the rollback
-// stood for a full catalogTTL. A stale-started row still applies its
-// OWN locale's strings and own-locale removals (same-locale flights
-// are serialized by singleflight, so per-locale data is always
-// newest), but it cannot add outcomes, sweep other locales, or touch
-// metadata.
+// otherwise sweep other locales' newer data or reinstall older
+// metadata — and with both locale marks then fresh, the rollback stood
+// for a full catalogTTL. A stale-started row still applies EVERYTHING
+// about its own locale — strings, own-locale removals, AND own-locale
+// outcome additions (same-locale flights are serialized by
+// singleflight, so per-locale data is always that locale's newest) —
+// but it cannot run the cross-locale sweep or touch metadata.
+//
+// Own-locale additions are deliberately NOT gated: gating them made
+// the outcome set depend on completion ORDER — with en carrying {1,2}
+// and de carrying {1}, en-finishes-last silently dropped outcome 2
+// (both locales then passed coverage with truncated data), while
+// en-finishes-first kept it and correctly reported the disagreement as
+// ErrMarketLocaleIncomplete. Recording own-locale membership always is
+// faithful to that locale's newest row, so the same responses now
+// yield the same typed outcome in either completion order. The cost is
+// that a stale-started row can re-add, WITH ONLY ITS OWN locale's
+// name, an outcome a newer row removed — which reads as a fresh
+// disagreement (typed error, never silent truncation) and is swept by
+// the freshness sweep once that locale's mark lapses.
 func (d *LocalizedMarketDescription) merge(description data.MarketDescription, locale types.Locale, loadStarted time.Time, staleLocale func(types.Locale) bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -935,14 +948,8 @@ func (d *LocalizedMarketDescription) merge(description data.MarketDescription, l
 			fresh[outcome.ID] = struct{}{}
 			lo, ok := d.outcomes[outcome.ID]
 			if !ok {
-				if !newest {
-					// A stale-started row must not resurrect an outcome a
-					// newer row removed. A genuinely new outcome would be
-					// carried by the newer row too, so skipping loses
-					// nothing that the next refresh doesn't restore.
-					continue
-				}
-				// New outcome on a fresh fetch — add it.
+				// Add unconditionally — own-locale set membership is not
+				// gated on newest; see the completion-order note above.
 				lo = &LocalizedOutcomeDescription{
 					name:        make(map[types.Locale]string),
 					description: make(map[types.Locale]string),
