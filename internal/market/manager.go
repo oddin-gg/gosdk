@@ -22,16 +22,6 @@ func (m Manager) MarketDescriptions(ctx context.Context) ([]types.MarketDescript
 	return m.LocalizedMarketDescriptions(ctx, m.oddsFeedConfiguration.DefaultLocale())
 }
 
-// MarketDescriptionByIDAndVariant returns the description in the configured
-// default locale.
-func (m Manager) MarketDescriptionByIDAndVariant(
-	ctx context.Context,
-	marketID int,
-	variant types.Optional[string],
-) (*types.MarketDescription, error) {
-	return m.LocalizedMarketDescriptionByIDAndVariant(ctx, marketID, variant, m.oddsFeedConfiguration.DefaultLocale())
-}
-
 // LocalizedMarketDescriptionByIDAndVariant returns the description in the
 // supplied locales. Variants caches per-locale; passing multiple locales
 // fills the cache for all of them.

@@ -134,6 +134,8 @@ func TestMarketManager_LocalizedMarketDescriptions(t *testing.T) {
 	}
 }
 
+// The no-locales call exercises the default-locale fallback that the
+// removed MarketDescriptionByIDAndVariant wrapper used to provide.
 func TestMarketManager_MarketDescriptionByIDAndVariant(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/xml")
@@ -142,7 +144,7 @@ func TestMarketManager_MarketDescriptionByIDAndVariant(t *testing.T) {
 	defer srv.Close()
 
 	mgr := newMarketManager(t, srv)
-	desc, err := mgr.MarketDescriptionByIDAndVariant(t.Context(), 1, types.None[string]())
+	desc, err := mgr.LocalizedMarketDescriptionByIDAndVariant(t.Context(), 1, types.None[string]())
 	if err != nil {
 		t.Fatalf("MarketDescriptionByIDAndVariant: %v", err)
 	}
@@ -236,7 +238,7 @@ func TestMarketManager_ClearMarketDescription(t *testing.T) {
 	}
 	// Clear should not panic; subsequent calls still work.
 	mgr.ClearMarketDescription(1, types.None[string]())
-	if _, err := mgr.MarketDescriptionByIDAndVariant(t.Context(), 1, types.None[string]()); err != nil {
+	if _, err := mgr.LocalizedMarketDescriptionByIDAndVariant(t.Context(), 1, types.None[string]()); err != nil {
 		t.Errorf("after clear: %v", err)
 	}
 }
