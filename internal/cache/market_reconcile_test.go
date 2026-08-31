@@ -781,6 +781,128 @@ func TestMarketDescriptionCache_StalePreClearFlightLoses(t *testing.T) {
 	}
 }
 
+// TestMarketDescriptionCache_SupersededFlightJoinsWinner is the
+// regression for ragnar-cr run-5 F001: a superseded flight must hand
+// its callers to the WINNING flight instead of reporting success. The
+// winner advances the fetchCursor at store-phase entry and only then
+// commits, so "superseded → return success" let the older flight's
+// caller re-read MID-commit state — for a cleared key the winner had
+// not yet re-created, a wrong transient ErrItemNotFound for a market
+// that exists upstream. The commit-gate hook holds the winner exactly
+// in that window (cursor advanced, nothing stored); the superseded
+// caller must block until the winner's full commit and then see the
+// fresh data.
+func TestMarketDescriptionCache_SupersededFlightJoinsWinner(t *testing.T) {
+	v1 := `<?xml version="1.0"?>
+<market_descriptions response_code="OK">
+  <market id="1" name="1x2"><outcomes><outcome id="1" name="home"/></outcomes></market>
+  <market id="9" name="Plain"><outcomes><outcome id="1" name="o1"/></outcomes></market>
+</market_descriptions>`
+	v2 := `<?xml version="1.0"?>
+<market_descriptions response_code="OK">
+  <market id="1" name="1x2"><outcomes><outcome id="1" name="home"/></outcomes></market>
+  <market id="9" name="Plain Renamed"><outcomes><outcome id="1" name="o1"/></outcomes></market>
+</market_descriptions>`
+
+	var body atomic.Pointer[string]
+	body.Store(&v1)
+	var gateArmed atomic.Bool
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		if gateArmed.CompareAndSwap(true, false) {
+			select {
+			case entered <- struct{}{}:
+			default:
+			}
+			<-release
+			_, _ = io.WriteString(w, v1) // the pre-clear catalog view
+			return
+		}
+		_, _ = io.WriteString(w, *body.Load())
+	}))
+	t.Cleanup(srv.Close)
+
+	// The winner pauses after advancing the cursor, before any store.
+	var hookArmed atomic.Bool
+	winnerEntered := make(chan struct{}, 1)
+	winnerRelease := make(chan struct{})
+	marketCommitGateHook = func(types.Locale) {
+		if hookArmed.CompareAndSwap(true, false) {
+			select {
+			case winnerEntered <- struct{}{}:
+			default:
+			}
+			<-winnerRelease
+		}
+	}
+	t.Cleanup(func() { marketCommitGateHook = nil })
+
+	mc := newMarketDescriptionCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	mc.catalogTTL = 50 * time.Millisecond
+	ctx := t.Context()
+
+	if _, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), []types.Locale{types.EnLocale}); err != nil {
+		t.Fatalf("seed lookup: %v", err)
+	}
+	body.Store(&v2)
+	gateArmed.Store(true)
+	time.Sleep(80 * time.Millisecond)
+
+	// gen-0 flight starts and blocks in the fixture.
+	type result struct {
+		name string
+		err  error
+	}
+	aDone := make(chan result, 1)
+	go func() {
+		e, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), []types.Locale{types.EnLocale})
+		r := result{err: err}
+		if err == nil {
+			r.name = e.Snapshot().Names[types.EnLocale]
+		}
+		aDone <- r
+	}()
+	<-entered
+
+	// The key gen-0's caller wants is cleared mid-flight, and the gen-1
+	// winner starts, wins the cursor, and pauses BEFORE re-creating it.
+	mc.ClearCacheItem(9, types.None[string]())
+	hookArmed.Store(true)
+	bDone := make(chan error, 1)
+	go func() {
+		_, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), []types.Locale{types.EnLocale})
+		bDone <- err
+	}()
+	<-winnerEntered
+
+	// gen-0 completes its fetch while the winner is mid-commit: it must
+	// JOIN the winner, not answer from the winner's partial state.
+	close(release)
+	select {
+	case r := <-aDone:
+		t.Fatalf("superseded caller answered mid-commit: (%q, %v) — must wait for the winner", r.name, r.err)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	// The winner commits; both callers get the fresh, complete state.
+	close(winnerRelease)
+	if err := <-bDone; err != nil {
+		t.Fatalf("winner caller: %v", err)
+	}
+	r := <-aDone
+	if r.err != nil {
+		t.Fatalf("superseded caller: %v (pre-fix: transient ErrItemNotFound for an existing market)", r.err)
+	}
+	if r.name != "Plain Renamed" {
+		t.Fatalf("superseded caller saw name %q, want %q from the winner's commit", r.name, "Plain Renamed")
+	}
+	if got := mc.loadingLen(); got != 0 {
+		t.Fatalf("loadingLocales = %d after all flights settled, want 0", got)
+	}
+}
+
 // TestMarketDescription_OutcomeSetIndependentOfCompletionOrder pins the
 // round-3 regression: with en carrying {1,2} and de carrying {1}
 // loaded concurrently, the outcome set must not depend on which

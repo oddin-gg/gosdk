@@ -440,8 +440,11 @@ func (s *SportCache) ensureLocalesLoaded(ctx context.Context, locales []types.Lo
 				// store phase only if no newer-started flight for this
 				// locale has begun committing; advancing the cursor makes
 				// every store of any older flight reject from now on. A
-				// superseded flight returns success without storing — the
-				// newer flight's data is what callers should read.
+				// superseded flight returns errStaleFlight so its callers
+				// re-register and JOIN the winning flight (which completes
+				// only after its full commit) — returning success let them
+				// re-read mid-commit state and transiently report
+				// not-found for sports that exist upstream.
 				s.mu.Lock()
 				superseded := s.fetchCursor[loc].After(loadStarted)
 				if !superseded && loadStarted.After(s.fetchCursor[loc]) {
@@ -449,7 +452,10 @@ func (s *SportCache) ensureLocalesLoaded(ctx context.Context, locales []types.Lo
 				}
 				s.mu.Unlock()
 				if superseded {
-					return struct{}{}, nil
+					return struct{}{}, errStaleFlight
+				}
+				if sportCommitGateHook != nil {
+					sportCommitGateHook(loc)
 				}
 
 				for k := range data {
@@ -461,6 +467,14 @@ func (s *SportCache) ensureLocalesLoaded(ctx context.Context, locales []types.Lo
 				// sports it no longer carries must stop being served.
 				s.reconcileCatalog(loc, ids, loadStarted)
 				s.markLocaleLoaded(loc, loadStarted)
+				// A flight superseded MID-commit hands its callers to the
+				// winner too (its remaining stores were rejected per row).
+				s.mu.Lock()
+				lost := s.fetchCursor[loc].After(loadStarted)
+				s.mu.Unlock()
+				if lost {
+					return struct{}{}, errStaleFlight
+				}
 				return struct{}{}, nil
 			})
 			if errors.Is(err, errStaleFlight) {
@@ -474,6 +488,13 @@ func (s *SportCache) ensureLocalesLoaded(ctx context.Context, locales []types.Lo
 	}
 	return nil
 }
+
+// sportCommitGateHook is a test-only seam invoked by a catalog flight
+// after it has advanced the fetchCursor (winning the locale) but
+// before any store — the window a superseded flight's callers must
+// never read across. Production builds leave it nil (same pattern as
+// lru.clearForgetHook / marketCommitGateHook).
+var sportCommitGateHook func(types.Locale)
 
 func (s *SportCache) findMissingLocales(locales []types.Locale) []types.Locale {
 	s.mu.RLock()

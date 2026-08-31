@@ -530,6 +530,13 @@ func (m *MarketDescriptionCache) expiredLocales(requested []types.Locale) []type
 	return expired
 }
 
+// marketCommitGateHook is a test-only seam invoked by a bulk flight
+// after it has advanced the fetchCursor (winning the locale) but
+// before any store — the window a superseded flight's callers must
+// never read across. Production builds leave it nil (same pattern as
+// lru.clearForgetHook).
+var marketCommitGateHook func(types.Locale)
+
 func (m *MarketDescriptionCache) loadAll(ctx context.Context, locales []types.Locale) error {
 	return m.loadOne(ctx, nil, types.None[string](), locales)
 }
@@ -623,9 +630,14 @@ func (m *MarketDescriptionCache) loadOne(ctx context.Context, marketID *int, var
 				// locale has begun committing; advancing the cursor here
 				// makes every store of any OLDER flight — including one
 				// already mid-commit — reject from now on. A superseded
-				// flight returns success without storing: the newer
-				// flight's data is already (or about to be) in the cache,
-				// and the caller re-reads it.
+				// flight returns errStaleFlight so its callers re-register
+				// under the current generation and JOIN the winning flight
+				// (singleflight completes only after the winner's full
+				// commit, mark included). Returning success here instead
+				// let the superseded caller re-read MID-commit state — for
+				// a cleared key the winner had not yet re-created, that
+				// read reported a wrong transient ErrItemNotFound for a
+				// market that exists upstream.
 				if !isDynamicVariant {
 					m.mu.Lock()
 					superseded := m.fetchCursor[loc].After(loadStarted)
@@ -634,7 +646,10 @@ func (m *MarketDescriptionCache) loadOne(ctx context.Context, marketID *int, var
 					}
 					m.mu.Unlock()
 					if superseded {
-						return struct{}{}, nil
+						return struct{}{}, errStaleFlight
+					}
+					if marketCommitGateHook != nil {
+						marketCommitGateHook(loc)
 					}
 				}
 
@@ -692,7 +707,16 @@ func (m *MarketDescriptionCache) loadOne(ctx context.Context, marketID *int, var
 						// regress the newer flight's.
 						m.loadedLocales[loc] = loadStarted
 					}
+					// A flight superseded MID-commit must not report
+					// success either — its remaining stores were rejected
+					// per row, so its callers would re-read the winner's
+					// partial state exactly like the store-phase-entry case
+					// above. Re-check and hand them to the winner.
+					lost := m.fetchCursor[loc].After(loadStarted)
 					m.mu.Unlock()
+					if lost {
+						return struct{}{}, errStaleFlight
+					}
 				}
 				return struct{}{}, nil
 			})
