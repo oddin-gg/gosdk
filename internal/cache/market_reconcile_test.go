@@ -903,6 +903,131 @@ func TestMarketDescriptionCache_SupersededFlightJoinsWinner(t *testing.T) {
 	}
 }
 
+// TestMarketDescriptionCache_MidCommitSupersededFlightJoinsWinner pins
+// the flight-END re-check: a flight that won the cursor and then got
+// superseded MID-commit (every remaining store rejected per row) must
+// also hand its callers to the winner instead of reporting success
+// over the winner's state. The commit gate holds the first flight
+// after its cursor advance; a second clear + flight then commits fully
+// before the first resumes.
+func TestMarketDescriptionCache_MidCommitSupersededFlightJoinsWinner(t *testing.T) {
+	v2 := `<?xml version="1.0"?>
+<market_descriptions response_code="OK">
+  <market id="9" name="Renamed-2"><outcomes><outcome id="1" name="o1"/></outcomes></market>
+</market_descriptions>`
+	v3 := `<?xml version="1.0"?>
+<market_descriptions response_code="OK">
+  <market id="9" name="Renamed-3"><outcomes><outcome id="1" name="o1"/></outcomes></market>
+</market_descriptions>`
+
+	var body atomic.Pointer[string]
+	v1 := `<?xml version="1.0"?>
+<market_descriptions response_code="OK">
+  <market id="9" name="Plain"><outcomes><outcome id="1" name="o1"/></outcomes></market>
+</market_descriptions>`
+	body.Store(&v1)
+	srv := newMarketSrvSwappable(t, &body)
+
+	// Two-stage gate: the FIRST flight through pauses on rel1, the
+	// SECOND on rel2 — so the superseded flight can be resumed while
+	// the winner is still held mid-commit.
+	var hookSeq atomic.Int64
+	entered1 := make(chan struct{}, 1)
+	entered2 := make(chan struct{}, 1)
+	rel1 := make(chan struct{})
+	rel2 := make(chan struct{})
+	marketCommitGateHook = func(types.Locale) {
+		switch hookSeq.Add(1) {
+		case 1:
+			entered1 <- struct{}{}
+			<-rel1
+		case 2:
+			entered2 <- struct{}{}
+			<-rel2
+		}
+	}
+	t.Cleanup(func() { marketCommitGateHook = nil })
+
+	mc := newMarketDescriptionCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	mc.catalogTTL = 50 * time.Millisecond
+	ctx := t.Context()
+
+	hookSeq.Store(-1) // let the seed flight pass the gate (Add → 0)
+	if _, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), []types.Locale{types.EnLocale}); err != nil {
+		t.Fatalf("seed lookup: %v", err)
+	}
+	hookSeq.Store(0)
+	body.Store(&v2)
+	time.Sleep(80 * time.Millisecond)
+
+	// Flight B fetches v2, wins the cursor, and pauses mid-commit.
+	bDone := make(chan result9, 1)
+	go func() {
+		e, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), []types.Locale{types.EnLocale})
+		r := result9{err: err}
+		if err == nil {
+			r.name = e.Snapshot().Names[types.EnLocale]
+		}
+		bDone <- r
+	}()
+	<-entered1
+
+	// A clear bumps the generation; winner flight C fetches v3, takes
+	// the cursor from B, and pauses mid-commit too (second gate stage).
+	mc.ClearCacheItem(9, types.None[string]())
+	body.Store(&v3)
+	cDone := make(chan error, 1)
+	go func() {
+		_, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), []types.Locale{types.EnLocale})
+		cDone <- err
+	}()
+	<-entered2
+
+	// B resumes WHILE the winner is still mid-commit: every one of B's
+	// stores is rejected by the cursor, and the flight-END re-check must
+	// hand B's caller to the still-running winner — pre-fix (returning
+	// success) B's caller re-read the cleared, not-yet-recreated key and
+	// got a wrong transient ErrItemNotFound.
+	close(rel1)
+	select {
+	case r := <-bDone:
+		t.Fatalf("mid-commit-superseded caller answered early: (%q, %v) — must join the winner", r.name, r.err)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	// The winner finishes; both callers see its data.
+	close(rel2)
+	if err := <-cDone; err != nil {
+		t.Fatalf("winner caller: %v", err)
+	}
+	r := <-bDone
+	if r.err != nil {
+		t.Fatalf("mid-commit-superseded caller: %v", r.err)
+	}
+	if r.name != "Renamed-3" {
+		t.Fatalf("mid-commit-superseded caller saw %q, want %q from the winner", r.name, "Renamed-3")
+	}
+	if got := mc.loadingLen(); got != 0 {
+		t.Fatalf("loadingLocales = %d, want 0", got)
+	}
+}
+
+type result9 struct {
+	name string
+	err  error
+}
+
+// newMarketSrvSwappable serves whatever *body currently points at.
+func newMarketSrvSwappable(t *testing.T, body *atomic.Pointer[string]) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = io.WriteString(w, *body.Load())
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
 // TestMarketDescription_OutcomeSetIndependentOfCompletionOrder pins the
 // round-3 regression: with en carrying {1,2} and de carrying {1}
 // loaded concurrently, the outcome set must not depend on which

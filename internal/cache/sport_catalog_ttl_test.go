@@ -377,6 +377,111 @@ func TestSportCache_SupersededFlightJoinsWinner(t *testing.T) {
 	}
 }
 
+// TestSportCache_MidCommitSupersededFlightJoinsWinner mirrors the
+// market cache's flight-END re-check regression: a catalog flight that
+// won the cursor and then got superseded MID-commit must hand its
+// callers to the still-running winner instead of reporting success —
+// pre-fix its caller re-read the cleared, not-yet-recreated sport and
+// Sports() transiently dropped it.
+func TestSportCache_MidCommitSupersededFlightJoinsWinner(t *testing.T) {
+	v1 := `<?xml version="1.0"?>
+<sports><sport id="od:sport:1" name="Football" abbreviation="FB"/></sports>`
+	v2 := `<?xml version="1.0"?>
+<sports><sport id="od:sport:1" name="Footy-2" abbreviation="FB"/></sports>`
+	v3 := `<?xml version="1.0"?>
+<sports><sport id="od:sport:1" name="Footy-3" abbreviation="FB"/></sports>`
+
+	var body atomic.Pointer[string]
+	body.Store(&v1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = io.WriteString(w, *body.Load())
+	}))
+	t.Cleanup(srv.Close)
+
+	var hookSeq atomic.Int64
+	entered1 := make(chan struct{}, 1)
+	entered2 := make(chan struct{}, 1)
+	rel1 := make(chan struct{})
+	rel2 := make(chan struct{})
+	sportCommitGateHook = func(types.Locale) {
+		switch hookSeq.Add(1) {
+		case 1:
+			entered1 <- struct{}{}
+			<-rel1
+		case 2:
+			entered2 <- struct{}{}
+			<-rel2
+		}
+	}
+	t.Cleanup(func() { sportCommitGateHook = nil })
+
+	sc := newSportDataCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	sc.catalogTTL = 50 * time.Millisecond
+
+	hookSeq.Store(-1) // seed flight passes the gate (Add → 0)
+	if _, err := sc.Sports(t.Context(), []types.Locale{types.EnLocale}); err != nil {
+		t.Fatalf("seed Sports: %v", err)
+	}
+	hookSeq.Store(0)
+	body.Store(&v2)
+	time.Sleep(80 * time.Millisecond)
+
+	// Flight B fetches v2, wins the cursor, pauses mid-commit.
+	type result struct {
+		ids []types.URN
+		err error
+	}
+	bDone := make(chan result, 1)
+	go func() {
+		ids, err := sc.Sports(t.Context(), []types.Locale{types.EnLocale})
+		bDone <- result{ids: ids, err: err}
+	}()
+	<-entered1
+
+	// Clear sport 1; winner flight C fetches v3, takes the cursor, and
+	// pauses mid-commit too.
+	sc.Clear(sportOne)
+	body.Store(&v3)
+	cDone := make(chan error, 1)
+	go func() {
+		_, err := sc.Sports(t.Context(), []types.Locale{types.EnLocale})
+		cDone <- err
+	}()
+	<-entered2
+
+	// B resumes while the winner is still mid-commit: its stores are all
+	// rejected, and it must join the winner rather than answer from the
+	// cleared, not-yet-recreated state.
+	close(rel1)
+	select {
+	case r := <-bDone:
+		t.Fatalf("mid-commit-superseded caller answered early: (%v, %v)", r.ids, r.err)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	close(rel2)
+	if err := <-cDone; err != nil {
+		t.Fatalf("winner caller: %v", err)
+	}
+	r := <-bDone
+	if r.err != nil {
+		t.Fatalf("mid-commit-superseded caller: %v", r.err)
+	}
+	if len(r.ids) != 1 || r.ids[0] != sportOne {
+		t.Fatalf("Sports = %v, want the winner's view", r.ids)
+	}
+	sc.mu.RLock()
+	entry := sc.sports[sportOne]
+	sc.mu.RUnlock()
+	entry.mu.RLock()
+	name := entry.name[types.EnLocale]
+	entry.mu.RUnlock()
+	if name != "Footy-3" {
+		t.Fatalf("sport 1 name = %q, want %q from the winner", name, "Footy-3")
+	}
+}
+
 // TestSportCache_ReconcilePerLocale: the catalog response is
 // authoritative for ITS locale only — a sport present in en but absent
 // from the de catalog keeps its en data and stays reachable in en;
