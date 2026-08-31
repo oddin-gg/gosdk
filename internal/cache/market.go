@@ -731,25 +731,33 @@ func (m *MarketDescriptionCache) upsert(description data.MarketDescription, loca
 		m.mu.Unlock()
 		return nil
 	}
+	if description.Outcomes == nil {
+		// Malformed row (no <outcomes> block): record the cause per
+		// (key, locale) and contribute NOTHING — whether or not an entry
+		// already exists. A subsequent read for this locale classifies as
+		// ErrMarketLocaleIncomplete (upstream defect), never ErrItemNotFound
+		// (genuine absence) and never a silently partial entry.
+		//
+		// The existing-entry path used to skip this validation entirely:
+		// it deleted the whole malformed record and merged the row's NAME,
+		// so the locale gained a name with no outcome names and no
+		// malformed evidence. Once reconciliation later removed the last
+		// well-formed locale, the name-only entry survived with an EMPTY
+		// outcomes map — coversLocaleLocked then passed vacuously and a
+		// by-id read served the outcome-less market as a valid description
+		// (the exact silent-truncation class this cache rework closes).
+		err := fmt.Errorf("market description %s locale %s: payload missing outcomes block", key, locale)
+		perLocale := m.malformed[key]
+		if perLocale == nil {
+			perLocale = make(map[types.Locale]error, 1)
+			m.malformed[key] = perLocale
+		}
+		perLocale[locale] = err
+		m.mu.Unlock()
+		return err
+	}
 	entry, ok := m.lookupLocked(key)
 	if !ok {
-		if description.Outcomes == nil {
-			// Malformed FIRST-locale row: no entry gets created. Record
-			// the cause so a subsequent by-id miss reports
-			// ErrMarketLocaleIncomplete (upstream defect) rather than
-			// ErrItemNotFound (genuine absence) — the same classification
-			// the entry-exists path already yields, independent of which
-			// locale was loaded first.
-			err := fmt.Errorf("market description %s locale %s: payload missing outcomes block", key, locale)
-			perLocale := m.malformed[key]
-			if perLocale == nil {
-				perLocale = make(map[types.Locale]error, 1)
-				m.malformed[key] = perLocale
-			}
-			perLocale[locale] = err
-			m.mu.Unlock()
-			return err
-		}
 		outcomes := make(map[string]*LocalizedOutcomeDescription, len(description.Outcomes.Outcome))
 		for _, o := range description.Outcomes.Outcome {
 			outcomes[o.ID] = &LocalizedOutcomeDescription{
@@ -772,9 +780,20 @@ func (m *MarketDescriptionCache) upsert(description data.MarketDescription, loca
 			m.base[key] = entry
 		}
 	}
-	// A well-formed row now backs this key — drop any malformed tombstone
-	// so a later good load reclassifies the market as present.
-	delete(m.malformed, key)
+	// A well-formed row backs this key IN THIS LOCALE — drop this
+	// locale's malformed record so a later good load reclassifies the
+	// market as present. Only this locale's: another locale's row may
+	// still be malformed upstream, and a whole-key delete here let a
+	// valid de row erase en's live malformed evidence — after which a
+	// de-side removal reconciled the entry away and en reads reported a
+	// definitive ErrItemNotFound for a market the en catalog still
+	// carries (broken).
+	if perLocale := m.malformed[key]; perLocale != nil {
+		delete(perLocale, locale)
+		if len(perLocale) == 0 {
+			delete(m.malformed, key)
+		}
+	}
 	// staleLocale scopes merge's cross-locale outcome removal to locales
 	// whose bulk-catalog mark has expired. Only bulk-provenance rows
 	// consult the marks: dynamic-variant entries live in a TTL'd store
@@ -898,9 +917,16 @@ func (d *LocalizedMarketDescription) missingLocales(locales []types.Locale) []ty
 
 // removeLocale drops every trace of one locale from the entry (market
 // name, outcome names and descriptions), deleting outcomes left with no
-// locale names at all. Reports whether the entry itself is now empty
-// (no market name in any locale) and should be dropped by the caller.
-// Used by reconcileBulk for markets absent from a fresh bulk response.
+// locale names at all. Reports whether the entry is now unusable and
+// should be dropped by the caller: no market name in any locale, OR no
+// outcomes left. The outcome condition matters — coversLocaleLocked
+// iterates the outcome map, so an entry whose outcomes this removal
+// just emptied (names in other locales only ever came from rows that
+// carried no outcome data) would otherwise cover every named locale
+// VACUOUSLY, and by-id reads would serve an outcome-less market as a
+// valid description. Used by reconcileBulk for markets absent from a
+// fresh bulk response; a market genuinely still present upstream is
+// re-created by that locale's next load.
 func (d *LocalizedMarketDescription) removeLocale(locale types.Locale) (empty bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -915,7 +941,7 @@ func (d *LocalizedMarketDescription) removeLocale(locale types.Locale) (empty bo
 			delete(d.outcomes, id)
 		}
 	}
-	return len(d.name) == 0
+	return len(d.name) == 0 || len(d.outcomes) == 0
 }
 
 // coversLocaleLocked reports full coverage of one locale: market name +
@@ -967,8 +993,10 @@ func (d *LocalizedMarketDescription) coversLocaleLocked(locale types.Locale) boo
 // zombie outcome kept alive only by locales nobody refreshes is swept
 // as soon as their marks lapse — bounded by one catalogTTL.
 //
-// A malformed row (no <outcomes> block) contributes only its name —
-// it carries no authority over outcomes or metadata.
+// A malformed row (no <outcomes> block) never reaches merge — upsert
+// records it per (key, locale) and contributes nothing (the earlier
+// name-only merge left entries that could outlive their outcomes and
+// then cover locales vacuously); the Outcomes guard below is defensive.
 //
 // Cross-locale mutations are additionally MONOTONIC on loadStarted
 // (the fetch-start instant of the row's flight, tracked in lastRowAt):

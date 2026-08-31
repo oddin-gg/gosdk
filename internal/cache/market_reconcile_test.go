@@ -808,6 +808,95 @@ func TestMarketDescriptionCache_MalformedRecordSurvivesOtherLocale(t *testing.T)
 	}
 }
 
+// TestMarketDescriptionCache_NameOnlyEntryCannotCoverVacuously is the
+// regression for ragnar-cr F003. Chain: (1) market 9 loads well-formed
+// in de; (2) the en row arrives with NO <outcomes> block — pre-fix the
+// existing-entry path skipped the malformed validation, deleted the
+// whole malformed record, and merged the row's NAME; (3) the de
+// catalog later drops market 9, reconciliation removes de from the
+// entry — emptying the outcomes map — and the name-only entry
+// survived. coversLocaleLocked(en) then passed VACUOUSLY (the outcome
+// loop over an empty map), so by-id [en] served an outcome-less market
+// as a valid description and the bulk view listed it. Post-fix a
+// malformed row records evidence and contributes nothing, and an
+// entry whose outcomes empty out is dropped — so the en read reports
+// the typed ErrMarketLocaleIncomplete instead.
+func TestMarketDescriptionCache_NameOnlyEntryCannotCoverVacuously(t *testing.T) {
+	// Market 1 is present and well-formed everywhere so responses never
+	// go empty (the empty-response guard must not mask the reconcile).
+	deV1 := `<?xml version="1.0"?>
+<market_descriptions response_code="OK">
+  <market id="1" name="1x2"><outcomes><outcome id="1" name="home"/></outcomes></market>
+  <market id="9" name="Schlicht"><outcomes><outcome id="1" name="a1"/></outcomes></market>
+</market_descriptions>`
+	deV2 := `<?xml version="1.0"?>
+<market_descriptions response_code="OK">
+  <market id="1" name="1x2"><outcomes><outcome id="1" name="home"/></outcomes></market>
+</market_descriptions>`
+	enMalformed := `<?xml version="1.0"?>
+<market_descriptions response_code="OK">
+  <market id="1" name="1x2"><outcomes><outcome id="1" name="home"/></outcomes></market>
+  <market id="9" name="Plain"/>
+</market_descriptions>`
+
+	var deBody atomic.Pointer[string]
+	deBody.Store(&deV1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		if strings.Contains(r.URL.Path, "/de/") {
+			_, _ = io.WriteString(w, *deBody.Load())
+			return
+		}
+		_, _ = io.WriteString(w, enMalformed)
+	}))
+	t.Cleanup(srv.Close)
+	mc := newMarketDescriptionCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	mc.catalogTTL = 50 * time.Millisecond
+	ctx := t.Context()
+
+	// (1) well-formed de row seeds the entry.
+	if _, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), []types.Locale{types.DeLocale}); err != nil {
+		t.Fatalf("de seed lookup: %v", err)
+	}
+	// (2) the malformed en row on the EXISTING entry: typed incomplete,
+	// and the evidence must be recorded for the entry-missing path.
+	if _, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), []types.Locale{types.EnLocale}); !errors.Is(err, ErrMarketLocaleIncomplete) {
+		t.Fatalf("en lookup on malformed row: err = %v, want ErrMarketLocaleIncomplete", err)
+	}
+	mc.mu.RLock()
+	_, recorded := mc.malformed[CompositeKey{MarketID: 9}][types.EnLocale]
+	mc.mu.RUnlock()
+	if !recorded {
+		t.Fatal("malformed evidence for the en row not recorded on the existing-entry path")
+	}
+
+	// (3) de drops market 9; marks lapse; the de reconcile runs.
+	deBody.Store(&deV2)
+	time.Sleep(80 * time.Millisecond)
+	if _, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), []types.Locale{types.DeLocale}); err == nil {
+		t.Fatal("de lookup after upstream removal: want an error")
+	}
+
+	// The vacuous-coverage read: pre-fix this SUCCEEDED with an
+	// outcome-less market.
+	_, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), []types.Locale{types.EnLocale})
+	if !errors.Is(err, ErrMarketLocaleIncomplete) {
+		t.Fatalf("en lookup after de removal: err = %v, want ErrMarketLocaleIncomplete (pre-fix: valid zero-outcome market)", err)
+	}
+	if errors.Is(err, ErrItemNotFoundInCache) {
+		t.Fatalf("err = %v, must not read as definitive not-found while the en catalog still carries the (broken) row", err)
+	}
+
+	// And the bulk view must not list the outcome-less market either.
+	all, err := mc.LocalizedMarketDescriptions(ctx, types.EnLocale)
+	if err != nil {
+		t.Fatalf("bulk read: %v", err)
+	}
+	if _, ok := all[CompositeKey{MarketID: 9}]; ok {
+		t.Fatal("bulk view lists the outcome-less market 9")
+	}
+}
+
 // TestMarketDescriptionCache_ReconcilePerLocale: the bulk response is
 // authoritative for ITS locale only. A market present in en but absent
 // from the de catalog keeps its en data (and stays reachable by id in
