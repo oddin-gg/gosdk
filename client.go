@@ -847,10 +847,21 @@ func (c *Client) rollbackPartialNormal(
 	rmq *feed.Client,
 	priorMode clientMode,
 ) {
+	// Read-and-clear under lifecycleMu like every other internalCancel
+	// access: an attempt in rollback never owns a PUBLISHED
+	// internalCancel (publication happens only on the modeNormalReady
+	// path, and the attempt's own cancel is still held locally by the
+	// cancelPublished defer), so both sides only ever see nil today —
+	// but without the lock there is no happens-before edge against
+	// runShutdown's read after a shutdown-timeout race, and the
+	// invariant keeping the bare access benign is one refactor away
+	// from breaking.
+	c.lifecycleMu.Lock()
 	if c.internalCancel != nil {
 		c.internalCancel()
 		c.internalCancel = nil
 	}
+	c.lifecycleMu.Unlock()
 
 	shutdownCtx, sCancel := context.WithTimeout(context.WithoutCancel(ctx), c.cfg.shutdownTimeout)
 	defer sCancel()
@@ -2666,15 +2677,12 @@ func (c *Client) MarketDescriptions(ctx context.Context, locales ...types.Locale
 // Multiple locales preload all of them into the cache; the returned
 // MarketDescription has its Names map populated for each.
 func (c *Client) MarketDescription(ctx context.Context, id int, variant types.Optional[string], locales ...types.Locale) (*types.MarketDescription, error) {
-	var (
-		md  *types.MarketDescription
-		err error
-	)
-	if len(locales) == 0 {
-		md, err = c.marketDescriptionManager.MarketDescriptionByIDAndVariant(ctx, id, variant)
-	} else {
-		md, err = c.marketDescriptionManager.LocalizedMarketDescriptionByIDAndVariant(ctx, id, variant, locales...)
-	}
+	// Route through localesOrDefault like every other locale-variadic
+	// method: the previous len-based branch forwarded the arguments
+	// verbatim, so an explicitly empty types.Locale("") reached the API
+	// path builder (a malformed request path) and duplicates triggered
+	// redundant preloads — the exact defects the helper exists to drop.
+	md, err := c.marketDescriptionManager.LocalizedMarketDescriptionByIDAndVariant(ctx, id, variant, c.localesOrDefault(locales)...)
 	if err != nil {
 		return nil, fmt.Errorf("gosdk: market description %d/%v (locales=%v): %w", id, variant, locales, err)
 	}
