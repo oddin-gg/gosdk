@@ -588,7 +588,15 @@ func (s *SportCache) upsertSport(id types.URN, locale types.Locale, sport *xml.S
 	defer entry.mu.Unlock()
 	entry.name[locale] = sport.Name
 	entry.abbreviation[locale] = sport.Abbreviation
-	entry.iconPath = sport.IconPath
+	if sport.IconPath != nil {
+		// icon_path is locale-independent and OPTIONAL on the wire: a
+		// locale whose catalog row omits it must mean "nothing new", not
+		// "cleared" — an unconditional assign let whichever locale's
+		// refresh ran last erase an icon another locale supplied, with
+		// the survivor flipping between refresh cycles. Same guard the
+		// referenceIDs blocks in match.go / tournament.go apply.
+		entry.iconPath = sport.IconPath
+	}
 	return nil
 }
 

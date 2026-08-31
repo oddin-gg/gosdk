@@ -703,6 +703,41 @@ func TestSportCache_TournamentCommitCannotResurrectRemovedSport(t *testing.T) {
 	}
 }
 
+// TestSportCache_IconPathSurvivesIconlessLocale: icon_path is
+// locale-independent and optional on the wire — a locale whose catalog
+// row omits it must not erase the icon another locale supplied
+// (pre-fix the unconditional assign let refresh ordering decide which
+// value survived).
+func TestSportCache_IconPathSurvivesIconlessLocale(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		if strings.Contains(r.URL.Path, "/en/") {
+			_, _ = io.WriteString(w, `<?xml version="1.0"?>
+<sports><sport id="od:sport:1" name="Football" abbreviation="FB" icon_path="/icons/fb.png"/></sports>`)
+			return
+		}
+		_, _ = io.WriteString(w, oneSportCatalog) // de: no icon_path attribute
+	}))
+	t.Cleanup(srv.Close)
+	sc := newSportDataCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+
+	if _, err := sc.Sports(t.Context(), []types.Locale{types.EnLocale}); err != nil {
+		t.Fatalf("en Sports: %v", err)
+	}
+	if _, err := sc.Sports(t.Context(), []types.Locale{types.DeLocale}); err != nil {
+		t.Fatalf("de Sports: %v", err)
+	}
+
+	entry, err := sc.Sport(t.Context(), sportOne, []types.Locale{types.EnLocale})
+	if err != nil {
+		t.Fatalf("Sport: %v", err)
+	}
+	snap := entry.summarySnapshot()
+	if v, ok := snap.IconPath.Get(); !ok || v != "/icons/fb.png" {
+		t.Fatalf("IconPath = %v, want /icons/fb.png (icon-less de row must not erase it)", snap.IconPath)
+	}
+}
+
 // TestSportCache_ConcurrentRefreshCoalesced pins the herd control.
 // Expiry turns a once-per-process fetch into a recurring one, so
 // without coalescing every caller finding the list stale at the same
