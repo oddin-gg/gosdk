@@ -412,6 +412,47 @@ func TestMarketDescriptionCache_MalformedTombstoneReconciled(t *testing.T) {
 	}
 }
 
+// TestMarketDescriptionCache_MalformedRecordSurvivesOtherLocale: a
+// locale whose catalog simply omits a key must not erase ANOTHER
+// locale's malformed evidence for it. Pre-fix reconcileBulk deleted
+// the whole per-key record: with the en row malformed and the de
+// catalog omitting the market, loading de flipped the multi-locale
+// classification from ErrMarketLocaleIncomplete (market exists but is
+// broken in en) to a definitive ErrItemNotFound.
+func TestMarketDescriptionCache_MalformedRecordSurvivesOtherLocale(t *testing.T) {
+	enCatalog := `<?xml version="1.0"?>
+<market_descriptions response_code="OK">
+  <market id="9" name="Plain"><outcomes><outcome id="1" name="o1"/></outcomes></market>
+  <market id="5" name="Broken"/>
+</market_descriptions>`
+	deCatalog := `<?xml version="1.0"?>
+<market_descriptions response_code="OK">
+  <market id="9" name="Schlicht"><outcomes><outcome id="1" name="a1"/></outcomes></market>
+</market_descriptions>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		if strings.Contains(r.URL.Path, "/de/") {
+			_, _ = io.WriteString(w, deCatalog) // de omits market 5 entirely
+			return
+		}
+		_, _ = io.WriteString(w, enCatalog) // en carries market 5, malformed
+	}))
+	t.Cleanup(srv.Close)
+
+	mc := newMarketDescriptionCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	ctx := t.Context()
+
+	// Loading BOTH locales runs de's reconcile after en recorded the
+	// malformed row; en's evidence must survive it.
+	_, err := mc.MarketDescriptionByID(ctx, 5, types.None[string](), []types.Locale{types.EnLocale, types.DeLocale})
+	if !errors.Is(err, ErrMarketLocaleIncomplete) {
+		t.Fatalf("err = %v, want ErrMarketLocaleIncomplete (en's malformed evidence must survive de's reconcile)", err)
+	}
+	if errors.Is(err, ErrItemNotFoundInCache) {
+		t.Fatalf("err = %v, must not classify as definitive not-found while en still carries the row", err)
+	}
+}
+
 // TestMarketDescriptionCache_ReconcilePerLocale: the bulk response is
 // authoritative for ITS locale only. A market present in en but absent
 // from the de catalog keeps its en data (and stays reachable by id in

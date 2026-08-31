@@ -174,17 +174,20 @@ type MarketDescriptionCache struct {
 	lastClearAt time.Time
 	purgedAt    time.Time
 
-	// malformed records, per key, the validation cause of a catalog row
-	// that was SKIPPED because it was malformed (e.g. a new market with no
-	// <outcomes> block) so no entry was ever created for it. Without it, a
-	// by-id lookup for such a market returned ErrItemNotFound when the
-	// malformed row was the FIRST locale seen (no entry) but
-	// ErrMarketLocaleIncomplete when another locale had created the entry
-	// first — the SAME upstream defect classified two different ways
-	// depending on load order. Consulted only on the entry-missing path of
-	// MarketDescriptionByID; cleared when a good row later creates the
+	// malformed records, per key and per LOCALE, the validation cause of
+	// a catalog row that was SKIPPED because it was malformed (e.g. a new
+	// market with no <outcomes> block) so no entry was ever created for
+	// it. Without it, a by-id lookup for such a market returned
+	// ErrItemNotFound when the malformed row was the FIRST locale seen
+	// (no entry) but ErrMarketLocaleIncomplete when another locale had
+	// created the entry first — the SAME upstream defect classified two
+	// different ways depending on load order. Locale granularity lets
+	// reconcileBulk prune safely: one locale's catalog omitting the key
+	// retracts only THAT locale's evidence, not another locale's live
+	// malformed classification. Consulted only on the entry-missing path
+	// of MarketDescriptionByID; cleared when a good row later creates the
 	// entry, and on ClearCacheItem/Purge. Guarded by mu.
-	malformed map[CompositeKey]error
+	malformed map[CompositeKey]map[types.Locale]error
 
 	// flightGen is folded into every singleflight key. Tombstones stop
 	// a pre-clear flight from repopulating the cache, but without a
@@ -354,7 +357,23 @@ func (m *MarketDescriptionCache) MarketDescriptionByID(
 			// (ErrMarketLocaleIncomplete) — the latter must classify the
 			// same way regardless of which locale was loaded first.
 			m.mu.RLock()
-			cause := m.malformed[key]
+			var cause error
+			if perLocale := m.malformed[key]; len(perLocale) > 0 {
+				// Prefer a requested locale's cause; any locale's record
+				// still proves the market exists-but-broken upstream.
+				for _, l := range locales {
+					if c, ok := perLocale[l]; ok {
+						cause = c
+						break
+					}
+				}
+				if cause == nil {
+					for _, c := range perLocale {
+						cause = c
+						break
+					}
+				}
+			}
 			m.mu.RUnlock()
 			if cause != nil {
 				return nil, fmt.Errorf("market description %s malformed in upstream catalog (locales=%v): %w: %w", key, locales, ErrMarketLocaleIncomplete, cause)
@@ -420,7 +439,7 @@ func (m *MarketDescriptionCache) Purge() {
 	m.purgedAt = now
 	m.lastClearAt = now
 	m.clearedAt = make(map[CompositeKey]time.Time)
-	m.malformed = make(map[CompositeKey]error)
+	m.malformed = make(map[CompositeKey]map[types.Locale]error)
 	m.base = make(map[CompositeKey]*LocalizedMarketDescription)
 	m.variants.Purge()
 	m.loadedLocales = make(map[types.Locale]time.Time)
@@ -633,18 +652,23 @@ func (m *MarketDescriptionCache) reconcileBulk(locale types.Locale, seen map[Com
 			delete(m.base, key)
 		}
 	}
-	// Malformed tombstones are reconciled the same way: a market whose
-	// only trace was a malformed row (no entry was ever created) and
-	// that the fresh catalog no longer carries must classify as
-	// ErrItemNotFound, not stay ErrMarketLocaleIncomplete forever.
-	// The record is per key, not per locale — if the row was malformed
-	// in a DIFFERENT locale's catalog than the one reconciling here,
-	// the classification briefly reads as not-found until that locale's
-	// next refresh re-records the cause; both classifications describe a
-	// market that is unusable upstream, so the temporary shift is
-	// harmless.
-	for key := range m.malformed {
-		if _, ok := seen[key]; !ok {
+	// Malformed records are reconciled the same way, at LOCALE
+	// granularity: a market whose only trace was a malformed row (no
+	// entry was ever created) and that the fresh catalog no longer
+	// carries must classify as ErrItemNotFound, not stay
+	// ErrMarketLocaleIncomplete forever — but this locale's catalog
+	// omitting the key retracts only THIS locale's evidence. A row
+	// malformed in a DIFFERENT locale's catalog keeps its record (and
+	// its incomplete classification) until that locale's own refresh
+	// says otherwise; a whole-key delete here let an unrelated locale
+	// erase live evidence and flip the classification to a definitive
+	// not-found.
+	for key, perLocale := range m.malformed {
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		delete(perLocale, locale)
+		if len(perLocale) == 0 {
 			delete(m.malformed, key)
 		}
 	}
@@ -672,7 +696,12 @@ func (m *MarketDescriptionCache) upsert(description data.MarketDescription, loca
 			// the entry-exists path already yields, independent of which
 			// locale was loaded first.
 			err := fmt.Errorf("market description %s locale %s: payload missing outcomes block", key, locale)
-			m.malformed[key] = err
+			perLocale := m.malformed[key]
+			if perLocale == nil {
+				perLocale = make(map[types.Locale]error, 1)
+				m.malformed[key] = perLocale
+			}
+			perLocale[locale] = err
 			m.mu.Unlock()
 			return err
 		}
@@ -753,7 +782,7 @@ func newMarketDescriptionCache(lifeCtx context.Context, client *api.Client, logg
 		catalogTTL:    defaultCatalogTTL,
 		base:          make(map[CompositeKey]*LocalizedMarketDescription),
 		clearedAt:     make(map[CompositeKey]time.Time),
-		malformed:     make(map[CompositeKey]error),
+		malformed:     make(map[CompositeKey]map[types.Locale]error),
 		variants: lru.NewTTL[CompositeKey, *LocalizedMarketDescription](
 			variantCacheSize, nil, lru.DefaultEventCacheTTL),
 	}
