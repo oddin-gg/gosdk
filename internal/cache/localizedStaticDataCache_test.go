@@ -85,6 +85,47 @@ func TestLocalizedStaticDataCache_CtxCancelledMidIterationStopsFetches(t *testin
 	}
 }
 
+// TestLocalizedStaticDataCache_PrimaryLocaleIsRequestedNotDefault pins
+// Description to the CALL's primary locale (locales[0]). Pre-fix it was
+// filled from the configured default locale, so LocalizedItem(ctx, id,
+// [de]) with default en populated Descriptions[de] but returned
+// Description == None — the documented primary-locale value silently
+// missing for every non-default-locale consumer.
+func TestLocalizedStaticDataCache_PrimaryLocaleIsRequestedNotDefault(t *testing.T) {
+	fetcher := func(ctx context.Context, locale types.Locale) ([]types.StaticData, error) {
+		return []types.StaticData{{ID: 1, Description: types.Some("desc-" + string(locale))}}, nil
+	}
+	c := newLocalizedStaticDataCache(t.Context(), &minimalCfg{}, log.New(nil), nil, fetcher)
+	defer c.Close()
+
+	// Non-default primary: Description must carry the de value.
+	got, err := c.LocalizedItem(t.Context(), 1, []types.Locale{types.DeLocale})
+	if err != nil {
+		t.Fatalf("LocalizedItem(de): %v", err)
+	}
+	if v, ok := got.Description.Get(); !ok || v != "desc-de" {
+		t.Fatalf("Description = %v, want Some(desc-de) (primary must be locales[0], not the configured default)", got.Description)
+	}
+
+	// Multi-locale call: still the FIRST locale, not the default.
+	got, err = c.LocalizedItem(t.Context(), 1, []types.Locale{types.RuLocale, types.EnLocale})
+	if err != nil {
+		t.Fatalf("LocalizedItem(ru,en): %v", err)
+	}
+	if v, ok := got.Description.Get(); !ok || v != "desc-ru" {
+		t.Fatalf("Description = %v, want Some(desc-ru)", got.Description)
+	}
+
+	// Default-locale calls keep their existing behavior.
+	got, err = c.LocalizedItem(t.Context(), 1, []types.Locale{types.EnLocale})
+	if err != nil {
+		t.Fatalf("LocalizedItem(en): %v", err)
+	}
+	if v, ok := got.Description.Get(); !ok || v != "desc-en" {
+		t.Fatalf("Description = %v, want Some(desc-en)", got.Description)
+	}
+}
+
 // TestLocalizedStaticDataCache_FirstRefreshAfterInitialDelay is the
 // regression for the Codex P2 scheduling finding: startTimer waited
 // initialDelay (24h) and then refreshed only on the FIRST TICKER FIRE
