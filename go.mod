@@ -6,12 +6,14 @@ module github.com/oddin-gg/gosdk
 // of the modern stdlib without `//go:build go1.x` shims.
 go 1.26.0
 
-// Toolchain: 1.26.5 — pulls in stdlib CVE patches when building/
-// testing this module (GO-2026-4971 net.Dial / GO-2026-4918
-// net/http/internal/http2; both reachable from the SDK feed/api
-// layers per govulncheck). Consumers using their own toolchain
-// (their go.mod's `go` directive) are not affected.
-toolchain go1.26.5
+// Toolchain: 1.26.6 — pulls in stdlib CVE patches when building/
+// testing this module (currently GO-2026-6218 net/url,
+// GO-2026-6090 crypto/tls, GO-2026-6088 encoding/xml,
+// GO-2026-5972 encoding/asn1, GO-2026-5026 net/http — all reachable
+// from the SDK feed/api layers per govulncheck). Consumers using
+// their own toolchain (their go.mod's `go` directive) are not
+// affected.
+toolchain go1.26.6
 
 require (
 	github.com/cenkalti/backoff/v5 v5.0.3
