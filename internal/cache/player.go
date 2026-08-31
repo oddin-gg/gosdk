@@ -11,7 +11,6 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	"github.com/oddin-gg/gosdk/internal/api"
-	"github.com/oddin-gg/gosdk/internal/api/xml"
 	"github.com/oddin-gg/gosdk/internal/cache/lru"
 	log "github.com/oddin-gg/gosdk/internal/log"
 	"github.com/oddin-gg/gosdk/types"
@@ -282,25 +281,6 @@ func (c *PlayersCache) snapshot(ids []PlayerCacheKey) (map[PlayerCacheKey]types.
 		}
 	}
 	return found, missing
-}
-
-func (c *PlayersCache) set(id PlayerCacheKey, p types.Player) {
-	c.players.Add(id, p)
-}
-
-// MergePlayers folds an XML.Player slice into the cache (used by code paths
-// that already fetched a parent entity and want to pre-populate players).
-func (c *PlayersCache) MergePlayers(locale types.Locale, players []xml.Player) {
-	for _, p := range players {
-		key := PlayerCacheKey{PlayerID: p.ID, Locale: locale}
-		c.set(key, types.Player{
-			ID:       p.ID,
-			Name:     p.Name,
-			FullName: p.FullName,
-			SportID:  p.SportID,
-			Locale:   locale,
-		})
-	}
 }
 
 func newPlayersCache(lifeCtx context.Context, apiClient *api.Client, logger *log.Logger) *PlayersCache {
