@@ -451,6 +451,70 @@ func TestMarketDescription_StaleStartedRowHasNoCrossLocaleAuthority(t *testing.T
 	}
 }
 
+// TestMarketDescriptionCache_InFlightLocaleNotSweptAsStale pins the
+// loading-locale guard: a locale whose refresh is IN FLIGHT has an
+// expired mark (the mark is republished only at flight completion),
+// but its just-merged rows are the opposite of stale. Pre-fix an en
+// merge interleaving with a de refresh — de merged market X's row,
+// hasn't re-marked yet — swept X's fresh de outcome names; de then
+// finished and marked itself fresh without revisiting X, and both
+// locales served the silently truncated set for a full catalogTTL.
+func TestMarketDescriptionCache_InFlightLocaleNotSweptAsStale(t *testing.T) {
+	row := func(name string, outcomes ...apiXML.MarketDescriptionOutcome) apiXML.MarketDescription {
+		return apiXML.MarketDescription{
+			ID: 9, Name: name,
+			Outcomes: &apiXML.OutcomesWrapper{Outcome: outcomes},
+		}
+	}
+	mc := newMarketDescriptionCache(t.Context(), nil, log.New(nil))
+	key := CompositeKey{MarketID: 9}
+	start := time.Now()
+
+	// The de refresh has merged market 9 (carrying outcome 2) but has
+	// not completed — its mark is unset, its flight is registered.
+	mc.mu.Lock()
+	mc.loadingLocales[types.DeLocale] = 1
+	mc.mu.Unlock()
+	if err := mc.upsert(row("Schlicht",
+		apiXML.MarketDescriptionOutcome{ID: "1", Name: "a1"},
+		apiXML.MarketDescriptionOutcome{ID: "2", Name: "a2"},
+	), types.DeLocale, start); err != nil {
+		t.Fatalf("de upsert: %v", err)
+	}
+
+	// A concurrent en merge whose row omits outcome 2 must NOT sweep
+	// the in-flight de names.
+	if err := mc.upsert(row("Plain",
+		apiXML.MarketDescriptionOutcome{ID: "1", Name: "o1"},
+	), types.EnLocale, start.Add(time.Millisecond)); err != nil {
+		t.Fatalf("en upsert: %v", err)
+	}
+	entry, ok := mc.lookup(key)
+	if !ok {
+		t.Fatal("entry missing")
+	}
+	snap := entry.Snapshot()
+	if len(snap.Outcomes) != 2 {
+		t.Fatalf("outcomes = %+v, want both (in-flight de rows must not be swept as stale)", snap.Outcomes)
+	}
+
+	// Once the de flight is gone AND its mark is expired, the same en
+	// merge sweeps the now genuinely stale de evidence.
+	mc.mu.Lock()
+	delete(mc.loadingLocales, types.DeLocale)
+	mc.mu.Unlock()
+	if err := mc.upsert(row("Plain",
+		apiXML.MarketDescriptionOutcome{ID: "1", Name: "o1"},
+	), types.EnLocale, start.Add(2*time.Millisecond)); err != nil {
+		t.Fatalf("en upsert after flight end: %v", err)
+	}
+	entry, _ = mc.lookup(key)
+	snap = entry.Snapshot()
+	if len(snap.Outcomes) != 1 || snap.Outcomes[0].ID != "1" {
+		t.Fatalf("outcomes = %+v, want only outcome 1 (stale sweep must still fire once the flight is gone)", snap.Outcomes)
+	}
+}
+
 // TestMarketDescription_OutcomeSetIndependentOfCompletionOrder pins the
 // round-3 regression: with en carrying {1,2} and de carrying {1}
 // loaded concurrently, the outcome set must not depend on which

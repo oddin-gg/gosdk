@@ -140,6 +140,16 @@ type MarketDescriptionCache struct {
 	// only while that timestamp is within catalogTTL — see
 	// defaultCatalogTTL for why the mark is not permanent.
 	loadedLocales map[types.Locale]time.Time
+	// loadingLocales counts bulk-catalog flights currently IN FLIGHT
+	// per locale (guarded by mu; a refcount because a generation bump
+	// can briefly leave an old-gen and a new-gen flight for one locale
+	// alive together). The freshness mark is republished only when a
+	// flight COMPLETES, so mid-refresh a locale's mark is expired even
+	// though its rows are being merged right now — merge's stale-locale
+	// sweep must treat such a locale as fresh, or a concurrent
+	// other-locale merge deletes outcome names the in-flight refresh
+	// just wrote (see upsert's staleLocale).
+	loadingLocales map[types.Locale]int
 	// base holds every description the BULK catalog returns: plain
 	// market rows AND static variants. Bounded by the upstream catalog
 	// (hundreds of entries) and never expired, because a bulk load is
@@ -539,6 +549,23 @@ func (m *MarketDescriptionCache) loadOne(ctx context.Context, marketID *int, var
 				if !isDynamicVariant && m.localeLoaded(loc) {
 					return struct{}{}, nil
 				}
+				if !isDynamicVariant {
+					// Register this locale as in flight for the duration of
+					// the fetch+merge, so concurrent other-locale merges
+					// don't mistake its expired mark for staleness and
+					// sweep the rows this flight is writing (see
+					// loadingLocales).
+					m.mu.Lock()
+					m.loadingLocales[loc]++
+					m.mu.Unlock()
+					defer func() {
+						m.mu.Lock()
+						if m.loadingLocales[loc]--; m.loadingLocales[loc] <= 0 {
+							delete(m.loadingLocales, loc)
+						}
+						m.mu.Unlock()
+					}()
+				}
 				var (
 					descriptions []data.MarketDescription
 					err          error
@@ -753,9 +780,20 @@ func (m *MarketDescriptionCache) upsert(description data.MarketDescription, loca
 	// consult the marks: dynamic-variant entries live in a TTL'd store
 	// whose whole-entry expiry already bounds their staleness, and the
 	// bulk marks say nothing about per-variant data.
+	//
+	// A locale with a flight currently IN PROGRESS counts as fresh even
+	// though its mark is expired — the mark is republished only when the
+	// flight completes, so mid-refresh its rows are the very opposite of
+	// stale. Without this, an en merge interleaving with a de refresh
+	// (de merged market X, hasn't re-marked yet) swept X's just-written
+	// de outcome names; de then finished and marked itself fresh without
+	// revisiting X, and both locales served the silently truncated set
+	// for a full catalogTTL.
 	var staleLocale func(types.Locale) bool
 	if !key.isDynamicVariant() {
-		staleLocale = func(l types.Locale) bool { return !m.localeLoadedLocked(l) }
+		staleLocale = func(l types.Locale) bool {
+			return m.loadingLocales[l] == 0 && !m.localeLoadedLocked(l)
+		}
 	}
 	// Merge UNDER m.mu (it takes the entry's own lock; the m.mu →
 	// entry.mu order matches collect/reconcileBulk — and staleLocale
@@ -793,14 +831,15 @@ func splitGroups(raw string) []string {
 
 func newMarketDescriptionCache(lifeCtx context.Context, client *api.Client, logger *log.Logger) *MarketDescriptionCache {
 	return &MarketDescriptionCache{
-		apiClient:     client,
-		logger:        logger,
-		lifetime:      lifeCtx,
-		loadedLocales: make(map[types.Locale]time.Time),
-		catalogTTL:    defaultCatalogTTL,
-		base:          make(map[CompositeKey]*LocalizedMarketDescription),
-		clearedAt:     make(map[CompositeKey]time.Time),
-		malformed:     make(map[CompositeKey]map[types.Locale]error),
+		apiClient:      client,
+		logger:         logger,
+		lifetime:       lifeCtx,
+		loadedLocales:  make(map[types.Locale]time.Time),
+		loadingLocales: make(map[types.Locale]int),
+		catalogTTL:     defaultCatalogTTL,
+		base:           make(map[CompositeKey]*LocalizedMarketDescription),
+		clearedAt:      make(map[CompositeKey]time.Time),
+		malformed:      make(map[CompositeKey]map[types.Locale]error),
 		variants: lru.NewTTL[CompositeKey, *LocalizedMarketDescription](
 			variantCacheSize, nil, lru.DefaultEventCacheTTL),
 	}
