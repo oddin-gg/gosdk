@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -153,6 +154,61 @@ func TestMarketDescriptionCache_MetadataRefreshedOnReload(t *testing.T) {
 	}
 	if len(snap.Outcomes[0].Descriptions) != 0 {
 		t.Fatalf("outcome descriptions = %v, want none (removed upstream)", snap.Outcomes[0].Descriptions)
+	}
+}
+
+// TestMarketDescriptionCache_StaleFallbackRevalidatesCoverage: the
+// serve-stale-on-refresh-failure path must re-validate coverage on the
+// CURRENT entry. loadOne commits per locale sequentially and mutates
+// the entry in place, so a multi-locale freshness refresh can succeed
+// for the first locale (reconciling removed data away) and then fail
+// for the second — pre-fix the pointer captured before the load was
+// returned as a complete success even though the surviving entry no
+// longer covered the requested locales.
+func TestMarketDescriptionCache_StaleFallbackRevalidatesCoverage(t *testing.T) {
+	full := `<?xml version="1.0"?>
+<market_descriptions response_code="OK">
+  <market id="9" name="Plain"><outcomes><outcome id="1" name="o1"/></outcomes></market>
+</market_descriptions>`
+	removed := `<?xml version="1.0"?>
+<market_descriptions response_code="OK">
+  <market id="1" name="1x2"><outcomes><outcome id="1" name="home"/></outcomes></market>
+</market_descriptions>`
+
+	var failDE, dropEN atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		switch {
+		case strings.Contains(r.URL.Path, "/de/") && failDE.Load():
+			_, _ = io.WriteString(w, `upstream exploded`)
+		case strings.Contains(r.URL.Path, "/en/") && dropEN.Load():
+			_, _ = io.WriteString(w, removed) // market 9 removed upstream
+		default:
+			_, _ = io.WriteString(w, full)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	mc := newMarketDescriptionCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	mc.catalogTTL = 50 * time.Millisecond
+	ctx := t.Context()
+
+	// Seed: market 9 covered in both locales.
+	if _, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), []types.Locale{types.EnLocale, types.DeLocale}); err != nil {
+		t.Fatalf("seed lookup: %v", err)
+	}
+
+	// Upstream removes market 9; the de catalog endpoint goes down.
+	dropEN.Store(true)
+	failDE.Store(true)
+	time.Sleep(80 * time.Millisecond)
+
+	// The freshness refresh loads en first (reconciling market 9's en
+	// data away), then fails on de. The pre-refresh entry no longer
+	// covers [en, de]; serving it as a clean success would hand back
+	// data the refresh itself just invalidated.
+	if _, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), []types.Locale{types.EnLocale, types.DeLocale}); err == nil {
+		t.Fatal("partially-refreshed entry served as success; want the fetch error")
 	}
 }
 

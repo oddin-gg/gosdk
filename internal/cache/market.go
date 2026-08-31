@@ -320,18 +320,29 @@ func (m *MarketDescriptionCache) MarketDescriptionByID(
 	if len(missing) > 0 {
 		if err := m.loadOne(ctx, &marketID, variant, missing); err != nil {
 			if staleOnly {
-				// The refresh was purely freshness-driven — the cached
-				// entry still covers every requested locale. Failing the
+				// The refresh was purely freshness-driven — failing the
 				// read here would turn any upstream outage past the TTL
-				// window into a hard failure on the odds-change hot path;
-				// serve the stale-but-complete entry instead and let the
-				// next call retry the refresh (the mark stays expired).
-				if m.logger != nil {
-					m.logger.WithError(err).
-						WithField("market", key.String()).
-						Warn("cache: catalog refresh failed, serving stale market description")
+				// window into a hard failure on the odds-change hot path,
+				// so prefer serving the stale entry and let the next call
+				// retry the refresh (the mark stays expired).
+				//
+				// But only when the entry is STILL complete: loadOne
+				// commits per locale sequentially, so an earlier locale's
+				// successful refresh may have reconciled data away (a
+				// market or outcome removed upstream) before a later
+				// locale's fetch failed — and merge/reconcile mutate the
+				// entry IN PLACE, so the pointer captured above reflects
+				// those removals. Re-look-up and re-validate coverage;
+				// a partially-refreshed entry must surface the fetch
+				// error, not masquerade as a complete success.
+				if cur, ok := m.lookup(key); ok && len(cur.missingLocales(locales)) == 0 {
+					if m.logger != nil {
+						m.logger.WithError(err).
+							WithField("market", key.String()).
+							Warn("cache: catalog refresh failed, serving stale market description")
+					}
+					return cur, nil
 				}
-				return entry, nil
 			}
 			return nil, err
 		}
