@@ -95,6 +95,13 @@ const variantCacheSize = 5000
 // problem by a different mechanism.
 const defaultCatalogTTL = 12 * time.Hour
 
+// defaultRefreshBackoff bounds how often the warm by-id path retries a
+// FAILING freshness refresh during an upstream outage (see
+// refreshFailedAt). 30s keeps staleness detection prompt once the
+// upstream recovers while capping the outage cost at one failing fetch
+// per window instead of one per odds change.
+const defaultRefreshBackoff = 30 * time.Second
+
 // variantKey builds the cache key from (marketID, variant). An
 // empty-string variant is normalised to "no variant" — NEXT.md §0
 // rejects `Some("")` as a meaningful variant, and treating it as
@@ -191,6 +198,21 @@ type MarketDescriptionCache struct {
 	// compress the window (same pattern as the static-data cache's
 	// refresh timings).
 	catalogTTL time.Duration
+
+	// refreshFailedAt records, per locale, when a bulk-catalog fetch
+	// last FAILED (guarded by mu). Consulted only by expiredLocales —
+	// the warm by-id freshness path — together with refreshBackoff:
+	// once the catalog mark lapses during an upstream outage, every
+	// odds-change resolution would otherwise re-enter loadOne and pay a
+	// fresh failing fetch (singleflight coalesces only CONCURRENT
+	// callers), collapsing feed throughput to roughly one message per
+	// fetch timeout. With the backoff, the stale-but-complete entry
+	// keeps being served and the failing refresh is retried at most
+	// once per window. First loads and bulk reads are NOT gated: they
+	// have no stale data to serve, so they must attempt and report.
+	refreshFailedAt map[types.Locale]time.Time
+	// refreshBackoff is defaultRefreshBackoff, a field for tests.
+	refreshBackoff time.Duration
 
 	// Clear-vs-in-flight-load tombstones (same invariant as
 	// lru.EventCache), guarded by mu like the stores they gate.
@@ -517,15 +539,25 @@ func (m *MarketDescriptionCache) localeDataFreshLocked(locale types.Locale) bool
 }
 
 // expiredLocales returns the requested locales whose catalog mark is
-// absent or older than catalogTTL. Used by the warm by-id path so a
-// bulk-provenance hit re-loads once its locale's catalog window lapses
-// (see MarketDescriptionByID).
+// absent or older than catalogTTL — excluding locales whose refresh
+// FAILED within the backoff window (refreshFailedAt): during an
+// upstream outage the warm path keeps serving the stale-but-complete
+// entry and retries the refresh at most once per refreshBackoff. Used
+// by the warm by-id path so a bulk-provenance hit re-loads once its
+// locale's catalog window lapses (see MarketDescriptionByID).
 func (m *MarketDescriptionCache) expiredLocales(requested []types.Locale) []types.Locale {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	var expired []types.Locale
 	for _, l := range requested {
-		if !m.localeLoaded(l) {
-			expired = append(expired, l)
+		if m.localeLoadedLocked(l) {
+			continue
 		}
+		if failedAt, ok := m.refreshFailedAt[l]; ok &&
+			m.refreshBackoff > 0 && time.Since(failedAt) < m.refreshBackoff {
+			continue
+		}
+		expired = append(expired, l)
 	}
 	return expired
 }
@@ -622,6 +654,14 @@ func (m *MarketDescriptionCache) loadOne(ctx context.Context, marketID *int, var
 					descriptions, err = m.apiClient.FetchMarketDescriptions(loadCtx, loc)
 				}
 				if err != nil {
+					if !isDynamicVariant {
+						// Feed the warm-path retry backoff (see
+						// refreshFailedAt); cleared again on the next
+						// successful commit below.
+						m.mu.Lock()
+						m.refreshFailedAt[loc] = time.Now()
+						m.mu.Unlock()
+					}
 					return struct{}{}, fmt.Errorf("fetch market description %s locale %s: %w", sfKey, loc, err)
 				}
 
@@ -706,6 +746,7 @@ func (m *MarketDescriptionCache) loadOne(ctx context.Context, marketID *int, var
 						// locale (fetchCursor) — an older mark must not
 						// regress the newer flight's.
 						m.loadedLocales[loc] = loadStarted
+						delete(m.refreshFailedAt, loc)
 					}
 					// A flight superseded MID-commit must not report
 					// success either — its remaining stores were rejected
@@ -980,16 +1021,18 @@ func splitGroups(raw string) []string {
 
 func newMarketDescriptionCache(lifeCtx context.Context, client *api.Client, logger *log.Logger) *MarketDescriptionCache {
 	return &MarketDescriptionCache{
-		apiClient:      client,
-		logger:         logger,
-		lifetime:       lifeCtx,
-		loadedLocales:  make(map[types.Locale]time.Time),
-		loadingLocales: make(map[types.Locale]int),
-		fetchCursor:    make(map[types.Locale]time.Time),
-		catalogTTL:     defaultCatalogTTL,
-		base:           make(map[CompositeKey]*LocalizedMarketDescription),
-		clearedAt:      make(map[CompositeKey]time.Time),
-		malformed:      make(map[CompositeKey]map[types.Locale]error),
+		apiClient:       client,
+		logger:          logger,
+		lifetime:        lifeCtx,
+		loadedLocales:   make(map[types.Locale]time.Time),
+		loadingLocales:  make(map[types.Locale]int),
+		fetchCursor:     make(map[types.Locale]time.Time),
+		refreshFailedAt: make(map[types.Locale]time.Time),
+		refreshBackoff:  defaultRefreshBackoff,
+		catalogTTL:      defaultCatalogTTL,
+		base:            make(map[CompositeKey]*LocalizedMarketDescription),
+		clearedAt:       make(map[CompositeKey]time.Time),
+		malformed:       make(map[CompositeKey]map[types.Locale]error),
 		variants: lru.NewTTL[CompositeKey, *LocalizedMarketDescription](
 			variantCacheSize, nil, lru.DefaultEventCacheTTL),
 	}

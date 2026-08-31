@@ -404,6 +404,7 @@ func TestMarketDescriptionCache_WarmByIDServesStaleOnRefreshFailure(t *testing.T
 	srv := newMarketSrv(t, bulkCatalogWithStaticVariants)
 	mc, ctx := newMarketCacheForTest(t, srv)
 	mc.catalogTTL = 50 * time.Millisecond
+	mc.refreshBackoff = 0 // retry pacing is pinned by the backoff test
 
 	if _, err := mc.MarketDescriptionByID(ctx, 1, types.Some("way:three"), []types.Locale{types.EnLocale}); err != nil {
 		t.Fatalf("initial lookup: %v", err)
@@ -428,6 +429,54 @@ func TestMarketDescriptionCache_WarmByIDServesStaleOnRefreshFailure(t *testing.T
 	}
 	if got := srv.bulkHits.Load(); got < 3 {
 		t.Fatalf("bulk hits = %d, want >= 3 (failed refresh must not mark the locale loaded)", got)
+	}
+}
+
+// TestMarketDescriptionCache_FreshnessRefreshBackoff pins the outage
+// cost of the warm by-id freshness reload: once the catalog mark
+// lapses during an upstream outage, every odds-change resolution used
+// to re-enter loadOne and pay a fresh failing fetch (singleflight
+// coalesces only concurrent callers), collapsing feed throughput to
+// roughly one message per fetch timeout. A failed freshness refresh is
+// now recorded per locale and retried at most once per refreshBackoff
+// while the stale-but-complete entry keeps being served; a successful
+// refresh clears the record.
+func TestMarketDescriptionCache_FreshnessRefreshBackoff(t *testing.T) {
+	srv := newMarketSrv(t, bulkCatalogWithStaticVariants)
+	mc, ctx := newMarketCacheForTest(t, srv)
+	mc.catalogTTL = 50 * time.Millisecond
+	mc.refreshBackoff = time.Hour
+
+	if _, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), []types.Locale{types.EnLocale}); err != nil {
+		t.Fatalf("seed lookup: %v", err)
+	}
+
+	srv.serve(`upstream exploded`)
+	time.Sleep(80 * time.Millisecond)
+
+	// The first warm read past the TTL pays one failing fetch and serves
+	// stale; the following reads must not fetch again inside the window.
+	for i := range 5 {
+		if _, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), []types.Locale{types.EnLocale}); err != nil {
+			t.Fatalf("warm lookup %d during outage: %v (stale entry must be served)", i, err)
+		}
+	}
+	if got := srv.bulkHits.Load(); got != 2 {
+		t.Fatalf("bulk hits = %d, want 2 (one seed + exactly one failing retry per backoff window)", got)
+	}
+
+	// Once the backoff lapses (and upstream recovers), the refresh
+	// retries and the failure record clears.
+	mc.mu.Lock()
+	mc.refreshBackoff = time.Millisecond
+	mc.mu.Unlock()
+	time.Sleep(5 * time.Millisecond)
+	srv.serve(bulkCatalogWithStaticVariants)
+	if _, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), []types.Locale{types.EnLocale}); err != nil {
+		t.Fatalf("lookup after recovery: %v", err)
+	}
+	if got := srv.bulkHits.Load(); got != 3 {
+		t.Fatalf("bulk hits = %d, want 3 (backoff lapse must allow the retry)", got)
 	}
 }
 
