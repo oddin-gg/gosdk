@@ -113,8 +113,12 @@ type LocalizedMatchStatus struct {
 	// timestamp of the newest APPLIED feed update; feedAppliedAt is the
 	// local wall-clock instant it was applied (comparable with
 	// api.Response.StartedAt, which is also local wall clock).
+	// apiStartedAt is the START instant of the newest APPLIED API
+	// summary fetch — the API-vs-API ordering cursor (see the monotonic
+	// guard in refreshOrInsertAPIItem).
 	feedMsgTS     time.Time
 	feedAppliedAt time.Time
+	apiStartedAt  time.Time
 
 	winnerID              *types.URN
 	status                types.EventStatus
@@ -392,7 +396,21 @@ func (m *MatchStatusCache) refreshOrInsertAPIItem(id types.URN, data apiXML.Spor
 	if prev != nil && !prev.feedAppliedAt.IsZero() && fetchStarted.Before(prev.feedAppliedAt) {
 		return nil
 	}
+	// API-vs-API ordering: MONOTONIC on fetch start, same only-advance
+	// discipline as LocalizedSport.replaceTournaments. Concurrent
+	// summary fetches for one id are real — the match cache's per-locale
+	// loads and this cache's own loader run under SEPARATE singleflight
+	// groups, and every response lands here via the observer — so an
+	// earlier-STARTED fetch that finishes LAST would otherwise reinstall
+	// its older status/scores/winner over a newer one. For a just-
+	// finished match with no further feed traffic, that rollback stood
+	// until entry TTL (~12h). A snapshot no newer than the committed one
+	// is rejected.
+	if prev != nil && !prev.apiStartedAt.IsZero() && !fetchStarted.After(prev.apiStartedAt) {
+		return nil
+	}
 	result := m.shallowClone(prev)
+	result.apiStartedAt = fetchStarted
 	// Presence-preserving merge — same contract as the feed path.
 	if data.Status != "" {
 		result.status = m.fromAPI(data.Status)

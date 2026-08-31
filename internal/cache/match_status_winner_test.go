@@ -201,3 +201,64 @@ func TestMatchStatusCache_FreshnessOrdering(t *testing.T) {
 		t.Fatalf("older feed message overwrote newer: %+v", entry)
 	}
 }
+
+// TestMatchStatusCache_APIvsAPIOrdering is the regression for the
+// missing API-vs-API monotonic guard. Concurrent summary fetches for
+// one id are real (the match cache's per-locale loads and the status
+// cache's own loader run under separate singleflight groups; every
+// response lands in refreshOrInsertAPIItem via the observer). An
+// earlier-STARTED fetch finishing LAST used to reinstall its older
+// status/scores/winner over the newer one — for a just-finished match
+// with no further feed traffic the rollback stood until entry TTL.
+func TestMatchStatusCache_APIvsAPIOrdering(t *testing.T) {
+	c := &MatchStatusCache{
+		logger:    log.New(nil),
+		clearedAt: map[types.URN]time.Time{},
+		entries: lru.NewTTL[types.URN, *LocalizedMatchStatus](
+			lru.DefaultEventCacheSize, nil, lru.DefaultEventCacheTTL),
+	}
+	id := types.URN{Prefix: "od", Type: "match", ID: 11}
+	winner := "od:competitor:42"
+
+	olderStart := time.Now()
+	newerStart := olderStart.Add(50 * time.Millisecond)
+
+	// The NEWER fetch (match already ended, winner known) finishes first.
+	if err := c.refreshOrInsertAPIItem(id, apiXML.SportEventStatus{
+		CommonSportEventStatus: apiXML.CommonSportEventStatus{HomeScore: ptrOf(3.0), WinnerID: &winner},
+		Status:                 "ended", MatchStatusCode: ptrOf(9),
+	}, newerStart); err != nil {
+		t.Fatalf("refreshOrInsertAPIItem(newer): %v", err)
+	}
+
+	// The OLDER fetch (still live, no winner yet) finishes last: rejected.
+	if err := c.refreshOrInsertAPIItem(id, apiXML.SportEventStatus{
+		CommonSportEventStatus: apiXML.CommonSportEventStatus{HomeScore: ptrOf(2.0)},
+		Status:                 "live", MatchStatusCode: ptrOf(5),
+	}, olderStart); err != nil {
+		t.Fatalf("refreshOrInsertAPIItem(older): %v", err)
+	}
+
+	entry, _ := c.entries.Get(id)
+	if entry.status != types.EndedEventStatus {
+		t.Fatalf("status = %v, want ended (older API response must not roll back)", entry.status)
+	}
+	if entry.homeScore == nil || *entry.homeScore != 3 {
+		t.Fatalf("homeScore = %v, want 3", entry.homeScore)
+	}
+	if entry.winnerID == nil || entry.winnerID.ToString() != winner {
+		t.Fatalf("winnerID = %v, want %s (rollback erased the winner)", entry.winnerID, winner)
+	}
+
+	// A strictly newer fetch still lands (the cursor only advances).
+	if err := c.refreshOrInsertAPIItem(id, apiXML.SportEventStatus{
+		CommonSportEventStatus: apiXML.CommonSportEventStatus{HomeScore: ptrOf(4.0), WinnerID: &winner},
+		Status:                 "ended", MatchStatusCode: ptrOf(9),
+	}, newerStart.Add(time.Millisecond)); err != nil {
+		t.Fatalf("refreshOrInsertAPIItem(newest): %v", err)
+	}
+	entry, _ = c.entries.Get(id)
+	if entry.homeScore == nil || *entry.homeScore != 4 {
+		t.Fatalf("homeScore = %v, want 4 (a newer fetch must still apply)", entry.homeScore)
+	}
+}
