@@ -967,6 +967,64 @@ func TestMarketDescriptionCache_MalformedRefreshRetractsLocale(t *testing.T) {
 	}
 }
 
+// TestMarketDescriptionCache_EmptyOutcomesContainerNotCovered pins the
+// F002 hardening: a well-formed row whose <outcomes> container carries
+// ZERO <outcome> children clears the nil-block malformed guard, and
+// merge's sweep then empties the entry's outcome map while its name
+// survives — the key stays in the reconcile's `seen` set, so
+// removeLocale's emptiness test never runs. Pre-fix
+// coversLocaleLocked's outcome loop passed vacuously over the empty
+// map and by-id served the outcome-less market as valid; a
+// zero-outcome entry now covers nothing.
+func TestMarketDescriptionCache_EmptyOutcomesContainerNotCovered(t *testing.T) {
+	withOutcomes := `<?xml version="1.0"?>
+<market_descriptions response_code="OK">
+  <market id="9" name="Plain"><outcomes><outcome id="1" name="o1"/></outcomes></market>
+</market_descriptions>`
+	emptyContainer := `<?xml version="1.0"?>
+<market_descriptions response_code="OK">
+  <market id="9" name="Plain"><outcomes/></market>
+</market_descriptions>`
+
+	srv := newMarketSrv(t, withOutcomes)
+	mc, ctx := newMarketCacheForTest(t, srv)
+	mc.catalogTTL = 50 * time.Millisecond
+
+	if _, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), []types.Locale{types.EnLocale}); err != nil {
+		t.Fatalf("seed lookup: %v", err)
+	}
+
+	// The refreshed row keeps the container but loses every outcome:
+	// the sweep empties the map, the name survives.
+	srv.serve(emptyContainer)
+	time.Sleep(80 * time.Millisecond)
+
+	if _, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), []types.Locale{types.EnLocale}); !errors.Is(err, ErrMarketLocaleIncomplete) {
+		t.Fatalf("lookup on zero-outcome entry: err = %v, want ErrMarketLocaleIncomplete (pre-fix: valid outcome-less market)", err)
+	}
+	all, err := mc.LocalizedMarketDescriptions(ctx, types.EnLocale)
+	if err != nil {
+		t.Fatalf("bulk read: %v", err)
+	}
+	if _, ok := all[CompositeKey{MarketID: 9}]; ok {
+		t.Fatal("bulk view lists the zero-outcome market")
+	}
+
+	// The cold-creation shape is covered too: a fresh cache seeing only
+	// the empty-container row must classify the market as incomplete.
+	mc2 := newMarketDescriptionCache(t.Context(), newAPIClientForTest(t, srv.Server), log.New(nil))
+	if _, err := mc2.MarketDescriptionByID(ctx, 9, types.None[string](), []types.Locale{types.EnLocale}); !errors.Is(err, ErrMarketLocaleIncomplete) {
+		t.Fatalf("cold lookup on empty-container row: err = %v, want ErrMarketLocaleIncomplete", err)
+	}
+
+	// Upstream heals: served again.
+	srv.serve(withOutcomes)
+	time.Sleep(80 * time.Millisecond)
+	if _, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), []types.Locale{types.EnLocale}); err != nil {
+		t.Fatalf("lookup after recovery: %v", err)
+	}
+}
+
 // TestMarketDescriptionCache_ReconcilePerLocale: the bulk response is
 // authoritative for ITS locale only. A market present in en but absent
 // from the de catalog keeps its en data (and stays reachable by id in

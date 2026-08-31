@@ -968,7 +968,20 @@ func (d *LocalizedMarketDescription) removeLocale(locale types.Locale) (empty bo
 // the upstream catalog marks them optional (data shape, not a coverage
 // gap). Caller must hold d.mu; takes each outcome's lock in the same
 // d.mu→outcome.mu order merge and Snapshot use.
+//
+// An entry with NO outcomes covers nothing: the loop below would pass
+// vacuously, serving an outcome-less market as a valid description.
+// The zero-outcome shape is reachable without reconciliation (whose
+// removeLocale applies the same emptiness test and drops the entry) —
+// a well-formed row whose <outcomes> container carries zero <outcome>
+// children clears the nil-block malformed guard, and merge's sweep
+// then empties a single-locale entry's outcome map while its name
+// survives. Such a market is unusable for odds resolution either way;
+// reads classify it as ErrMarketLocaleIncomplete.
 func (d *LocalizedMarketDescription) coversLocaleLocked(locale types.Locale) bool {
+	if len(d.outcomes) == 0 {
+		return false
+	}
 	if _, ok := d.name[locale]; !ok {
 		return false
 	}
