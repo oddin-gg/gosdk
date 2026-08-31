@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/singleflight"
 
 	"github.com/oddin-gg/gosdk/internal/api"
@@ -135,12 +136,22 @@ func (c *PlayersCache) GetPlayer(ctx context.Context, id PlayerCacheKey) (*types
 	return &p, nil
 }
 
+// playerLoadConcurrency bounds the per-call fan-out of GetPlayers'
+// missing-key loads (and the per-locale player resolution in the
+// competitor snapshot). Cold rosters are the hot case: a 2×10-player
+// match across 3 locales is ~60 profile fetches, and loading them one
+// at a time made BuildMatch's cold path scale linearly with roster
+// size. Cross-caller parallelism already existed via singleflight;
+// this bounds the WITHIN-call batch.
+const playerLoadConcurrency = 8
+
 // GetPlayers returns a map of cached Player values, fetching any missing
-// ones from the API. Concurrent callers requesting different
-// (PlayerID, Locale) keys load in parallel; concurrent callers
-// requesting the SAME key share a single in-flight HTTP call via
-// lru.LoadCoalesced — the shared fetch runs under WithoutCancel so a
-// short-deadline leader can't fail every coalesced follower with ITS
+// ones from the API. Missing keys within one call load as a bounded
+// parallel batch (playerLoadConcurrency); concurrent callers requesting
+// different (PlayerID, Locale) keys load in parallel; concurrent
+// callers requesting the SAME key share a single in-flight HTTP call
+// via lru.LoadCoalesced — the shared fetch runs under WithoutCancel so
+// a short-deadline leader can't fail every coalesced follower with ITS
 // cancellation, and each caller's own ctx still bounds its wait.
 func (c *PlayersCache) GetPlayers(ctx context.Context, ids []PlayerCacheKey) (map[PlayerCacheKey]types.Player, error) {
 	result, missing := c.snapshot(ids)
@@ -148,72 +159,46 @@ func (c *PlayersCache) GetPlayers(ctx context.Context, ids []PlayerCacheKey) (ma
 		return result, nil
 	}
 
+	// Fan out the misses. The first failure cancels the group's ctx so
+	// sibling waiters stop early (their coalesced fetches, detached by
+	// design, are shared with other callers and finish on their own);
+	// duplicate keys in the input coalesce on the singleflight.
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(playerLoadConcurrency)
+	var resultMu sync.Mutex
 	for _, key := range missing {
-		// Fast-path: another goroutine may have populated this key
-		// between the snapshot above and now. Re-check before paying
-		// the singleflight join cost.
-		if p, ok := c.lookup(key); ok {
-			result[key] = p
-			continue
-		}
-		var p types.Player
-		for {
-			gen := c.flightGen.Load()
-			var err error
-			p, err = lru.LoadCoalesced(ctx, c.lifetime, &c.loadGroup, c.flightKey(gen, key), func(loadCtx context.Context) (types.Player, error) {
-				// Stale-generation guard — see errStaleFlight for the
-				// register-vs-clear window this closes.
-				if c.flightGen.Load() != gen {
-					return types.Player{}, errStaleFlight
-				}
-				// Snapshot the flight's start BEFORE fetching: the store
-				// below is suppressed if a Clear lands after this point
-				// (see clearMu/clearedIDsAt).
-				loadStarted := time.Now()
-				// Re-check under the singleflight gate — the leader of a
-				// duplicate-call group may already have stored the value
-				// before the follower entered the closure.
-				if p, ok := c.lookup(key); ok {
-					return p, nil
-				}
-				data, err := c.apiClient.FetchPlayerProfile(loadCtx, key.PlayerID, key.Locale)
-				if err != nil {
-					return types.Player{}, fmt.Errorf("fetch player profile %s/%s: %w", key.PlayerID, key.Locale, err)
-				}
-				if data == nil {
-					return types.Player{}, nil
-				}
-				p := types.Player{
-					ID:       data.Player.ID,
-					Name:     data.Player.Name,
-					FullName: data.Player.FullName,
-					SportID:  data.Player.SportID,
-					Locale:   key.Locale,
-				}
-				// Caller still receives p; a suppressed store just means
-				// the next read refetches (post-clear freshness wins).
-				c.storeIfNotCleared(key, p, loadStarted)
-				return p, nil
-			})
-			if errors.Is(err, errStaleFlight) {
-				continue // re-register under the fresh generation
+		g.Go(func() error {
+			// Fast-path: another goroutine may have populated this key
+			// between the snapshot above and now. Re-check before paying
+			// the singleflight join cost.
+			if p, ok := c.lookup(key); ok {
+				resultMu.Lock()
+				result[key] = p
+				resultMu.Unlock()
+				return nil
 			}
+			p, err := c.loadPlayer(gctx, key)
 			if err != nil {
 				// A by-id 404 is definitive absence — classify it as
 				// ErrItemNotFound (the ErrItemNotFound docs name Player)
 				// while keeping the APIError in the chain.
-				return nil, notFoundIfAbsent(err)
+				return notFoundIfAbsent(err)
 			}
-			break
-		}
-		// Use the flight's return value directly rather than relying on
-		// a cache re-read: when a Clear raced the load, the store was
-		// suppressed (tombstone) but the freshly-fetched player is still
-		// the correct answer for THIS caller. Zero value = upstream had
-		// no such player.
-		if p != (types.Player{}) {
-			result[key] = p
-		}
+			// Use the flight's return value directly rather than relying
+			// on a cache re-read: when a Clear raced the load, the store
+			// was suppressed (tombstone) but the freshly-fetched player is
+			// still the correct answer for THIS caller. Zero value =
+			// upstream had no such player.
+			if p != (types.Player{}) {
+				resultMu.Lock()
+				result[key] = p
+				resultMu.Unlock()
+			}
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return nil, err
 	}
 
 	// Success = every requested key resolved. Compare against the map,
@@ -230,6 +215,55 @@ func (c *PlayersCache) GetPlayers(ctx context.Context, ids []PlayerCacheKey) (ma
 		return result, nil
 	}
 	return nil, fmt.Errorf("get player from cache - some players %v not found: %w", notFound, ErrItemNotFoundInCache)
+}
+
+// loadPlayer runs the singleflight-coalesced profile fetch for one
+// key, re-registering whenever a Clear/Purge invalidates the flight
+// generation mid-registration (errStaleFlight). The zero Player means
+// upstream had no such player.
+func (c *PlayersCache) loadPlayer(ctx context.Context, key PlayerCacheKey) (types.Player, error) {
+	for {
+		gen := c.flightGen.Load()
+		p, err := lru.LoadCoalesced(ctx, c.lifetime, &c.loadGroup, c.flightKey(gen, key), func(loadCtx context.Context) (types.Player, error) {
+			// Stale-generation guard — see errStaleFlight for the
+			// register-vs-clear window this closes.
+			if c.flightGen.Load() != gen {
+				return types.Player{}, errStaleFlight
+			}
+			// Snapshot the flight's start BEFORE fetching: the store
+			// below is suppressed if a Clear lands after this point
+			// (see clearMu/clearedIDsAt).
+			loadStarted := time.Now()
+			// Re-check under the singleflight gate — the leader of a
+			// duplicate-call group may already have stored the value
+			// before the follower entered the closure.
+			if p, ok := c.lookup(key); ok {
+				return p, nil
+			}
+			data, err := c.apiClient.FetchPlayerProfile(loadCtx, key.PlayerID, key.Locale)
+			if err != nil {
+				return types.Player{}, fmt.Errorf("fetch player profile %s/%s: %w", key.PlayerID, key.Locale, err)
+			}
+			if data == nil {
+				return types.Player{}, nil
+			}
+			p := types.Player{
+				ID:       data.Player.ID,
+				Name:     data.Player.Name,
+				FullName: data.Player.FullName,
+				SportID:  data.Player.SportID,
+				Locale:   key.Locale,
+			}
+			// Caller still receives p; a suppressed store just means
+			// the next read refetches (post-clear freshness wins).
+			c.storeIfNotCleared(key, p, loadStarted)
+			return p, nil
+		})
+		if errors.Is(err, errStaleFlight) {
+			continue // re-register under the fresh generation
+		}
+		return p, err
+	}
 }
 
 // lookup is the single-key snapshot helper used by the singleflight

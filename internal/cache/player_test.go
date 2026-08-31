@@ -95,6 +95,65 @@ func TestPlayersCache_DistinctKeysLoadInParallel(t *testing.T) {
 	}
 }
 
+// TestPlayersCache_SingleCallBatchLoadsInParallel pins the WITHIN-call
+// fan-out: one GetPlayers call with several missing keys must load
+// them as a bounded parallel batch, not one at a time. Pre-fix only
+// cross-CALLER parallelism existed (via singleflight); a single cold
+// roster resolution still issued its round-trips sequentially, so
+// BuildMatch's cold path scaled linearly with roster size.
+func TestPlayersCache_SingleCallBatchLoadsInParallel(t *testing.T) {
+	const perRequestDelay = 120 * time.Millisecond
+
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		time.Sleep(perRequestDelay)
+		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		id := "unknown"
+		for i, p := range parts {
+			if p == "players" && i+1 < len(parts) {
+				id = parts[i+1]
+				break
+			}
+		}
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = io.WriteString(w, playerProfileBody(id))
+	}))
+	defer srv.Close()
+
+	pc := newPlayersCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+
+	keys := []PlayerCacheKey{
+		{PlayerID: "od:player:1", Locale: types.EnLocale},
+		{PlayerID: "od:player:2", Locale: types.EnLocale},
+		{PlayerID: "od:player:3", Locale: types.EnLocale},
+		{PlayerID: "od:player:4", Locale: types.EnLocale},
+	}
+
+	start := time.Now()
+	got, err := pc.GetPlayers(t.Context(), keys)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("GetPlayers: %v", err)
+	}
+	if len(got) != len(keys) {
+		t.Fatalf("players = %d, want %d", len(got), len(keys))
+	}
+	for _, k := range keys {
+		if p, ok := got[k]; !ok || p.ID != k.PlayerID {
+			t.Fatalf("key %s: got %+v", k, got[k])
+		}
+	}
+	if h := hits.Load(); h != int32(len(keys)) {
+		t.Errorf("HTTP hits = %d, want %d (one per distinct key)", h, len(keys))
+	}
+	// Generous bound: 4 batched requests at ~120 ms each should finish
+	// well under 300 ms; the pre-fix sequential loop took ~480 ms.
+	if elapsed > 300*time.Millisecond {
+		t.Errorf("single-call batch of 4 took %v, want <300ms (misses must fan out)", elapsed)
+	}
+}
+
 // TestPlayersCache_DuplicateKeyDeduplicated verifies the converse:
 // concurrent calls for the SAME key share a single in-flight HTTP
 // request. Pre-fix the global mutex did this implicitly; the
