@@ -68,6 +68,18 @@ type SportCache struct {
 	purgedAt    time.Time
 	flightGen   atomic.Uint64
 
+	// fetchCursor records, per locale, the fetch-START of the newest
+	// catalog flight that entered its store phase — the flight-level
+	// monotonic cursor, mirroring the market cache's field of the same
+	// name. The generation guard runs once at flight entry and Clear
+	// bumps the generation, so a pre-clear and a post-clear flight for
+	// one locale can be alive together; without the cursor the older
+	// flight finishing last overwrote the newer flight's names and
+	// re-created sports its reconcile had just removed, under a fresh
+	// locale mark. Clear/Purge deliberately do NOT reset it — it orders
+	// flights, the mark gates read validity. Guarded by mu.
+	fetchCursor map[types.Locale]time.Time
+
 	sf singleflight.Group
 }
 
@@ -424,6 +436,22 @@ func (s *SportCache) ensureLocalesLoaded(ctx context.Context, locales []types.Lo
 					}
 					ids = append(ids, *id)
 				}
+				// Flight-level monotonic gate (see fetchCursor): enter the
+				// store phase only if no newer-started flight for this
+				// locale has begun committing; advancing the cursor makes
+				// every store of any older flight reject from now on. A
+				// superseded flight returns success without storing — the
+				// newer flight's data is what callers should read.
+				s.mu.Lock()
+				superseded := s.fetchCursor[loc].After(loadStarted)
+				if !superseded && loadStarted.After(s.fetchCursor[loc]) {
+					s.fetchCursor[loc] = loadStarted
+				}
+				s.mu.Unlock()
+				if superseded {
+					return struct{}{}, nil
+				}
+
 				for k := range data {
 					if err := s.upsertSport(ids[k], loc, &data[k], loadStarted); err != nil {
 						return struct{}{}, fmt.Errorf("load sport catalog locale %s: upsert %s: %w", loc, ids[k].ToString(), err)
@@ -478,7 +506,9 @@ func (s *SportCache) localeLoadedLocked(locale types.Locale) bool {
 // window must cover the age of the DATA, not of the transfer.
 func (s *SportCache) markLocaleLoaded(locale types.Locale, loadStarted time.Time) {
 	s.mu.Lock()
-	if !s.lastClearAt.After(loadStarted) {
+	if !s.lastClearAt.After(loadStarted) && !s.fetchCursor[locale].After(loadStarted) {
+		// Also suppressed when a newer-started flight owns the locale
+		// (fetchCursor) — an older mark must not regress the newer one.
 		s.loadedLocales[locale] = loadStarted
 	}
 	s.mu.Unlock()
@@ -490,6 +520,13 @@ func (s *SportCache) upsertSport(id types.URN, locale types.Locale, sport *xml.S
 	if s.storeSuppressedLocked(id, loadStarted) {
 		// A Clear for this sport (or a Purge) landed after the load
 		// started: skip only this row — the next read refetches.
+		return nil
+	}
+	if s.fetchCursor[locale].After(loadStarted) {
+		// A newer-started catalog flight for this locale has begun
+		// committing (see fetchCursor): this row is superseded content.
+		// Checked per row — the store-phase gate can't stop a flight
+		// already mid-commit when the newer one arrived.
 		return nil
 	}
 	entry, ok := s.sports[id]
@@ -573,6 +610,12 @@ func (s *SportCache) reconcileCatalog(locale types.Locale, fresh []types.URN, lo
 	if s.lastClearAt.After(loadStarted) || s.purgedAt.After(loadStarted) {
 		return
 	}
+	if s.fetchCursor[locale].After(loadStarted) {
+		// A newer-started flight owns this locale now (see fetchCursor);
+		// removals driven by this flight's older view are as superseded
+		// as its rows.
+		return
+	}
 	for id, entry := range s.sports {
 		if _, ok := seen[id]; ok {
 			continue
@@ -631,6 +674,7 @@ func newSportDataCache(lifeCtx context.Context, client *api.Client, logger *log.
 		catalogTTL:    defaultCatalogTTL,
 		sports:        make(map[types.URN]*LocalizedSport),
 		clearedAt:     make(map[types.URN]time.Time),
+		fetchCursor:   make(map[types.Locale]time.Time),
 	}
 }
 

@@ -677,6 +677,110 @@ func TestMarketDescriptionCache_SweepSuppressedWhileLocaleLoadsEndToEnd(t *testi
 	}
 }
 
+// TestMarketDescriptionCache_StalePreClearFlightLoses is the regression
+// for ragnar-cr run-3 F003. ClearCacheItem bumps the flight generation,
+// but the generation guard runs ONCE at flight-closure entry — so a
+// pre-clear (gen-0) flight and a post-clear (gen-1) flight for the SAME
+// locale run concurrently under different singleflight keys. Pre-fix,
+// when the newer flight finished FIRST, the older flight's row stores
+// were not suppressed (only its reconcile and locale mark were, via
+// lastClearAt): it overwrote the fresh names with stale pre-clear
+// values and RE-CREATED markets the newer reconcile had just removed
+// (their keys carry no clear tombstone) — all under the newer flight's
+// fresh mark, serving the stale/resurrected rows for up to catalogTTL.
+// The fetchCursor now makes every store of a superseded flight reject.
+func TestMarketDescriptionCache_StalePreClearFlightLoses(t *testing.T) {
+	v1 := `<?xml version="1.0"?>
+<market_descriptions response_code="OK">
+  <market id="1" name="1x2"><outcomes><outcome id="1" name="home"/></outcomes></market>
+  <market id="4" name="Correct score"><outcomes><outcome id="1" name="3:0"/></outcomes></market>
+  <market id="9" name="Plain"><outcomes><outcome id="1" name="o1"/></outcomes></market>
+</market_descriptions>`
+	// Post-clear upstream state: market 9 renamed, market 4 removed.
+	v2 := `<?xml version="1.0"?>
+<market_descriptions response_code="OK">
+  <market id="1" name="1x2"><outcomes><outcome id="1" name="home"/></outcomes></market>
+  <market id="9" name="Plain Renamed"><outcomes><outcome id="1" name="o1"/></outcomes></market>
+</market_descriptions>`
+
+	var body atomic.Pointer[string]
+	body.Store(&v1)
+	var gateArmed atomic.Bool
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		if gateArmed.CompareAndSwap(true, false) {
+			// The gen-0 flight: hold it open, then serve the PRE-CLEAR
+			// catalog no matter what the current body is.
+			select {
+			case entered <- struct{}{}:
+			default:
+			}
+			<-release
+			_, _ = io.WriteString(w, v1)
+			return
+		}
+		_, _ = io.WriteString(w, *body.Load())
+	}))
+	t.Cleanup(srv.Close)
+	mc := newMarketDescriptionCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	mc.catalogTTL = 50 * time.Millisecond
+	ctx := t.Context()
+
+	// Seed, then expire the mark so a warm read starts a refresh flight.
+	if _, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), []types.Locale{types.EnLocale}); err != nil {
+		t.Fatalf("seed lookup: %v", err)
+	}
+	body.Store(&v2)
+	gateArmed.Store(true)
+	time.Sleep(80 * time.Millisecond)
+
+	// gen-0 flight starts and blocks inside the fixture.
+	aDone := make(chan error, 1)
+	go func() {
+		_, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), []types.Locale{types.EnLocale})
+		aDone <- err
+	}()
+	<-entered
+
+	// The public invalidation lands mid-flight: generation bumps, marks
+	// are wiped — and the NEWER (gen-1) flight commits the v2 catalog
+	// while gen-0 is still in the fixture.
+	mc.ClearCacheItem(1, types.None[string]())
+	entry, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), []types.Locale{types.EnLocale})
+	if err != nil {
+		t.Fatalf("post-clear lookup: %v", err)
+	}
+	if got := entry.Snapshot().Names[types.EnLocale]; got != "Plain Renamed" {
+		t.Fatalf("market 9 name = %q, want %q from the fresh flight", got, "Plain Renamed")
+	}
+
+	// The stale pre-clear flight finishes LAST. Every store it makes
+	// must lose to the committed newer flight.
+	close(release)
+	if err := <-aDone; err != nil {
+		t.Fatalf("gen-0 caller: %v (a superseded flight must not fail the read)", err)
+	}
+
+	entry, err = mc.MarketDescriptionByID(ctx, 9, types.None[string](), []types.Locale{types.EnLocale})
+	if err != nil {
+		t.Fatalf("final lookup: %v", err)
+	}
+	if got := entry.Snapshot().Names[types.EnLocale]; got != "Plain Renamed" {
+		t.Fatalf("market 9 name = %q, want %q (stale pre-clear flight overwrote the fresh name)", got, "Plain Renamed")
+	}
+	if mc.baseHas(CompositeKey{MarketID: 4}) {
+		t.Fatal("market 4 resurrected by the stale pre-clear flight (removed upstream, reconciled by the newer flight)")
+	}
+	if !mc.baseHas(CompositeKey{MarketID: 1}) {
+		t.Fatal("market 1 missing (the newer flight should have re-created the cleared key)")
+	}
+	if got := mc.loadingLen(); got != 0 {
+		t.Fatalf("loadingLocales = %d after both flights settled, want 0", got)
+	}
+}
+
 // TestMarketDescription_OutcomeSetIndependentOfCompletionOrder pins the
 // round-3 regression: with en carrying {1,2} and de carrying {1}
 // loaded concurrently, the outcome set must not depend on which

@@ -194,6 +194,92 @@ func TestSportCache_EmptyResponseDoesNotWipeCatalog(t *testing.T) {
 	}
 }
 
+// TestSportCache_StalePreClearFlightLoses mirrors the market cache's
+// stale-flight regression (ragnar-cr run-3 F003): a pre-clear (gen-0)
+// catalog flight finishing after a post-clear (gen-1) flight must not
+// overwrite the fresh names or re-create sports the newer reconcile
+// removed. Pre-fix only the old flight's reconcile and locale mark
+// were suppressed — its row stores landed and, with the fresh mark
+// standing, served stale/resurrected sports for up to catalogTTL.
+func TestSportCache_StalePreClearFlightLoses(t *testing.T) {
+	v1 := `<?xml version="1.0"?>
+<sports><sport id="od:sport:1" name="Football" abbreviation="FB"/><sport id="od:sport:2" name="Tennis" abbreviation="TN"/><sport id="od:sport:3" name="Chess" abbreviation="CH"/></sports>`
+	// Post-clear upstream state: sport 1 renamed, sport 2 removed
+	// (sport 3 is the explicitly cleared one).
+	v2 := `<?xml version="1.0"?>
+<sports><sport id="od:sport:1" name="Footy" abbreviation="FB"/></sports>`
+
+	var body atomic.Pointer[string]
+	body.Store(&v1)
+	var gateArmed atomic.Bool
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		if gateArmed.CompareAndSwap(true, false) {
+			select {
+			case entered <- struct{}{}:
+			default:
+			}
+			<-release
+			_, _ = io.WriteString(w, v1) // the pre-clear catalog view
+			return
+		}
+		_, _ = io.WriteString(w, *body.Load())
+	}))
+	t.Cleanup(srv.Close)
+	sc := newSportDataCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	sc.catalogTTL = 50 * time.Millisecond
+
+	if _, err := sc.Sports(t.Context(), []types.Locale{types.EnLocale}); err != nil {
+		t.Fatalf("seed Sports: %v", err)
+	}
+	body.Store(&v2)
+	gateArmed.Store(true)
+	time.Sleep(80 * time.Millisecond)
+
+	// gen-0 flight starts and blocks inside the fixture.
+	aDone := make(chan error, 1)
+	go func() {
+		_, err := sc.Sports(t.Context(), []types.Locale{types.EnLocale})
+		aDone <- err
+	}()
+	<-entered
+
+	// Clear mid-flight; the newer gen-1 flight commits v2 first.
+	sc.Clear(types.URN{Prefix: "od", Type: "sport", ID: 3})
+	ids, err := sc.Sports(t.Context(), []types.Locale{types.EnLocale})
+	if err != nil {
+		t.Fatalf("post-clear Sports: %v", err)
+	}
+	if len(ids) != 1 || ids[0] != sportOne {
+		t.Fatalf("Sports = %v, want only %s from the fresh flight", ids, sportOne.ToString())
+	}
+
+	// The stale pre-clear flight finishes last: all its stores must lose.
+	close(release)
+	if err := <-aDone; err != nil {
+		t.Fatalf("gen-0 caller: %v (a superseded flight must not fail the read)", err)
+	}
+
+	ids, err = sc.Sports(t.Context(), []types.Locale{types.EnLocale})
+	if err != nil {
+		t.Fatalf("final Sports: %v", err)
+	}
+	if len(ids) != 1 || ids[0] != sportOne {
+		t.Fatalf("Sports = %v, want only %s (stale flight resurrected a reconciled-away sport)", ids, sportOne.ToString())
+	}
+	sc.mu.RLock()
+	entry := sc.sports[sportOne]
+	sc.mu.RUnlock()
+	entry.mu.RLock()
+	name := entry.name[types.EnLocale]
+	entry.mu.RUnlock()
+	if name != "Footy" {
+		t.Fatalf("sport 1 name = %q, want %q (stale flight overwrote the fresh name)", name, "Footy")
+	}
+}
+
 // TestSportCache_ReconcilePerLocale: the catalog response is
 // authoritative for ITS locale only — a sport present in en but absent
 // from the de catalog keeps its en data and stays reachable in en;

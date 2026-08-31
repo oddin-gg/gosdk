@@ -150,6 +150,32 @@ type MarketDescriptionCache struct {
 	// other-locale merge deletes outcome names the in-flight refresh
 	// just wrote (see upsert's staleLocale).
 	loadingLocales map[types.Locale]int
+	// fetchCursor records, per locale, the fetch-START of the newest
+	// bulk flight that entered its STORE phase — the flight-level
+	// monotonic cursor (guarded by mu; same only-advance discipline as
+	// lastRowAt / replaceTournaments / apiStartedAt). Every store a
+	// bulk flight makes (rows, reconcile, locale mark) is rejected once
+	// a newer-started flight has begun committing.
+	//
+	// Why it exists: the generation guard runs ONCE at flight-closure
+	// entry, and a ClearCacheItem bumps the generation — so a pre-clear
+	// (old-gen) flight and a post-clear (new-gen) flight for the SAME
+	// locale can be alive together under different singleflight keys.
+	// Same-locale serialization — the premise merge's ungated own-locale
+	// writes rest on — is false in exactly that window: without the
+	// cursor, the older flight finishing LAST overwrote the newer
+	// flight's fresh names with stale pre-clear values and re-created
+	// markets the newer reconcile had just removed (their keys carry no
+	// clear tombstone), all under a fresh locale mark, serving the
+	// stale/resurrected rows for up to a catalogTTL.
+	//
+	// Unlike loadedLocales, Clear/Purge deliberately do NOT reset it:
+	// the cursor orders flights, the mark gates read validity. Keeping
+	// it across invalidations also keeps merge's cross-locale sweep
+	// honest after a Clear (a wiped mark made every locale look stale,
+	// briefly re-arming the global sweep the freshness-scoped model
+	// removed).
+	fetchCursor map[types.Locale]time.Time
 	// base holds every description the BULK catalog returns: plain
 	// market rows AND static variants. Bounded by the upstream catalog
 	// (hundreds of entries) and never expired, because a bulk load is
@@ -467,14 +493,27 @@ func (m *MarketDescriptionCache) localeLoaded(locale types.Locale) bool {
 }
 
 // localeLoadedLocked is localeLoaded for callers already holding m.mu
-// (read or write) — upsert's merge-time staleLocale predicate runs
-// under the write lock.
+// (read or write).
 func (m *MarketDescriptionCache) localeLoadedLocked(locale types.Locale) bool {
 	loadedAt, ok := m.loadedLocales[locale]
 	if !ok {
 		return false
 	}
 	return m.catalogTTL <= 0 || time.Since(loadedAt) < m.catalogTTL
+}
+
+// localeDataFreshLocked reports whether the locale's newest COMMITTED
+// bulk data (fetchCursor) is within catalogTTL. Distinct from
+// localeLoadedLocked: the mark gates read validity and is wiped by
+// Clear/Purge to force refetches, while the cursor tracks data age and
+// survives invalidations — merge's cross-locale sweep judges staleness
+// by data age (see upsert's staleLocale). Caller must hold m.mu.
+func (m *MarketDescriptionCache) localeDataFreshLocked(locale types.Locale) bool {
+	at, ok := m.fetchCursor[locale]
+	if !ok {
+		return false
+	}
+	return m.catalogTTL <= 0 || time.Since(at) < m.catalogTTL
 }
 
 // expiredLocales returns the requested locales whose catalog mark is
@@ -579,6 +618,26 @@ func (m *MarketDescriptionCache) loadOne(ctx context.Context, marketID *int, var
 					return struct{}{}, fmt.Errorf("fetch market description %s locale %s: %w", sfKey, loc, err)
 				}
 
+				// Flight-level monotonic gate (see fetchCursor): enter the
+				// store phase only if no newer-started flight for this
+				// locale has begun committing; advancing the cursor here
+				// makes every store of any OLDER flight — including one
+				// already mid-commit — reject from now on. A superseded
+				// flight returns success without storing: the newer
+				// flight's data is already (or about to be) in the cache,
+				// and the caller re-reads it.
+				if !isDynamicVariant {
+					m.mu.Lock()
+					superseded := m.fetchCursor[loc].After(loadStarted)
+					if !superseded && loadStarted.After(m.fetchCursor[loc]) {
+						m.fetchCursor[loc] = loadStarted
+					}
+					m.mu.Unlock()
+					if superseded {
+						return struct{}{}, nil
+					}
+				}
+
 				// Track every key the response carries (malformed rows
 				// included — a broken row still proves the market exists
 				// upstream) so the bulk reconcile below only removes
@@ -624,10 +683,13 @@ func (m *MarketDescriptionCache) loadOne(ctx context.Context, marketID *int, var
 				// refetch the Clear asked for; the next read reloads fresh.
 				if !isDynamicVariant {
 					m.mu.Lock()
-					if !m.lastClearAt.After(loadStarted) {
+					if !m.lastClearAt.After(loadStarted) && !m.fetchCursor[loc].After(loadStarted) {
 						// Timestamped with the fetch's START, not its
 						// completion: the freshness window must cover the
-						// age of the DATA, not of the transfer.
+						// age of the DATA, not of the transfer. Also
+						// suppressed when a newer-started flight owns the
+						// locale (fetchCursor) — an older mark must not
+						// regress the newer flight's.
 						m.loadedLocales[loc] = loadStarted
 					}
 					m.mu.Unlock()
@@ -689,6 +751,12 @@ func (m *MarketDescriptionCache) reconcileBulk(locale types.Locale, seen map[Com
 	if m.lastClearAt.After(loadStarted) || m.purgedAt.After(loadStarted) {
 		return
 	}
+	if m.fetchCursor[locale].After(loadStarted) {
+		// A newer-started flight owns this locale now (see fetchCursor);
+		// removals driven by this flight's older view are as superseded
+		// as its rows.
+		return
+	}
 	for key, entry := range m.base {
 		if _, ok := seen[key]; ok {
 			continue
@@ -728,6 +796,17 @@ func (m *MarketDescriptionCache) upsert(description data.MarketDescription, loca
 		// started: its data may predate the invalidation. Skip only
 		// this row — unrelated markets in the same bulk response are
 		// stored normally, so a clear can never empty the catalog.
+		m.mu.Unlock()
+		return nil
+	}
+	if !key.isDynamicVariant() && m.fetchCursor[locale].After(loadStarted) {
+		// A newer-started bulk flight for this locale has begun
+		// committing (see fetchCursor): this row is superseded catalog
+		// content. Checked per row — the gate at store-phase entry can't
+		// stop a flight that was already mid-commit when the newer one
+		// arrived. Dynamic-variant rows are exempt: they come from the
+		// per-variant endpoint and the bulk cursor says nothing about
+		// them.
 		m.mu.Unlock()
 		return nil
 	}
@@ -827,10 +906,18 @@ func (m *MarketDescriptionCache) upsert(description data.MarketDescription, loca
 	// de outcome names; de then finished and marked itself fresh without
 	// revisiting X, and both locales served the silently truncated set
 	// for a full catalogTTL.
+	//
+	// Freshness is judged by the fetchCursor, not loadedLocales:
+	// Clear/Purge wipe the marks (to force refetches) but not the
+	// cursor, and a wiped mark made every locale look stale to the very
+	// next single-locale load — briefly re-arming the global
+	// last-row-wins sweep the freshness-scoped model removed. The
+	// cursor records exactly what the sweep needs: how old each
+	// locale's newest committed data is.
 	var staleLocale func(types.Locale) bool
 	if !key.isDynamicVariant() {
 		staleLocale = func(l types.Locale) bool {
-			return m.loadingLocales[l] == 0 && !m.localeLoadedLocked(l)
+			return m.loadingLocales[l] == 0 && !m.localeDataFreshLocked(l)
 		}
 	}
 	// Merge UNDER m.mu (it takes the entry's own lock; the m.mu →
@@ -874,6 +961,7 @@ func newMarketDescriptionCache(lifeCtx context.Context, client *api.Client, logg
 		lifetime:       lifeCtx,
 		loadedLocales:  make(map[types.Locale]time.Time),
 		loadingLocales: make(map[types.Locale]int),
+		fetchCursor:    make(map[types.Locale]time.Time),
 		catalogTTL:     defaultCatalogTTL,
 		base:           make(map[CompositeKey]*LocalizedMarketDescription),
 		clearedAt:      make(map[CompositeKey]time.Time),
