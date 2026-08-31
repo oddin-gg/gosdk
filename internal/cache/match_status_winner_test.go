@@ -1,6 +1,8 @@
 package cache
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -200,6 +202,91 @@ func TestMatchStatusCache_FreshnessOrdering(t *testing.T) {
 	if entry.homeScore == nil || *entry.homeScore != 7 {
 		t.Fatalf("older feed message overwrote newer: %+v", entry)
 	}
+}
+
+// TestBuildMatchStatus_StatusDescriptionOutcomes pins the three
+// contractual outcomes of the status-description resolution — the
+// ErrStaticDataLocaleIncomplete tolerance branch in particular, whose
+// ONLY production consumer is BuildMatchStatus: were the branch
+// removed or reordered, the default case would turn a routine upstream
+// catalog gap into a hard failure for every multi-locale match-status
+// read, and (pre-this-test) nothing would have caught it.
+//
+//   - catalog gap in SOME requested locale: tolerated, the PARTIAL
+//     description is attached (the locales that exist beat dropping
+//     the description entirely);
+//   - id absent from EVERY loaded locale: tolerated, StatusDescription
+//     stays nil (documented optional);
+//   - transport/fetch failure: propagates as an error — never silently
+//     converted to "no description".
+func TestBuildMatchStatus_StatusDescriptionOutcomes(t *testing.T) {
+	newStatusCache := func(id types.URN, statusID int) *MatchStatusCache {
+		c := &MatchStatusCache{
+			logger:    log.New(nil),
+			clearedAt: map[types.URN]time.Time{},
+			entries: lru.NewTTL[types.URN, *LocalizedMatchStatus](
+				lru.DefaultEventCacheSize, nil, lru.DefaultEventCacheTTL),
+		}
+		c.refreshOrInsertFeedItem(id, &feedXML.SportEventStatus{Status: ptrOf(1), MatchStatus: ptrOf(statusID)}, time.Now())
+		return c
+	}
+	id := types.URN{Prefix: "od", Type: "match", ID: 21}
+
+	t.Run("locale gap attaches the partial description", func(t *testing.T) {
+		fetcher := func(ctx context.Context, locale types.Locale) ([]types.StaticData, error) {
+			if locale == types.EnLocale {
+				return []types.StaticData{{ID: 42, Description: types.Some("live")}}, nil
+			}
+			return nil, nil // the de catalog omits status 42
+		}
+		static := newLocalizedStaticDataCache(t.Context(), &minimalCfg{}, log.New(nil), nil, fetcher)
+		defer static.Close()
+
+		out, err := BuildMatchStatus(t.Context(), newStatusCache(id, 42), static, id, []types.Locale{types.EnLocale, types.DeLocale})
+		if err != nil {
+			t.Fatalf("BuildMatchStatus: %v (a catalog locale gap must be tolerated)", err)
+		}
+		if out.StatusDescription == nil {
+			t.Fatal("StatusDescription = nil, want the partial description attached")
+		}
+		if got := out.StatusDescription.Descriptions[types.EnLocale]; got != "live" {
+			t.Fatalf("Descriptions[en] = %q, want %q", got, "live")
+		}
+		if _, ok := out.StatusDescription.Descriptions[types.DeLocale]; ok {
+			t.Fatalf("Descriptions[de] = %v, want absent", out.StatusDescription.Descriptions)
+		}
+		if v, ok := out.StatusDescription.Description.Get(); !ok || v != "live" {
+			t.Fatalf("Description = %v, want Some(live) (primary = locales[0])", out.StatusDescription.Description)
+		}
+	})
+
+	t.Run("unknown status id leaves StatusDescription nil", func(t *testing.T) {
+		fetcher := func(ctx context.Context, locale types.Locale) ([]types.StaticData, error) {
+			return []types.StaticData{{ID: 1, Description: types.Some("other")}}, nil
+		}
+		static := newLocalizedStaticDataCache(t.Context(), &minimalCfg{}, log.New(nil), nil, fetcher)
+		defer static.Close()
+
+		out, err := BuildMatchStatus(t.Context(), newStatusCache(id, 42), static, id, []types.Locale{types.EnLocale, types.DeLocale})
+		if err != nil {
+			t.Fatalf("BuildMatchStatus: %v (genuine absence must be tolerated)", err)
+		}
+		if out.StatusDescription != nil {
+			t.Fatalf("StatusDescription = %+v, want nil for an id absent from every locale", out.StatusDescription)
+		}
+	})
+
+	t.Run("fetch failure propagates", func(t *testing.T) {
+		fetcher := func(ctx context.Context, locale types.Locale) ([]types.StaticData, error) {
+			return nil, errors.New("upstream exploded")
+		}
+		static := newLocalizedStaticDataCache(t.Context(), &minimalCfg{}, log.New(nil), nil, fetcher)
+		defer static.Close()
+
+		if _, err := BuildMatchStatus(t.Context(), newStatusCache(id, 42), static, id, []types.Locale{types.EnLocale}); err == nil {
+			t.Fatal("BuildMatchStatus = nil error, want the fetch failure propagated (only the two catalog-gap outcomes are tolerated)")
+		}
+	})
 }
 
 // TestMatchStatusCache_APIvsAPIOrdering is the regression for the
