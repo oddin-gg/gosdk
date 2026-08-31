@@ -4219,14 +4219,17 @@ Closes every confirmed finding from the pre-beta full-codebase review
   config up-front (empty token, unresolvable environment/region) and
   returns wrapped `ErrInvalidConfig` before any HTTP.
 - **`Subscription.Close(ctx)` implements the documented graceful
-  drain** (NEXT.md §8): the first caller's ctx is the drain deadline —
-  the in-flight AMQP delivery finishes its decode+admit+ack cycle (no
-  Nack), intake stops, and admitted messages drain to the consumer.
-  If the deadline expires first, the remaining buffered messages are
-  discarded and `Err()` returns the ctx error. Session close + drain
-  share ONE budget (min(ctx, WithShutdownTimeout)) — previously each
-  stage got its own full `shutdownTimeout`, and ctx was only a wait
-  bound with `Err()` always nil.
+  drain** (NEXT.md §8): the in-flight AMQP delivery finishes its
+  decode+admit+ack cycle (no Nack), intake stops, and admitted
+  messages drain to the consumer. The caller's ctx bounds only the
+  WAIT — if it expires first, Close returns `ctx.Err()` while the
+  drain continues in the background (call Close again with a fresh
+  ctx to rejoin it); buffered messages were already ACKed on
+  admission, so a short-lived caller ctx must not discard them. The
+  drain itself runs on ONE budget, `WithShutdownTimeout` (session
+  close + drain share it — previously each stage got its own full
+  `shutdownTimeout`); only that budget expiring discards the
+  remaining buffer, with `Err()` returning the deadline error.
 - **`WithInitialSnapshotTime` is now functional** (was stored but never
   read): a producer with no recovery cursor requests its first snapshot
   from `now - initialSnapshotTime` instead of full history. Zero (the

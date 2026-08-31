@@ -133,7 +133,7 @@ func (*Client) Subscribe(ctx context.Context, opts ...SubscribeOption) (*Subscri
 
 // Subscription — returned from Subscribe. All methods safe for concurrent use.
 // (*Subscription).Messages() <-chan types.SessionMessage // envelope: tagged-union {OddsChange|BetStop|BetSettlement|BetCancel|FixtureChange|Rollback*} + UnparsableMessage + RawFeedMessage; closed after drain
-// (*Subscription).Close(ctx context.Context) error       // graceful drain; ctx is the drain deadline; safe to call repeatedly
+// (*Subscription).Close(ctx context.Context) error       // graceful drain; ctx bounds the caller's wait, the drain runs on the WithShutdownTimeout budget; safe to call repeatedly
 // (*Subscription).Done() <-chan struct{}                 // closed when subscription terminates (any reason)
 // (*Subscription).Err() error                            // nil on graceful close; non-nil on client.Close-abort / terminal error
 // See §3 "Subscribe / Subscription" below for the consuming example.
@@ -686,7 +686,7 @@ This consolidates what was previously three independent 5-second `time.Second` l
 
 | Path | API | Behavior |
 |---|---|---|
-| **Graceful** | `Subscription.Close(ctx)` | Stops accepting new deliveries; waits for the in-flight delivery to complete its decode + admit-to-buffer + ack cycle; drains the in-process buffered channel until consumers have read all admitted messages or the supplied `ctx` deadline expires; then closes `Messages()` channel and `Done()`. `Err()` returns nil. Use this when you want a clean shutdown with no in-flight loss. The provided `ctx` is the drain deadline — if it expires before drain completes, remaining buffered messages are discarded and `Err()` returns `ctx.Err()`. |
+| **Graceful** | `Subscription.Close(ctx)` | Stops accepting new deliveries; waits for the in-flight delivery to complete its decode + admit-to-buffer + ack cycle; drains the in-process buffered channel until consumers have read all admitted messages or the `WithShutdownTimeout` budget expires; then closes `Messages()` channel and `Done()`. `Err()` returns nil. Use this when you want a clean shutdown with no in-flight loss. The supplied `ctx` bounds only the CALLER'S WAIT — if it expires first, `Close` returns `ctx.Err()` while the drain continues in the background (call `Close` again with a fresh ctx to rejoin it); the caller's cancellation deliberately does not abort the drain, because buffered messages were already ACKed on admission and exist nowhere else. Only the budget expiring discards the remaining buffer, with `Err()` returning the deadline error. |
 | **Abrupt** | `client.Close(ctx)` called OR terminal error (the Subscribe `ctx` does NOT terminate a live subscription — it bounds setup only) | Subscription terminates immediately. The currently-in-flight delivery (if any) is `Nack(requeue=false)` rather than acked — see §AMQP backpressure failure handling below. Buffered messages already admitted to `Messages()` channel remain readable until the consumer stops reading or the channel is closed. `Err()` returns the abort cause or terminal error. Use this for emergency shutdown. |
 
 **Note:** abrupt termination may drop the single message currently being processed (between AMQP delivery and channel admission). Buffered messages already in the `Messages()` channel are still visible to readers until the channel closes. Consumers that need zero-loss shutdown should call `Subscription.Close(ctx)` with a generous deadline before calling `client.Close(ctx)`.

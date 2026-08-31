@@ -68,7 +68,8 @@ func WithReplay() SubscribeOption { return func(c *subscribeConfig) { c.replay =
 // Lifecycle:
 //   - Messages() returns the message stream; the channel closes after a
 //     graceful drain or abrupt termination.
-//   - Close(ctx) requests a graceful drain; ctx is the drain deadline.
+//   - Close(ctx) requests a graceful drain; ctx bounds the caller's
+//     wait, the drain itself runs on the WithShutdownTimeout budget.
 //   - Done() closes when the subscription terminates (any reason).
 //   - Err() returns the cause: nil for graceful close, non-nil otherwise.
 type Subscription struct {

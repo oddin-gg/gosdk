@@ -28,9 +28,10 @@ func main() {
 	}
 	cfg := gosdk.NewConfig(token, parseEnv(),
 		gosdk.WithMaxInactivity(20*time.Second),
-		// Align the total shutdown budget with the drain deadline this
-		// example advertises — otherwise the drain is silently capped at
-		// the 5s WithShutdownTimeout default (min(caller, shutdownTimeout)).
+		// WithShutdownTimeout IS the drain budget (the ctx passed to
+		// Subscription.Close bounds only the caller's wait) — raise it to
+		// the window this example advertises, or the drain is silently
+		// capped at the 5s default.
 		gosdk.WithShutdownTimeout(drainDeadline),
 	)
 
