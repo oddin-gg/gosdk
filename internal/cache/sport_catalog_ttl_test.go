@@ -157,6 +157,43 @@ func TestSportCache_RemovedSportReconciled(t *testing.T) {
 	}
 }
 
+// TestSportCache_EmptyResponseDoesNotWipeCatalog: mirrors the market
+// cache's guard — an empty-but-successful catalog response must not be
+// treated as "every sport was removed upstream" (pre-fix it wiped the
+// sports map and marked the locale loaded, serving not-found for every
+// sport for a full catalogTTL).
+func TestSportCache_EmptyResponseDoesNotWipeCatalog(t *testing.T) {
+	srv := newSportSrv(t, twoSportCatalog, noTournaments)
+	sc := newSportDataCache(t.Context(), newAPIClientForTest(t, srv.Server), log.New(nil))
+	sc.catalogTTL = 50 * time.Millisecond
+
+	if _, err := sc.Sports(t.Context(), []types.Locale{types.EnLocale}); err != nil {
+		t.Fatalf("seed Sports: %v", err)
+	}
+
+	srv.serveSports(`<?xml version="1.0"?><sports/>`)
+	time.Sleep(80 * time.Millisecond)
+
+	ids, err := sc.Sports(t.Context(), []types.Locale{types.EnLocale})
+	if err != nil {
+		t.Fatalf("Sports across empty response: %v", err)
+	}
+	if len(ids) != 2 {
+		t.Fatalf("Sports = %v, want 2 entries (empty response must not wipe the catalog)", ids)
+	}
+
+	// A real (non-empty) removal still reconciles.
+	srv.serveSports(oneSportCatalog)
+	time.Sleep(80 * time.Millisecond)
+	ids, err = sc.Sports(t.Context(), []types.Locale{types.EnLocale})
+	if err != nil {
+		t.Fatalf("Sports after recovery: %v", err)
+	}
+	if len(ids) != 1 {
+		t.Fatalf("Sports = %v, want 1 (non-empty response keeps removal authority)", ids)
+	}
+}
+
 // TestSportCache_ReconcilePerLocale: the catalog response is
 // authoritative for ITS locale only — a sport present in en but absent
 // from the de catalog keeps its en data and stays reachable in en;

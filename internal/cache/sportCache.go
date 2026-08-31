@@ -556,6 +556,20 @@ func (s *SportCache) reconcileCatalog(locale types.Locale, fresh []types.URN, lo
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// An EMPTY response carries no removal authority — response_code=OK
+	// with zero <sport> rows decodes successfully, and a catalog with
+	// zero sports is indistinguishable from a broken response. Pruning
+	// on it would wipe the whole sports map and, with the locale then
+	// marked loaded, serve not-found for every sport for a catalogTTL;
+	// refusing costs at most one catalogTTL of staleness. Mirrors the
+	// market cache's reconcileBulk guard.
+	if len(seen) == 0 {
+		if len(s.sports) > 0 && s.logger != nil {
+			s.logger.WithField("locale", string(locale)).
+				Warn("cache: empty sport catalog response; keeping cached sports (reconcile skipped)")
+		}
+		return
+	}
 	if s.lastClearAt.After(loadStarted) || s.purgedAt.After(loadStarted) {
 		return
 	}

@@ -58,6 +58,61 @@ func TestMarketDescriptionCache_RemovedMarketReconciled(t *testing.T) {
 	}
 }
 
+// TestMarketDescriptionCache_EmptyResponseDoesNotWipeCatalog: an
+// empty-but-successful bulk response (response_code=OK, zero <market>
+// rows — an upstream deploy glitch or truncated-yet-well-formed body)
+// must not be treated as a full upstream removal. Pre-fix the empty
+// `seen` set made reconcileBulk strip the locale from every base entry
+// and delete the emptied ones, and the locale was then marked loaded —
+// every bulk read returned empty and every MarketDescriptionByID
+// returned ErrItemNotFoundInCache for a full catalogTTL (12h): no
+// odds-change market could be named.
+func TestMarketDescriptionCache_EmptyResponseDoesNotWipeCatalog(t *testing.T) {
+	srv := newMarketSrv(t, bulkCatalogWithStaticVariants)
+	mc, ctx := newMarketCacheForTest(t, srv)
+	mc.catalogTTL = 50 * time.Millisecond
+
+	if _, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), []types.Locale{types.EnLocale}); err != nil {
+		t.Fatalf("seed lookup: %v", err)
+	}
+	if got := mc.baseLen(); got != 3 {
+		t.Fatalf("base = %d entries after seed, want 3", got)
+	}
+
+	// Upstream glitches: well-formed OK envelope with no rows.
+	srv.serve(`<?xml version="1.0"?>
+<market_descriptions response_code="OK"/>`)
+	time.Sleep(80 * time.Millisecond)
+
+	all, err := mc.LocalizedMarketDescriptions(ctx, types.EnLocale)
+	if err != nil {
+		t.Fatalf("bulk read across empty response: %v", err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("bulk view = %d entries, want 3 (empty response must not wipe the catalog)", len(all))
+	}
+	if _, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), []types.Locale{types.EnLocale}); err != nil {
+		t.Fatalf("by-id across empty response: %v", err)
+	}
+
+	// Upstream recovers with a real removal: the reconcile still works.
+	srv.serve(`<?xml version="1.0"?>
+<market_descriptions response_code="OK">
+  <market id="1" name="1x2" variant="way:three">
+    <outcomes><outcome id="1" name="home"/><outcome id="2" name="draw"/><outcome id="3" name="away"/></outcomes>
+  </market>
+  <market id="9" name="Plain"><outcomes><outcome id="1" name="o1"/></outcomes></market>
+</market_descriptions>`)
+	time.Sleep(80 * time.Millisecond)
+	all, err = mc.LocalizedMarketDescriptions(ctx, types.EnLocale)
+	if err != nil {
+		t.Fatalf("bulk read after recovery: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("bulk view = %d entries, want 2 (a non-empty response keeps its removal authority)", len(all))
+	}
+}
+
 // TestMarketDescriptionCache_RemovedOutcomeReconciled: an outcome the
 // fresh row no longer carries must leave the entry — pre-fix it not
 // only lingered in snapshots, it broke coverage validation for every

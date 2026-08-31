@@ -641,6 +641,24 @@ func (m *MarketDescriptionCache) loadOne(ctx context.Context, marketID *int, var
 func (m *MarketDescriptionCache) reconcileBulk(locale types.Locale, seen map[CompositeKey]struct{}, loadStarted time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// An EMPTY response carries no removal authority. response_code=OK
+	// with zero <market> rows decodes successfully (nil slice, nil
+	// error) — an upstream deploy glitch or truncated-but-well-formed
+	// body is indistinguishable from a genuinely empty catalog, and a
+	// bookmaker catalog with zero markets does not exist in practice.
+	// Pruning on it would wipe the ENTIRE base map and, with the locale
+	// then marked loaded, serve not-found for every market for a full
+	// catalogTTL. Refusing to prune costs at most one catalogTTL of
+	// staleness if the catalog ever really emptied. (Pre-replace, the
+	// accumulate semantics made an empty response a harmless no-op —
+	// this guard restores that property for the pathological case.)
+	if len(seen) == 0 {
+		if len(m.base) > 0 && m.logger != nil {
+			m.logger.WithField("locale", string(locale)).
+				Warn("cache: empty market catalog response; keeping cached descriptions (reconcile skipped)")
+		}
+		return
+	}
 	if m.lastClearAt.After(loadStarted) || m.purgedAt.After(loadStarted) {
 		return
 	}
