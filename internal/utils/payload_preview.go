@@ -35,6 +35,26 @@ func PayloadPreview(b []byte) string {
 	return fmt.Sprintf("len=%d sha256=%x preview=%s%s", len(b), sum[:8], strconv.Quote(string(preview)), truncated)
 }
 
+// routePreviewBytes bounds the escaped routing-key form included in
+// diagnostic logs. AMQP shortstr allows up to 255 bytes; the bound is
+// belt-and-braces against pathological keys.
+const routePreviewBytes = 128
+
+// RoutePreview renders an untrusted AMQP routing key for logging:
+// escaped via strconv.Quote (so a publisher-controlled key carrying
+// CR/LF or terminal escapes cannot forge log lines — the same defense
+// PayloadPreview applies to the delivery body) and length-capped.
+// slog's stock handlers escape the message themselves; this protects
+// consumers that supply their own handler via WithLogger.
+func RoutePreview(route string) string {
+	truncated := ""
+	if len(route) > routePreviewBytes {
+		route = route[:routePreviewBytes]
+		truncated = "…"
+	}
+	return strconv.Quote(route) + truncated
+}
+
 // EnsureXMLEOF consumes dec's remaining token stream, permitting only
 // trailing whitespace, comments, processing instructions, and
 // directives. Both XML decode paths (feed messages, API responses)

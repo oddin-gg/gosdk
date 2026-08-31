@@ -463,7 +463,7 @@ func (o *oddsFeedSessionImpl) processFeedMessage(ctx context.Context, feedMessag
 		if feedMessage.RoutingKey != nil {
 			route = feedMessage.RoutingKey.FullRoutingKey
 		}
-		o.logger.WithError(err).Errorf("failed to build message from feed message route %s %s", route, utils.PayloadPreview(feedMessage.RawMessage))
+		o.logger.WithError(err).Errorf("failed to build message from feed message route %s %s", utils.RoutePreview(route), utils.PayloadPreview(feedMessage.RawMessage))
 		unparsableMsg := o.feedMessageFactory.BuildUnparsableMessage(ctx, feedMessage)
 		o.emitUnparsable(ctx, unparsableMsg, fmt.Errorf("gosdk: build message: %w", err), ack, emitRaw, rawMsg)
 		return // deferred endProcessing fires

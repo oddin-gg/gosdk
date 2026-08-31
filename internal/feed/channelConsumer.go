@@ -591,7 +591,7 @@ func (c *ChannelConsumer) ackFunc(d amqp.Delivery) func() {
 			return
 		}
 		log := c.logger.WithError(err).
-			WithField("routing_key", d.RoutingKey).
+			WithField("routing_key", utils.RoutePreview(d.RoutingKey)).
 			WithField("delivery_tag", d.DeliveryTag)
 		if c.draining() && errors.Is(err, amqp.ErrClosed) {
 			log.Debug("feed: ack after graceful drain raced channel close (benign; exclusive queue already deleted)")
@@ -624,7 +624,7 @@ func (c *ChannelConsumer) admit(ctx context.Context, d amqp.Delivery, env QueueE
 	case <-ctx.Done():
 		if err := d.Nack(false, false); err != nil {
 			c.logger.WithError(err).
-				WithField("routing_key", d.RoutingKey).
+				WithField("routing_key", utils.RoutePreview(d.RoutingKey)).
 				WithField("delivery_tag", d.DeliveryTag).
 				Debug("feed: nack on shutdown")
 		}
@@ -683,7 +683,7 @@ func (c *ChannelConsumer) processDelivery(ctx context.Context, d amqp.Delivery) 
 
 	routingKeyInfo, err := c.parseRoute(d.RoutingKey)
 	if err != nil {
-		c.logger.WithError(err).Errorf("failed to parse route %s", d.RoutingKey)
+		c.logger.WithError(err).Errorf("failed to parse route %s", utils.RoutePreview(d.RoutingKey))
 		// Admit as UnparsableMessage so consumers see the malformed
 		// delivery. Minimal RoutingKeyInfo carries just the raw
 		// route — EventID and SportID stay nil, and
@@ -712,7 +712,7 @@ func (c *ChannelConsumer) processDelivery(ctx context.Context, d amqp.Delivery) 
 	queueMessage := &types.QueueMessage{}
 
 	if len(d.Body) == 0 {
-		c.logger.Warnf("received message without proper body from %s", d.RoutingKey)
+		c.logger.Warnf("received message without proper body from %s", utils.RoutePreview(d.RoutingKey))
 		// No XML to read Created from; leave it zero. Sent stays as the
 		// AMQP delivery timestamp (or zero if the broker didn't supply one).
 		queueMessage.UnparsableMessage = c.feedMessageFactory.BuildUnparsableMessage(ctx, &types.FeedMessage{
@@ -732,9 +732,9 @@ func (c *ChannelConsumer) processDelivery(ctx context.Context, d amqp.Delivery) 
 		// consumers on the UnparsableMessage below.
 		switch {
 		case errors.Is(err, feedXML.ErrUnknownMessage):
-			c.logger.Errorf("unknown message - route %s %s", d.RoutingKey, utils.PayloadPreview(d.Body))
+			c.logger.Errorf("unknown message - route %s %s", utils.RoutePreview(d.RoutingKey), utils.PayloadPreview(d.Body))
 		default:
-			c.logger.WithError(err).Errorf("failed to unmarshall route %s %s", d.RoutingKey, utils.PayloadPreview(d.Body))
+			c.logger.WithError(err).Errorf("failed to unmarshall route %s %s", utils.RoutePreview(d.RoutingKey), utils.PayloadPreview(d.Body))
 		}
 		// Decode failed — XML timestamp unavailable. Same shape as the
 		// empty-body branch. retainedBody truncates + copies an oversized
@@ -763,7 +763,7 @@ func (c *ChannelConsumer) processDelivery(ctx context.Context, d amqp.Delivery) 
 	// attached, so cache invalidation and event enrichment never run
 	// under the wrong identity.
 	if verr := validateRouteIdentity(routingKeyInfo, message); verr != nil {
-		c.logger.WithError(verr).Errorf("route/payload identity mismatch - route %s %s", d.RoutingKey, utils.PayloadPreview(d.Body))
+		c.logger.WithError(verr).Errorf("route/payload identity mismatch - route %s %s", utils.RoutePreview(d.RoutingKey), utils.PayloadPreview(d.Body))
 		queueMessage.UnparsableMessage = c.feedMessageFactory.BuildUnparsableMessage(ctx, &types.FeedMessage{
 			BasicFeedMessage: types.BasicFeedMessage{
 				RawMessage: retainedBody(d.Body),
@@ -786,7 +786,7 @@ func (c *ChannelConsumer) processDelivery(ctx context.Context, d amqp.Delivery) 
 	// ACKed (never redelivered) but carrying NO decoded Message, so none
 	// of that processing runs under an unvalidated identity/payload.
 	if verr := validateDecodedMessage(routingKeyInfo, message); verr != nil {
-		c.logger.WithError(verr).Errorf("feed message failed required-attribute validation - route %s %s", d.RoutingKey, utils.PayloadPreview(d.Body))
+		c.logger.WithError(verr).Errorf("feed message failed required-attribute validation - route %s %s", utils.RoutePreview(d.RoutingKey), utils.PayloadPreview(d.Body))
 		queueMessage.UnparsableMessage = c.feedMessageFactory.BuildUnparsableMessage(ctx, &types.FeedMessage{
 			BasicFeedMessage: types.BasicFeedMessage{
 				RawMessage: retainedBody(d.Body),
