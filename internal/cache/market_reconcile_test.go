@@ -897,6 +897,76 @@ func TestMarketDescriptionCache_NameOnlyEntryCannotCoverVacuously(t *testing.T) 
 	}
 }
 
+// TestMarketDescriptionCache_MalformedRefreshRetractsLocale is the
+// regression for ragnar-cr run-2 F001: a previously well-formed locale
+// whose REFRESHED row loses its <outcomes> block must stop being
+// served from the pre-defect data. Pre-fix the malformed row recorded
+// evidence but left the old entry untouched — the key stayed in the
+// reconcile's `seen` set, the successful load renewed the freshness
+// mark, and warm reads found the retained old name/outcomes fully
+// covered: the market served with a NIL error from stale data
+// indefinitely while the recorded evidence sat unreachable
+// (contradicting the typed-error contract, and making classification
+// depend on prior cache state).
+func TestMarketDescriptionCache_MalformedRefreshRetractsLocale(t *testing.T) {
+	wellFormed := `<?xml version="1.0"?>
+<market_descriptions response_code="OK">
+  <market id="1" name="1x2"><outcomes><outcome id="1" name="home"/></outcomes></market>
+  <market id="9" name="Plain"><outcomes><outcome id="1" name="o1"/></outcomes></market>
+</market_descriptions>`
+	nineMalformed := `<?xml version="1.0"?>
+<market_descriptions response_code="OK">
+  <market id="1" name="1x2"><outcomes><outcome id="1" name="home"/></outcomes></market>
+  <market id="9" name="Plain"/>
+</market_descriptions>`
+
+	srv := newMarketSrv(t, wellFormed)
+	mc, ctx := newMarketCacheForTest(t, srv)
+	mc.catalogTTL = 50 * time.Millisecond
+
+	// Seed en AND de well-formed.
+	if _, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), []types.Locale{types.EnLocale, types.DeLocale}); err != nil {
+		t.Fatalf("seed lookup: %v", err)
+	}
+
+	// Market 9's row turns malformed upstream; only en refreshes.
+	srv.serve(nineMalformed)
+	time.Sleep(80 * time.Millisecond)
+
+	// The en read must surface the defect, not serve the pre-defect
+	// name/outcomes with a nil error.
+	if _, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), []types.Locale{types.EnLocale}); !errors.Is(err, ErrMarketLocaleIncomplete) {
+		t.Fatalf("en lookup after malformed refresh: err = %v, want ErrMarketLocaleIncomplete (pre-fix: nil error with stale data)", err)
+	}
+	// The en bulk view drops the market.
+	all, err := mc.LocalizedMarketDescriptions(ctx, types.EnLocale)
+	if err != nil {
+		t.Fatalf("en bulk read: %v", err)
+	}
+	if _, ok := all[CompositeKey{MarketID: 9}]; ok {
+		t.Fatal("en bulk view still lists the market whose en row is malformed")
+	}
+
+	// Once EVERY locale's row has refreshed malformed, the entry empties
+	// and the kept evidence still classifies the read as incomplete —
+	// never not-found, never success.
+	time.Sleep(80 * time.Millisecond) // let de's mark lapse too
+	if _, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), []types.Locale{types.DeLocale}); !errors.Is(err, ErrMarketLocaleIncomplete) {
+		t.Fatalf("de lookup after malformed refresh: err = %v, want ErrMarketLocaleIncomplete", err)
+	}
+
+	// Upstream heals: the next refresh serves the market again.
+	srv.serve(wellFormed)
+	time.Sleep(80 * time.Millisecond)
+	entry, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), []types.Locale{types.EnLocale, types.DeLocale})
+	if err != nil {
+		t.Fatalf("lookup after upstream heals: %v", err)
+	}
+	if snap := entry.Snapshot(); len(snap.Outcomes) != 1 {
+		t.Fatalf("outcomes = %+v, want 1 after recovery", snap.Outcomes)
+	}
+}
+
 // TestMarketDescriptionCache_ReconcilePerLocale: the bulk response is
 // authoritative for ITS locale only. A market present in en but absent
 // from the de catalog keeps its en data (and stays reachable by id in

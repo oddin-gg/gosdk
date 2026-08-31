@@ -733,19 +733,27 @@ func (m *MarketDescriptionCache) upsert(description data.MarketDescription, loca
 	}
 	if description.Outcomes == nil {
 		// Malformed row (no <outcomes> block): record the cause per
-		// (key, locale) and contribute NOTHING — whether or not an entry
-		// already exists. A subsequent read for this locale classifies as
-		// ErrMarketLocaleIncomplete (upstream defect), never ErrItemNotFound
-		// (genuine absence) and never a silently partial entry.
+		// (key, locale), contribute nothing, and RETRACT this locale's
+		// previous contribution from any existing entry. A subsequent
+		// read for this locale then classifies as
+		// ErrMarketLocaleIncomplete (upstream defect) — via coverage
+		// revalidation while the entry survives on other locales, or via
+		// the kept evidence once it empties — never ErrItemNotFound
+		// (genuine absence) and never a silently partial or stale entry.
 		//
-		// The existing-entry path used to skip this validation entirely:
-		// it deleted the whole malformed record and merged the row's NAME,
-		// so the locale gained a name with no outcome names and no
-		// malformed evidence. Once reconciliation later removed the last
-		// well-formed locale, the name-only entry survived with an EMPTY
-		// outcomes map — coversLocaleLocked then passed vacuously and a
-		// by-id read served the outcome-less market as a valid description
-		// (the exact silent-truncation class this cache rework closes).
+		// The retraction is what keeps classification independent of
+		// prior cache state: the row IS its locale's newest catalog
+		// content (same-locale flights are serialized), and without it a
+		// previously well-formed locale whose refreshed row lost its
+		// outcomes block kept serving the pre-defect name/outcomes with a
+		// NIL error indefinitely — the key stays in the reconcile's
+		// `seen` set and the completed load renews the freshness mark, so
+		// nothing ever consulted the recorded evidence. The serve-stale
+		// fallback deliberately does NOT apply here: that path is for
+		// fetch FAILURES, logs at read time, and leaves the mark expired
+		// to retry — a malformed row arrives on a SUCCESSFUL load that
+		// re-marks the locale, so serving stale would be silent and
+		// permanent.
 		err := fmt.Errorf("market description %s locale %s: payload missing outcomes block", key, locale)
 		perLocale := m.malformed[key]
 		if perLocale == nil {
@@ -753,6 +761,17 @@ func (m *MarketDescriptionCache) upsert(description data.MarketDescription, loca
 			m.malformed[key] = perLocale
 		}
 		perLocale[locale] = err
+		if entry, ok := m.lookupLocked(key); ok {
+			if entry.removeLocale(locale) {
+				// No usable data left in any locale — drop the entry;
+				// the by-id entry-missing path serves the kept evidence.
+				if key.isDynamicVariant() {
+					m.variants.Remove(key)
+				} else {
+					delete(m.base, key)
+				}
+			}
+		}
 		m.mu.Unlock()
 		return err
 	}
