@@ -626,6 +626,21 @@ func (m *MarketDescriptionCache) reconcileBulk(locale types.Locale, seen map[Com
 			delete(m.base, key)
 		}
 	}
+	// Malformed tombstones are reconciled the same way: a market whose
+	// only trace was a malformed row (no entry was ever created) and
+	// that the fresh catalog no longer carries must classify as
+	// ErrItemNotFound, not stay ErrMarketLocaleIncomplete forever.
+	// The record is per key, not per locale — if the row was malformed
+	// in a DIFFERENT locale's catalog than the one reconciling here,
+	// the classification briefly reads as not-found until that locale's
+	// next refresh re-records the cause; both classifications describe a
+	// market that is unusable upstream, so the temporary shift is
+	// harmless.
+	for key := range m.malformed {
+		if _, ok := seen[key]; !ok {
+			delete(m.malformed, key)
+		}
+	}
 }
 
 func (m *MarketDescriptionCache) upsert(description data.MarketDescription, locale types.Locale, loadStarted time.Time) error {

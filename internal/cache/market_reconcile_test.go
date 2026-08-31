@@ -254,6 +254,42 @@ func TestMarketDescriptionCache_StaleFallbackRevalidatesCoverage(t *testing.T) {
 	}
 }
 
+// TestMarketDescriptionCache_MalformedTombstoneReconciled: a market
+// whose only trace is a malformed-row record (no entry was ever
+// created) and that the fresh catalog no longer carries must classify
+// as ErrItemNotFound. Pre-fix reconcileBulk pruned only m.base, so the
+// stale malformed record kept the removed market classified as
+// ErrMarketLocaleIncomplete forever.
+func TestMarketDescriptionCache_MalformedTombstoneReconciled(t *testing.T) {
+	srv := newMarketSrv(t, `<?xml version="1.0"?>
+<market_descriptions response_code="OK">
+  <market id="9" name="Plain"><outcomes><outcome id="1" name="o1"/></outcomes></market>
+  <market id="5" name="Broken"/>
+</market_descriptions>`)
+	mc, ctx := newMarketCacheForTest(t, srv)
+	mc.catalogTTL = 50 * time.Millisecond
+
+	// The malformed row (no outcomes block) classifies as incomplete.
+	if _, err := mc.MarketDescriptionByID(ctx, 5, types.None[string](), []types.Locale{types.EnLocale}); !errors.Is(err, ErrMarketLocaleIncomplete) {
+		t.Fatalf("err = %v, want ErrMarketLocaleIncomplete for the malformed row", err)
+	}
+
+	// The broken market is removed upstream entirely.
+	srv.serve(`<?xml version="1.0"?>
+<market_descriptions response_code="OK">
+  <market id="9" name="Plain"><outcomes><outcome id="1" name="o1"/></outcomes></market>
+</market_descriptions>`)
+	time.Sleep(80 * time.Millisecond)
+
+	_, err := mc.MarketDescriptionByID(ctx, 5, types.None[string](), []types.Locale{types.EnLocale})
+	if !errors.Is(err, ErrItemNotFoundInCache) {
+		t.Fatalf("err = %v, want ErrItemNotFoundInCache after upstream removal", err)
+	}
+	if errors.Is(err, ErrMarketLocaleIncomplete) {
+		t.Fatalf("err = %v, stale malformed record must not classify a removed market as incomplete", err)
+	}
+}
+
 // TestMarketDescriptionCache_ReconcilePerLocale: the bulk response is
 // authoritative for ITS locale only. A market present in en but absent
 // from the de catalog keeps its en data (and stays reachable by id in
