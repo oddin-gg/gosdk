@@ -515,6 +515,168 @@ func TestMarketDescriptionCache_InFlightLocaleNotSweptAsStale(t *testing.T) {
 	}
 }
 
+// loadingLen reads the in-flight locale refcount map size under the
+// cache lock (test helper).
+func (m *MarketDescriptionCache) loadingLen() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return len(m.loadingLocales)
+}
+
+// TestMarketDescriptionCache_LoadingLocaleRefcountSettles drives the
+// loadingLocales registration through REAL loadOne flights (the
+// in-flight-locale test above pokes the map directly, which cannot
+// catch broken production wiring). A leaked refcount is the dangerous
+// direction: loadingLocales[l] > 0 forever makes staleLocale report
+// that locale fresh for the process lifetime, so the cross-locale
+// sweep never fires again and consumers get silently truncated
+// outcome sets — the exact class this PR closes. The refcount must
+// settle to zero after (a) a successful load, (b) a fetch error, and
+// (c) a load raced by ClearCacheItem (tombstone-suppressed flight).
+func TestMarketDescriptionCache_LoadingLocaleRefcountSettles(t *testing.T) {
+	release := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	var gate, fail atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if gate.Load() {
+			select {
+			case entered <- struct{}{}:
+			default:
+			}
+			<-release
+		}
+		w.Header().Set("Content-Type", "application/xml")
+		if fail.Load() {
+			_, _ = io.WriteString(w, `upstream exploded`)
+			return
+		}
+		_, _ = io.WriteString(w, bulkCatalogWithStaticVariants)
+	}))
+	t.Cleanup(srv.Close)
+	mc := newMarketDescriptionCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	mc.catalogTTL = 50 * time.Millisecond
+	ctx := t.Context()
+
+	// (a) successful load.
+	if _, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), []types.Locale{types.EnLocale}); err != nil {
+		t.Fatalf("seed lookup: %v", err)
+	}
+	if got := mc.loadingLen(); got != 0 {
+		t.Fatalf("loadingLocales = %d after successful load, want 0", got)
+	}
+
+	// (b) fetch-error path.
+	fail.Store(true)
+	time.Sleep(80 * time.Millisecond) // expire the mark so the next read reloads
+	if _, err := mc.MarketDescriptionByID(ctx, 999, types.None[string](), []types.Locale{types.DeLocale}); err == nil {
+		t.Fatal("lookup during outage: want error")
+	}
+	if got := mc.loadingLen(); got != 0 {
+		t.Fatalf("loadingLocales = %d after failed load, want 0", got)
+	}
+	fail.Store(false)
+
+	// (c) ClearCacheItem racing an in-flight load: the flight's stores
+	// are tombstone-suppressed, and its registration must still unwind.
+	gate.Store(true)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = mc.MarketDescriptionByID(ctx, 9, types.None[string](), []types.Locale{types.RuLocale})
+	}()
+	<-entered // flight is blocked in the handler
+	mc.ClearCacheItem(9, types.None[string]())
+	gate.Store(false)
+	close(release)
+	<-done
+	if got := mc.loadingLen(); got != 0 {
+		t.Fatalf("loadingLocales = %d after clear-raced load, want 0 (a leak disables the stale sweep forever)", got)
+	}
+}
+
+// TestMarketDescriptionCache_SweepSuppressedWhileLocaleLoadsEndToEnd is
+// the production-wiring counterpart of the in-flight guard test: the
+// de refresh is held open by the FIXTURE (a real loadOne flight, not a
+// poked map) while an en refresh merges. While de is in flight the
+// sweep must be suppressed — the en read reports the disagreement as
+// the typed ErrMarketLocaleIncomplete (pre-fix wiring it would SUCCEED
+// with a silently truncated outcome set). Once de completes, its own-
+// locale removal drops the dead outcome and en reads converge to the
+// truncated-but-correct set.
+func TestMarketDescriptionCache_SweepSuppressedWhileLocaleLoadsEndToEnd(t *testing.T) {
+	twoOutcomes := `<?xml version="1.0"?>
+<market_descriptions response_code="OK">
+  <market id="9" name="Plain"><outcomes><outcome id="1" name="o1"/><outcome id="2" name="o2"/></outcomes></market>
+</market_descriptions>`
+	oneOutcome := `<?xml version="1.0"?>
+<market_descriptions response_code="OK">
+  <market id="9" name="Plain"><outcomes><outcome id="1" name="o1"/></outcomes></market>
+</market_descriptions>`
+
+	var body atomic.Pointer[string]
+	body.Store(&twoOutcomes)
+	var blockDE atomic.Bool
+	deEntered := make(chan struct{}, 1)
+	deRelease := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/de/") && blockDE.Load() {
+			select {
+			case deEntered <- struct{}{}:
+			default:
+			}
+			<-deRelease
+		}
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = io.WriteString(w, *body.Load())
+	}))
+	t.Cleanup(srv.Close)
+	mc := newMarketDescriptionCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	mc.catalogTTL = 50 * time.Millisecond
+	ctx := t.Context()
+
+	// Seed both locales with outcomes {1, 2}.
+	if _, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), []types.Locale{types.EnLocale, types.DeLocale}); err != nil {
+		t.Fatalf("seed lookup: %v", err)
+	}
+
+	// Outcome 2 is removed upstream; both marks expire; the de refresh
+	// starts and blocks inside the fixture.
+	body.Store(&oneOutcome)
+	blockDE.Store(true)
+	time.Sleep(80 * time.Millisecond)
+	deDone := make(chan error, 1)
+	go func() {
+		_, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), []types.Locale{types.DeLocale})
+		deDone <- err
+	}()
+	<-deEntered // the de flight is in the handler — registered as loading
+
+	// An en refresh merges while de is in flight: outcome 2 loses its
+	// en name (own-locale removal) but de's evidence must survive the
+	// sweep — the read errors typed instead of silently truncating.
+	if _, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), []types.Locale{types.EnLocale}); !errors.Is(err, ErrMarketLocaleIncomplete) {
+		t.Fatalf("en read while de in flight: err = %v, want ErrMarketLocaleIncomplete (sweep must be suppressed for a loading locale)", err)
+	}
+
+	// de completes: its own row omits outcome 2, so the disagreement
+	// resolves and en reads converge.
+	blockDE.Store(false)
+	close(deRelease)
+	if err := <-deDone; err != nil {
+		t.Fatalf("de read: %v", err)
+	}
+	entry, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), []types.Locale{types.EnLocale})
+	if err != nil {
+		t.Fatalf("en read after de completed: %v", err)
+	}
+	if snap := entry.Snapshot(); len(snap.Outcomes) != 1 || snap.Outcomes[0].ID != "1" {
+		t.Fatalf("outcomes = %+v, want only outcome 1", snap.Outcomes)
+	}
+	if got := mc.loadingLen(); got != 0 {
+		t.Fatalf("loadingLocales = %d after all loads settled, want 0", got)
+	}
+}
+
 // TestMarketDescription_OutcomeSetIndependentOfCompletionOrder pins the
 // round-3 regression: with en carrying {1,2} and de carrying {1}
 // loaded concurrently, the outcome set must not depend on which
