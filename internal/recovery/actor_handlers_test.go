@@ -344,27 +344,43 @@ func TestActor_CalculateTiming_NoUserSessionBaseline(t *testing.T) {
 	a := newWiredActor(t, srv, newFakeManagerOps())
 
 	now := time.Now()
-	// System alives keep the processed cursor fresh even on Connect-only
-	// clients (the alive branch advances it); the user-session field
-	// stays at its zero value forever.
-	if err := a.pm.SetLastProcessedMessageGenTimestamp(1, now); err != nil {
-		t.Fatalf("SetLastProcessedMessageGenTimestamp: %v", err)
-	}
+
+	// Precondition: BOTH baselines genuinely absent on the fresh actor.
+	// The processed cursor must be asserted, not re-zeroed later —
+	// SetLastProcessedMessageGenTimestamp is monotonic (only advances),
+	// so a time.Time{} write after a real value is silently ignored and
+	// would leave the zero-cursor branch untested.
 	if a.lastUserSessionAlive != (time.Time{}) {
 		t.Fatal("precondition: lastUserSessionAlive must be unset")
 	}
-	if !a.calculateTiming(now) {
-		t.Error("timing must be ok with no user-session baseline (pre-fix: permanent ProcessingQueueDelayViolation down state)")
+	if lp, err := a.lastProcessedMessageGenTimestamp(); err != nil || !lp.IsZero() {
+		t.Fatalf("precondition: processed cursor = %v (err=%v), must be zero", lp, err)
 	}
 
-	// The processed-cursor half gets the same guard: no baseline yet
-	// must not read as a delay violation (genuine alive silence is the
-	// aliveInterval check's job, which fires first in onTick).
-	if err := a.pm.SetLastProcessedMessageGenTimestamp(1, time.Time{}); err != nil {
-		t.Fatalf("reset SetLastProcessedMessageGenTimestamp: %v", err)
+	// No baseline at all: both IsZero guards must hold (removing either
+	// fails this — pre-fix now.Sub(zero) dwarfed MaxInactivity).
+	if !a.calculateTiming(now) {
+		t.Error("timing must be ok with no baselines at all (pre-fix: permanent ProcessingQueueDelayViolation down state)")
 	}
+
+	// Processed-cursor guard in ISOLATION: a fresh user baseline plus a
+	// still-zero cursor must not read as a delay violation (genuine
+	// alive silence is the aliveInterval check's job, which fires first
+	// in onTick and has its own baseline).
+	a.lastUserSessionAlive = now
 	if !a.calculateTiming(now) {
 		t.Error("timing must be ok with no processed-message baseline")
+	}
+
+	// User-alive guard in ISOLATION: a fresh cursor plus the zero
+	// user-session field (the Connect-only / SystemAliveOnly shape —
+	// system alives advance the cursor, nothing writes the user field).
+	a.lastUserSessionAlive = time.Time{}
+	if err := a.pm.SetLastProcessedMessageGenTimestamp(1, now); err != nil {
+		t.Fatalf("SetLastProcessedMessageGenTimestamp: %v", err)
+	}
+	if !a.calculateTiming(now) {
+		t.Error("timing must be ok with no user-session baseline")
 	}
 
 	// Once a user-session baseline EXISTS, staleness detection applies.
