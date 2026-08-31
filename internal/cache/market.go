@@ -298,11 +298,41 @@ func (m *MarketDescriptionCache) MarketDescriptionByID(
 	entry, _ := m.lookup(key)
 
 	missing := locales
+	staleOnly := false
 	if entry != nil {
 		missing = entry.missingLocales(locales)
+		if len(missing) == 0 && !key.isDynamicVariant() {
+			// A bulk-provenance entry is only as fresh as its locale's
+			// catalog mark: rows in the permanent base map never expire on
+			// their own, so a warm hit that skipped this check served
+			// renamed markets/outcomes for the process lifetime to any
+			// consumer that only reads by id (the odds-change hot path) —
+			// the catalogTTL refresh fired solely on bulk reads and by-id
+			// MISSES. Requested locales whose mark expired are treated as
+			// missing; loadOne coalesces them onto the shared bulk flight
+			// and the refreshed catalog re-marks the locale. Dynamic
+			// variants are excluded: their store already expires per entry
+			// and their reload path is the per-variant endpoint.
+			missing = m.expiredLocales(locales)
+			staleOnly = len(missing) > 0
+		}
 	}
 	if len(missing) > 0 {
 		if err := m.loadOne(ctx, &marketID, variant, missing); err != nil {
+			if staleOnly {
+				// The refresh was purely freshness-driven — the cached
+				// entry still covers every requested locale. Failing the
+				// read here would turn any upstream outage past the TTL
+				// window into a hard failure on the odds-change hot path;
+				// serve the stale-but-complete entry instead and let the
+				// next call retry the refresh (the mark stays expired).
+				if m.logger != nil {
+					m.logger.WithError(err).
+						WithField("market", key.String()).
+						Warn("cache: catalog refresh failed, serving stale market description")
+				}
+				return entry, nil
+			}
 			return nil, err
 		}
 		entry, _ = m.lookup(key)
@@ -398,6 +428,20 @@ func (m *MarketDescriptionCache) localeLoaded(locale types.Locale) bool {
 		return false
 	}
 	return m.catalogTTL <= 0 || time.Since(loadedAt) < m.catalogTTL
+}
+
+// expiredLocales returns the requested locales whose catalog mark is
+// absent or older than catalogTTL. Used by the warm by-id path so a
+// bulk-provenance hit re-loads once its locale's catalog window lapses
+// (see MarketDescriptionByID).
+func (m *MarketDescriptionCache) expiredLocales(requested []types.Locale) []types.Locale {
+	var expired []types.Locale
+	for _, l := range requested {
+		if !m.localeLoaded(l) {
+			expired = append(expired, l)
+		}
+	}
+	return expired
 }
 
 func (m *MarketDescriptionCache) loadAll(ctx context.Context, locales []types.Locale) error {
