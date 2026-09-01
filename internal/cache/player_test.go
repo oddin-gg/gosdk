@@ -1,6 +1,8 @@
 package cache
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/oddin-gg/gosdk/internal/api"
 	log "github.com/oddin-gg/gosdk/internal/log"
 	"github.com/oddin-gg/gosdk/types"
 )
@@ -92,6 +95,171 @@ func TestPlayersCache_DistinctKeysLoadInParallel(t *testing.T) {
 	// jitter without making the test flaky.
 	if elapsed > 300*time.Millisecond {
 		t.Errorf("4 parallel distinct-key loads took %v, want <300ms (singleflight should not serialise distinct keys)", elapsed)
+	}
+}
+
+// TestPlayersCache_SingleCallBatchLoadsInParallel pins the WITHIN-call
+// fan-out: one GetPlayers call with several missing keys must load
+// them as a bounded parallel batch, not one at a time. Pre-fix only
+// cross-CALLER parallelism existed (via singleflight); a single cold
+// roster resolution still issued its round-trips sequentially, so
+// BuildMatch's cold path scaled linearly with roster size.
+func TestPlayersCache_SingleCallBatchLoadsInParallel(t *testing.T) {
+	const perRequestDelay = 120 * time.Millisecond
+
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		time.Sleep(perRequestDelay)
+		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		id := "unknown"
+		for i, p := range parts {
+			if p == "players" && i+1 < len(parts) {
+				id = parts[i+1]
+				break
+			}
+		}
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = io.WriteString(w, playerProfileBody(id))
+	}))
+	defer srv.Close()
+
+	pc := newPlayersCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+
+	keys := []PlayerCacheKey{
+		{PlayerID: "od:player:1", Locale: types.EnLocale},
+		{PlayerID: "od:player:2", Locale: types.EnLocale},
+		{PlayerID: "od:player:3", Locale: types.EnLocale},
+		{PlayerID: "od:player:4", Locale: types.EnLocale},
+	}
+
+	start := time.Now()
+	got, err := pc.GetPlayers(t.Context(), keys)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("GetPlayers: %v", err)
+	}
+	if len(got) != len(keys) {
+		t.Fatalf("players = %d, want %d", len(got), len(keys))
+	}
+	for _, k := range keys {
+		if p, ok := got[k]; !ok || p.ID != k.PlayerID {
+			t.Fatalf("key %s: got %+v", k, got[k])
+		}
+	}
+	if h := hits.Load(); h != int32(len(keys)) {
+		t.Errorf("HTTP hits = %d, want %d (one per distinct key)", h, len(keys))
+	}
+	// Generous bound: 4 batched requests at ~120 ms each should finish
+	// well under 300 ms; the pre-fix sequential loop took ~480 ms.
+	if elapsed > 300*time.Millisecond {
+		t.Errorf("single-call batch of 4 took %v, want <300ms (misses must fan out)", elapsed)
+	}
+}
+
+// TestPlayersCache_BatchBoundEnforced pins the playerLoadConcurrency
+// limit itself (Fixpoint i20: the four-key batch test never reached
+// the limit of eight, so removing SetLimit left the suite green, and
+// its only parallelism proof was a wall-clock ceiling). Twelve keys —
+// more than the limit — are loaded in one call against a fixture that
+// tracks concurrent in-flight requests with an atomic active/peak
+// counter: the peak must show real overlap AND must never exceed the
+// bound, independent of elapsed time.
+func TestPlayersCache_BatchBoundEnforced(t *testing.T) {
+	const keys = playerLoadConcurrency + 4
+
+	var active, peak atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cur := active.Add(1)
+		defer active.Add(-1)
+		for {
+			p := peak.Load()
+			if cur <= p || peak.CompareAndSwap(p, cur) {
+				break
+			}
+		}
+		time.Sleep(120 * time.Millisecond)
+		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		id := "unknown"
+		for i, p := range parts {
+			if p == "players" && i+1 < len(parts) {
+				id = parts[i+1]
+				break
+			}
+		}
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = io.WriteString(w, playerProfileBody(id))
+	}))
+	defer srv.Close()
+
+	pc := newPlayersCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	ids := make([]PlayerCacheKey, 0, keys)
+	for i := range keys {
+		ids = append(ids, PlayerCacheKey{PlayerID: fmt.Sprintf("od:player:%d", i+1), Locale: types.EnLocale})
+	}
+
+	got, err := pc.GetPlayers(t.Context(), ids)
+	if err != nil {
+		t.Fatalf("GetPlayers: %v", err)
+	}
+	if len(got) != keys {
+		t.Fatalf("players = %d, want %d", len(got), keys)
+	}
+	if p := peak.Load(); p < 2 {
+		t.Errorf("peak concurrent fetches = %d, want >= 2 (batch re-serialized?)", p)
+	}
+	if p := peak.Load(); p > playerLoadConcurrency {
+		t.Errorf("peak concurrent fetches = %d, want <= %d (SetLimit bound violated)", p, playerLoadConcurrency)
+	}
+}
+
+// TestPlayersCache_BatchWith404KeepsClassification pins the error
+// contract of the errgroup fan-out with a FAILING key in the batch
+// (Fixpoint run-2 medium): the by-id 404 must surface as
+// ErrItemNotFoundInCache with the APIError in the chain — never a
+// sibling's context.Canceled from the group cancellation. The
+// classification depends on errgroup recording the first returned
+// error before cancelling; this is the same defect class
+// not_found_mapping_test.go pins for the other caches.
+func TestPlayersCache_BatchWith404KeepsClassification(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		if strings.Contains(r.URL.Path, "od:player:404") {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = io.WriteString(w, `<?xml version="1.0"?><error><message>no such player</message></error>`)
+			return
+		}
+		time.Sleep(80 * time.Millisecond) // siblings in flight when the 404 lands
+		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		id := "unknown"
+		for i, p := range parts {
+			if p == "players" && i+1 < len(parts) {
+				id = parts[i+1]
+				break
+			}
+		}
+		_, _ = io.WriteString(w, playerProfileBody(id))
+	}))
+	defer srv.Close()
+
+	pc := newPlayersCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	ids := []PlayerCacheKey{
+		{PlayerID: "od:player:1", Locale: types.EnLocale},
+		{PlayerID: "od:player:404", Locale: types.EnLocale},
+		{PlayerID: "od:player:2", Locale: types.EnLocale},
+		{PlayerID: "od:player:3", Locale: types.EnLocale},
+	}
+
+	_, err := pc.GetPlayers(t.Context(), ids)
+	if !errors.Is(err, ErrItemNotFoundInCache) {
+		t.Fatalf("GetPlayers with a 404 key = %v, want ErrItemNotFoundInCache", err)
+	}
+	if errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, a sibling's cancellation must not win over the 404 classification", err)
+	}
+	var apiErr *api.Error
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusNotFound {
+		t.Fatalf("APIError with Status=404 not in chain: %v", err)
 	}
 }
 

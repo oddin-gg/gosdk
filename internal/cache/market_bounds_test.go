@@ -165,7 +165,9 @@ func TestMatchStatusCache_Bounded(t *testing.T) {
 func TestPlayersCache_Bounded(t *testing.T) {
 	c := newPlayersCache(t.Context(), nil, log.New(nil))
 	for i := 0; i < playersCacheSize+50; i++ {
-		c.set(PlayerCacheKey{PlayerID: fmt.Sprintf("od:player:%d", i), Locale: types.EnLocale}, types.Player{})
+		// Straight to the store: this test pins only the LRU bound. Real
+		// admissions go through storeIfNotCleared (tombstone-gated).
+		c.players.Add(PlayerCacheKey{PlayerID: fmt.Sprintf("od:player:%d", i), Locale: types.EnLocale}, types.Player{})
 	}
 	if got := c.players.Len(); got > playersCacheSize {
 		t.Fatalf("players entries = %d, want <= %d (LRU bound)", got, playersCacheSize)

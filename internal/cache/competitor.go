@@ -6,6 +6,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/errgroup"
+
 	"github.com/oddin-gg/gosdk/internal/api"
 	"github.com/oddin-gg/gosdk/internal/api/xml"
 	"github.com/oddin-gg/gosdk/internal/cache/lru"
@@ -378,17 +380,31 @@ func (l *LocalizedCompetitor) snapshot(
 	}
 	l.mu.RUnlock()
 
-	players := map[types.Locale][]types.Player{}
+	// Resolve the roster as a bounded parallel batch: sequential
+	// (locale × player) resolution made a cold competitor build scale
+	// linearly with roster size (a 10-player roster in 3 locales was 30
+	// serial round-trips). Each goroutine writes its own index of its
+	// own bucket, so no two goroutines share a slot; the player cache's
+	// singleflight still dedups concurrent fetches of one profile.
+	players := make(map[types.Locale][]types.Player, len(locales))
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(playerLoadConcurrency)
 	for _, locale := range locales {
-		bucket := make([]types.Player, 0, len(playerURNs))
-		for _, urn := range playerURNs {
-			p, err := factory.BuildPlayer(ctx, urn, locale)
-			if err != nil {
-				return nil, fmt.Errorf("build player %s/%s: %w", urn.ToString(), locale, err)
-			}
-			bucket = append(bucket, *p)
-		}
+		bucket := make([]types.Player, len(playerURNs))
 		players[locale] = bucket
+		for i, urn := range playerURNs {
+			g.Go(func() error {
+				p, err := factory.BuildPlayer(gctx, urn, locale)
+				if err != nil {
+					return fmt.Errorf("build player %s/%s: %w", urn.ToString(), locale, err)
+				}
+				bucket[i] = *p
+				return nil
+			})
+		}
+	}
+	if err := g.Wait(); err != nil {
+		return nil, err
 	}
 
 	return &types.Competitor{

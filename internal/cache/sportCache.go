@@ -68,6 +68,18 @@ type SportCache struct {
 	purgedAt    time.Time
 	flightGen   atomic.Uint64
 
+	// fetchCursor records, per locale, the fetch-START of the newest
+	// catalog flight that entered its store phase — the flight-level
+	// monotonic cursor, mirroring the market cache's field of the same
+	// name. The generation guard runs once at flight entry and Clear
+	// bumps the generation, so a pre-clear and a post-clear flight for
+	// one locale can be alive together; without the cursor the older
+	// flight finishing last overwrote the newer flight's names and
+	// re-created sports its reconcile had just removed, under a fresh
+	// locale mark. Clear/Purge deliberately do NOT reset it — it orders
+	// flights, the mark gates read validity. Guarded by mu.
+	fetchCursor map[types.Locale]time.Time
+
 	sf singleflight.Group
 }
 
@@ -320,7 +332,7 @@ func (s *SportCache) SportTournaments(ctx context.Context, sportID types.URN, lo
 			// views. The caller still gets the freshly fetched list even
 			// when the commit is suppressed or rejected as out-of-order —
 			// it is what THIS fetch observed upstream.
-			if entry := s.ensureSportEntry(sportID, loadStarted); entry != nil {
+			if entry := s.ensureSportEntry(sportID, locale, loadStarted); entry != nil {
 				entry.replaceTournaments(tournamentIDs, loadStarted)
 			}
 			return tournamentIDs, nil
@@ -343,8 +355,10 @@ func (s *SportCache) SportTournaments(ctx context.Context, sportID types.URN, lo
 // catalog refresh). Used by SportTournaments to attach
 // tournamentsLoaded=true even when the upstream result was empty and
 // recordTournament's create-on-miss path didn't fire.
-// Returns nil when the store was suppressed by a racing invalidation.
-func (s *SportCache) ensureSportEntry(sportID types.URN, loadStarted time.Time) *LocalizedSport {
+// Returns nil when the store was suppressed by a racing invalidation,
+// or when a NEWER catalog commit for the locale has established the
+// sport's absence.
+func (s *SportCache) ensureSportEntry(sportID types.URN, locale types.Locale, loadStarted time.Time) *LocalizedSport {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.storeSuppressedLocked(sportID, loadStarted) {
@@ -352,6 +366,19 @@ func (s *SportCache) ensureSportEntry(sportID types.URN, loadStarted time.Time) 
 	}
 	entry, ok := s.sports[sportID]
 	if !ok {
+		if s.fetchCursor[locale].After(loadStarted) {
+			// A catalog flight that STARTED after this tournament fetch
+			// has committed for this locale, and the sport is not in the
+			// map — the fresh catalog says it does not exist. Re-creating
+			// a nameless stub here would resurrect a reconciled-away
+			// sport: Sports() filters it (no names) but Sport() would
+			// report ErrSportLocaleIncomplete instead of not-found, and
+			// the stub would pin an obsolete tournament list. Skip the
+			// commit; the caller still gets its freshly fetched list, and
+			// if the sport reappears upstream the next catalog load
+			// recreates the entry.
+			return nil
+		}
 		entry = &LocalizedSport{
 			id:            sportID,
 			tournamentIDs: make(map[types.URN]struct{}),
@@ -424,12 +451,45 @@ func (s *SportCache) ensureLocalesLoaded(ctx context.Context, locales []types.Lo
 					}
 					ids = append(ids, *id)
 				}
+				// Flight-level monotonic gate (see fetchCursor): enter the
+				// store phase only if no newer-started flight for this
+				// locale has begun committing; advancing the cursor makes
+				// every store of any older flight reject from now on. A
+				// superseded flight returns errStaleFlight so its callers
+				// re-register and JOIN the winning flight (which completes
+				// only after its full commit) — returning success let them
+				// re-read mid-commit state and transiently report
+				// not-found for sports that exist upstream.
+				s.mu.Lock()
+				superseded := s.fetchCursor[loc].After(loadStarted)
+				if !superseded && loadStarted.After(s.fetchCursor[loc]) {
+					s.fetchCursor[loc] = loadStarted
+				}
+				s.mu.Unlock()
+				if superseded {
+					return struct{}{}, errStaleFlight
+				}
+				if sportCommitGateHook != nil {
+					sportCommitGateHook(loc)
+				}
+
 				for k := range data {
 					if err := s.upsertSport(ids[k], loc, &data[k], loadStarted); err != nil {
 						return struct{}{}, fmt.Errorf("load sport catalog locale %s: upsert %s: %w", loc, ids[k].ToString(), err)
 					}
 				}
+				// The response is the complete catalog for this locale:
+				// sports it no longer carries must stop being served.
+				s.reconcileCatalog(loc, ids, loadStarted)
 				s.markLocaleLoaded(loc, loadStarted)
+				// A flight superseded MID-commit hands its callers to the
+				// winner too (its remaining stores were rejected per row).
+				s.mu.Lock()
+				lost := s.fetchCursor[loc].After(loadStarted)
+				s.mu.Unlock()
+				if lost {
+					return struct{}{}, errStaleFlight
+				}
 				return struct{}{}, nil
 			})
 			if errors.Is(err, errStaleFlight) {
@@ -443,6 +503,13 @@ func (s *SportCache) ensureLocalesLoaded(ctx context.Context, locales []types.Lo
 	}
 	return nil
 }
+
+// sportCommitGateHook is a test-only seam invoked by a catalog flight
+// after it has advanced the fetchCursor (winning the locale) but
+// before any store — the window a superseded flight's callers must
+// never read across. Production builds leave it nil (same pattern as
+// lru.clearForgetHook / marketCommitGateHook).
+var sportCommitGateHook func(types.Locale)
 
 func (s *SportCache) findMissingLocales(locales []types.Locale) []types.Locale {
 	s.mu.RLock()
@@ -475,7 +542,9 @@ func (s *SportCache) localeLoadedLocked(locale types.Locale) bool {
 // window must cover the age of the DATA, not of the transfer.
 func (s *SportCache) markLocaleLoaded(locale types.Locale, loadStarted time.Time) {
 	s.mu.Lock()
-	if !s.lastClearAt.After(loadStarted) {
+	if !s.lastClearAt.After(loadStarted) && !s.fetchCursor[locale].After(loadStarted) {
+		// Also suppressed when a newer-started flight owns the locale
+		// (fetchCursor) — an older mark must not regress the newer one.
 		s.loadedLocales[locale] = loadStarted
 	}
 	s.mu.Unlock()
@@ -483,10 +552,17 @@ func (s *SportCache) markLocaleLoaded(locale types.Locale, loadStarted time.Time
 
 func (s *SportCache) upsertSport(id types.URN, locale types.Locale, sport *xml.Sport, loadStarted time.Time) error {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.storeSuppressedLocked(id, loadStarted) {
 		// A Clear for this sport (or a Purge) landed after the load
 		// started: skip only this row — the next read refetches.
-		s.mu.Unlock()
+		return nil
+	}
+	if s.fetchCursor[locale].After(loadStarted) {
+		// A newer-started catalog flight for this locale has begun
+		// committing (see fetchCursor): this row is superseded content.
+		// Checked per row — the store-phase gate can't stop a flight
+		// already mid-commit when the newer one arrived.
 		return nil
 	}
 	entry, ok := s.sports[id]
@@ -499,14 +575,99 @@ func (s *SportCache) upsertSport(id types.URN, locale types.Locale, sport *xml.S
 		}
 		s.sports[id] = entry
 	}
-	s.mu.Unlock()
 
+	// Populate UNDER s.mu (entry.mu nested inside, the same s.mu →
+	// entry.mu order Sports() uses). Populating after the unlock — the
+	// previous shape — left a window where a freshly created entry sat
+	// in the map with zero locales; reconcileCatalog (which prunes
+	// empty entries atomically under s.mu) could then delete it while
+	// this row's names were still pending, silently losing the sport.
+	// Catalog loads run once per catalogTTL, so the hold time is
+	// irrelevant.
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
 	entry.name[locale] = sport.Name
 	entry.abbreviation[locale] = sport.Abbreviation
-	entry.iconPath = sport.IconPath
+	if sport.IconPath != nil {
+		// icon_path is locale-independent and OPTIONAL on the wire: a
+		// locale whose catalog row omits it must mean "nothing new", not
+		// "cleared" — an unconditional assign let whichever locale's
+		// refresh ran last erase an icon another locale supplied, with
+		// the survivor flipping between refresh cycles. Same guard the
+		// referenceIDs blocks in match.go / tournament.go apply.
+		entry.iconPath = sport.IconPath
+	}
 	return nil
+}
+
+// removeLocale drops one locale's name/abbreviation from the entry.
+// Reports whether the entry carries no name in any locale afterwards
+// (and should be dropped by the caller). Used by reconcileCatalog for
+// sports absent from a fresh catalog response.
+func (l *LocalizedSport) removeLocale(locale types.Locale) (empty bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.name, locale)
+	delete(l.abbreviation, locale)
+	return len(l.name) == 0
+}
+
+// reconcileCatalog removes, for one locale, every sport the fresh
+// catalog response no longer carries — the response is the complete
+// sport list for that locale, so absence is authoritative removal.
+// Sports left with no locale at all are dropped entirely: Sports()
+// stops listing them and Sport() reports not-found instead of serving
+// (or locale-gap-erroring on) an entity that no longer exists
+// upstream. Pre-fix the map was upsert-only, so a removed sport was
+// listed for the process lifetime — and building it then failed on
+// its tournament fetch. Mirrors the market cache's reconcileBulk; per
+// locale only, so a sport present in just some locales keeps those.
+//
+// Dropping a sport also drops its cached tournament list; the
+// SportTournaments stub for a sport genuinely absent from the catalog
+// is recreated (and its list refetched) on the next call — bounded,
+// once per catalogTTL. Suppressed when an invalidation raced the load
+// (the clear already reset the locale marks, so the next load
+// reconciles from fresh data). Atomic with upsertSport's
+// create+populate, which now holds s.mu throughout.
+func (s *SportCache) reconcileCatalog(locale types.Locale, fresh []types.URN, loadStarted time.Time) {
+	seen := make(map[types.URN]struct{}, len(fresh))
+	for _, id := range fresh {
+		seen[id] = struct{}{}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// An EMPTY response carries no removal authority — response_code=OK
+	// with zero <sport> rows decodes successfully, and a catalog with
+	// zero sports is indistinguishable from a broken response. Pruning
+	// on it would wipe the whole sports map and, with the locale then
+	// marked loaded, serve not-found for every sport for a catalogTTL;
+	// refusing costs at most one catalogTTL of staleness. Mirrors the
+	// market cache's reconcileBulk guard.
+	if len(seen) == 0 {
+		if len(s.sports) > 0 && s.logger != nil {
+			s.logger.WithField("locale", string(locale)).
+				Warn("cache: empty sport catalog response; keeping cached sports (reconcile skipped)")
+		}
+		return
+	}
+	if s.lastClearAt.After(loadStarted) || s.purgedAt.After(loadStarted) {
+		return
+	}
+	if s.fetchCursor[locale].After(loadStarted) {
+		// A newer-started flight owns this locale now (see fetchCursor);
+		// removals driven by this flight's older view are as superseded
+		// as its rows.
+		return
+	}
+	for id, entry := range s.sports {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		if entry.removeLocale(locale) {
+			delete(s.sports, id)
+		}
+	}
 }
 
 // Clear evicts a single sport AND invalidates every loaded-locale
@@ -557,6 +718,7 @@ func newSportDataCache(lifeCtx context.Context, client *api.Client, logger *log.
 		catalogTTL:    defaultCatalogTTL,
 		sports:        make(map[types.URN]*LocalizedSport),
 		clearedAt:     make(map[types.URN]time.Time),
+		fetchCursor:   make(map[types.Locale]time.Time),
 	}
 }
 

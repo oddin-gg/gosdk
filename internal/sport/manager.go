@@ -500,6 +500,15 @@ func (m *Manager) MultiLocalizedPlayer(ctx context.Context, id types.URN, locale
 // DeleteMatchFromCache, both of which invalidate all three caches —
 // pre-v2.24 only the match summary was cleared, leaving fixture and
 // status entries stale.
+//
+// The three clears are sequential, not atomic — a cross-cache
+// transaction would couple three independent tombstone locks (each
+// also taken by admission/OnAdmit/StoreSide paths) for no practical
+// gain. Consequence, documented on the public interface: a Match
+// built concurrently with this call can pair a freshly reloaded
+// summary with the previous fixture or status snapshot. Each cache's
+// own clear-vs-in-flight-load tombstone still guarantees that once
+// this returns, no pre-clear load re-admits stale data anywhere.
 func (m *Manager) ClearMatch(id types.URN) {
 	m.cacheManager.MatchCache.ClearCacheItem(id)
 	m.cacheManager.FixtureCache.ClearCacheItem(id)

@@ -8,8 +8,10 @@
 //   - per-locale "merge into existing entry" semantics: callers describe the
 //     locales they need, and the loader is asked only for the missing ones
 //
-// StaticCache (in static_cache.go) is the small-catalog variant with no
-// bounded size and a simple per-locale RWMutex map.
+// Small-catalog data (sports, market descriptions, void reasons,
+// match-status descriptions) is NOT cached through this package: those
+// caches live in internal/cache with their own per-locale maps, expiring
+// catalog marks, and clear-tombstone machinery.
 package lru
 
 import (

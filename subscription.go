@@ -68,7 +68,8 @@ func WithReplay() SubscribeOption { return func(c *subscribeConfig) { c.replay =
 // Lifecycle:
 //   - Messages() returns the message stream; the channel closes after a
 //     graceful drain or abrupt termination.
-//   - Close(ctx) requests a graceful drain; ctx is the drain deadline.
+//   - Close(ctx) requests a graceful drain; ctx bounds the caller's
+//     wait, the drain itself runs on the WithShutdownTimeout budget.
 //   - Done() closes when the subscription terminates (any reason).
 //   - Err() returns the cause: nil for graceful close, non-nil otherwise.
 type Subscription struct {
@@ -131,17 +132,22 @@ func (s *Subscription) Err() error {
 //     again with a fresh context to wait for completion (it joins the
 //     same in-flight shutdown).
 //
-// The FIRST Close caller's ctx is the drain deadline (NEXT.md §8
-// Subscriptions): the session finishes its in-flight delivery
-// (decode + admit + ack — no Nack), stops intake, and every admitted
-// message is drained to the consumer. If the deadline expires before
-// the consumer read everything, the remaining buffered messages are
-// discarded and Err() returns the ctx error. The whole drain sequence —
-// session close AND buffer drain — shares ONE ceiling: min(caller
-// deadline, WithShutdownTimeout).
+// The drain itself is bounded by ONE ceiling: WithShutdownTimeout
+// (NEXT.md §8 Subscriptions — session close AND buffer drain share
+// it). The session finishes its in-flight delivery (decode + admit +
+// ack — no Nack), stops intake, and every admitted message is drained
+// to the consumer; only if that budget expires before the consumer
+// read everything are the remaining buffered messages discarded, with
+// Err() returning the deadline error. The first caller's ctx VALUES
+// propagate into the drain, but its cancellation deliberately does
+// not: buffered messages were already ACKed on admission (the queue is
+// exclusive+autoDelete, so they exist nowhere else), and a drain
+// aborted by a short-lived caller ctx would silently discard them —
+// the opposite of the background-continuation contract above, and of
+// Client.Close, which roots its shutdown the same way.
 func (s *Subscription) Close(ctx context.Context) error {
 	s.closeOnce.Do(func() {
-		drainCtx, cancel := context.WithTimeout(ctx, s.budget())
+		drainCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.budget())
 		go func() {
 			defer cancel()
 			s.runShutdown(nil, drainCtx)

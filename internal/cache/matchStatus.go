@@ -113,8 +113,12 @@ type LocalizedMatchStatus struct {
 	// timestamp of the newest APPLIED feed update; feedAppliedAt is the
 	// local wall-clock instant it was applied (comparable with
 	// api.Response.StartedAt, which is also local wall clock).
+	// apiStartedAt is the START instant of the newest APPLIED API
+	// summary fetch — the API-vs-API ordering cursor (see the monotonic
+	// guard in refreshOrInsertAPIItem).
 	feedMsgTS     time.Time
 	feedAppliedAt time.Time
+	apiStartedAt  time.Time
 
 	winnerID              *types.URN
 	status                types.EventStatus
@@ -276,10 +280,17 @@ func (m *MatchStatusCache) lookup(id types.URN) (*LocalizedMatchStatus, bool) {
 }
 
 // shallowClone returns a fresh struct with all fields copied from src,
-// or a zero-value if src is nil.
+// or a zero-value if src is nil — except status, which starts at the
+// documented UnknownEventStatus sentinel. Both merge paths are
+// presence-preserving (they assign status only when the payload
+// carried the attribute), so a match whose FIRST observed payload
+// omits it was otherwise admitted with the zero EventStatus("") — an
+// out-of-enum value consumers can't match against any documented
+// constant, and the one path the wire-value mappers' unknown-fallback
+// didn't cover.
 func (m *MatchStatusCache) shallowClone(src *LocalizedMatchStatus) *LocalizedMatchStatus {
 	if src == nil {
-		return &LocalizedMatchStatus{}
+		return &LocalizedMatchStatus{status: types.UnknownEventStatus}
 	}
 	c := *src
 	return &c
@@ -392,7 +403,21 @@ func (m *MatchStatusCache) refreshOrInsertAPIItem(id types.URN, data apiXML.Spor
 	if prev != nil && !prev.feedAppliedAt.IsZero() && fetchStarted.Before(prev.feedAppliedAt) {
 		return nil
 	}
+	// API-vs-API ordering: MONOTONIC on fetch start, same only-advance
+	// discipline as LocalizedSport.replaceTournaments. Concurrent
+	// summary fetches for one id are real — the match cache's per-locale
+	// loads and this cache's own loader run under SEPARATE singleflight
+	// groups, and every response lands here via the observer — so an
+	// earlier-STARTED fetch that finishes LAST would otherwise reinstall
+	// its older status/scores/winner over a newer one. For a just-
+	// finished match with no further feed traffic, that rollback stood
+	// until entry TTL (~12h). A snapshot no newer than the committed one
+	// is rejected.
+	if prev != nil && !prev.apiStartedAt.IsZero() && !fetchStarted.After(prev.apiStartedAt) {
+		return nil
+	}
 	result := m.shallowClone(prev)
+	result.apiStartedAt = fetchStarted
 	// Presence-preserving merge — same contract as the feed path.
 	if data.Status != "" {
 		result.status = m.fromAPI(data.Status)
@@ -704,7 +729,16 @@ func BuildMatchStatus(
 		case errors.Is(err, ErrItemNotFoundInCache):
 			// The status-code description is genuinely absent from the
 			// upstream catalog — leave StatusDescription nil (documented
-			// optional). Only THIS outcome is tolerated.
+			// optional).
+		case errors.Is(err, ErrStaticDataLocaleIncomplete):
+			// The description exists but not in every requested locale —
+			// an upstream catalog gap, not a fetch failure. Attach the
+			// partially-populated value (LocalizedItem returns it with
+			// the error): the locales that DO exist are strictly more
+			// useful than dropping the description entirely, and
+			// Description/Descriptions reflect exactly what the catalog
+			// carries. Only these two catalog-gap outcomes are tolerated.
+			out.StatusDescription = &desc
 		default:
 			// Context cancellation or a transport/API failure must NOT be
 			// silently converted to "no description": that made a

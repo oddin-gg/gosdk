@@ -142,8 +142,14 @@ type sportsInfoManager interface {
 
 	// ClearMatch invalidates every cache entry for a match URN: the
 	// match summary, fixture, and live status. Mirrors Java
-	// SportsInfoManager.clearMatch and .NET DeleteMatchFromCache —
-	// both invalidate all three caches atomically.
+	// SportsInfoManager.clearMatch and .NET DeleteMatchFromCache.
+	//
+	// The three caches are cleared sequentially, not atomically: a
+	// Match built concurrently with the call may combine a freshly
+	// reloaded summary with the previous fixture or status snapshot
+	// (each individually consistent). Once ClearMatch returns, all
+	// three entries are invalidated and the next read of each
+	// refetches.
 	ClearMatch(id types.URN)
 	// ClearFixture invalidates only the fixture cache entry.
 	ClearFixture(id types.URN)
@@ -163,7 +169,6 @@ type sportsInfoManager interface {
 // accessors are gone).
 type marketDescriptionManager interface {
 	MarketDescriptions(ctx context.Context) ([]types.MarketDescription, error)
-	MarketDescriptionByIDAndVariant(ctx context.Context, marketID int, variant types.Optional[string]) (*types.MarketDescription, error)
 	// LocalizedMarketDescriptionByIDAndVariant returns a description
 	// in the supplied locales (parity with .NET / Java); the first
 	// locale is the primary, additional locales preload the cache.

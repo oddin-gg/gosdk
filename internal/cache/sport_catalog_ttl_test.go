@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -120,6 +121,396 @@ func TestSportCache_CatalogNotRefetchedWithinTTL(t *testing.T) {
 	}
 	if got := srv.sportHits.Load(); got != 1 {
 		t.Fatalf("catalog hits = %d, want 1 (no refetch inside the TTL window)", got)
+	}
+}
+
+// TestSportCache_RemovedSportReconciled pins the catalog refresh as a
+// REPLACE: a sport absent from the fresh response must stop being
+// served. Pre-fix the sports map was upsert-only — Sports() listed a
+// removed sport for the process lifetime, and building it then failed
+// on its tournament fetch.
+func TestSportCache_RemovedSportReconciled(t *testing.T) {
+	srv := newSportSrv(t, twoSportCatalog, noTournaments)
+	sc := newSportDataCache(t.Context(), newAPIClientForTest(t, srv.Server), log.New(nil))
+	sc.catalogTTL = 50 * time.Millisecond
+
+	ids, err := sc.Sports(t.Context(), []types.Locale{types.EnLocale})
+	if err != nil {
+		t.Fatalf("initial Sports: %v", err)
+	}
+	if len(ids) != 2 {
+		t.Fatalf("Sports = %v, want 2 entries", ids)
+	}
+
+	srv.serveSports(oneSportCatalog) // sport 2 removed upstream
+	time.Sleep(80 * time.Millisecond)
+
+	ids, err = sc.Sports(t.Context(), []types.Locale{types.EnLocale})
+	if err != nil {
+		t.Fatalf("Sports after removal: %v", err)
+	}
+	if len(ids) != 1 || ids[0] != sportOne {
+		t.Fatalf("Sports = %v, want only %s (removed sport must not linger)", ids, sportOne.ToString())
+	}
+	if _, err := sc.Sport(t.Context(), sportTwo, []types.Locale{types.EnLocale}); !errors.Is(err, ErrItemNotFoundInCache) {
+		t.Fatalf("Sport(removed) err = %v, want ErrItemNotFoundInCache", err)
+	}
+}
+
+// TestSportCache_EmptyResponseDoesNotWipeCatalog: mirrors the market
+// cache's guard — an empty-but-successful catalog response must not be
+// treated as "every sport was removed upstream" (pre-fix it wiped the
+// sports map and marked the locale loaded, serving not-found for every
+// sport for a full catalogTTL).
+func TestSportCache_EmptyResponseDoesNotWipeCatalog(t *testing.T) {
+	srv := newSportSrv(t, twoSportCatalog, noTournaments)
+	sc := newSportDataCache(t.Context(), newAPIClientForTest(t, srv.Server), log.New(nil))
+	sc.catalogTTL = 50 * time.Millisecond
+
+	if _, err := sc.Sports(t.Context(), []types.Locale{types.EnLocale}); err != nil {
+		t.Fatalf("seed Sports: %v", err)
+	}
+
+	srv.serveSports(`<?xml version="1.0"?><sports/>`)
+	time.Sleep(80 * time.Millisecond)
+
+	ids, err := sc.Sports(t.Context(), []types.Locale{types.EnLocale})
+	if err != nil {
+		t.Fatalf("Sports across empty response: %v", err)
+	}
+	if len(ids) != 2 {
+		t.Fatalf("Sports = %v, want 2 entries (empty response must not wipe the catalog)", ids)
+	}
+
+	// A real (non-empty) removal still reconciles.
+	srv.serveSports(oneSportCatalog)
+	time.Sleep(80 * time.Millisecond)
+	ids, err = sc.Sports(t.Context(), []types.Locale{types.EnLocale})
+	if err != nil {
+		t.Fatalf("Sports after recovery: %v", err)
+	}
+	if len(ids) != 1 {
+		t.Fatalf("Sports = %v, want 1 (non-empty response keeps removal authority)", ids)
+	}
+}
+
+// TestSportCache_StalePreClearFlightLoses mirrors the market cache's
+// stale-flight regression (ragnar-cr run-3 F003): a pre-clear (gen-0)
+// catalog flight finishing after a post-clear (gen-1) flight must not
+// overwrite the fresh names or re-create sports the newer reconcile
+// removed. Pre-fix only the old flight's reconcile and locale mark
+// were suppressed — its row stores landed and, with the fresh mark
+// standing, served stale/resurrected sports for up to catalogTTL.
+func TestSportCache_StalePreClearFlightLoses(t *testing.T) {
+	v1 := `<?xml version="1.0"?>
+<sports><sport id="od:sport:1" name="Football" abbreviation="FB"/><sport id="od:sport:2" name="Tennis" abbreviation="TN"/><sport id="od:sport:3" name="Chess" abbreviation="CH"/></sports>`
+	// Post-clear upstream state: sport 1 renamed, sport 2 removed
+	// (sport 3 is the explicitly cleared one).
+	v2 := `<?xml version="1.0"?>
+<sports><sport id="od:sport:1" name="Footy" abbreviation="FB"/></sports>`
+
+	var body atomic.Pointer[string]
+	body.Store(&v1)
+	var gateArmed atomic.Bool
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		if gateArmed.CompareAndSwap(true, false) {
+			select {
+			case entered <- struct{}{}:
+			default:
+			}
+			<-release
+			_, _ = io.WriteString(w, v1) // the pre-clear catalog view
+			return
+		}
+		_, _ = io.WriteString(w, *body.Load())
+	}))
+	t.Cleanup(srv.Close)
+	sc := newSportDataCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	sc.catalogTTL = 50 * time.Millisecond
+
+	if _, err := sc.Sports(t.Context(), []types.Locale{types.EnLocale}); err != nil {
+		t.Fatalf("seed Sports: %v", err)
+	}
+	body.Store(&v2)
+	gateArmed.Store(true)
+	time.Sleep(80 * time.Millisecond)
+
+	// gen-0 flight starts and blocks inside the fixture.
+	aDone := make(chan error, 1)
+	go func() {
+		_, err := sc.Sports(t.Context(), []types.Locale{types.EnLocale})
+		aDone <- err
+	}()
+	<-entered
+
+	// Clear mid-flight; the newer gen-1 flight commits v2 first.
+	sc.Clear(types.URN{Prefix: "od", Type: "sport", ID: 3})
+	ids, err := sc.Sports(t.Context(), []types.Locale{types.EnLocale})
+	if err != nil {
+		t.Fatalf("post-clear Sports: %v", err)
+	}
+	if len(ids) != 1 || ids[0] != sportOne {
+		t.Fatalf("Sports = %v, want only %s from the fresh flight", ids, sportOne.ToString())
+	}
+
+	// The stale pre-clear flight finishes last: all its stores must lose.
+	close(release)
+	if err := <-aDone; err != nil {
+		t.Fatalf("gen-0 caller: %v (a superseded flight must not fail the read)", err)
+	}
+
+	ids, err = sc.Sports(t.Context(), []types.Locale{types.EnLocale})
+	if err != nil {
+		t.Fatalf("final Sports: %v", err)
+	}
+	if len(ids) != 1 || ids[0] != sportOne {
+		t.Fatalf("Sports = %v, want only %s (stale flight resurrected a reconciled-away sport)", ids, sportOne.ToString())
+	}
+	sc.mu.RLock()
+	entry := sc.sports[sportOne]
+	sc.mu.RUnlock()
+	entry.mu.RLock()
+	name := entry.name[types.EnLocale]
+	entry.mu.RUnlock()
+	if name != "Footy" {
+		t.Fatalf("sport 1 name = %q, want %q (stale flight overwrote the fresh name)", name, "Footy")
+	}
+}
+
+// TestSportCache_SupersededFlightJoinsWinner mirrors the market cache's
+// join-the-winner regression (ragnar-cr run-5 F001): a superseded
+// catalog flight must not answer its callers from the winner's
+// mid-commit state — for a cleared sport the winner had not yet
+// re-created, that read transiently dropped it from Sports().
+func TestSportCache_SupersededFlightJoinsWinner(t *testing.T) {
+	v1 := `<?xml version="1.0"?>
+<sports><sport id="od:sport:1" name="Football" abbreviation="FB"/><sport id="od:sport:2" name="Tennis" abbreviation="TN"/></sports>`
+	v2 := `<?xml version="1.0"?>
+<sports><sport id="od:sport:1" name="Footy" abbreviation="FB"/><sport id="od:sport:2" name="Tennis" abbreviation="TN"/></sports>`
+
+	var body atomic.Pointer[string]
+	body.Store(&v1)
+	var gateArmed atomic.Bool
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		if gateArmed.CompareAndSwap(true, false) {
+			select {
+			case entered <- struct{}{}:
+			default:
+			}
+			<-release
+			_, _ = io.WriteString(w, v1)
+			return
+		}
+		_, _ = io.WriteString(w, *body.Load())
+	}))
+	t.Cleanup(srv.Close)
+
+	var hookArmed atomic.Bool
+	winnerEntered := make(chan struct{}, 1)
+	winnerRelease := make(chan struct{})
+	sportCommitGateHook = func(types.Locale) {
+		if hookArmed.CompareAndSwap(true, false) {
+			select {
+			case winnerEntered <- struct{}{}:
+			default:
+			}
+			<-winnerRelease
+		}
+	}
+	t.Cleanup(func() { sportCommitGateHook = nil })
+
+	sc := newSportDataCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	sc.catalogTTL = 50 * time.Millisecond
+
+	if _, err := sc.Sports(t.Context(), []types.Locale{types.EnLocale}); err != nil {
+		t.Fatalf("seed Sports: %v", err)
+	}
+	body.Store(&v2)
+	gateArmed.Store(true)
+	time.Sleep(80 * time.Millisecond)
+
+	type result struct {
+		ids []types.URN
+		err error
+	}
+	aDone := make(chan result, 1)
+	go func() {
+		ids, err := sc.Sports(t.Context(), []types.Locale{types.EnLocale})
+		aDone <- result{ids: ids, err: err}
+	}()
+	<-entered
+
+	// Sport 1 is cleared mid-flight; the winner starts, wins the cursor,
+	// and pauses before re-creating it.
+	sc.Clear(sportOne)
+	hookArmed.Store(true)
+	bDone := make(chan error, 1)
+	go func() {
+		_, err := sc.Sports(t.Context(), []types.Locale{types.EnLocale})
+		bDone <- err
+	}()
+	<-winnerEntered
+
+	close(release)
+	select {
+	case r := <-aDone:
+		t.Fatalf("superseded caller answered mid-commit: (%v, %v) — must wait for the winner", r.ids, r.err)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	close(winnerRelease)
+	if err := <-bDone; err != nil {
+		t.Fatalf("winner caller: %v", err)
+	}
+	r := <-aDone
+	if r.err != nil {
+		t.Fatalf("superseded caller: %v", r.err)
+	}
+	if len(r.ids) != 2 {
+		t.Fatalf("superseded caller saw Sports = %v, want both sports (pre-fix: the cleared sport transiently vanished)", r.ids)
+	}
+}
+
+// TestSportCache_MidCommitSupersededFlightJoinsWinner mirrors the
+// market cache's flight-END re-check regression: a catalog flight that
+// won the cursor and then got superseded MID-commit must hand its
+// callers to the still-running winner instead of reporting success —
+// pre-fix its caller re-read the cleared, not-yet-recreated sport and
+// Sports() transiently dropped it.
+func TestSportCache_MidCommitSupersededFlightJoinsWinner(t *testing.T) {
+	v1 := `<?xml version="1.0"?>
+<sports><sport id="od:sport:1" name="Football" abbreviation="FB"/></sports>`
+	v2 := `<?xml version="1.0"?>
+<sports><sport id="od:sport:1" name="Footy-2" abbreviation="FB"/></sports>`
+	v3 := `<?xml version="1.0"?>
+<sports><sport id="od:sport:1" name="Footy-3" abbreviation="FB"/></sports>`
+
+	var body atomic.Pointer[string]
+	body.Store(&v1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = io.WriteString(w, *body.Load())
+	}))
+	t.Cleanup(srv.Close)
+
+	var hookSeq atomic.Int64
+	entered1 := make(chan struct{}, 1)
+	entered2 := make(chan struct{}, 1)
+	rel1 := make(chan struct{})
+	rel2 := make(chan struct{})
+	sportCommitGateHook = func(types.Locale) {
+		switch hookSeq.Add(1) {
+		case 1:
+			entered1 <- struct{}{}
+			<-rel1
+		case 2:
+			entered2 <- struct{}{}
+			<-rel2
+		}
+	}
+	t.Cleanup(func() { sportCommitGateHook = nil })
+
+	sc := newSportDataCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	sc.catalogTTL = 50 * time.Millisecond
+
+	hookSeq.Store(-1) // seed flight passes the gate (Add → 0)
+	if _, err := sc.Sports(t.Context(), []types.Locale{types.EnLocale}); err != nil {
+		t.Fatalf("seed Sports: %v", err)
+	}
+	hookSeq.Store(0)
+	body.Store(&v2)
+	time.Sleep(80 * time.Millisecond)
+
+	// Flight B fetches v2, wins the cursor, pauses mid-commit.
+	type result struct {
+		ids []types.URN
+		err error
+	}
+	bDone := make(chan result, 1)
+	go func() {
+		ids, err := sc.Sports(t.Context(), []types.Locale{types.EnLocale})
+		bDone <- result{ids: ids, err: err}
+	}()
+	<-entered1
+
+	// Clear sport 1; winner flight C fetches v3, takes the cursor, and
+	// pauses mid-commit too.
+	sc.Clear(sportOne)
+	body.Store(&v3)
+	cDone := make(chan error, 1)
+	go func() {
+		_, err := sc.Sports(t.Context(), []types.Locale{types.EnLocale})
+		cDone <- err
+	}()
+	<-entered2
+
+	// B resumes while the winner is still mid-commit: its stores are all
+	// rejected, and it must join the winner rather than answer from the
+	// cleared, not-yet-recreated state.
+	close(rel1)
+	select {
+	case r := <-bDone:
+		t.Fatalf("mid-commit-superseded caller answered early: (%v, %v)", r.ids, r.err)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	close(rel2)
+	if err := <-cDone; err != nil {
+		t.Fatalf("winner caller: %v", err)
+	}
+	r := <-bDone
+	if r.err != nil {
+		t.Fatalf("mid-commit-superseded caller: %v", r.err)
+	}
+	if len(r.ids) != 1 || r.ids[0] != sportOne {
+		t.Fatalf("Sports = %v, want the winner's view", r.ids)
+	}
+	sc.mu.RLock()
+	entry := sc.sports[sportOne]
+	sc.mu.RUnlock()
+	entry.mu.RLock()
+	name := entry.name[types.EnLocale]
+	entry.mu.RUnlock()
+	if name != "Footy-3" {
+		t.Fatalf("sport 1 name = %q, want %q from the winner", name, "Footy-3")
+	}
+}
+
+// TestSportCache_ReconcilePerLocale: the catalog response is
+// authoritative for ITS locale only — a sport present in en but absent
+// from the de catalog keeps its en data and stays reachable in en;
+// multi-locale reads report the de gap as the typed incomplete.
+func TestSportCache_ReconcilePerLocale(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		if strings.Contains(r.URL.Path, "/de/") {
+			_, _ = io.WriteString(w, oneSportCatalog) // de: sport 1 only
+			return
+		}
+		_, _ = io.WriteString(w, twoSportCatalog) // en: sports 1 and 2
+	}))
+	t.Cleanup(srv.Close)
+	sc := newSportDataCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+
+	if _, err := sc.Sports(t.Context(), []types.Locale{types.EnLocale}); err != nil {
+		t.Fatalf("en Sports: %v", err)
+	}
+	if _, err := sc.Sports(t.Context(), []types.Locale{types.DeLocale}); err != nil {
+		t.Fatalf("de Sports: %v", err)
+	}
+
+	// The de reconcile must not evict sport 2's en data.
+	if _, err := sc.Sport(t.Context(), sportTwo, []types.Locale{types.EnLocale}); err != nil {
+		t.Fatalf("Sport(2, en) after de load: %v (another locale's reconcile must not evict en data)", err)
+	}
+	if _, err := sc.Sport(t.Context(), sportTwo, []types.Locale{types.EnLocale, types.DeLocale}); !errors.Is(err, ErrSportLocaleIncomplete) {
+		t.Fatalf("Sport(2, [en,de]) err = %v, want ErrSportLocaleIncomplete", err)
 	}
 }
 
@@ -338,6 +729,187 @@ func TestSportCache_OutOfOrderRefreshKeepsNewest(t *testing.T) {
 	got := entry.makeTournamentIDsList()
 	if len(got) != 1 || got[0] != tournamentTen {
 		t.Fatalf("cached tournaments = %v, want only %s (the newer snapshot must survive)", got, tournamentTen.ToString())
+	}
+}
+
+// TestSportCache_TournamentCommitCannotResurrectRemovedSport pins the
+// stub-creation guard (Fixpoint i11): a tournament fetch that STARTED
+// before a catalog refresh removed its sport must not re-create the
+// sport as a nameless stub when it commits afterwards — the stub
+// pinned an obsolete tournament list and flipped Sport() from
+// not-found to ErrSportLocaleIncomplete for an entity the fresh
+// catalog says does not exist. The caller still receives its fetched
+// list; only the cache commit is skipped.
+func TestSportCache_TournamentCommitCannotResurrectRemovedSport(t *testing.T) {
+	var gateTournaments atomic.Bool
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var sportsBody atomic.Pointer[string]
+	body1 := twoSportCatalog
+	sportsBody.Store(&body1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		if strings.Contains(r.URL.Path, "/tournaments") {
+			if gateTournaments.CompareAndSwap(true, false) {
+				select {
+				case entered <- struct{}{}:
+				default:
+				}
+				<-release
+			}
+			_, _ = io.WriteString(w, `<?xml version="1.0"?>
+<sport_tournaments><sport id="od:sport:2" name="Tennis"/><tournaments>`+
+				`<tournament id="od:tournament:10" name="T10"><sport id="od:sport:2" name="Tennis"/></tournament>`+
+				`</tournaments></sport_tournaments>`)
+			return
+		}
+		_, _ = io.WriteString(w, *sportsBody.Load())
+	}))
+	t.Cleanup(srv.Close)
+	sc := newSportDataCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	sc.catalogTTL = 50 * time.Millisecond
+
+	if _, err := sc.Sports(t.Context(), []types.Locale{types.EnLocale}); err != nil {
+		t.Fatalf("seed Sports: %v", err)
+	}
+
+	// The tournament fetch for sport 2 starts and blocks.
+	gateTournaments.Store(true)
+	tDone := make(chan error, 1)
+	go func() {
+		_, err := sc.SportTournaments(t.Context(), sportTwo, types.EnLocale)
+		tDone <- err
+	}()
+	<-entered
+
+	// Meanwhile the catalog refreshes without sport 2 (removed upstream).
+	body2 := oneSportCatalog
+	sportsBody.Store(&body2)
+	time.Sleep(80 * time.Millisecond)
+	if _, err := sc.Sports(t.Context(), []types.Locale{types.EnLocale}); err != nil {
+		t.Fatalf("catalog refresh: %v", err)
+	}
+
+	// The older tournament fetch completes: its caller gets the list,
+	// but the removed sport must not come back as a stub.
+	close(release)
+	if err := <-tDone; err != nil {
+		t.Fatalf("SportTournaments: %v (the caller still gets its fetched list)", err)
+	}
+	ids, err := sc.Sports(t.Context(), []types.Locale{types.EnLocale})
+	if err != nil {
+		t.Fatalf("Sports after commit: %v", err)
+	}
+	if len(ids) != 1 || ids[0] != sportOne {
+		t.Fatalf("Sports = %v, want only %s (stub resurrected a removed sport)", ids, sportOne.ToString())
+	}
+	if _, err := sc.Sport(t.Context(), sportTwo, []types.Locale{types.EnLocale}); !errors.Is(err, ErrItemNotFoundInCache) {
+		t.Fatalf("Sport(removed) err = %v, want ErrItemNotFoundInCache (not a locale-gap error from a stub)", err)
+	}
+}
+
+// TestSportCache_IconPathSurvivesIconlessLocale: icon_path is
+// locale-independent and optional on the wire — a locale whose catalog
+// row omits it must not erase the icon another locale supplied
+// (pre-fix the unconditional assign let refresh ordering decide which
+// value survived).
+func TestSportCache_IconPathSurvivesIconlessLocale(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		if strings.Contains(r.URL.Path, "/en/") {
+			_, _ = io.WriteString(w, `<?xml version="1.0"?>
+<sports><sport id="od:sport:1" name="Football" abbreviation="FB" icon_path="/icons/fb.png"/></sports>`)
+			return
+		}
+		_, _ = io.WriteString(w, oneSportCatalog) // de: no icon_path attribute
+	}))
+	t.Cleanup(srv.Close)
+	sc := newSportDataCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+
+	if _, err := sc.Sports(t.Context(), []types.Locale{types.EnLocale}); err != nil {
+		t.Fatalf("en Sports: %v", err)
+	}
+	if _, err := sc.Sports(t.Context(), []types.Locale{types.DeLocale}); err != nil {
+		t.Fatalf("de Sports: %v", err)
+	}
+
+	entry, err := sc.Sport(t.Context(), sportOne, []types.Locale{types.EnLocale})
+	if err != nil {
+		t.Fatalf("Sport: %v", err)
+	}
+	snap := entry.summarySnapshot()
+	if v, ok := snap.IconPath.Get(); !ok || v != "/icons/fb.png" {
+		t.Fatalf("IconPath = %v, want /icons/fb.png (icon-less de row must not erase it)", snap.IconPath)
+	}
+}
+
+// TestSportCache_ReconcileSuppressedByMidFlightClear mirrors the
+// market cache's guard proof (Fixpoint i14): a catalog response
+// fetched BEFORE a Clear must not prune sports it omits, and the
+// locale mark stays unset so the next read reconciles fresh.
+func TestSportCache_ReconcileSuppressedByMidFlightClear(t *testing.T) {
+	var body atomic.Pointer[string]
+	b1 := twoSportCatalog
+	body.Store(&b1)
+	var gateArmed atomic.Bool
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "application/xml")
+		if gateArmed.CompareAndSwap(true, false) {
+			select {
+			case entered <- struct{}{}:
+			default:
+			}
+			<-release
+			_, _ = io.WriteString(w, oneSportCatalog) // pre-clear view omitting sport 2
+			return
+		}
+		_, _ = io.WriteString(w, *body.Load())
+	}))
+	t.Cleanup(srv.Close)
+	sc := newSportDataCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	sc.catalogTTL = 50 * time.Millisecond
+
+	if _, err := sc.Sports(t.Context(), []types.Locale{types.EnLocale}); err != nil {
+		t.Fatalf("seed Sports: %v", err)
+	}
+	gateArmed.Store(true)
+	time.Sleep(80 * time.Millisecond)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := sc.Sports(t.Context(), []types.Locale{types.EnLocale})
+		done <- err
+	}()
+	<-entered
+
+	sc.Clear(sportOne) // an unrelated sport is cleared mid-flight
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("gated Sports: %v", err)
+	}
+
+	// Sport 2 (omitted by the pre-clear response) must survive.
+	sc.mu.RLock()
+	_, ok := sc.sports[sportTwo]
+	sc.mu.RUnlock()
+	if !ok {
+		t.Fatal("sport 2 pruned by a pre-clear response's reconcile (invalidation-race guard broken)")
+	}
+	// The next read refetches (mark stayed unset) and restores sport 1.
+	before := hits.Load()
+	ids, err := sc.Sports(t.Context(), []types.Locale{types.EnLocale})
+	if err != nil {
+		t.Fatalf("post-clear Sports: %v", err)
+	}
+	if hits.Load() != before+1 {
+		t.Fatalf("catalog hits = %d, want %d (a suppressed load must not mark the locale loaded)", hits.Load(), before+1)
+	}
+	if len(ids) != 2 {
+		t.Fatalf("Sports = %v, want both after the fresh refetch", ids)
 	}
 }
 

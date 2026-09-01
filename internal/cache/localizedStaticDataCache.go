@@ -56,12 +56,27 @@ type LocalizedStaticDataCache struct {
 // id, fetching missing locales as needed. Loads run outside the mutex
 // (deduplicated via per-locale singleflight) so a slow upstream
 // doesn't block other readers.
+//
+// Description carries the PRIMARY locale of this call — locales[0],
+// matching the SDK-wide primary-locale convention (BuildMatchStatus,
+// MultiLocalized* managers) and the types.LocalizedStaticData contract.
+// Pre-fix it was filled from the CONFIGURED DEFAULT locale instead, so
+// a caller requesting [de] with default en loaded Descriptions[de] but
+// got Description == None (en was never fetched) — the documented
+// primary-locale value silently missing for every non-default-locale
+// consumer. The configured default is the fallback only when the caller
+// supplied no locales.
 func (l *LocalizedStaticDataCache) LocalizedItem(ctx context.Context, id int, locales []types.Locale) (types.LocalizedStaticData, error) {
 	missing := l.unloadedLocales(locales)
 	if len(missing) > 0 {
 		if err := l.loadLocales(ctx, missing); err != nil {
 			return types.LocalizedStaticData{}, err
 		}
+	}
+
+	primary := l.oddsFeedConfiguration.DefaultLocale()
+	if len(locales) > 0 {
+		primary = locales[0]
 	}
 
 	l.mux.RLock()
@@ -73,8 +88,16 @@ func (l *LocalizedStaticDataCache) LocalizedItem(ctx context.Context, id int, lo
 	for k, v := range localeMap {
 		out.Descriptions[k] = v
 	}
-	if def, ok := localeMap[l.oddsFeedConfiguration.DefaultLocale()]; ok {
+	if def, ok := localeMap[primary]; ok {
 		out.Description = types.Some(def)
+	}
+	// Requested-locale coverage, computed under the same lock as the
+	// snapshot above so the two can't disagree.
+	var incomplete []types.Locale
+	for _, loc := range locales {
+		if _, ok := localeMap[loc]; !ok {
+			incomplete = append(incomplete, loc)
+		}
 	}
 	l.mux.RUnlock()
 	if !known {
@@ -84,6 +107,16 @@ func (l *LocalizedStaticDataCache) LocalizedItem(ctx context.Context, id int, lo
 		// documented nil-on-unknown semantics silently broken); a typed
 		// not-found lets them distinguish absent from empty.
 		return out, fmt.Errorf("static data id %d not in catalog: %w", id, ErrItemNotFoundInCache)
+	}
+	if len(incomplete) > 0 {
+		// The id exists, but some requested locale has no description
+		// (the id — or its description — is absent from that locale's
+		// catalog). Pre-fix this reported success whenever the id existed
+		// in ANY loaded locale, silently handing back a partial localized
+		// value; the market/sport caches surface exactly this condition
+		// as a typed incomplete error. The partial value is returned WITH
+		// the error so tolerant callers can attach what exists.
+		return out, fmt.Errorf("static data id %d: locales %v unavailable in upstream catalog: %w", id, incomplete, ErrStaticDataLocaleIncomplete)
 	}
 	return out, nil
 }
