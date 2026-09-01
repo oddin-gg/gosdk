@@ -156,9 +156,12 @@ type MarketDescription struct {
 	Variant                Optional[string]
 	IncludesOutcomesOfType Optional[string]
 	OutcomeType            Optional[string]
-	Outcomes               []OutcomeDescription
-	Specifiers             []Specifier
-	Groups                 []string
+	// Outcomes are listed in upstream catalog order — the display order
+	// of the selections (e.g. Exact Number of Goals: 0, 1, 2, …, 10,
+	// 11). Not sorted by ID; IDs are strings and would order 10 before 2.
+	Outcomes   []OutcomeDescription
+	Specifiers []Specifier
+	Groups     []string
 }
 
 // LocalizedName returns the localized market description name, or

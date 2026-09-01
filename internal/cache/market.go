@@ -1,11 +1,9 @@
 package cache
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -921,21 +919,20 @@ func (m *MarketDescriptionCache) upsert(description data.MarketDescription, loca
 	}
 	entry, ok := m.lookupLocked(key)
 	if !ok {
-		outcomes := make(map[string]*LocalizedOutcomeDescription, len(description.Outcomes.Outcome))
-		for _, o := range description.Outcomes.Outcome {
-			outcomes[o.ID] = &LocalizedOutcomeDescription{
-				name:        make(map[types.Locale]string),
-				description: make(map[types.Locale]string),
-			}
-		}
 		entry = &LocalizedMarketDescription{
 			id:                     description.ID,
 			variant:                description.Variant,
 			IncludesOutcomesOfType: description.IncludesOutcomesOfType,
 			OutcomeType:            description.OutcomeType,
-			outcomes:               outcomes,
+			outcomes:               make([]*LocalizedOutcomeDescription, 0, len(description.Outcomes.Outcome)),
+			outcomeByID:            make(map[string]*LocalizedOutcomeDescription, len(description.Outcomes.Outcome)),
 			name:                   make(map[types.Locale]string),
 			groups:                 splitGroups(description.Groups),
+		}
+		// Seed in catalog order. The entry is not yet published (still
+		// under m.mu, not in any store), so no d.mu is needed.
+		for _, o := range description.Outcomes.Outcome {
+			entry.addOutcomeLocked(o.ID)
 		}
 		if key.isDynamicVariant() {
 			m.variants.Add(key, entry)
@@ -1047,10 +1044,26 @@ type LocalizedMarketDescription struct {
 	variant                *string
 	IncludesOutcomesOfType *string
 	OutcomeType            *string
-	outcomes               map[string]*LocalizedOutcomeDescription
-	specifiers             []types.Specifier
-	name                   map[types.Locale]string
-	groups                 []string
+	// outcomes keeps the upstream catalog order (GAD-4104). Selections
+	// such as Exact Score / Exact Number of Goals are listed 0, 1, 2, …
+	// by the catalog; a keyed map lost that order and the lexical sort
+	// that replaced it yielded 0, 1, 10, 11, 2, … in every public
+	// projection (outcome IDs are strings). outcomeByID indexes the same
+	// entries for merge lookups — the two structures are maintained ONLY
+	// through addOutcomeLocked / filterOutcomesLocked /
+	// reorderOutcomesLocked so they cannot diverge. The order is the
+	// NEWEST authoritative row's listing (reorderOutcomesLocked, gated
+	// on lastRowAt like the sweep and metadata), so upstream insertions
+	// and reorders land on refresh; sweep survivors the newest row no
+	// longer lists trail in their previous relative order, and a
+	// stale-started row's additions sit at the end until the next
+	// newest row places them. Removals (the merge sweep, removeLocale)
+	// compact in place preserving the survivors' order.
+	outcomes    []*LocalizedOutcomeDescription
+	outcomeByID map[string]*LocalizedOutcomeDescription
+	specifiers  []types.Specifier
+	name        map[types.Locale]string
+	groups      []string
 
 	// lastRowAt is the fetch-start instant of the newest APPLIED
 	// well-formed row — the monotonic cursor for merge's cross-locale
@@ -1059,6 +1072,77 @@ type LocalizedMarketDescription struct {
 	// LocalizedSport.replaceTournaments and the match-status cache's
 	// apiStartedAt; see merge for the race it closes.
 	lastRowAt time.Time
+}
+
+// addOutcomeLocked appends a new, empty outcome under id and indexes
+// it. Caller must hold d.mu (or own an unpublished entry). Returns the
+// existing entry when id is already known, so a repeat never changes
+// the established order; the appended position is provisional — a
+// newest-row merge places it via reorderOutcomesLocked.
+func (d *LocalizedMarketDescription) addOutcomeLocked(id string) *LocalizedOutcomeDescription {
+	if lo, ok := d.outcomeByID[id]; ok {
+		return lo
+	}
+	lo := &LocalizedOutcomeDescription{
+		id:          id,
+		name:        make(map[types.Locale]string),
+		description: make(map[types.Locale]string),
+	}
+	if d.outcomeByID == nil {
+		d.outcomeByID = make(map[string]*LocalizedOutcomeDescription)
+	}
+	d.outcomeByID[id] = lo
+	d.outcomes = append(d.outcomes, lo)
+	return lo
+}
+
+// filterOutcomesLocked retains, IN ORDER, the outcomes for which keep
+// returns true and drops the rest from both the ordered slice and the
+// index — the removal counterpart of addOutcomeLocked, used by merge's
+// sweep and removeLocale. keep runs once per outcome, in catalog order.
+// Caller must hold d.mu.
+func (d *LocalizedMarketDescription) filterOutcomesLocked(keep func(*LocalizedOutcomeDescription) bool) {
+	kept := d.outcomes[:0]
+	for _, lo := range d.outcomes {
+		if keep(lo) {
+			kept = append(kept, lo)
+			continue
+		}
+		delete(d.outcomeByID, lo.id)
+	}
+	// Zero the tail so dropped outcomes don't stay reachable through
+	// the shared backing array.
+	for i := len(kept); i < len(d.outcomes); i++ {
+		d.outcomes[i] = nil
+	}
+	d.outcomes = kept
+}
+
+// reorderOutcomesLocked rebuilds the ordered slice to match the newest
+// authoritative row's listing: row outcomes first, in row order, then
+// any sweep survivors the row no longer lists (outcomes retained on
+// fresh cross-locale disagreement) in their previous relative order.
+// Membership is untouched — every element comes from outcomeByID, which
+// addOutcomeLocked/filterOutcomesLocked keep authoritative. Caller must
+// hold d.mu and have already applied the row's adds and the sweep.
+func (d *LocalizedMarketDescription) reorderOutcomesLocked(row []data.MarketDescriptionOutcome) {
+	ordered := make([]*LocalizedOutcomeDescription, 0, len(d.outcomes))
+	placed := make(map[string]struct{}, len(row))
+	for _, o := range row {
+		if _, dup := placed[o.ID]; dup {
+			continue
+		}
+		placed[o.ID] = struct{}{}
+		if lo, ok := d.outcomeByID[o.ID]; ok {
+			ordered = append(ordered, lo)
+		}
+	}
+	for _, lo := range d.outcomes {
+		if _, ok := placed[lo.id]; !ok {
+			ordered = append(ordered, lo)
+		}
+	}
+	d.outcomes = ordered
 }
 
 func (d *LocalizedMarketDescription) hasLocale(locale types.Locale) bool {
@@ -1105,16 +1189,14 @@ func (d *LocalizedMarketDescription) removeLocale(locale types.Locale) (empty bo
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	delete(d.name, locale)
-	for id, lo := range d.outcomes {
+	d.filterOutcomesLocked(func(lo *LocalizedOutcomeDescription) bool {
 		lo.mu.Lock()
 		delete(lo.name, locale)
 		delete(lo.description, locale)
 		gone := len(lo.name) == 0
 		lo.mu.Unlock()
-		if gone {
-			delete(d.outcomes, id)
-		}
-	}
+		return !gone
+	})
 	return len(d.name) == 0 || len(d.outcomes) == 0
 }
 
@@ -1218,16 +1300,12 @@ func (d *LocalizedMarketDescription) merge(description data.MarketDescription, l
 		fresh := make(map[string]struct{}, len(description.Outcomes.Outcome))
 		for _, outcome := range description.Outcomes.Outcome {
 			fresh[outcome.ID] = struct{}{}
-			lo, ok := d.outcomes[outcome.ID]
-			if !ok {
-				// Add unconditionally — own-locale set membership is not
-				// gated on newest; see the completion-order note above.
-				lo = &LocalizedOutcomeDescription{
-					name:        make(map[types.Locale]string),
-					description: make(map[types.Locale]string),
-				}
-				d.outcomes[outcome.ID] = lo
-			}
+			// Add unconditionally — own-locale set membership is not
+			// gated on newest; see the completion-order note above. A
+			// new outcome is appended provisionally; when this row is the
+			// newest applied, reorderOutcomesLocked below places it (and
+			// everything else) exactly where the row lists it.
+			lo := d.addOutcomeLocked(outcome.ID)
 			lo.mu.Lock()
 			lo.name[locale] = outcome.Name
 			if outcome.Description != nil {
@@ -1244,9 +1322,9 @@ func (d *LocalizedMarketDescription) merge(description data.MarketDescription, l
 		// mark is stale (see the freshness-scoped contract above) AND
 		// this row is the newest applied — a stale-started row has no
 		// cross-locale authority.
-		for id, lo := range d.outcomes {
-			if _, ok := fresh[id]; ok {
-				continue
+		d.filterOutcomesLocked(func(lo *LocalizedOutcomeDescription) bool {
+			if _, ok := fresh[lo.id]; ok {
+				return true
 			}
 			lo.mu.Lock()
 			delete(lo.name, locale)
@@ -1261,12 +1339,22 @@ func (d *LocalizedMarketDescription) merge(description data.MarketDescription, l
 			}
 			gone := len(lo.name) == 0
 			lo.mu.Unlock()
-			if gone {
-				delete(d.outcomes, id)
-			}
-		}
+			return !gone
+		})
 
 		if newest {
+			// The newest row is authoritative for the outcome ORDER as
+			// well as the set (GAD-4104: the public contract is upstream
+			// catalog order, meaning the CURRENT catalog's). Fixing each
+			// position at first sight diverged permanently on an upstream
+			// insertion — a cached [0, 2] refreshed against [0, 1, 2]
+			// yielded [0, 2, 1] forever — and ignored deliberate upstream
+			// reorders. Gating on newest keeps the order monotonic
+			// (stale-started rows have no cross-locale authority, exactly
+			// like the sweep and the metadata) and completion-order
+			// independent: whichever of two concurrent rows applies
+			// second, the newer-started one's listing wins.
+			d.reorderOutcomesLocked(description.Outcomes.Outcome)
 			// Locale-independent metadata: the newest row is authoritative.
 			d.groups = splitGroups(description.Groups)
 			d.IncludesOutcomesOfType = description.IncludesOutcomesOfType
@@ -1296,8 +1384,12 @@ func (d *LocalizedMarketDescription) Snapshot() types.MarketDescription {
 		names[k] = v
 	}
 
+	// Upstream catalog order, preserved by d.outcomes (see the field
+	// doc) — deterministic across calls without any re-sort. The lexical
+	// sort that used to live here is the OTHER half of GAD-4104: string
+	// IDs ordered 10 before 2.
 	outcomes := make([]types.OutcomeDescription, 0, len(d.outcomes))
-	for id, oc := range d.outcomes {
+	for _, oc := range d.outcomes {
 		oc.mu.RLock()
 		ocNames := make(map[types.Locale]string, len(oc.name))
 		for k, v := range oc.name {
@@ -1309,17 +1401,11 @@ func (d *LocalizedMarketDescription) Snapshot() types.MarketDescription {
 		}
 		oc.mu.RUnlock()
 		outcomes = append(outcomes, types.OutcomeDescription{
-			ID:           id,
+			ID:           oc.id,
 			Names:        ocNames,
 			Descriptions: ocDesc,
 		})
 	}
-	// Deterministic public ordering: d.outcomes is a map, so the
-	// projection otherwise reshuffles between identical calls (see
-	// sortURNs for the class rationale).
-	slices.SortFunc(outcomes, func(a, b types.OutcomeDescription) int {
-		return cmp.Compare(a.ID, b.ID)
-	})
 
 	specifiers := make([]types.Specifier, len(d.specifiers))
 	copy(specifiers, d.specifiers)
@@ -1342,9 +1428,11 @@ func (d *LocalizedMarketDescription) Snapshot() types.MarketDescription {
 	}
 }
 
-// LocalizedOutcomeDescription holds per-locale outcome data.
+// LocalizedOutcomeDescription holds per-locale outcome data. id is the
+// outcome's upstream identifier, immutable after addOutcomeLocked.
 type LocalizedOutcomeDescription struct {
 	mu          sync.RWMutex
+	id          string
 	name        map[types.Locale]string
 	description map[types.Locale]string
 }
