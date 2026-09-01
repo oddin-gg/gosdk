@@ -71,18 +71,10 @@ func TestMarketDescription_OutcomeLevelLocaleCoverage(t *testing.T) {
 	d := &LocalizedMarketDescription{
 		id:   1,
 		name: map[types.Locale]string{types.EnLocale: "Winner", types.RuLocale: "Победитель"},
-		outcomes: map[string]*LocalizedOutcomeDescription{
-			"1": {
-				name:        map[types.Locale]string{types.EnLocale: "home", types.RuLocale: "Хозяева"},
-				description: map[types.Locale]string{},
-			},
-			"2": {
-				// ru payload omitted this outcome.
-				name:        map[types.Locale]string{types.EnLocale: "away"},
-				description: map[types.Locale]string{},
-			},
-		},
 	}
+	d.addOutcomeLocked("1").name = map[types.Locale]string{types.EnLocale: "home", types.RuLocale: "Хозяева"}
+	// ru payload omitted this outcome.
+	d.addOutcomeLocked("2").name = map[types.Locale]string{types.EnLocale: "away"}
 
 	missing := d.missingLocales([]types.Locale{types.EnLocale, types.RuLocale})
 	if len(missing) != 1 || missing[0] != types.RuLocale {
@@ -97,7 +89,7 @@ func TestMarketDescription_OutcomeLevelLocaleCoverage(t *testing.T) {
 
 	// Close the gap: full coverage again. Descriptions stay absent —
 	// they are optional and must not count against coverage.
-	d.outcomes["2"].name[types.RuLocale] = "Гости"
+	d.outcomeByID["2"].name[types.RuLocale] = "Гости"
 	if missing := d.missingLocales([]types.Locale{types.EnLocale, types.RuLocale}); len(missing) != 0 {
 		t.Fatalf("missingLocales after fill = %v, want none (descriptions are optional)", missing)
 	}

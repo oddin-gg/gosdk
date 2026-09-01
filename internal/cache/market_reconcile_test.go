@@ -382,9 +382,8 @@ func TestMarketDescription_StaleStartedRowHasNoCrossLocaleAuthority(t *testing.T
 		}
 	}
 	d := &LocalizedMarketDescription{
-		id:       9,
-		name:     make(map[types.Locale]string),
-		outcomes: make(map[string]*LocalizedOutcomeDescription),
+		id:   9,
+		name: make(map[types.Locale]string),
 	}
 
 	olderStart := time.Now()
@@ -1051,9 +1050,8 @@ func TestMarketDescription_OutcomeSetIndependentOfCompletionOrder(t *testing.T) 
 	}
 	newEntry := func() *LocalizedMarketDescription {
 		return &LocalizedMarketDescription{
-			id:       9,
-			name:     make(map[types.Locale]string),
-			outcomes: make(map[string]*LocalizedOutcomeDescription),
+			id:   9,
+			name: make(map[types.Locale]string),
 		}
 	}
 	enStart := time.Now()
