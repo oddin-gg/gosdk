@@ -180,6 +180,10 @@ func WithPreloadLocales(locales ...types.Locale) Option {
 // are then nil and Market.Name / Outcome.Name report None for every
 // locale. Ids, specifiers, odds, status and settlement results are
 // unaffected, as is the catalog API.
+//
+// Market and outcome names are the ONLY thing this gates. Event,
+// tournament, sport and competitor names travel on the same message,
+// come from their own caches, and resolve either way.
 func WithMessageNameResolution(enabled bool) Option {
 	return func(c *Config) { c.messageNameResolution = enabled }
 }
