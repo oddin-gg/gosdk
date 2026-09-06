@@ -15,33 +15,31 @@ import (
 // interface via configAdapter (config_adapter.go) — the legacy
 // configuration.go setter-chain type is gone.
 type Config struct {
-	accessToken          string
-	defaultLocale        types.Locale
-	preloadLocales       []types.Locale
-	maxInactivity        time.Duration
-	maxRecoveryExecution time.Duration
-	initialSnapshotTime  time.Duration
-	httpClientTimeout    time.Duration
-	messagingPort        int
-	sdkNodeID            *int
-	selectedEnvironment  types.Environment
-	selectedRegion       types.Region
-	reportExtendedData   bool
-	forcedAPIHost        string
-	forcedMQHost         string
-	exchangeName         string
-	replayExchangeName   string
-	sportIDPrefix        string
-	exceptionStrategy    ExceptionStrategy
-	logger               *slog.Logger
-	apiCallLogging       APILogLevel
-	apiCallBodyLimit     int
-	amqpPrefetch         int
-	subscriptionBuffer   int
-	httpClient           *http.Client
-	shutdownTimeout      time.Duration
-	// messageNameResolution gates name resolution during message
-	// construction; see WithMessageNameResolution. Default true.
+	accessToken           string
+	defaultLocale         types.Locale
+	preloadLocales        []types.Locale
+	maxInactivity         time.Duration
+	maxRecoveryExecution  time.Duration
+	initialSnapshotTime   time.Duration
+	httpClientTimeout     time.Duration
+	messagingPort         int
+	sdkNodeID             *int
+	selectedEnvironment   types.Environment
+	selectedRegion        types.Region
+	reportExtendedData    bool
+	forcedAPIHost         string
+	forcedMQHost          string
+	exchangeName          string
+	replayExchangeName    string
+	sportIDPrefix         string
+	exceptionStrategy     ExceptionStrategy
+	logger                *slog.Logger
+	apiCallLogging        APILogLevel
+	apiCallBodyLimit      int
+	amqpPrefetch          int
+	subscriptionBuffer    int
+	httpClient            *http.Client
+	shutdownTimeout       time.Duration
 	messageNameResolution bool
 }
 
@@ -125,22 +123,21 @@ const (
 // token and the target environment; everything else is supplied via options.
 func NewConfig(token string, env types.Environment, opts ...Option) Config {
 	cfg := Config{
-		accessToken:          token,
-		selectedEnvironment:  env,
-		defaultLocale:        types.EnLocale,
-		maxInactivity:        defaultMaxInactivity,
-		maxRecoveryExecution: defaultMaxRecoveryExecution,
-		httpClientTimeout:    defaultHTTPClientTimeoutPub,
-		messagingPort:        defaultMessagingPort,
-		exchangeName:         defaultExchangeName,
-		replayExchangeName:   defaultReplayExchangeName,
-		sportIDPrefix:        defaultSportIDPrefix,
-		exceptionStrategy:    StrategyCatch,
-		apiCallBodyLimit:     defaultAPIBodyLimitBytes,
-		amqpPrefetch:         defaultAMQPPrefetch,
-		subscriptionBuffer:   defaultSubscriptionBuffer,
-		shutdownTimeout:      defaultShutdownTimeout,
-		// Opt-OUT: existing consumers read names off the message.
+		accessToken:           token,
+		selectedEnvironment:   env,
+		defaultLocale:         types.EnLocale,
+		maxInactivity:         defaultMaxInactivity,
+		maxRecoveryExecution:  defaultMaxRecoveryExecution,
+		httpClientTimeout:     defaultHTTPClientTimeoutPub,
+		messagingPort:         defaultMessagingPort,
+		exchangeName:          defaultExchangeName,
+		replayExchangeName:    defaultReplayExchangeName,
+		sportIDPrefix:         defaultSportIDPrefix,
+		exceptionStrategy:     StrategyCatch,
+		apiCallBodyLimit:      defaultAPIBodyLimitBytes,
+		amqpPrefetch:          defaultAMQPPrefetch,
+		subscriptionBuffer:    defaultSubscriptionBuffer,
+		shutdownTimeout:       defaultShutdownTimeout,
 		messageNameResolution: true,
 	}
 	for _, opt := range opts {
