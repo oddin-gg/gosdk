@@ -84,7 +84,7 @@ func TestMakeOutcomeName_LocaleMissSkipsInsteadOfEmpty(t *testing.T) {
 // the default locale, starving the home/away substitution for every
 // preloaded non-default locale.
 func TestFeedMessageFactory_BuildLocales(t *testing.T) {
-	mf := NewMarketFactory(nil, []types.Locale{types.EnLocale, types.RuLocale}, nil)
+	mf := NewMarketFactory(nil, []types.Locale{types.EnLocale, types.RuLocale}, true, nil)
 	f := &FeedMessageFactory{marketFactory: mf, oddsFeedConfiguration: minimalCfg{}}
 	got := f.buildLocales()
 	if len(got) != 2 || got[0] != types.EnLocale || got[1] != types.RuLocale {

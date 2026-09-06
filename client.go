@@ -404,6 +404,7 @@ func New(ctx context.Context, cfg Config) (*Client, error) {
 	marketFactory := factory.NewMarketFactory(
 		marketDataFactory,
 		marketFactoryLocales,
+		c.cfg.messageNameResolution,
 		c.logger,
 	)
 	c.feedMessageFactory = factory.NewFeedMessageFactory(

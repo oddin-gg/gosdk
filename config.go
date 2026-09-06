@@ -40,6 +40,9 @@ type Config struct {
 	subscriptionBuffer   int
 	httpClient           *http.Client
 	shutdownTimeout      time.Duration
+	// messageNameResolution gates name resolution during message
+	// construction; see WithMessageNameResolution. Default true.
+	messageNameResolution bool
 }
 
 // redactedToken is what every Config formatting path shows in place of
@@ -54,12 +57,12 @@ const redactedToken = "[REDACTED]"
 // through this redacted rendering.
 func (c Config) String() string {
 	return fmt.Sprintf(
-		"gosdk.Config{accessToken:%s env:%v region:%q defaultLocale:%s preloadLocales:%v node:%v apiHost:%q mqHost:%q port:%d exchange:%q replayExchange:%q maxInactivity:%v maxRecoveryExecution:%v httpTimeout:%v shutdownTimeout:%v strategy:%v extendedData:%v apiLog:%v prefetch:%d subBuffer:%d}",
+		"gosdk.Config{accessToken:%s env:%v region:%q defaultLocale:%s preloadLocales:%v node:%v apiHost:%q mqHost:%q port:%d exchange:%q replayExchange:%q maxInactivity:%v maxRecoveryExecution:%v httpTimeout:%v shutdownTimeout:%v strategy:%v extendedData:%v apiLog:%v prefetch:%d subBuffer:%d messageNames:%t}",
 		redactedToken, c.selectedEnvironment, c.selectedRegion, c.defaultLocale, c.preloadLocales,
 		c.sdkNodeID, c.forcedAPIHost, c.forcedMQHost, c.messagingPort, c.exchangeName,
 		c.replayExchangeName, c.maxInactivity, c.maxRecoveryExecution, c.httpClientTimeout,
 		c.shutdownTimeout, c.exceptionStrategy, c.reportExtendedData, c.apiCallLogging,
-		c.amqpPrefetch, c.subscriptionBuffer,
+		c.amqpPrefetch, c.subscriptionBuffer, c.messageNameResolution,
 	)
 }
 
@@ -137,6 +140,8 @@ func NewConfig(token string, env types.Environment, opts ...Option) Config {
 		amqpPrefetch:         defaultAMQPPrefetch,
 		subscriptionBuffer:   defaultSubscriptionBuffer,
 		shutdownTimeout:      defaultShutdownTimeout,
+		// Opt-OUT: existing consumers read names off the message.
+		messageNameResolution: true,
 	}
 	for _, opt := range opts {
 		opt(&cfg)
@@ -164,6 +169,19 @@ func WithPreloadLocales(locales ...types.Locale) Option {
 	return func(c *Config) {
 		c.preloadLocales = append([]types.Locale(nil), locales...)
 	}
+}
+
+// WithMessageNameResolution toggles market/outcome name resolution during
+// AMQP message construction. Default true.
+//
+// Resolution costs a description-cache lookup per market AND per outcome,
+// per configured locale, on the single session goroutine. Set false when
+// the consumer takes its names from the catalog API instead: Names maps
+// are then nil and Market.Name / Outcome.Name report None for every
+// locale. Ids, specifiers, odds, status and settlement results are
+// unaffected, as is the catalog API.
+func WithMessageNameResolution(enabled bool) Option {
+	return func(c *Config) { c.messageNameResolution = enabled }
 }
 
 // WithRegion selects the AWS region suffix for the broker / API host
@@ -365,6 +383,9 @@ func (c Config) AccessToken() string { return c.accessToken }
 
 // DefaultLocale returns the configured default locale.
 func (c Config) DefaultLocale() types.Locale { return c.defaultLocale }
+
+// MessageNameResolution reports whether message construction resolves names.
+func (c Config) MessageNameResolution() bool { return c.messageNameResolution }
 
 // PreloadLocales returns a copy of the preload locale list.
 func (c Config) PreloadLocales() []types.Locale {

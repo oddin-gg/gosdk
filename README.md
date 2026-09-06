@@ -189,6 +189,17 @@ for msg := range sub.Messages() {
 }
 ```
 
+Filling those maps costs a description-cache lookup per market *and per
+outcome*, per locale. A consumer that takes its names from the catalog
+API (`Client.MarketDescription`) can skip the work:
+
+```go
+cfg := gosdk.NewConfig(token, env,
+    gosdk.WithMessageNameResolution(false))
+// m.Name(locale) / o.Name(locale) → None for every locale.
+// Ids, specifiers, odds, status and settlement results are unaffected.
+```
+
 ### Recovery
 
 ```go

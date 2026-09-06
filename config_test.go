@@ -35,6 +35,20 @@ func TestNewConfig_Defaults(t *testing.T) {
 	if cfg.Logger() != nil {
 		t.Errorf("logger should be nil by default")
 	}
+	// Opt-OUT polarity: a zero value would strip names from every consumer.
+	if !cfg.MessageNameResolution() {
+		t.Errorf("message name resolution should default to true")
+	}
+}
+
+func TestWithMessageNameResolution(t *testing.T) {
+	cfg := NewConfig("token", types.IntegrationEnvironment, WithMessageNameResolution(false))
+	if cfg.MessageNameResolution() {
+		t.Errorf("WithMessageNameResolution(false): got true")
+	}
+	if !NewConfig("token", types.IntegrationEnvironment, WithMessageNameResolution(true)).MessageNameResolution() {
+		t.Errorf("WithMessageNameResolution(true): got false")
+	}
 }
 
 func TestNewConfig_AllOptions(t *testing.T) {

@@ -322,3 +322,68 @@ func TestMarketFactory_BuildOutcomeSettlement_VoidFactor(t *testing.T) {
 
 func ptrStr(s string) *string                              { return &s }
 func ptrFR(r feedXML.OutcomeResult) *feedXML.OutcomeResult { return &r }
+
+// countingMarketData counts cache lookups, so the opt-out test can
+// assert the work was SKIPPED and not merely discarded.
+type countingMarketData struct {
+	marketCalls  int
+	outcomeCalls int
+}
+
+func (c *countingMarketData) MarketName(_ context.Context, _ types.Locale) (*string, error) {
+	c.marketCalls++
+	name := "1x2"
+	return &name, nil
+}
+
+func (c *countingMarketData) OutcomeName(_ context.Context, _ string, _ types.Locale) (*string, error) {
+	c.outcomeCalls++
+	name := "home"
+	return &name, nil
+}
+
+// TestResolveNames_OptOut pins WithMessageNameResolution(false). The stub
+// returns a good name, so a broken gate fails on both the call count and
+// the non-nil map rather than passing by accident.
+func TestResolveNames_OptOut(t *testing.T) {
+	locales := []types.Locale{types.EnLocale, types.RuLocale}
+
+	off := NewMarketFactory(nil, locales, false, nil)
+	md := &countingMarketData{}
+
+	if names := off.resolveMarketNames(context.Background(), md); names != nil {
+		t.Fatalf("market names = %v, want nil", names)
+	}
+	if names := off.resolveOutcomeNames(context.Background(), md, "1"); names != nil {
+		t.Fatalf("outcome names = %v, want nil", names)
+	}
+	if md.marketCalls != 0 || md.outcomeCalls != 0 {
+		t.Fatalf("description cache consulted %d/%d times, want 0/0", md.marketCalls, md.outcomeCalls)
+	}
+
+	// Nil maps read as None, the shape a missing locale already produces.
+	if _, ok := (types.Market{}).Name(types.EnLocale).Get(); ok {
+		t.Fatal("Market.Name over nil Names = Some, want None")
+	}
+	if _, ok := (types.Outcome{}).Name(types.EnLocale).Get(); ok {
+		t.Fatal("Outcome.Name over nil Names = Some, want None")
+	}
+}
+
+// TestResolveNames_DefaultResolves: the default stays ON.
+func TestResolveNames_DefaultResolves(t *testing.T) {
+	locales := []types.Locale{types.EnLocale, types.RuLocale}
+
+	on := NewMarketFactory(nil, locales, true, nil)
+	md := &countingMarketData{}
+
+	if names := on.resolveMarketNames(context.Background(), md); len(names) != 2 {
+		t.Fatalf("market names = %v, want an entry per locale", names)
+	}
+	if names := on.resolveOutcomeNames(context.Background(), md, "1"); len(names) != 2 {
+		t.Fatalf("outcome names = %v, want an entry per locale", names)
+	}
+	if md.marketCalls != 2 || md.outcomeCalls != 2 {
+		t.Fatalf("description cache consulted %d/%d times, want 2/2", md.marketCalls, md.outcomeCalls)
+	}
+}
