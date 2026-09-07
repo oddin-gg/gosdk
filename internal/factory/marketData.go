@@ -3,8 +3,8 @@ package factory
 import (
 	"context"
 	"fmt"
-	"slices"
 	"strings"
+	"sync"
 
 	"github.com/oddin-gg/gosdk/internal/cache"
 	"github.com/oddin-gg/gosdk/internal/config"
@@ -17,7 +17,10 @@ type MarketDataFactory struct {
 	marketDescriptionFactory *MarketDescriptionFactory
 }
 
-// BuildMarketData ...
+// BuildMarketData returns the name resolver for ONE market of ONE
+// message. The value memoizes its description-cache reads, so it must
+// not be reused across messages (a later message must observe a catalog
+// refresh); the market factory builds a fresh one per market it emits.
 func (m MarketDataFactory) BuildMarketData(event interface{}, marketID int, specifiers map[string]string) types.MarketData {
 	return &marketDataImpl{
 		marketID:                 marketID,
@@ -40,40 +43,89 @@ type marketDataImpl struct {
 	specifiers               map[string]string
 	marketDescriptionFactory *MarketDescriptionFactory
 	event                    interface{}
+
+	// descriptions memoizes the cache entry per requested locale shape
+	// for the lifetime of this value (one market of one message). Name
+	// resolution asks for the description once per market name per
+	// locale and once per OUTCOME per locale; the cache lookup behind
+	// each ask walks every outcome of the entry for its locale-coverage
+	// check (twice), so per outcome it was O(N) mutex traffic and per
+	// market O(N²) — the second half of CORE-4213 after the Snapshot()
+	// copy. With the memo the lookup runs once per (locale, canonical)
+	// shape per market; everything after it is a map read.
+	//
+	// Errors are memoized too: an unknown market failed the same way for
+	// every outcome × locale, each attempt a fresh cache miss.
+	mu           sync.Mutex
+	descriptions []descriptionMemo
 }
 
-func (m marketDataImpl) OutcomeName(ctx context.Context, outcomeID string, locale types.Locale) (*string, error) {
+// descriptionMemo is one memoized description lookup. canonical marks
+// the OutcomeName shape, which requests EnLocale alongside locale (see
+// OutcomeName); MarketName requests locale alone.
+type descriptionMemo struct {
+	locale    types.Locale
+	canonical bool
+	entry     *cache.LocalizedMarketDescription
+	err       error
+}
+
+// description returns the live cache entry for this market covering
+// locale (and EnLocale too when canonical), memoized per shape.
+func (m *marketDataImpl) description(ctx context.Context, locale types.Locale, canonical bool) (*cache.LocalizedMarketDescription, error) {
+	// EnLocale alongside EnLocale is the plain shape.
+	canonical = canonical && locale != types.EnLocale
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := range m.descriptions {
+		if d := &m.descriptions[i]; d.locale == locale && d.canonical == canonical {
+			return d.entry, d.err
+		}
+	}
+	locales := []types.Locale{locale}
+	if canonical {
+		locales = append(locales, types.EnLocale)
+	}
+	entry, err := m.marketDescriptionFactory.localizedMarketDescription(ctx, m.marketID, m.specifiers, locales)
+	m.descriptions = append(m.descriptions, descriptionMemo{locale: locale, canonical: canonical, entry: entry, err: err})
+	return entry, err
+}
+
+func (m *marketDataImpl) OutcomeName(ctx context.Context, outcomeID string, locale types.Locale) (*string, error) {
 	// Request EnLocale alongside the caller's locale: the English
 	// catalog label is the canonical outcome identity used to recognise
 	// the home/away placeholder outcomes locale-independently (see
 	// makeOutcomeName). Matching on the LOCALIZED label (pre-fix) only
 	// ever worked for English — a ru/de catalog returned its generic
 	// translated label instead of the localized competitor name.
-	locales := []types.Locale{locale}
-	if locale != types.EnLocale {
-		locales = append(locales, types.EnLocale)
-	}
-	marketDescription, err := m.marketDescriptionFactory.MarketDescriptionByIDAndSpecifiers(ctx, m.marketID, m.specifiers, locales)
+	marketDescription, err := m.description(ctx, locale, true)
 	if err != nil {
 		return nil, err
 	}
 
-	found := false
+	// Direct by-id read off the live entry: exists tells the dynamic
+	// branch below apart from a known outcome the catalog does not name
+	// in this locale (→ None). Pre-CORE-4213 this scanned the Outcomes
+	// slice of a full Snapshot() copy.
 	var outcomeName *string
 	var canonicalName types.Optional[string]
-	for _, outcome := range marketDescription.Outcomes {
-		if outcome.ID == outcomeID {
-			if v, ok := outcome.LocalizedName(locale).Get(); ok {
-				outcomeName = &v
+	name, found, ok := marketDescription.OutcomeName(outcomeID, locale)
+	if found {
+		if ok {
+			outcomeName = &name
+		}
+		if locale == types.EnLocale {
+			if ok {
+				canonicalName = types.Some(name)
 			}
-			canonicalName = outcome.LocalizedName(types.EnLocale)
-			found = true
-			break
+		} else if en, _, okEn := marketDescription.OutcomeName(outcomeID, types.EnLocale); okEn {
+			canonicalName = types.Some(en)
 		}
 	}
 
 	// market with dynamic outcomes can have also non-dynamic outcome, that's reason why outcome with outcomeID exists at first
-	if ot, ok := marketDescription.OutcomeType.Get(); !found && ok {
+	if ot, ok := marketDescription.OutcomeTypeValue().Get(); !found && ok {
 		switch outcomeType(ot) {
 		case playerOutcomeType:
 			player, err := m.marketDescriptionFactory.playerCache.GetPlayer(ctx, cache.PlayerCacheKey{PlayerID: outcomeID, Locale: locale})
@@ -109,18 +161,18 @@ func (m marketDataImpl) OutcomeName(ctx context.Context, outcomeID string, local
 	return m.makeOutcomeName(outcomeName, canonicalName, locale)
 }
 
-func (m marketDataImpl) MarketName(ctx context.Context, locale types.Locale) (*string, error) {
-	marketDescription, err := m.marketDescriptionFactory.MarketDescriptionByIDAndSpecifiers(ctx, m.marketID, m.specifiers, []types.Locale{locale})
+func (m *marketDataImpl) MarketName(ctx context.Context, locale types.Locale) (*string, error) {
+	marketDescription, err := m.description(ctx, locale, false)
 	if err != nil {
 		return nil, err
 	}
 
-	name, ok := marketDescription.LocalizedName(locale).Get()
+	name, ok := marketDescription.Name(locale)
 	if !ok {
 		return nil, fmt.Errorf("missing locale %s for market %d", locale, m.marketID)
 	}
 
-	return m.makeMarketName(ctx, name, locale)
+	return m.makeMarketName(ctx, marketDescription, name, locale)
 }
 
 // makeOutcomeName substitutes the home/away placeholder outcomes with
@@ -133,7 +185,7 @@ func (m marketDataImpl) MarketName(ctx context.Context, locale types.Locale) (*s
 // of the team name. canonicalName falls back to the localized label
 // when the en name isn't loaded (defensive; OutcomeName requests en
 // explicitly), which preserves the English behaviour exactly.
-func (m marketDataImpl) makeOutcomeName(outcomeName *string, canonicalName types.Optional[string], locale types.Locale) (*string, error) {
+func (m *marketDataImpl) makeOutcomeName(outcomeName *string, canonicalName types.Optional[string], locale types.Locale) (*string, error) {
 	if outcomeName == nil {
 		return nil, nil
 	}
@@ -163,17 +215,17 @@ func (m marketDataImpl) makeOutcomeName(outcomeName *string, canonicalName types
 	}
 }
 
-func (m marketDataImpl) makeMarketName(ctx context.Context, marketName string, locale types.Locale) (*string, error) {
+// makeMarketName fills the "{specifier}" placeholders of the catalog
+// template from the market's specifiers. marketDescription is the entry
+// MarketName already fetched — pre-CORE-4213 this re-fetched (and
+// re-copied) the description just to read Groups.
+func (m *marketDataImpl) makeMarketName(ctx context.Context, marketDescription *cache.LocalizedMarketDescription, marketName string, locale types.Locale) (*string, error) {
 	if len(m.specifiers) == 0 {
 		return &marketName, nil
 	}
 
 	match, isMatch := m.event.(types.Match)
-	marketDescription, err := m.marketDescriptionFactory.MarketDescriptionByIDAndSpecifiers(ctx, m.marketID, m.specifiers, []types.Locale{locale})
-	if err != nil {
-		return nil, err
-	}
-	groups := marketDescription.Groups
+	isPropsMarket := marketDescription.HasGroup(types.MarketGroupPlayerProps)
 
 	template := marketName
 	for key, value := range m.specifiers {
@@ -202,8 +254,10 @@ func (m marketDataImpl) makeMarketName(ctx context.Context, marketName string, l
 		}
 
 		// handle props markets
-		if name, isPropsMarket := m.getPropsName(ctx, value, groups, locale); isPropsMarket {
-			value = name
+		if isPropsMarket {
+			if name, ok := m.getPropsName(ctx, value, locale); ok {
+				value = name
+			}
 		}
 
 		template = strings.ReplaceAll(template, key, value)
@@ -212,11 +266,10 @@ func (m marketDataImpl) makeMarketName(ctx context.Context, marketName string, l
 	return &template, nil
 }
 
-func (m marketDataImpl) getPropsName(ctx context.Context, entityID string, groups []string, locale types.Locale) (string, bool) {
-	if !slices.Contains(groups, types.MarketGroupPlayerProps) {
-		return "", false
-	}
-
+// getPropsName resolves a player-props specifier value (a player URN)
+// to the player's localized name. Callers gate on the market carrying
+// the player_props group.
+func (m *marketDataImpl) getPropsName(ctx context.Context, entityID string, locale types.Locale) (string, bool) {
 	urn, err := types.ParseURN(entityID)
 	if err != nil {
 		return "", false
