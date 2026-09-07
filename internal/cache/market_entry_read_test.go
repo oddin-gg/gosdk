@@ -2,6 +2,8 @@ package cache
 
 import (
 	"fmt"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -237,4 +239,192 @@ func BenchmarkMarketDescriptionByID_WarmHit(b *testing.B) {
 			}
 		})
 	}
+}
+
+// readRevision builds one catalog revision of market 7 for the
+// concurrency test below. rev tags every string, so a name can be
+// traced back to the revision and the locale that produced it; dynamic
+// swings the market between its two shapes — outcome "3" listed with
+// outcome_type="competitor", or absent with outcome_type="player" and
+// the player_props group. Those are exactly the fields merge rewrites
+// in place under one d.mu.Lock, so they are the ones ReadOutcomeName
+// must never mix across revisions.
+func readRevision(rev string, locale types.Locale, dynamic bool) data.MarketDescription {
+	outcomes := []data.MarketDescriptionOutcome{
+		{ID: "1", Name: fmt.Sprintf("o1-%s-%s", locale, rev)},
+		{ID: "2", Name: fmt.Sprintf("o2-%s-%s", locale, rev)},
+	}
+	outcomeType, groups := "competitor", "all"
+	if dynamic {
+		outcomeType, groups = "player", "all|"+types.MarketGroupPlayerProps
+	} else {
+		outcomes = append(outcomes, data.MarketDescriptionOutcome{ID: "3", Name: fmt.Sprintf("o3-%s-%s", locale, rev)})
+	}
+	return data.MarketDescription{
+		ID:          7,
+		Name:        fmt.Sprintf("market-%s-%s", locale, rev),
+		OutcomeType: &outcomeType,
+		Groups:      groups,
+		Outcomes:    &data.OutcomesWrapper{Outcome: outcomes},
+	}
+}
+
+// TestLocalizedMarketDescription_ReadsRaceWithMerge runs the direct
+// reads against an entry a catalog refresh is rewriting underneath
+// them — the situation every RLock in the accessors exists for, and
+// which the rest of this file (single-threaded, hand-built entries)
+// does not reach. Two things are under test: the reads are race-clean
+// against merge under -race, and ReadOutcomeName's cross-field answer
+// comes from ONE revision (the point of c6d5df2 — composing it from
+// separate OutcomeName / OutcomeTypeValue calls let a merge land in
+// between and fire the dynamic player branch for a listed outcome).
+func TestLocalizedMarketDescription_ReadsRaceWithMerge(t *testing.T) {
+	const merges = 400
+	notStale := func(types.Locale) bool { return false }
+
+	// readLoop runs read until done closes, so the readers cover the
+	// whole merge sequence rather than a fixed number of iterations. A
+	// reader that reports a failure stops, so one torn read does not
+	// bury the log under a few thousand copies of itself.
+	readLoop := func(wg *sync.WaitGroup, done <-chan struct{}, readers int, read func() bool) {
+		for i := 0; i < readers; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for {
+					select {
+					case <-done:
+						return
+					default:
+					}
+					if !read() {
+						return
+					}
+				}
+			}()
+		}
+	}
+
+	t.Run("outcome set and outcome_type stay one revision", func(t *testing.T) {
+		// One locale: the outcome set, outcome_type and groups all move
+		// in a single merge call, so "outcome 3 is listed" and "this is
+		// a player market" must agree in every observed read.
+		d := &LocalizedMarketDescription{id: 7, name: map[types.Locale]string{}}
+		base := time.Now()
+		d.merge(readRevision("A", types.EnLocale, false), types.EnLocale, base, notStale)
+
+		var wg sync.WaitGroup
+		done := make(chan struct{})
+		readLoop(&wg, done, 4, func() bool {
+			read := d.ReadOutcomeName("3", types.EnLocale, types.EnLocale)
+			outcomeType, _ := read.OutcomeType.Get()
+			switch {
+			case read.Exists && outcomeType != "competitor":
+				t.Errorf("outcome 3 listed but outcome_type = %q; the pair straddled a merge", outcomeType)
+				return false
+			case !read.Exists && outcomeType != "player":
+				t.Errorf("outcome 3 absent but outcome_type = %q; the pair straddled a merge", outcomeType)
+				return false
+			case read.Exists && (!read.NameOK || !strings.HasPrefix(read.Name, "o3-en-")):
+				t.Errorf("outcome 3 name = %q, ok=%v; want an o3-en-* hit", read.Name, read.NameOK)
+				return false
+			}
+			// canonical == locale collapses to the localized read.
+			if read.Name != read.Canonical || read.NameOK != read.CanonicalOK {
+				t.Errorf("collapsed read disagrees with itself: %+v", read)
+				return false
+			}
+			// An outcome no revision drops is always there and named.
+			if o1 := d.ReadOutcomeName("1", types.EnLocale, types.EnLocale); !o1.Exists || !o1.NameOK || !strings.HasPrefix(o1.Name, "o1-en-") {
+				t.Errorf("outcome 1 = %+v; want a permanent o1-en-* hit", o1)
+				return false
+			}
+			if name, ok := d.Name(types.EnLocale); !ok || !strings.HasPrefix(name, "market-en-") {
+				t.Errorf("market name = %q, ok=%v; want a market-en-* hit", name, ok)
+				return false
+			}
+			_, _, _ = d.OutcomeName("2", types.EnLocale)
+			_ = d.OutcomeTypeValue()
+			_ = d.HasGroup(types.MarketGroupPlayerProps)
+			return true
+		})
+
+		for i := 1; i <= merges; i++ {
+			rev, dynamic := "A", false
+			if i%2 == 1 {
+				rev, dynamic = "B", true
+			}
+			// loadStarted must strictly increase: an equal timestamp is
+			// not "newest", and merge would then apply the row's
+			// own-locale outcome removal without its metadata — a
+			// legitimate mixed state, not the tear under test.
+			d.merge(readRevision(rev, types.EnLocale, dynamic), types.EnLocale, base.Add(time.Duration(i)*time.Millisecond), notStale)
+		}
+		close(done)
+		wg.Wait()
+	})
+
+	t.Run("localized and canonical reads never bleed across locales", func(t *testing.T) {
+		// Two locales refreshing concurrently: ReadOutcomeName reads the
+		// localized name and the canonical English label the home/away
+		// substitution keys on out of one lock scope, and each must come
+		// from its own locale whichever revision is landing.
+		d := &LocalizedMarketDescription{id: 7, name: map[types.Locale]string{}}
+		base := time.Now()
+		for _, l := range []types.Locale{types.EnLocale, types.RuLocale} {
+			d.merge(readRevision("A", l, false), l, base, notStale)
+		}
+
+		var wg sync.WaitGroup
+		done := make(chan struct{})
+		readLoop(&wg, done, 4, func() bool {
+			// Outcome 1 is in every revision of both locales, so both
+			// reads are always hits.
+			read := d.ReadOutcomeName("1", types.RuLocale, types.EnLocale)
+			if !read.Exists || !read.NameOK || !strings.HasPrefix(read.Name, "o1-ru-") {
+				t.Errorf("localized read = %q, ok=%v exists=%v; want an o1-ru-* hit", read.Name, read.NameOK, read.Exists)
+				return false
+			}
+			if !read.CanonicalOK || !strings.HasPrefix(read.Canonical, "o1-en-") {
+				t.Errorf("canonical read = %q, ok=%v; want an o1-en-* hit", read.Canonical, read.CanonicalOK)
+				return false
+			}
+			// The swing outcome may be gone in either locale, but a hit
+			// is never the other locale's string.
+			if swing := d.ReadOutcomeName("3", types.RuLocale, types.EnLocale); swing.Exists {
+				if swing.NameOK && !strings.HasPrefix(swing.Name, "o3-ru-") {
+					t.Errorf("outcome 3 localized name = %q; want o3-ru-*", swing.Name)
+					return false
+				}
+				if swing.CanonicalOK && !strings.HasPrefix(swing.Canonical, "o3-en-") {
+					t.Errorf("outcome 3 canonical name = %q; want o3-en-*", swing.Canonical)
+					return false
+				}
+			}
+			if name, ok := d.Name(types.RuLocale); !ok || !strings.HasPrefix(name, "market-ru-") {
+				t.Errorf("ru market name = %q, ok=%v; want a market-ru-* hit", name, ok)
+				return false
+			}
+			_ = d.Snapshot()
+			return true
+		})
+
+		var mergers sync.WaitGroup
+		for _, l := range []types.Locale{types.EnLocale, types.RuLocale} {
+			mergers.Add(1)
+			go func(locale types.Locale) {
+				defer mergers.Done()
+				for i := 1; i <= merges; i++ {
+					rev, dynamic := "A", false
+					if i%2 == 1 {
+						rev, dynamic = "B", true
+					}
+					d.merge(readRevision(rev, locale, dynamic), locale, base.Add(time.Duration(i)*time.Millisecond), notStale)
+				}
+			}(l)
+		}
+		mergers.Wait()
+		close(done)
+		wg.Wait()
+	})
 }
