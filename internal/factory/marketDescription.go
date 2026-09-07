@@ -26,22 +26,56 @@ func (m MarketDescriptionFactory) MarketDescriptionByIDAndSpecifiers(
 	specifiers map[string]string,
 	locales []types.Locale,
 ) (*types.MarketDescription, error) {
-	variant := types.None[string]()
-	if specifier, ok := specifiers["variant"]; ok {
-		variant = types.Some(specifier)
-	}
-	return m.MarketDescriptionByIDAndVariant(ctx, marketID, variant, locales)
+	return m.MarketDescriptionByIDAndVariant(ctx, marketID, variantFromSpecifiers(specifiers), locales)
 }
 
 // MarketDescriptionByIDAndVariant returns the cached market description
 // by (marketID, variant, locales). Always returns a populated value or
-// an error.
+// an error. The value is a Snapshot() — the consumer's own copy, safe
+// to keep. It is the public catalog API's read (Client.MarketDescription
+// and friends); the message-build path reads the live entry instead,
+// see localizedMarketDescription.
 func (m MarketDescriptionFactory) MarketDescriptionByIDAndVariant(
 	ctx context.Context,
 	marketID int,
 	variant types.Optional[string],
 	locales []types.Locale,
 ) (*types.MarketDescription, error) {
+	mds, err := m.entryByIDAndVariant(ctx, marketID, variant, locales)
+	if err != nil {
+		return nil, err
+	}
+	desc := mds.Snapshot()
+	return &desc, nil
+}
+
+// localizedMarketDescription returns the LIVE cache entry for
+// (marketID, variant-from-specifiers) covering locales, for the
+// message-build path. Readers use the entry's locked accessors (Name,
+// OutcomeName, OutcomeTypeValue, HasGroup) and must not retain the
+// pointer past the message being built — a catalog refresh mutates the
+// entry in place.
+//
+// CORE-4213: building a message used to read names through
+// MarketDescriptionByIDAndSpecifiers, i.e. through a Snapshot() of the
+// whole description — one fresh map per outcome of the market — per
+// outcome, per locale, on the single session goroutine. On production
+// traffic that was ~4 MB of garbage per odds_change.
+func (m MarketDescriptionFactory) localizedMarketDescription(
+	ctx context.Context,
+	marketID int,
+	specifiers map[string]string,
+	locales []types.Locale,
+) (*cache.LocalizedMarketDescription, error) {
+	return m.entryByIDAndVariant(ctx, marketID, variantFromSpecifiers(specifiers), locales)
+}
+
+func (m MarketDescriptionFactory) entryByIDAndVariant(
+	ctx context.Context,
+	marketID int,
+	variant types.Optional[string],
+	locales []types.Locale,
+) (*cache.LocalizedMarketDescription, error) {
 	mds, err := m.marketDescriptionCache.MarketDescriptionByID(ctx, marketID, variant, locales)
 	if err != nil {
 		return nil, fmt.Errorf("market description %d/%v locales=%v: %w", marketID, variant, locales, err)
@@ -51,8 +85,16 @@ func (m MarketDescriptionFactory) MarketDescriptionByIDAndVariant(
 		// ErrItemNotFoundInCache so consumers can errors.Is.
 		return nil, fmt.Errorf("market description %d/%v locales=%v: cache returned nil with no error: %w", marketID, variant, locales, cache.ErrItemNotFoundInCache)
 	}
-	desc := mds.Snapshot()
-	return &desc, nil
+	return mds, nil
+}
+
+// variantFromSpecifiers lifts the "variant" specifier, when present,
+// into the cache key's variant.
+func variantFromSpecifiers(specifiers map[string]string) types.Optional[string] {
+	if specifier, ok := specifiers["variant"]; ok {
+		return types.Some(specifier)
+	}
+	return types.None[string]()
 }
 
 // MarketVoidReasons returns the void-reasons catalog.

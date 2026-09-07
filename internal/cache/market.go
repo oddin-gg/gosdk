@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1426,6 +1427,61 @@ func (d *LocalizedMarketDescription) Snapshot() types.MarketDescription {
 		Specifiers:             specifiers,
 		Groups:                 groups,
 	}
+}
+
+// Name returns the market's name in locale straight off the entry,
+// under its read lock and without projecting the description. The bool
+// is the locale hit: ("", true) for a loaded-but-empty catalog name,
+// ("", false) when the locale is not loaded on this entry.
+//
+// This — with OutcomeName, OutcomeTypeValue and HasGroup — is the
+// message-build path's read (CORE-4213). Snapshot() serves the public
+// catalog API, where the consumer keeps the value; building a message
+// used to go through that projection too, copying the WHOLE description
+// (a map per outcome) to read one string, per outcome, per locale.
+func (d *LocalizedMarketDescription) Name(locale types.Locale) (string, bool) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	v, ok := d.name[locale]
+	return v, ok
+}
+
+// OutcomeName returns outcome id's name in locale by direct index.
+// exists reports whether the entry knows the outcome at all; ok is the
+// locale hit and is meaningful only when exists. The two are distinct
+// on purpose: the factory derives an UNKNOWN outcome's name from the
+// player / competitor catalog (dynamic-outcome markets), while a known
+// outcome the catalog does not name in this locale reports None.
+//
+// Lock order is d.mu → outcome.mu, the same as Snapshot and merge.
+func (d *LocalizedMarketDescription) OutcomeName(id string, locale types.Locale) (name string, exists, ok bool) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	lo, exists := d.outcomeByID[id]
+	if !exists {
+		return "", false, false
+	}
+	lo.mu.RLock()
+	name, ok = lo.name[locale]
+	lo.mu.RUnlock()
+	return name, true, ok
+}
+
+// OutcomeTypeValue returns the market's outcome_type under the read
+// lock (merge rewrites the field in place on every newest-row refresh,
+// so a bare field read from another goroutine would race).
+func (d *LocalizedMarketDescription) OutcomeTypeValue() types.Optional[string] {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return types.FromPtr(d.OutcomeType)
+}
+
+// HasGroup reports whether the market carries group, under the read
+// lock. Replaces reading Snapshot().Groups for the player-props check.
+func (d *LocalizedMarketDescription) HasGroup(group string) bool {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return slices.Contains(d.groups, group)
 }
 
 // LocalizedOutcomeDescription holds per-locale outcome data. id is the
