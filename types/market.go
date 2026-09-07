@@ -36,7 +36,8 @@ type Market struct {
 	// locale (default + WithPreloadLocales) whose name resolved from
 	// the description catalog. A locale the catalog cannot supply is
 	// OMITTED (never an empty-string entry) — including, in the
-	// degenerate case, the default locale.
+	// degenerate case, the default locale. Nil throughout when the
+	// consumer set WithMessageNameResolution(false).
 	Names map[Locale]string
 }
 

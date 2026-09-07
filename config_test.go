@@ -2,6 +2,7 @@ package gosdk
 
 import (
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -34,6 +35,33 @@ func TestNewConfig_Defaults(t *testing.T) {
 	}
 	if cfg.Logger() != nil {
 		t.Errorf("logger should be nil by default")
+	}
+	// Opt-OUT polarity: a zero value would strip names from every consumer.
+	if !cfg.MessageNameResolution() {
+		t.Errorf("message name resolution should default to true")
+	}
+}
+
+func TestWithMessageNameResolution(t *testing.T) {
+	cfg := NewConfig("token", types.IntegrationEnvironment, WithMessageNameResolution(false))
+	if cfg.MessageNameResolution() {
+		t.Errorf("WithMessageNameResolution(false): got true")
+	}
+	if !NewConfig("token", types.IntegrationEnvironment, WithMessageNameResolution(true)).MessageNameResolution() {
+		t.Errorf("WithMessageNameResolution(true): got false")
+	}
+}
+
+// TestConfig_String_ReportsMessageNames pins the messageNames field of
+// Config.String to its positional argument: a startup log of the config
+// is the first place an operator looks when names come back None.
+func TestConfig_String_ReportsMessageNames(t *testing.T) {
+	if got := NewConfig("token", types.IntegrationEnvironment).String(); !strings.Contains(got, "messageNames:true") {
+		t.Errorf("default Config.String() = %q, want messageNames:true", got)
+	}
+	got := NewConfig("token", types.IntegrationEnvironment, WithMessageNameResolution(false)).String()
+	if !strings.Contains(got, "messageNames:false") {
+		t.Errorf("opted-out Config.String() = %q, want messageNames:false", got)
 	}
 }
 

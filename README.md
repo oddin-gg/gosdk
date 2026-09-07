@@ -171,8 +171,8 @@ state := client.ConnectionState()                 // Connected / Closed / etc.
 ### Per-message locale lookups
 
 Markets and outcomes carry per-locale name maps populated for every
-locale in `WithPreloadLocales(...)`. Lookups are O(1) — no I/O on the
-message hot path:
+locale in `WithPreloadLocales(...)`. Reading a name back off a decoded
+message is an O(1) map lookup and does no I/O:
 
 ```go
 cfg := gosdk.NewConfig(token, env,
@@ -188,6 +188,33 @@ for msg := range sub.Messages() {
     }
 }
 ```
+
+Filling those maps is the part that costs: a description-cache lookup per
+market *and per outcome*, per locale, at message-construction time — and
+I/O on a cold cache. A consumer that takes its names from the catalog API
+(`Client.MarketDescription`) can skip the work:
+
+```go
+cfg := gosdk.NewConfig(token, env,
+    gosdk.WithMessageNameResolution(false))
+// m.Name(locale) / o.Name(locale) → None for every locale.
+// Ids, specifiers, odds, status and settlement results are unaffected.
+```
+
+Only **market and outcome** names are affected. Event, tournament, sport
+and competitor names travel on the same message, come from their own
+caches, and resolve either way.
+
+Note that the catalog API is **not a drop-in replacement** for the message
+names. The message names are *composed*: `{specifier}` placeholders in the
+catalog template are filled from the market's specifiers, a home/away
+specifier value and the home/away placeholder outcomes are replaced with
+the event's localized competitor names, and player-props entities resolve
+to player names. `Client.MarketDescription` returns the raw template with
+none of that applied. Opt out only when you
+need no market/outcome display names at all, or are prepared to compose
+them yourself. The SDK logs one Info line at `Client.New` when the option
+is off, so an unexpected `None` later has a findable cause.
 
 ### Recovery
 

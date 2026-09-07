@@ -20,7 +20,11 @@ import (
 type MarketFactory struct {
 	marketDataFactory *MarketDataFactory
 	locales           []types.Locale
-	logger            *log.Logger
+	// skipNameResolution is the negative so the ZERO VALUE resolves:
+	// MarketFactory is also built as a struct literal in tests, and the
+	// positive polarity made those literals emit nameless markets.
+	skipNameResolution bool
+	logger             *log.Logger
 }
 
 // BuildMarket ...
@@ -167,6 +171,9 @@ func (m MarketFactory) buildOutcomeSettlement(ctx context.Context, outcome feedX
 // string entry) so market.Name(loc) returns Some("") — distinct
 // from None per the Optional[string] contract.
 func (m MarketFactory) resolveMarketNames(ctx context.Context, md types.MarketData) map[types.Locale]string {
+	if m.skipNameResolution {
+		return nil
+	}
 	names := make(map[types.Locale]string, len(m.locales))
 	for _, l := range m.locales {
 		if name, ok := resolveMarketName(ctx, md, l); ok {
@@ -180,6 +187,9 @@ func (m MarketFactory) resolveMarketNames(ctx context.Context, md types.MarketDa
 // resolveMarketNames. Loaded-but-empty names are preserved as
 // Some("") (the map gets the empty entry).
 func (m MarketFactory) resolveOutcomeNames(ctx context.Context, md types.MarketData, outcomeID string) map[types.Locale]string {
+	if m.skipNameResolution {
+		return nil
+	}
 	names := make(map[types.Locale]string, len(m.locales))
 	for _, l := range m.locales {
 		if name, ok := resolveOutcomeName(ctx, md, outcomeID, l); ok {
@@ -219,11 +229,12 @@ func resolveOutcomeName(ctx context.Context, md types.MarketData, outcomeID stri
 }
 
 // NewMarketFactory ...
-func NewMarketFactory(marketDataFactory *MarketDataFactory, locales []types.Locale, logger *log.Logger) *MarketFactory {
+func NewMarketFactory(marketDataFactory *MarketDataFactory, locales []types.Locale, resolveNames bool, logger *log.Logger) *MarketFactory {
 	return &MarketFactory{
-		marketDataFactory: marketDataFactory,
-		locales:           locales,
-		logger:            logger,
+		marketDataFactory:  marketDataFactory,
+		locales:            locales,
+		skipNameResolution: !resolveNames,
+		logger:             logger,
 	}
 }
 

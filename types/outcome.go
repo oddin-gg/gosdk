@@ -46,6 +46,9 @@ func (v VoidFactor) String() string {
 // on miss) and `Name(locale) string` (empty on miss) collapsed into a
 // single `Name(locale) Optional[string]`. `.ValueOr("")` keeps the
 // always-string ergonomics; `.Get()` detects "not preloaded".
+//
+// Names is nil throughout when the consumer set
+// `WithMessageNameResolution(false)`.
 type Outcome struct {
 	ID    string
 	Names map[Locale]string

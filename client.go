@@ -404,8 +404,15 @@ func New(ctx context.Context, cfg Config) (*Client, error) {
 	marketFactory := factory.NewMarketFactory(
 		marketDataFactory,
 		marketFactoryLocales,
+		c.cfg.messageNameResolution,
 		c.logger,
 	)
+	if !c.cfg.messageNameResolution {
+		// Market.Name / Outcome.Name will report None for every locale
+		// on every message — the same shape a catalog miss produces, so
+		// leave a findable trace of the deliberate cause.
+		c.logger.Info("gosdk: market/outcome name resolution disabled by WithMessageNameResolution(false); Market.Name and Outcome.Name report None on every message")
+	}
 	c.feedMessageFactory = factory.NewFeedMessageFactory(
 		entityFactory,
 		marketFactory,

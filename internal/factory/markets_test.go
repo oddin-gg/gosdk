@@ -322,3 +322,88 @@ func TestMarketFactory_BuildOutcomeSettlement_VoidFactor(t *testing.T) {
 
 func ptrStr(s string) *string                              { return &s }
 func ptrFR(r feedXML.OutcomeResult) *feedXML.OutcomeResult { return &r }
+
+// countingMarketData counts cache lookups, so the opt-out test can
+// assert the work was SKIPPED and not merely discarded.
+type countingMarketData struct {
+	marketCalls  int
+	outcomeCalls int
+}
+
+func (c *countingMarketData) MarketName(_ context.Context, _ types.Locale) (*string, error) {
+	c.marketCalls++
+	name := "1x2"
+	return &name, nil
+}
+
+func (c *countingMarketData) OutcomeName(_ context.Context, _ string, _ types.Locale) (*string, error) {
+	c.outcomeCalls++
+	name := "home"
+	return &name, nil
+}
+
+// TestResolveNames_OptOut pins WithMessageNameResolution(false). The stub
+// returns a good name, so a broken gate fails on both the call count and
+// the non-nil map rather than passing by accident.
+func TestResolveNames_OptOut(t *testing.T) {
+	locales := []types.Locale{types.EnLocale, types.RuLocale}
+
+	off := NewMarketFactory(nil, locales, false, log.New(nil))
+	md := &countingMarketData{}
+
+	if names := off.resolveMarketNames(t.Context(), md); names != nil {
+		t.Fatalf("market names = %v, want nil", names)
+	}
+	if names := off.resolveOutcomeNames(t.Context(), md, "1"); names != nil {
+		t.Fatalf("outcome names = %v, want nil", names)
+	}
+
+	// Through the build path a message actually takes, not just the
+	// resolvers: the outcome comes out with a nil map, and Name reports
+	// None over it — the shape a locale the catalog cannot supply
+	// already produces.
+	odds := off.buildOutcomeOdds(t.Context(), feedXML.Outcome{ID: "1"}, md)
+	if odds.Names != nil {
+		t.Fatalf("built outcome Names = %v, want nil", odds.Names)
+	}
+	if _, ok := odds.Name(types.EnLocale).Get(); ok {
+		t.Fatal("built outcome Name = Some, want None")
+	}
+	settled := off.buildOutcomeSettlement(t.Context(), feedXML.Outcome{ID: "1"}, md)
+	if settled.Names != nil {
+		t.Fatalf("settled outcome Names = %v, want nil", settled.Names)
+	}
+
+	if md.marketCalls != 0 || md.outcomeCalls != 0 {
+		t.Fatalf("description cache consulted %d/%d times, want 0/0", md.marketCalls, md.outcomeCalls)
+	}
+}
+
+// TestResolveNames_DefaultResolves: the default stays ON.
+func TestResolveNames_DefaultResolves(t *testing.T) {
+	locales := []types.Locale{types.EnLocale, types.RuLocale}
+
+	on := NewMarketFactory(nil, locales, true, log.New(nil))
+	md := &countingMarketData{}
+
+	if names := on.resolveMarketNames(t.Context(), md); len(names) != 2 {
+		t.Fatalf("market names = %v, want an entry per locale", names)
+	}
+	if names := on.resolveOutcomeNames(t.Context(), md, "1"); len(names) != 2 {
+		t.Fatalf("outcome names = %v, want an entry per locale", names)
+	}
+	if md.marketCalls != 2 || md.outcomeCalls != 2 {
+		t.Fatalf("description cache consulted %d/%d times, want 2/2", md.marketCalls, md.outcomeCalls)
+	}
+
+	// And through the build path, on its own stub so the counts stay
+	// readable: one lookup per locale for the one outcome built.
+	built := &countingMarketData{}
+	odds := on.buildOutcomeOdds(t.Context(), feedXML.Outcome{ID: "1"}, built)
+	if len(odds.Names) != 2 {
+		t.Fatalf("built outcome Names = %v, want an entry per locale", odds.Names)
+	}
+	if built.outcomeCalls != 2 {
+		t.Fatalf("built outcome consulted the cache %d times, want 2", built.outcomeCalls)
+	}
+}
