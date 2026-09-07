@@ -56,7 +56,7 @@ func (m MarketDescriptionFactory) MarketDescriptionByIDAndVariant(
 // pointer past the message being built — a catalog refresh mutates the
 // entry in place.
 //
-// CORE-4213: building a message used to read names through
+// Building a message used to read names through
 // MarketDescriptionByIDAndSpecifiers, i.e. through a Snapshot() of the
 // whole description — one fresh map per outcome of the market — per
 // outcome, per locale, on the single session goroutine. On production

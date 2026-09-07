@@ -22,7 +22,7 @@ import (
 
 // These tests drive marketDataImpl through a REAL description cache fed
 // by an httptest catalog — the path an odds_change takes — and pin the
-// CORE-4213 rewrite: names are read straight off the live cache entry
+// Snapshot()-free rewrite: names are read straight off the live cache entry
 // (no Snapshot() copy per outcome per locale) and the by-id lookup runs
 // once per market per locale shape, not once per outcome.
 
@@ -411,7 +411,7 @@ func TestMarketData_FailedBuildDoesNotPoisonTheNext(t *testing.T) {
 // BenchmarkMarketFactory_BuildMarketWithOdds is the message-path cost of
 // one market carrying every outcome of a 350-outcome description, two
 // locales, through the real cache — the shape Corwyn measured at ~16 ms
-// / 51 MB per market before CORE-4213. Run with -benchmem.
+// / 51 MB per market before the fix. Run with -benchmem.
 func BenchmarkMarketFactory_BuildMarketWithOdds(b *testing.B) {
 	for _, n := range []int{2, 121, 348} {
 		var sb strings.Builder

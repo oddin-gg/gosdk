@@ -14,7 +14,7 @@ import (
 // These tests pin the direct, lock-scoped reads on a cached market
 // description (Name / OutcomeName / ReadOutcomeName / OutcomeTypeValue
 // / HasGroup) that
-// the message-build path uses instead of Snapshot() — CORE-4213.
+// the message-build path uses instead of Snapshot().
 // Snapshot() copied the WHOLE description (a map per outcome) to read
 // one string, per outcome, per locale; on production traffic that was
 // ~4 MB of garbage per odds_change on the session goroutine.

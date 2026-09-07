@@ -50,7 +50,7 @@ type marketDataImpl struct {
 	// locale and once per OUTCOME per locale; the cache lookup behind
 	// each ask walks every outcome of the entry for its locale-coverage
 	// check (twice), so per outcome it was O(N) mutex traffic and per
-	// market O(N²) — the second half of CORE-4213 after the Snapshot()
+	// market O(N²) — the second half of the fix after the Snapshot()
 	// copy. With the memo the lookup runs once per (locale, canonical)
 	// shape per market; everything after it is a map read.
 	//
@@ -111,7 +111,7 @@ func (m *marketDataImpl) OutcomeName(ctx context.Context, outcomeID string, loca
 	// from a known outcome the catalog does not name in this locale (→
 	// None), and reading it together with outcome_type keeps a
 	// concurrent catalog merge from mixing two revisions into one
-	// answer. Pre-CORE-4213 this scanned the Outcomes slice of a full
+	// answer. Before this fix it scanned the Outcomes slice of a full
 	// Snapshot() copy — consistent, but at the cost of the copy.
 	read := marketDescription.ReadOutcomeName(outcomeID, locale, types.EnLocale)
 
@@ -220,7 +220,7 @@ func (m *marketDataImpl) makeOutcomeName(outcomeName *string, canonicalName type
 
 // makeMarketName fills the "{specifier}" placeholders of the catalog
 // template from the market's specifiers. marketDescription is the entry
-// MarketName already fetched — pre-CORE-4213 this re-fetched (and
+// MarketName already fetched — before this fix it re-fetched (and
 // re-copied) the description just to read Groups.
 func (m *marketDataImpl) makeMarketName(ctx context.Context, marketDescription *cache.LocalizedMarketDescription, marketName string, locale types.Locale) (*string, error) {
 	if len(m.specifiers) == 0 {

@@ -15,7 +15,7 @@ import (
 // off the message: the market's catalog name, and the home/away
 // placeholder outcomes replaced by the match's competitor names.
 //
-// It is the end-to-end guard for CORE-4213, which moved name resolution
+// It is the end-to-end guard for the change that moved name resolution
 // off the Snapshot() projection onto direct reads of the live cache
 // entry: whatever the read path, THIS is the contract.
 func TestClient_BuildMessage_ResolvesMarketAndOutcomeNames(t *testing.T) {

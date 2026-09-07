@@ -1435,7 +1435,7 @@ func (d *LocalizedMarketDescription) Snapshot() types.MarketDescription {
 // ("", false) when the locale is not loaded on this entry.
 //
 // This — with OutcomeName, ReadOutcomeName, OutcomeTypeValue and
-// HasGroup — is the message-build path's read (CORE-4213). Snapshot()
+// HasGroup — is the message-build path's read. Snapshot()
 // serves the public catalog API, where the consumer keeps the value;
 // building a message used to go through that projection too, copying
 // the WHOLE description (a map per outcome) to read one string, per
@@ -1499,7 +1499,7 @@ type OutcomeNameRead struct {
 // different revision than the localized name, or take the dynamic
 // branch for an outcome that reappeared in the outcome set. Snapshot()
 // gave that consistency for free by copying everything at once; this is
-// the same guarantee without the copy (CORE-4213).
+// the same guarantee without the copy.
 //
 // Lock order is d.mu → outcome.mu, the same as Snapshot and merge.
 func (d *LocalizedMarketDescription) ReadOutcomeName(id string, locale, canonical types.Locale) OutcomeNameRead {
