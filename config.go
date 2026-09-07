@@ -181,6 +181,17 @@ func WithPreloadLocales(locales ...types.Locale) Option {
 // Market and outcome names are the ONLY thing this gates. Event,
 // tournament, sport and competitor names travel on the same message,
 // come from their own caches, and resolve either way.
+//
+// The catalog API is NOT a drop-in replacement for the message names.
+// The names the factory writes into Names are COMPOSED: "{specifier}"
+// placeholders in the catalog template are filled from the market's
+// specifiers, a home/away specifier value and the home/away placeholder
+// outcomes are replaced with the event's localized competitor names, and
+// player-props entities resolve to player names. Client.MarketDescription
+// returns the raw catalog template with none of that applied. Opt out only when the
+// consumer needs no market/outcome display names at all, or is prepared
+// to compose them itself. Client.New logs at Info level when the option
+// is off so a later reader of an unexpected None can find the cause.
 func WithMessageNameResolution(enabled bool) Option {
 	return func(c *Config) { c.messageNameResolution = enabled }
 }

@@ -2,6 +2,7 @@ package gosdk
 
 import (
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -48,6 +49,19 @@ func TestWithMessageNameResolution(t *testing.T) {
 	}
 	if !NewConfig("token", types.IntegrationEnvironment, WithMessageNameResolution(true)).MessageNameResolution() {
 		t.Errorf("WithMessageNameResolution(true): got false")
+	}
+}
+
+// TestConfig_String_ReportsMessageNames pins the messageNames field of
+// Config.String to its positional argument: a startup log of the config
+// is the first place an operator looks when names come back None.
+func TestConfig_String_ReportsMessageNames(t *testing.T) {
+	if got := NewConfig("token", types.IntegrationEnvironment).String(); !strings.Contains(got, "messageNames:true") {
+		t.Errorf("default Config.String() = %q, want messageNames:true", got)
+	}
+	got := NewConfig("token", types.IntegrationEnvironment, WithMessageNameResolution(false)).String()
+	if !strings.Contains(got, "messageNames:false") {
+		t.Errorf("opted-out Config.String() = %q, want messageNames:false", got)
 	}
 }
 

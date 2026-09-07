@@ -205,6 +205,17 @@ Only **market and outcome** names are affected. Event, tournament, sport
 and competitor names travel on the same message, come from their own
 caches, and resolve either way.
 
+Note that the catalog API is **not a drop-in replacement** for the message
+names. The message names are *composed*: `{specifier}` placeholders in the
+catalog template are filled from the market's specifiers, a home/away
+specifier value and the home/away placeholder outcomes are replaced with
+the event's localized competitor names, and player-props entities resolve
+to player names. `Client.MarketDescription` returns the raw template with
+none of that applied. Opt out only when you
+need no market/outcome display names at all, or are prepared to compose
+them yourself. The SDK logs one Info line at `Client.New` when the option
+is off, so an unexpected `None` later has a findable cause.
+
 ### Recovery
 
 ```go
