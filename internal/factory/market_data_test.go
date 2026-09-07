@@ -128,6 +128,10 @@ const catalogEn = `<?xml version="1.0"?>
   <market id="8" name="Top scorer" outcome_type="player" groups="all">
     <outcomes><outcome id="1" name="nobody"/></outcomes>
   </market>
+  <market id="9" name="{player} assists" groups="all">
+    <specifiers><specifier name="player" type="string"/></specifiers>
+    <outcomes><outcome id="1" name="yes"/></outcomes>
+  </market>
 </market_descriptions>`
 
 const catalogRu = `<?xml version="1.0"?>
@@ -145,6 +149,10 @@ const catalogRu = `<?xml version="1.0"?>
   </market>
   <market id="8" name="Лучший бомбардир" outcome_type="player" groups="all">
     <outcomes><outcome id="1" name="никто"/></outcomes>
+  </market>
+  <market id="9" name="{player} передач" groups="all">
+    <specifiers><specifier name="player" type="string"/></specifiers>
+    <outcomes><outcome id="1" name="да"/></outcomes>
   </market>
 </market_descriptions>`
 
@@ -224,6 +232,17 @@ func TestMarketData_SpecifierTemplates(t *testing.T) {
 
 	props := mf.BuildMarketWithOdds(ctx, testMatch(), feedMarket(7, "player=od:player:100", "1"))
 	wantNames(t, "props market", props.Names, map[types.Locale]string{types.EnLocale: "Striker en kills", types.RuLocale: "Striker ru убийств"})
+
+	// The player_props group is what enables the URN → player-name
+	// substitution. Market 9 carries the same "{player}" template and
+	// the same URN specifier WITHOUT the group, so the raw URN must
+	// survive into the name: the gate is at the makeMarketName call
+	// site, and this is the only test that pins its negative side.
+	notProps := mf.BuildMarketWithOdds(ctx, testMatch(), feedMarket(9, "player=od:player:100", "1"))
+	wantNames(t, "non-props market with a player URN specifier", notProps.Names, map[types.Locale]string{
+		types.EnLocale: "od:player:100 assists",
+		types.RuLocale: "od:player:100 передач",
+	})
 }
 
 // TestMarketData_DynamicOutcomes: on an outcome_type="player" market an
