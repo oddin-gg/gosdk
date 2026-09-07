@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1426,6 +1427,118 @@ func (d *LocalizedMarketDescription) Snapshot() types.MarketDescription {
 		Specifiers:             specifiers,
 		Groups:                 groups,
 	}
+}
+
+// Name returns the market's name in locale straight off the entry,
+// under its read lock and without projecting the description. The bool
+// is the locale hit: ("", true) for a loaded-but-empty catalog name,
+// ("", false) when the locale is not loaded on this entry.
+//
+// This — with OutcomeName, ReadOutcomeName, OutcomeTypeValue and
+// HasGroup — is the message-build path's read. Snapshot()
+// serves the public catalog API, where the consumer keeps the value;
+// building a message used to go through that projection too, copying
+// the WHOLE description (a map per outcome) to read one string, per
+// outcome, per locale.
+func (d *LocalizedMarketDescription) Name(locale types.Locale) (string, bool) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	v, ok := d.name[locale]
+	return v, ok
+}
+
+// OutcomeName returns outcome id's name in locale by direct index.
+// exists reports whether the entry knows the outcome at all; ok is the
+// locale hit and is meaningful only when exists. The two are distinct
+// on purpose: the factory derives an UNKNOWN outcome's name from the
+// player / competitor catalog (dynamic-outcome markets), while a known
+// outcome the catalog does not name in this locale reports None.
+//
+// Lock order is d.mu → outcome.mu, the same as Snapshot and merge.
+func (d *LocalizedMarketDescription) OutcomeName(id string, locale types.Locale) (name string, exists, ok bool) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	lo, exists := d.outcomeByID[id]
+	if !exists {
+		return "", false, false
+	}
+	lo.mu.RLock()
+	name, ok = lo.name[locale]
+	lo.mu.RUnlock()
+	return name, true, ok
+}
+
+// OutcomeNameRead is one outcome's whole answer for the message-build
+// path, read in a single lock scope by ReadOutcomeName.
+type OutcomeNameRead struct {
+	// Exists reports whether the entry knows the outcome at all, and
+	// Name / NameOK are OutcomeName's results for the requested locale.
+	Exists bool
+	Name   string
+	NameOK bool
+	// Canonical / CanonicalOK are the same read for the canonical
+	// locale (the English catalog label the home/away substitution keys
+	// on); when the two locales coincide they repeat Name / NameOK.
+	Canonical   string
+	CanonicalOK bool
+	// OutcomeType is the market's outcome_type, needed to decide the
+	// dynamic player/competitor branch when Exists is false. It comes
+	// out of the same lock scope so the decision cannot see an outcome
+	// set and an outcome_type from two different catalog revisions.
+	OutcomeType types.Optional[string]
+}
+
+// ReadOutcomeName answers "what is outcome id called in locale, what is
+// its canonical label, and is this a dynamic-outcome market" in ONE
+// d.mu read scope.
+//
+// Composing the answer from separate OutcomeName / OutcomeTypeValue
+// calls would let a catalog merge land between them — it rewrites the
+// names, the outcome set and OutcomeType in place — and the factory
+// would key the home/away substitution on a canonical label from a
+// different revision than the localized name, or take the dynamic
+// branch for an outcome that reappeared in the outcome set. Snapshot()
+// gave that consistency for free by copying everything at once; this is
+// the same guarantee without the copy.
+//
+// Lock order is d.mu → outcome.mu, the same as Snapshot and merge.
+func (d *LocalizedMarketDescription) ReadOutcomeName(id string, locale, canonical types.Locale) OutcomeNameRead {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	read := OutcomeNameRead{OutcomeType: types.FromPtr(d.OutcomeType)}
+	lo, exists := d.outcomeByID[id]
+	if !exists {
+		return read
+	}
+	read.Exists = true
+
+	lo.mu.RLock()
+	read.Name, read.NameOK = lo.name[locale]
+	if canonical == locale {
+		read.Canonical, read.CanonicalOK = read.Name, read.NameOK
+	} else {
+		read.Canonical, read.CanonicalOK = lo.name[canonical]
+	}
+	lo.mu.RUnlock()
+	return read
+}
+
+// OutcomeTypeValue returns the market's outcome_type under the read
+// lock (merge rewrites the field in place on every newest-row refresh,
+// so a bare field read from another goroutine would race).
+func (d *LocalizedMarketDescription) OutcomeTypeValue() types.Optional[string] {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return types.FromPtr(d.OutcomeType)
+}
+
+// HasGroup reports whether the market carries group, under the read
+// lock. Replaces reading Snapshot().Groups for the player-props check.
+func (d *LocalizedMarketDescription) HasGroup(group string) bool {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return slices.Contains(d.groups, group)
 }
 
 // LocalizedOutcomeDescription holds per-locale outcome data. id is the

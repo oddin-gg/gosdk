@@ -171,12 +171,16 @@ func WithPreloadLocales(locales ...types.Locale) Option {
 // WithMessageNameResolution toggles market/outcome name resolution during
 // AMQP message construction. Default true.
 //
-// Resolution costs a description-cache lookup per market AND per outcome,
-// per configured locale, on the single session goroutine. Set false when
-// the consumer takes its names from the catalog API instead: Names maps
-// are then nil and Market.Name / Outcome.Name report None for every
-// locale. Ids, specifiers, odds, status and settlement results are
-// unaffected, as is the catalog API.
+// Resolution costs, per market and on the single session goroutine, one
+// description-cache lookup for the English locale and two for every
+// other configured locale (the outcome lookup additionally requests the
+// English catalog label, the locale-independent identity the home/away
+// substitution keys on), plus a locked map read per outcome per locale
+// — and I/O when the cache is cold (an unseen market, variant or
+// player). Set false when the consumer takes its names from the
+// catalog API instead: Names maps are then nil and Market.Name /
+// Outcome.Name report None for every locale. Ids, specifiers, odds,
+// status and settlement results are unaffected, as is the catalog API.
 //
 // Market and outcome names are the ONLY thing this gates. Event,
 // tournament, sport and competitor names travel on the same message,

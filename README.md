@@ -189,10 +189,14 @@ for msg := range sub.Messages() {
 }
 ```
 
-Filling those maps is the part that costs: a description-cache lookup per
-market *and per outcome*, per locale, at message-construction time — and
-I/O on a cold cache. A consumer that takes its names from the catalog API
-(`Client.MarketDescription`) can skip the work:
+Filling those maps is the part that costs: at message-construction time
+the SDK looks the market up in the description cache — once per market
+for English, twice per market for every other configured locale, since
+the outcome lookup also asks for the English catalog label that the
+home/away substitution keys on — then reads a name off the cached entry
+for the market and for each outcome, and does I/O when the cache is cold
+(an unseen market, variant or player). A consumer that takes its names
+from the catalog API (`Client.MarketDescription`) can skip the work:
 
 ```go
 cfg := gosdk.NewConfig(token, env,
