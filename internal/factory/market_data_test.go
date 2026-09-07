@@ -28,17 +28,26 @@ import (
 
 // catalogSrv serves a per-locale bulk market catalog, a player profile,
 // and counts per-variant fetches (which it always fails — the dynamic
-// variant here is deliberately unresolvable).
+// variant here is deliberately unresolvable). The served catalog can be
+// swapped (setBulk) or made to fail (failBulk) mid-test, so a second
+// build can be checked against fresh upstream data.
 type catalogSrv struct {
 	*httptest.Server
-	bulk        map[types.Locale]string
+	bulk        atomic.Pointer[map[types.Locale]string]
+	failBulk    atomic.Bool
 	variantHits atomic.Int64
 	bulkHits    atomic.Int64
 }
 
+// setBulk replaces the catalog every later bulk fetch serves.
+func (s *catalogSrv) setBulk(bulk map[types.Locale]string) {
+	s.bulk.Store(&bulk)
+}
+
 func newCatalogSrv(t *testing.T, bulk map[types.Locale]string) *catalogSrv {
 	t.Helper()
-	s := &catalogSrv{bulk: bulk}
+	s := &catalogSrv{}
+	s.setBulk(bulk)
 	s.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/xml")
 		path := r.URL.Path
@@ -48,10 +57,17 @@ func newCatalogSrv(t *testing.T, bulk map[types.Locale]string) *catalogSrv {
 			http.Error(w, "no such variant", http.StatusNotFound)
 		case strings.HasSuffix(path, "/markets"):
 			s.bulkHits.Add(1)
+			if s.failBulk.Load() {
+				// 4xx on purpose: the api client retries 5xx with a
+				// 500 ms floor, and the shape of the failure does not
+				// matter here — only that the fetch errors.
+				http.Error(w, "catalog unavailable", http.StatusNotFound)
+				return
+			}
 			// /v1/descriptions/{locale}/markets
 			parts := strings.Split(path, "/")
 			locale := types.Locale(parts[len(parts)-2])
-			body, ok := bulk[locale]
+			body, ok := (*s.bulk.Load())[locale]
 			if !ok {
 				http.NotFound(w, r)
 				return
@@ -89,7 +105,7 @@ func (rt *rewriteTransport) RoundTrip(req *http.Request) (*http.Response, error)
 
 // newMarketFactoryForTest wires the real cache manager + description /
 // market-data factories to srv, the way client.New does.
-func newMarketFactoryForTest(t *testing.T, srv *catalogSrv, locales []types.Locale) (*MarketFactory, context.Context) {
+func newMarketFactoryForTest(t *testing.T, srv *catalogSrv, locales []types.Locale) (*MarketFactory, *cache.Manager, context.Context) {
 	t.Helper()
 	apiClient := api.New(minimalCfg{})
 	apiClient.SetHTTPClient(&http.Client{
@@ -109,7 +125,7 @@ func newMarketFactoryForTest(t *testing.T, srv *catalogSrv, locales []types.Loca
 	mf := NewMarketFactory(NewMarketDataFactory(minimalCfg{}, mdf), locales, true, log.New(nil))
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	t.Cleanup(cancel)
-	return mf, ctx
+	return mf, mgr, ctx
 }
 
 const catalogEn = `<?xml version="1.0"?>
@@ -199,7 +215,7 @@ func wantNames(t *testing.T, what string, got map[types.Locale]string, want map[
 // English label, so the ru row's translated "Хозяева" substitutes too).
 func TestMarketData_StaticOutcomes_ResolveAcrossLocales(t *testing.T) {
 	srv := newCatalogSrv(t, map[types.Locale]string{types.EnLocale: catalogEn, types.RuLocale: catalogRu})
-	mf, ctx := newMarketFactoryForTest(t, srv, twoLocales)
+	mf, _, ctx := newMarketFactoryForTest(t, srv, twoLocales)
 
 	m := mf.BuildMarketWithOdds(ctx, testMatch(), feedMarket(1, "", "1", "2", "3"))
 
@@ -222,7 +238,7 @@ func TestMarketData_StaticOutcomes_ResolveAcrossLocales(t *testing.T) {
 // the player's localized name via the player cache.
 func TestMarketData_SpecifierTemplates(t *testing.T) {
 	srv := newCatalogSrv(t, map[types.Locale]string{types.EnLocale: catalogEn, types.RuLocale: catalogRu})
-	mf, ctx := newMarketFactoryForTest(t, srv, twoLocales)
+	mf, _, ctx := newMarketFactoryForTest(t, srv, twoLocales)
 
 	total := mf.BuildMarketWithOdds(ctx, testMatch(), feedMarket(5, "total=2.5", "12", "13"))
 	wantNames(t, "total market", total.Names, map[types.Locale]string{types.EnLocale: "Total 2.5 goals", types.RuLocale: "Тотал 2.5"})
@@ -251,7 +267,7 @@ func TestMarketData_SpecifierTemplates(t *testing.T) {
 // is the exists-vs-locale-hit distinction OutcomeName carries.
 func TestMarketData_DynamicOutcomes(t *testing.T) {
 	srv := newCatalogSrv(t, map[types.Locale]string{types.EnLocale: catalogEn, types.RuLocale: catalogRu})
-	mf, ctx := newMarketFactoryForTest(t, srv, twoLocales)
+	mf, _, ctx := newMarketFactoryForTest(t, srv, twoLocales)
 
 	m := mf.BuildMarketWithOdds(ctx, testMatch(), feedMarket(8, "", "1", "od:player:100"))
 	wantNames(t, "static outcome on dynamic market", m.OutcomeOdds[0].Names, map[types.Locale]string{types.EnLocale: "nobody", types.RuLocale: "никто"})
@@ -271,7 +287,7 @@ func TestMarketData_DynamicOutcomes(t *testing.T) {
 // market, not once per outcome — the memo also caps the failure cost.
 func TestMarketData_UnknownMarket_NamelessNotFailing(t *testing.T) {
 	srv := newCatalogSrv(t, map[types.Locale]string{types.EnLocale: catalogEn, types.RuLocale: catalogRu})
-	mf, ctx := newMarketFactoryForTest(t, srv, twoLocales)
+	mf, _, ctx := newMarketFactoryForTest(t, srv, twoLocales)
 
 	m := mf.BuildMarketWithOdds(ctx, testMatch(), feedMarket(404, "total=1", "1", "2", "3", "4"))
 	if m.ID != 404 || m.Specifiers["total"] != "1" || len(m.OutcomeOdds) != 4 {
@@ -295,7 +311,7 @@ func TestMarketData_UnknownMarket_NamelessNotFailing(t *testing.T) {
 // to be 2 + 2×20 = 42 lookups; the memo makes it one per locale shape.
 func TestMarketData_DescriptionLookupOncePerMarket(t *testing.T) {
 	srv := newCatalogSrv(t, map[types.Locale]string{types.EnLocale: catalogEn, types.RuLocale: catalogRu})
-	mf, ctx := newMarketFactoryForTest(t, srv, twoLocales)
+	mf, _, ctx := newMarketFactoryForTest(t, srv, twoLocales)
 
 	ids := make([]string, 20)
 	for i := range ids {
@@ -312,6 +328,68 @@ func TestMarketData_DescriptionLookupOncePerMarket(t *testing.T) {
 	} else if hits == 0 {
 		t.Fatal("variant endpoint never hit — test is not exercising the lookup")
 	}
+}
+
+// TestMarketData_RebuildObservesCatalogRefresh pins the OTHER half of
+// the memo contract: marketDataImpl holds the LIVE cache entry (and its
+// lookup errors) for ONE build only, so the next build of the same
+// market must see a refreshed catalog. Hoisting the resolver to a
+// longer-lived per-(market, specifiers) map would look like a natural
+// follow-on optimisation and would reintroduce this cache's
+// already-shipped staleness class — this test is what fails if it does.
+func TestMarketData_RebuildObservesCatalogRefresh(t *testing.T) {
+	srv := newCatalogSrv(t, map[types.Locale]string{types.EnLocale: catalogEn, types.RuLocale: catalogRu})
+	mf, mgr, ctx := newMarketFactoryForTest(t, srv, twoLocales)
+
+	first := mf.BuildMarketWithOdds(ctx, testMatch(), feedMarket(1, "", "2"))
+	wantNames(t, "market before refresh", first.Names, map[types.Locale]string{types.EnLocale: "1x2", types.RuLocale: "1х2"})
+	wantNames(t, "draw before refresh", first.OutcomeOdds[0].Names, map[types.Locale]string{types.EnLocale: "draw", types.RuLocale: "Ничья"})
+
+	// Upstream renames market 1 and its draw outcome, in both locales.
+	srv.setBulk(map[types.Locale]string{
+		types.EnLocale: strings.NewReplacer(
+			`name="1x2"`, `name="1x2 v2"`,
+			`<outcome id="2" name="draw"/>`, `<outcome id="2" name="tie"/>`,
+		).Replace(catalogEn),
+		types.RuLocale: strings.NewReplacer(
+			`name="1х2"`, `name="1х2 в2"`,
+			`name="Ничья"`, `name="Ничья 2"`,
+		).Replace(catalogRu),
+	})
+	mgr.MarketDescriptionCache.ClearCacheItem(1, types.None[string]())
+
+	second := mf.BuildMarketWithOdds(ctx, testMatch(), feedMarket(1, "", "2"))
+	wantNames(t, "market after refresh", second.Names, map[types.Locale]string{types.EnLocale: "1x2 v2", types.RuLocale: "1х2 в2"})
+	wantNames(t, "draw after refresh", second.OutcomeOdds[0].Names, map[types.Locale]string{types.EnLocale: "tie", types.RuLocale: "Ничья 2"})
+}
+
+// TestMarketData_FailedBuildDoesNotPoisonTheNext is the same invariant
+// for the memoized ERROR: a build whose catalog fetch failed emits a
+// nameless market, and the NEXT build must retry rather than replay the
+// remembered failure.
+func TestMarketData_FailedBuildDoesNotPoisonTheNext(t *testing.T) {
+	srv := newCatalogSrv(t, map[types.Locale]string{types.EnLocale: catalogEn, types.RuLocale: catalogRu})
+	srv.failBulk.Store(true)
+	mf, _, ctx := newMarketFactoryForTest(t, srv, twoLocales)
+
+	broken := mf.BuildMarketWithOdds(ctx, testMatch(), feedMarket(1, "", "1", "2"))
+	if srv.bulkHits.Load() == 0 {
+		t.Fatal("catalog never fetched — test is not exercising the lookup")
+	}
+	if len(broken.Names) != 0 {
+		t.Fatalf("market Names during outage = %v, want none", broken.Names)
+	}
+	for _, o := range broken.OutcomeOdds {
+		if len(o.Names) != 0 {
+			t.Fatalf("outcome %s Names during outage = %v, want none", o.ID, o.Names)
+		}
+	}
+
+	srv.failBulk.Store(false)
+	healed := mf.BuildMarketWithOdds(ctx, testMatch(), feedMarket(1, "", "1", "2"))
+	wantNames(t, "market after recovery", healed.Names, map[types.Locale]string{types.EnLocale: "1x2", types.RuLocale: "1х2"})
+	wantNames(t, "home after recovery", healed.OutcomeOdds[0].Names, map[types.Locale]string{types.EnLocale: "Team A", types.RuLocale: "Команда А"})
+	wantNames(t, "draw after recovery", healed.OutcomeOdds[1].Names, map[types.Locale]string{types.EnLocale: "draw", types.RuLocale: "Ничья"})
 }
 
 // BenchmarkMarketFactory_BuildMarketWithOdds is the message-path cost of
