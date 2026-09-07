@@ -52,7 +52,7 @@ func (m MarketDescriptionFactory) MarketDescriptionByIDAndVariant(
 // localizedMarketDescription returns the LIVE cache entry for
 // (marketID, variant-from-specifiers) covering locales, for the
 // message-build path. Readers use the entry's locked accessors (Name,
-// OutcomeName, OutcomeTypeValue, HasGroup) and must not retain the
+// ReadOutcomeName, OutcomeTypeValue, HasGroup) and must not retain the
 // pointer past the message being built — a catalog refresh mutates the
 // entry in place.
 //

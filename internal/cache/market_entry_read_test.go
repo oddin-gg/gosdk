@@ -10,7 +10,8 @@ import (
 )
 
 // These tests pin the direct, lock-scoped reads on a cached market
-// description (Name / OutcomeName / OutcomeTypeValue / HasGroup) that
+// description (Name / OutcomeName / ReadOutcomeName / OutcomeTypeValue
+// / HasGroup) that
 // the message-build path uses instead of Snapshot() — CORE-4213.
 // Snapshot() copied the WHOLE description (a map per outcome) to read
 // one string, per outcome, per locale; on production traffic that was
@@ -85,6 +86,60 @@ func TestLocalizedMarketDescription_OutcomeName(t *testing.T) {
 	}
 }
 
+// TestLocalizedMarketDescription_ReadOutcomeName pins the combined
+// read the message path takes: it must answer exactly what the separate
+// OutcomeName / OutcomeTypeValue accessors do, only in one lock scope,
+// so a concurrent merge cannot mix two catalog revisions into one
+// outcome's answer.
+func TestLocalizedMarketDescription_ReadOutcomeName(t *testing.T) {
+	d := newEntryForRead(3, types.EnLocale, types.RuLocale)
+	d.outcomeByID["1"].name[types.RuLocale] = "" // loaded-but-empty
+	delete(d.outcomeByID["2"].name, types.RuLocale)
+
+	read := d.ReadOutcomeName("1", types.RuLocale, types.EnLocale)
+	if !read.Exists || !read.NameOK || read.Name != "" {
+		t.Fatalf("ru name of outcome 1 = %q, ok=%v exists=%v; want loaded-but-empty", read.Name, read.NameOK, read.Exists)
+	}
+	if !read.CanonicalOK || read.Canonical != "Outcome 1 en" {
+		t.Fatalf("canonical = %q, ok=%v; want Outcome 1 en", read.Canonical, read.CanonicalOK)
+	}
+	if got, ok := read.OutcomeType.Get(); !ok || got != "player" {
+		t.Fatalf("OutcomeType = %q, %v; want player", got, ok)
+	}
+
+	// Locale not loaded on the outcome: exists, no hit — the factory
+	// reports None and must NOT take the dynamic branch.
+	read = d.ReadOutcomeName("2", types.RuLocale, types.EnLocale)
+	if !read.Exists || read.NameOK || !read.CanonicalOK {
+		t.Fatalf("outcome 2 in ru: exists=%v nameOK=%v canonicalOK=%v", read.Exists, read.NameOK, read.CanonicalOK)
+	}
+
+	// canonical == locale collapses to a single map read.
+	read = d.ReadOutcomeName("0", types.EnLocale, types.EnLocale)
+	if read.Name != read.Canonical || read.NameOK != read.CanonicalOK || read.Name != "Outcome 0 en" {
+		t.Fatalf("en read = %+v; want name == canonical", read)
+	}
+
+	// Unknown outcome: the dynamic branch's trigger, with the
+	// outcome_type that decides it out of the same lock scope.
+	read = d.ReadOutcomeName("od:player:100", types.RuLocale, types.EnLocale)
+	if read.Exists || read.NameOK || read.CanonicalOK {
+		t.Fatalf("unknown outcome = %+v; want no hit", read)
+	}
+	if got, ok := read.OutcomeType.Get(); !ok || got != "player" {
+		t.Fatalf("unknown outcome OutcomeType = %q, %v; want player", got, ok)
+	}
+
+	// Agrees with the separate accessors it replaces.
+	for _, id := range []string{"0", "1", "2", "od:player:100"} {
+		name, exists, ok := d.OutcomeName(id, types.RuLocale)
+		read := d.ReadOutcomeName(id, types.RuLocale, types.EnLocale)
+		if read.Name != name || read.Exists != exists || read.NameOK != ok {
+			t.Fatalf("outcome %s: combined %+v vs OutcomeName(%q, %v, %v)", id, read, name, exists, ok)
+		}
+	}
+}
+
 func TestLocalizedMarketDescription_OutcomeTypeAndGroups(t *testing.T) {
 	d := newEntryForRead(1, types.EnLocale)
 	if got, ok := d.OutcomeTypeValue().Get(); !ok || got != "player" {
@@ -109,6 +164,7 @@ func TestLocalizedMarketDescription_DirectReadsAllocateNothing(t *testing.T) {
 		"Name":             func() { d.Name(types.RuLocale) },
 		"OutcomeName":      func() { d.OutcomeName("249", types.RuLocale) },
 		"OutcomeName miss": func() { d.OutcomeName("od:player:1", types.RuLocale) },
+		"ReadOutcomeName":  func() { d.ReadOutcomeName("249", types.RuLocale, types.EnLocale) },
 		"OutcomeTypeValue": func() { d.OutcomeTypeValue() },
 		"HasGroup":         func() { d.HasGroup(types.MarketGroupPlayerProps) },
 	}

@@ -1434,11 +1434,12 @@ func (d *LocalizedMarketDescription) Snapshot() types.MarketDescription {
 // is the locale hit: ("", true) for a loaded-but-empty catalog name,
 // ("", false) when the locale is not loaded on this entry.
 //
-// This — with OutcomeName, OutcomeTypeValue and HasGroup — is the
-// message-build path's read (CORE-4213). Snapshot() serves the public
-// catalog API, where the consumer keeps the value; building a message
-// used to go through that projection too, copying the WHOLE description
-// (a map per outcome) to read one string, per outcome, per locale.
+// This — with OutcomeName, ReadOutcomeName, OutcomeTypeValue and
+// HasGroup — is the message-build path's read (CORE-4213). Snapshot()
+// serves the public catalog API, where the consumer keeps the value;
+// building a message used to go through that projection too, copying
+// the WHOLE description (a map per outcome) to read one string, per
+// outcome, per locale.
 func (d *LocalizedMarketDescription) Name(locale types.Locale) (string, bool) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
@@ -1465,6 +1466,62 @@ func (d *LocalizedMarketDescription) OutcomeName(id string, locale types.Locale)
 	name, ok = lo.name[locale]
 	lo.mu.RUnlock()
 	return name, true, ok
+}
+
+// OutcomeNameRead is one outcome's whole answer for the message-build
+// path, read in a single lock scope by ReadOutcomeName.
+type OutcomeNameRead struct {
+	// Exists reports whether the entry knows the outcome at all, and
+	// Name / NameOK are OutcomeName's results for the requested locale.
+	Exists bool
+	Name   string
+	NameOK bool
+	// Canonical / CanonicalOK are the same read for the canonical
+	// locale (the English catalog label the home/away substitution keys
+	// on); when the two locales coincide they repeat Name / NameOK.
+	Canonical   string
+	CanonicalOK bool
+	// OutcomeType is the market's outcome_type, needed to decide the
+	// dynamic player/competitor branch when Exists is false. It comes
+	// out of the same lock scope so the decision cannot see an outcome
+	// set and an outcome_type from two different catalog revisions.
+	OutcomeType types.Optional[string]
+}
+
+// ReadOutcomeName answers "what is outcome id called in locale, what is
+// its canonical label, and is this a dynamic-outcome market" in ONE
+// d.mu read scope.
+//
+// Composing the answer from separate OutcomeName / OutcomeTypeValue
+// calls would let a catalog merge land between them — it rewrites the
+// names, the outcome set and OutcomeType in place — and the factory
+// would key the home/away substitution on a canonical label from a
+// different revision than the localized name, or take the dynamic
+// branch for an outcome that reappeared in the outcome set. Snapshot()
+// gave that consistency for free by copying everything at once; this is
+// the same guarantee without the copy (CORE-4213).
+//
+// Lock order is d.mu → outcome.mu, the same as Snapshot and merge.
+func (d *LocalizedMarketDescription) ReadOutcomeName(id string, locale, canonical types.Locale) OutcomeNameRead {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	read := OutcomeNameRead{OutcomeType: types.FromPtr(d.OutcomeType)}
+	lo, exists := d.outcomeByID[id]
+	if !exists {
+		return read
+	}
+	read.Exists = true
+
+	lo.mu.RLock()
+	read.Name, read.NameOK = lo.name[locale]
+	if canonical == locale {
+		read.Canonical, read.CanonicalOK = read.Name, read.NameOK
+	} else {
+		read.Canonical, read.CanonicalOK = lo.name[canonical]
+	}
+	lo.mu.RUnlock()
+	return read
 }
 
 // OutcomeTypeValue returns the market's outcome_type under the read

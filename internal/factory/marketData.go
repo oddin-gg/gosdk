@@ -104,28 +104,31 @@ func (m *marketDataImpl) OutcomeName(ctx context.Context, outcomeID string, loca
 		return nil, err
 	}
 
-	// Direct by-id read off the live entry: exists tells the dynamic
-	// branch below apart from a known outcome the catalog does not name
-	// in this locale (→ None). Pre-CORE-4213 this scanned the Outcomes
-	// slice of a full Snapshot() copy.
+	// Direct by-id read off the live entry, in ONE lock scope: the
+	// localized name, the canonical (English) label the substitution
+	// keys on, whether the entry knows the outcome at all, and the
+	// market's outcome_type. Exists tells the dynamic branch below apart
+	// from a known outcome the catalog does not name in this locale (→
+	// None), and reading it together with outcome_type keeps a
+	// concurrent catalog merge from mixing two revisions into one
+	// answer. Pre-CORE-4213 this scanned the Outcomes slice of a full
+	// Snapshot() copy — consistent, but at the cost of the copy.
+	read := marketDescription.ReadOutcomeName(outcomeID, locale, types.EnLocale)
+
 	var outcomeName *string
 	var canonicalName types.Optional[string]
-	name, found, ok := marketDescription.OutcomeName(outcomeID, locale)
-	if found {
-		if ok {
+	if read.Exists {
+		if read.NameOK {
+			name := read.Name
 			outcomeName = &name
 		}
-		if locale == types.EnLocale {
-			if ok {
-				canonicalName = types.Some(name)
-			}
-		} else if en, _, okEn := marketDescription.OutcomeName(outcomeID, types.EnLocale); okEn {
-			canonicalName = types.Some(en)
+		if read.CanonicalOK {
+			canonicalName = types.Some(read.Canonical)
 		}
 	}
 
 	// market with dynamic outcomes can have also non-dynamic outcome, that's reason why outcome with outcomeID exists at first
-	if ot, ok := marketDescription.OutcomeTypeValue().Get(); !found && ok {
+	if ot, ok := read.OutcomeType.Get(); !read.Exists && ok {
 		switch outcomeType(ot) {
 		case playerOutcomeType:
 			player, err := m.marketDescriptionFactory.playerCache.GetPlayer(ctx, cache.PlayerCacheKey{PlayerID: outcomeID, Locale: locale})
