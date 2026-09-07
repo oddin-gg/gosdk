@@ -259,6 +259,22 @@ func TestMarketData_SpecifierTemplates(t *testing.T) {
 		types.EnLocale: "od:player:100 assists",
 		types.RuLocale: "od:player:100 передач",
 	})
+
+	// Past the gate, getPropsName still fails silently in two ways —
+	// the value does not parse as a URN, or it parses as something
+	// other than a player. Both leave the RAW specifier value in the
+	// template: a name, never an error and never a missing locale.
+	badURN := mf.BuildMarketWithOdds(ctx, testMatch(), feedMarket(7, "player=od:player:bad", "1"))
+	wantNames(t, "props market with an unparseable player specifier", badURN.Names, map[types.Locale]string{
+		types.EnLocale: "od:player:bad kills",
+		types.RuLocale: "od:player:bad убийств",
+	})
+
+	notPlayer := mf.BuildMarketWithOdds(ctx, testMatch(), feedMarket(7, "player=od:competitor:10", "1"))
+	wantNames(t, "props market with a non-player URN specifier", notPlayer.Names, map[types.Locale]string{
+		types.EnLocale: "od:competitor:10 kills",
+		types.RuLocale: "od:competitor:10 убийств",
+	})
 }
 
 // TestMarketData_DynamicOutcomes: on an outcome_type="player" market an
