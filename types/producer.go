@@ -104,6 +104,12 @@ const (
 	AliveIntervalViolationProducerStatusReason         ProducerStatusReason = 4
 	ProcessingQueueDelayViolationProducerStatusReason  ProducerStatusReason = 5
 	OtherProducerStatusReason                          ProducerStatusReason = 6
+	// ConnectionDownProducerStatusReason: the AMQP connection dropped and
+	// came back. The subscription queues are exclusive and auto-delete,
+	// so everything published while the connection was down is gone from
+	// the broker; the SDK flags the producer down so the next alive
+	// starts a snapshot recovery from the last alive before the drop.
+	ConnectionDownProducerStatusReason ProducerStatusReason = 7
 )
 
 // ProducerDownReason narrows the reason for a producer-down
@@ -115,7 +121,10 @@ const (
 	DefaultProducerDownReason                       ProducerDownReason = 0
 	AliveInternalViolationProducerDownReason        ProducerDownReason = 1
 	ProcessingQueueDelayViolationProducerDownReason ProducerDownReason = 2
-	OtherProducerDownReason                         ProducerDownReason = 6
+	// ConnectionDownProducerDownReason is raised on feed reconnect; see
+	// ConnectionDownProducerStatusReason.
+	ConnectionDownProducerDownReason ProducerDownReason = 3
+	OtherProducerDownReason          ProducerDownReason = 6
 )
 
 // ToProducerStatusReason maps a producer-down reason to the broader
@@ -126,6 +135,8 @@ func (p ProducerDownReason) ToProducerStatusReason() ProducerStatusReason {
 		return AliveIntervalViolationProducerStatusReason
 	case ProcessingQueueDelayViolationProducerDownReason:
 		return ProcessingQueueDelayViolationProducerStatusReason
+	case ConnectionDownProducerDownReason:
+		return ConnectionDownProducerStatusReason
 	case OtherProducerDownReason:
 		return OtherProducerStatusReason
 	default:

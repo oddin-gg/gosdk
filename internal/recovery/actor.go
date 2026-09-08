@@ -66,7 +66,13 @@ type recoveryActor struct {
 	// Coalescing is now scoped WITHIN each interest class only.
 	pendingSystemAlive atomic.Pointer[evAlive]
 	pendingUserAlive   atomic.Pointer[evAlive]
-	done               chan struct{}
+
+	// pendingFeedReconnect is set by enqueueFeedReconnected when the
+	// AMQP connection came back after a drop; drained (and acted on)
+	// before any alive or tick is evaluated, so the producer is already
+	// flagged down when the first post-reconnect alive arrives.
+	pendingFeedReconnect atomic.Bool
+	done                 chan struct{}
 
 	// Manager-lifetime ctx, used for API calls. Cancelled at shutdown.
 	ctx context.Context
@@ -182,6 +188,45 @@ func (a *recoveryActor) enqueueAlive(ev evAlive) {
 		a.pendingUserAlive.Store(&ev)
 	}
 	a.send(evAliveNudge{})
+}
+
+// enqueueFeedReconnected records that the feed connection dropped and
+// came back, and nudges the actor. Coalesced like alive: the flag is
+// what carries the fact, the nudge may be dropped by a full inbox.
+func (a *recoveryActor) enqueueFeedReconnected() {
+	a.pendingFeedReconnect.Store(true)
+	a.send(evFeedReconnectNudge{})
+}
+
+// drainPendingFeedReconnect acts on a pending reconnect, if any.
+// Actor-goroutine only.
+func (a *recoveryActor) drainPendingFeedReconnect() {
+	if a.pendingFeedReconnect.Swap(false) {
+		a.onFeedReconnected()
+	}
+}
+
+// onFeedReconnected closes the gap a connection drop opens. Every
+// subscription consumes from an exclusive, auto-delete queue: when the
+// connection goes, the broker deletes the queue, and everything
+// published to the exchange until the SDK reconnects and re-binds is
+// lost — nothing is "released" or redelivered. The alive-based checks
+// only notice a drop longer than MaxInactivity, so a shorter blip used
+// to pass silently. Flagging the producer down here makes the next
+// system alive issue a snapshot recovery from the last alive gen
+// timestamp before the drop (systemAliveReceived: flagged down + not
+// performing recovery → makeSnapshotRecovery); an in-flight recovery
+// is interrupted by producerDown and restarted the same way, since its
+// replayed messages were lost along with the rest.
+func (a *recoveryActor) onFeedReconnected() {
+	if a.isDisabled() {
+		return
+	}
+	a.logger.WithField("producer_id", a.producerID).
+		Warn("recovery: feed reconnected; messages published during the outage were lost with the exclusive queue — flagging producer down to force a snapshot recovery")
+	if err := a.producerDown(types.ConnectionDownProducerDownReason); err != nil {
+		a.logger.WithError(err).WithField("producer_id", a.producerID).Error("recovery: producer-down after feed reconnect")
+	}
 }
 
 // drainPendingAlive processes the latest coalesced alive of each interest
@@ -372,7 +417,12 @@ func (a *recoveryActor) dispatch(ev actorEvent) {
 	case evAlive:
 		a.onAlive(e)
 	case evAliveNudge:
+		// A reconnect that preceded this alive must be applied first, so
+		// the alive sees the producer flagged down and starts recovery.
+		a.drainPendingFeedReconnect()
 		a.drainPendingAlive()
+	case evFeedReconnectNudge:
+		a.drainPendingFeedReconnect()
 	case evSnapshotComplete:
 		a.onSnapshotComplete(e)
 	case evRecoverEvent:
@@ -382,8 +432,11 @@ func (a *recoveryActor) dispatch(ev actorEvent) {
 	case evSnapshotRecoveryAPICompleted:
 		a.onSnapshotRecoveryAPICompleted(e)
 	case evTick:
-		// Drain any coalesced alive FIRST: the tick must never evaluate
-		// producer staleness while a fresher alive sits unprocessed.
+		// Drain any coalesced reconnect and alive FIRST: the tick must
+		// never evaluate producer staleness while a fresher alive sits
+		// unprocessed, and the tick is the fallback that applies a
+		// reconnect whose nudge was dropped by a full inbox.
+		a.drainPendingFeedReconnect()
 		a.drainPendingAlive()
 		a.onTick(e.now, e.inactivityArmed)
 	default:

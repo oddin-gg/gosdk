@@ -36,6 +36,15 @@ type evAliveNudge struct{}
 
 func (evAliveNudge) isActorEvent() {}
 
+// evFeedReconnectNudge signals that pendingFeedReconnect is set: the
+// AMQP connection dropped and came back. Like alive, the fact itself is
+// coalesced into an atomic flag and the nudge is the lossy wake-up —
+// a full inbox can only delay the reaction (the next tick drains the
+// flag too), never lose it.
+type evFeedReconnectNudge struct{}
+
+func (evFeedReconnectNudge) isActorEvent() {}
+
 // evSnapshotComplete: a snapshot-complete arrived. The actor decides
 // whether it terminates a snapshot recovery, an event recovery, or is
 // stale/unknown.

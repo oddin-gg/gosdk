@@ -166,6 +166,9 @@ type Manager struct {
 	// start/end call the thread-safe producer setters directly — so this
 	// counter covers only best-effort notifications.
 	inboxDrops atomic.Uint64
+
+	// feedReconnects counts OnFeedReconnected calls (diagnostics).
+	feedReconnects atomic.Uint64
 }
 
 // tickDropWarnInterval bounds how often per-producer tick-drop warns are
@@ -625,6 +628,34 @@ func (m *Manager) OnMessageProcessingEnded(sessionID uuid.UUID, producerID int, 
 		m.logger.Warnf("processing message took more than 1s - %d ms", time.Since(start).Milliseconds())
 	}
 }
+
+// OnFeedReconnected tells every known producer actor that the AMQP
+// connection dropped and came back. The subscription queues are
+// exclusive and auto-delete, so the drop lost everything published in
+// between; each actor flags its producer down (ConnectionDown) so the
+// next system alive starts a snapshot recovery. Only actors that exist
+// are told — an actor is spawned by the first alive/message of its
+// producer, and a producer never seen has no gap to close. A no-op
+// before Open (replay-only clients never open the recovery manager).
+func (m *Manager) OnFeedReconnected() {
+	m.feedReconnects.Add(1)
+	if m.state.Load() != mgrStateOpen {
+		return
+	}
+	m.actorsMu.RLock()
+	actors := make([]*recoveryActor, 0, len(m.actors))
+	for _, a := range m.actors {
+		actors = append(actors, a)
+	}
+	m.actorsMu.RUnlock()
+	for _, a := range actors {
+		a.enqueueFeedReconnected()
+	}
+}
+
+// FeedReconnectCount reports how many feed reconnects were signalled to
+// the manager over its lifetime (opened or not).
+func (m *Manager) FeedReconnectCount() uint64 { return m.feedReconnects.Load() }
 
 // OnAliveReceived dispatches to the producer's actor via the COALESCED
 // latest-alive mailbox: a full inbox can only delay an alive, never
