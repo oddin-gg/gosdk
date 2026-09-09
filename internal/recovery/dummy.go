@@ -29,3 +29,5 @@ func (d DummyManager) OnAliveReceived(producerID int, timestamp types.MessageTim
 func (d DummyManager) OnSnapshotCompleteReceived(ctx context.Context, producerID int, requestID int, messageInterest types.MessageInterest) error {
 	return nil
 }
+
+func (d DummyManager) OnFeedChannelLost() {}

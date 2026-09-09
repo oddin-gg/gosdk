@@ -167,8 +167,8 @@ type Manager struct {
 	// counter covers only best-effort notifications.
 	inboxDrops atomic.Uint64
 
-	// feedReconnects counts OnFeedReconnected calls (diagnostics).
-	feedReconnects atomic.Uint64
+	// channelLosses counts OnFeedChannelLost calls (diagnostics).
+	channelLosses atomic.Uint64
 }
 
 // tickDropWarnInterval bounds how often per-producer tick-drop warns are
@@ -629,16 +629,21 @@ func (m *Manager) OnMessageProcessingEnded(sessionID uuid.UUID, producerID int, 
 	}
 }
 
-// OnFeedReconnected tells every known producer actor that the AMQP
-// connection dropped and came back. The subscription queues are
-// exclusive and auto-delete, so the drop lost everything published in
-// between; each actor flags its producer down (ConnectionDown) so the
-// next system alive starts a snapshot recovery. Only actors that exist
-// are told — an actor is spawned by the first alive/message of its
-// producer, and a producer never seen has no gap to close. A no-op
-// before Open (replay-only clients never open the recovery manager).
-func (m *Manager) OnFeedReconnected() {
-	m.feedReconnects.Add(1)
+// OnFeedChannelLost tells every known producer actor that a live
+// consumer channel — and with it its exclusive, auto-delete queue — was
+// lost, whether with the whole AMQP connection or alone on a
+// channel-level exception. Everything published until the consumer
+// re-binds is gone from the broker; each actor flags its producer down
+// (ConnectionDown) so the next system alive starts a snapshot recovery
+// from the last alive before the loss. Called at the moment of loss,
+// before the rebind, so no alive on the new channel can advance the
+// recovery cursor past the gap. Only actors that exist are told — an
+// actor is spawned by the first alive/message of its producer, and a
+// producer never seen has never recovered, so its first alive recovers
+// regardless. A no-op before Open (replay-only clients never open the
+// recovery manager).
+func (m *Manager) OnFeedChannelLost() {
+	m.channelLosses.Add(1)
 	if m.state.Load() != mgrStateOpen {
 		return
 	}
@@ -649,13 +654,13 @@ func (m *Manager) OnFeedReconnected() {
 	}
 	m.actorsMu.RUnlock()
 	for _, a := range actors {
-		a.enqueueFeedReconnected()
+		a.enqueueChannelLost()
 	}
 }
 
-// FeedReconnectCount reports how many feed reconnects were signalled to
-// the manager over its lifetime (opened or not).
-func (m *Manager) FeedReconnectCount() uint64 { return m.feedReconnects.Load() }
+// ChannelLossCount reports how many consumer-channel losses were
+// signalled to the manager over its lifetime (opened or not).
+func (m *Manager) ChannelLossCount() uint64 { return m.channelLosses.Load() }
 
 // OnAliveReceived dispatches to the producer's actor via the COALESCED
 // latest-alive mailbox: a full inbox can only delay an alive, never

@@ -67,12 +67,12 @@ type recoveryActor struct {
 	pendingSystemAlive atomic.Pointer[evAlive]
 	pendingUserAlive   atomic.Pointer[evAlive]
 
-	// pendingFeedReconnect is set by enqueueFeedReconnected when the
-	// AMQP connection came back after a drop; drained (and acted on)
-	// before any alive or tick is evaluated, so the producer is already
-	// flagged down when the first post-reconnect alive arrives.
-	pendingFeedReconnect atomic.Bool
-	done                 chan struct{}
+	// pendingChannelLoss is set by enqueueChannelLost when a consumer
+	// channel was lost; drained (and acted on) before any alive or tick
+	// is evaluated, so the producer is already flagged down when the
+	// first alive after the rebind arrives.
+	pendingChannelLoss atomic.Bool
+	done               chan struct{}
 
 	// Manager-lifetime ctx, used for API calls. Cancelled at shutdown.
 	ctx context.Context
@@ -190,43 +190,68 @@ func (a *recoveryActor) enqueueAlive(ev evAlive) {
 	a.send(evAliveNudge{})
 }
 
-// enqueueFeedReconnected records that the feed connection dropped and
-// came back, and nudges the actor. Coalesced like alive: the flag is
-// what carries the fact, the nudge may be dropped by a full inbox.
-func (a *recoveryActor) enqueueFeedReconnected() {
-	a.pendingFeedReconnect.Store(true)
-	a.send(evFeedReconnectNudge{})
+// enqueueChannelLost records that a consumer channel — and with it its
+// exclusive queue — was lost, and nudges the actor. Coalesced like
+// alive: the flag is what carries the fact, the nudge may be dropped by
+// a full inbox.
+func (a *recoveryActor) enqueueChannelLost() {
+	a.pendingChannelLoss.Store(true)
+	a.send(evChannelLossNudge{})
 }
 
-// drainPendingFeedReconnect acts on a pending reconnect, if any.
-// Actor-goroutine only.
-func (a *recoveryActor) drainPendingFeedReconnect() {
-	if a.pendingFeedReconnect.Swap(false) {
-		a.onFeedReconnected()
-	}
-}
-
-// onFeedReconnected closes the gap a connection drop opens. Every
-// subscription consumes from an exclusive, auto-delete queue: when the
-// connection goes, the broker deletes the queue, and everything
-// published to the exchange until the SDK reconnects and re-binds is
-// lost — nothing is "released" or redelivered. The alive-based checks
-// only notice a drop longer than MaxInactivity, so a shorter blip used
-// to pass silently. Flagging the producer down here makes the next
-// system alive issue a snapshot recovery from the last alive gen
-// timestamp before the drop (systemAliveReceived: flagged down + not
-// performing recovery → makeSnapshotRecovery); an in-flight recovery
-// is interrupted by producerDown and restarted the same way, since its
-// replayed messages were lost along with the rest.
-func (a *recoveryActor) onFeedReconnected() {
-	if a.isDisabled() {
+// drainPendingChannelLoss acts on a pending channel loss, if any. The
+// flag is cleared only once the reaction took effect: when the producer
+// manager cannot answer (a network fault that dropped AMQP may well be
+// failing the producer catalog too) the flag is put back so the next
+// nudge or tick retries — unlike alive, nothing upstream repeats this
+// notice. Actor-goroutine only.
+func (a *recoveryActor) drainPendingChannelLoss() {
+	if !a.pendingChannelLoss.Swap(false) {
 		return
 	}
-	a.logger.WithField("producer_id", a.producerID).
-		Warn("recovery: feed reconnected; messages published during the outage were lost with the exclusive queue — flagging producer down to force a snapshot recovery")
-	if err := a.producerDown(types.ConnectionDownProducerDownReason); err != nil {
-		a.logger.WithError(err).WithField("producer_id", a.producerID).Error("recovery: producer-down after feed reconnect")
+	if !a.onChannelLost() {
+		a.pendingChannelLoss.Store(true)
 	}
+}
+
+// onChannelLost closes the gap a lost consumer channel opens. Every
+// subscription consumes from an exclusive, auto-delete queue: when its
+// channel goes — with the whole connection, or alone on a channel-level
+// exception — the broker deletes the queue, and everything published to
+// the exchange until the consumer re-binds is lost; nothing is
+// "released" or redelivered. The alive-based checks only notice a
+// connection drop longer than MaxInactivity and never notice a single
+// channel's loss while alives keep flowing on another, so both used to
+// pass silently. Flagging the producer down makes the next system alive
+// issue a snapshot recovery from the last alive gen timestamp before the
+// loss (systemAliveReceived: flagged down + not performing recovery →
+// makeSnapshotRecovery); an in-flight recovery is interrupted by
+// producerDown and restarted the same way, since its replayed messages
+// were lost along with the rest.
+//
+// The flag is raised at the moment of loss, before the consumer starts
+// re-binding, so no alive on the new channel can advance the recovery
+// cursor past the gap first.
+//
+// Returns false when the reaction could not be applied because the
+// producer manager errored; the caller then keeps the notice pending.
+func (a *recoveryActor) onChannelLost() bool {
+	enabled, err := a.pm.IsProducerEnabled(a.ctx, a.producerID)
+	if err != nil {
+		a.logger.WithError(err).WithField("producer_id", a.producerID).
+			Warn("recovery: channel lost but producer state unavailable; will retry")
+		return false
+	}
+	if !enabled {
+		return true
+	}
+	a.logger.WithField("producer_id", a.producerID).
+		Warn("recovery: consumer channel lost; messages published until the queue is re-bound are lost with it — flagging producer down to force a snapshot recovery")
+	if err := a.producerDown(types.ConnectionDownProducerDownReason); err != nil {
+		a.logger.WithError(err).WithField("producer_id", a.producerID).Error("recovery: producer-down after channel loss; will retry")
+		return false
+	}
+	return true
 }
 
 // drainPendingAlive processes the latest coalesced alive of each interest
@@ -417,12 +442,12 @@ func (a *recoveryActor) dispatch(ev actorEvent) {
 	case evAlive:
 		a.onAlive(e)
 	case evAliveNudge:
-		// A reconnect that preceded this alive must be applied first, so
-		// the alive sees the producer flagged down and starts recovery.
-		a.drainPendingFeedReconnect()
+		// A channel loss that preceded this alive must be applied first,
+		// so the alive sees the producer flagged down and starts recovery.
+		a.drainPendingChannelLoss()
 		a.drainPendingAlive()
-	case evFeedReconnectNudge:
-		a.drainPendingFeedReconnect()
+	case evChannelLossNudge:
+		a.drainPendingChannelLoss()
 	case evSnapshotComplete:
 		a.onSnapshotComplete(e)
 	case evRecoverEvent:
@@ -432,11 +457,11 @@ func (a *recoveryActor) dispatch(ev actorEvent) {
 	case evSnapshotRecoveryAPICompleted:
 		a.onSnapshotRecoveryAPICompleted(e)
 	case evTick:
-		// Drain any coalesced reconnect and alive FIRST: the tick must
+		// Drain any coalesced channel loss and alive FIRST: the tick must
 		// never evaluate producer staleness while a fresher alive sits
 		// unprocessed, and the tick is the fallback that applies a
-		// reconnect whose nudge was dropped by a full inbox.
-		a.drainPendingFeedReconnect()
+		// channel loss whose nudge was dropped by a full inbox.
+		a.drainPendingChannelLoss()
 		a.drainPendingAlive()
 		a.onTick(e.now, e.inactivityArmed)
 	default:

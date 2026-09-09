@@ -233,12 +233,13 @@ the queue is exclusive and auto-delete, so nothing is redelivered. Size
 the buffer for how much you can afford to lose on a crash, and read
 `Messages()` promptly.
 
-Gaps are closed by recovery, not by the broker. When the AMQP connection
-drops, the queues die with it and every message published until the SDK
-reconnects is lost from the broker; on reconnect the SDK flags every
-known producer down (`ConnectionDownProducerStatusReason`) and the next
-alive starts a snapshot recovery from the last alive before the drop.
-Watch `RecoveryEvents()` / `ProducerStatus()` for the down → up cycle.
+Gaps are closed by recovery, not by the broker. When a consumer channel
+is lost — with the whole AMQP connection or alone — its queue dies with
+it and every message published until the SDK re-binds is lost from the
+broker. At that moment the SDK flags every known producer down
+(`ConnectionDownProducerStatusReason`) and the next alive starts a
+snapshot recovery from the last alive before the loss. Watch
+`RecoveryEvents()` / `ProducerStatus()` for the down → up cycle.
 
 ### Recovery
 

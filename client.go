@@ -1284,17 +1284,7 @@ func (c *Client) onFeedEvent(ev feed.Event) {
 	// is lossy. See Client.feedDown and ConnectionState().
 	switch ev.Kind {
 	case feed.EventConnected:
-		if wasDown := c.feedDown.Swap(false); wasDown {
-			// A reconnect, not the first connect. The exclusive
-			// auto-delete queues died with the old connection and
-			// took every message published in between; the recovery
-			// manager flags the producers down so the next alive
-			// starts a snapshot recovery. Without this, a drop
-			// shorter than MaxInactivity lost messages silently.
-			if rmgr := c.recoveryManager.Load(); rmgr != nil {
-				rmgr.OnFeedReconnected()
-			}
-		}
+		c.feedDown.Store(false)
 	case feed.EventDisconnected, feed.EventReconnecting:
 		c.feedDown.Store(true)
 	}

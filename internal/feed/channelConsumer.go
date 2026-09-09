@@ -85,6 +85,15 @@ type ChannelConsumer struct {
 
 	prefetch int
 
+	// onChannelLost, when set, is called from run() the moment the
+	// deliveries channel closes for any reason other than drain/ctx —
+	// BEFORE the reopen starts. The exclusive auto-delete queue died
+	// with the channel and everything published until the rebind is
+	// lost; the hook lets the recovery layer flag producers down so the
+	// first alive on the new channel starts a recovery over the gap
+	// rather than advancing the recovery cursor past it.
+	onChannelLost func()
+
 	mu              sync.Mutex
 	outgoing        chan QueueEnvelope
 	closeFn         context.CancelFunc
@@ -145,6 +154,11 @@ type ChannelConsumer struct {
 	ackMu    sync.Mutex
 	chClosed bool
 }
+
+// SetChannelLostHook installs the callback run() invokes when the
+// consumer channel is lost and about to be reopened (see onChannelLost).
+// Must be called before Open.
+func (c *ChannelConsumer) SetChannelLostHook(fn func()) { c.onChannelLost = fn }
 
 // NewChannelConsumer constructs an unstarted consumer. Call Open to begin.
 // prefetch ≤ 0 falls back to the package default.
@@ -436,6 +450,15 @@ func (c *ChannelConsumer) run(ctx context.Context, deliveries <-chan amqp.Delive
 		}
 		if ctx.Err() != nil {
 			return
+		}
+
+		// The channel is gone and so is its exclusive queue: every
+		// message published until the reopen below re-binds is lost.
+		// Tell the recovery layer NOW, before any delivery on the new
+		// channel can be processed (see onChannelLost).
+		if c.onChannelLost != nil {
+			c.logger.Warn("feed: consumer channel lost; queue and everything published until rebind are gone — recovery will close the gap")
+			c.onChannelLost()
 		}
 
 		// Connection dropped mid-consume — reopen. Transient failures

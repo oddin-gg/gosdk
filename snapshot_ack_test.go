@@ -30,6 +30,8 @@ func (f *fakeSnapshotProcessor) OnSnapshotCompleteReceived(context.Context, int,
 	return f.err
 }
 
+func (f *fakeSnapshotProcessor) OnFeedChannelLost() {}
+
 // TestSession_SnapshotComplete_AckOnlyWhenAdmitted pins the High-finding
 // fix: a snapshot_complete delivery is acked ONLY when the recovery
 // actor admits it. If admission fails (ctx cancelled / recovery manager
