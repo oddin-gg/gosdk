@@ -30,4 +30,4 @@ func (d DummyManager) OnSnapshotCompleteReceived(ctx context.Context, producerID
 	return nil
 }
 
-func (d DummyManager) OnFeedChannelLost() {}
+func (d DummyManager) OnFeedChannelLost(types.MessageInterest) {}

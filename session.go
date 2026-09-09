@@ -104,13 +104,15 @@ type messageBuilder interface {
 // consumer implements or receives it, which is why it lives unexported
 // here rather than in the public types/ package (v1.0.0 surface pass).
 type recoveryMessageProcessor interface {
-	// OnFeedChannelLost reports that this session's consumer channel —
-	// and with it its exclusive, auto-delete queue — was lost, so every
+	// OnFeedChannelLost reports that a session's consumer channel — and
+	// with it its exclusive, auto-delete queue — was lost, so every
 	// message published until the consumer re-binds is gone from the
-	// broker. The recovery manager flags the known producers down so the
-	// next alive starts a snapshot recovery over the gap. Raised at the
+	// broker. messageInterest is the lost session's: the recovery
+	// manager flags the known producers IN THAT SCOPE down so the next
+	// alive starts a snapshot recovery over the gap (an alive-only
+	// session's loss has no odds gap and flags nothing). Raised at the
 	// moment of loss, before the rebind.
-	OnFeedChannelLost()
+	OnFeedChannelLost(messageInterest types.MessageInterest)
 	OnMessageProcessingStarted(sessionID uuid.UUID, producerID int, timestamp time.Time)
 	OnMessageProcessingEnded(sessionID uuid.UUID, producerID int, timestamp time.Time)
 	OnAliveReceived(producerID int, timestamp types.MessageTimestamp, isSubscribed bool, messageInterest types.MessageInterest)

@@ -104,11 +104,14 @@ const (
 	AliveIntervalViolationProducerStatusReason         ProducerStatusReason = 4
 	ProcessingQueueDelayViolationProducerStatusReason  ProducerStatusReason = 5
 	OtherProducerStatusReason                          ProducerStatusReason = 6
-	// ConnectionDownProducerStatusReason: the AMQP connection dropped and
-	// came back. The subscription queues are exclusive and auto-delete,
-	// so everything published while the connection was down is gone from
-	// the broker; the SDK flags the producer down so the next alive
-	// starts a snapshot recovery from the last alive before the drop.
+	// ConnectionDownProducerStatusReason: a subscription's consumer
+	// channel was lost — with the whole AMQP connection, or alone on a
+	// channel-level exception. The subscription queues are exclusive and
+	// auto-delete, so the queue died with the channel and everything
+	// published until the SDK re-binds is gone from the broker. Raised
+	// at the moment of loss, before any reconnect, for the producers the
+	// lost subscription served; the next system alive then starts a
+	// snapshot recovery from the last alive before the loss.
 	ConnectionDownProducerStatusReason ProducerStatusReason = 7
 )
 
@@ -121,8 +124,8 @@ const (
 	DefaultProducerDownReason                       ProducerDownReason = 0
 	AliveInternalViolationProducerDownReason        ProducerDownReason = 1
 	ProcessingQueueDelayViolationProducerDownReason ProducerDownReason = 2
-	// ConnectionDownProducerDownReason is raised on feed reconnect; see
-	// ConnectionDownProducerStatusReason.
+	// ConnectionDownProducerDownReason is raised the moment a consumer
+	// channel is lost; see ConnectionDownProducerStatusReason.
 	ConnectionDownProducerDownReason ProducerDownReason = 3
 	OtherProducerDownReason          ProducerDownReason = 6
 )

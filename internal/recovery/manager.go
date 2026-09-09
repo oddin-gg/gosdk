@@ -629,22 +629,32 @@ func (m *Manager) OnMessageProcessingEnded(sessionID uuid.UUID, producerID int, 
 	}
 }
 
-// OnFeedChannelLost tells every known producer actor that a live
-// consumer channel — and with it its exclusive, auto-delete queue — was
-// lost, whether with the whole AMQP connection or alone on a
-// channel-level exception. Everything published until the consumer
-// re-binds is gone from the broker; each actor flags its producer down
+// OnFeedChannelLost tells the known producer actors that a live consumer
+// channel — and with it its exclusive, auto-delete queue — was lost,
+// whether with the whole AMQP connection or alone on a channel-level
+// exception. Everything published until the consumer re-binds is gone
+// from the broker; each affected actor flags its producer down
 // (ConnectionDown) so the next system alive starts a snapshot recovery
 // from the last alive before the loss. Called at the moment of loss,
 // before the rebind, so no alive on the new channel can advance the
-// recovery cursor past the gap. Only actors that exist are told — an
-// actor is spawned by the first alive/message of its producer, and a
-// producer never seen has never recovered, so its first alive recovers
+// recovery cursor past the gap.
+//
+// Scope: only producers the lost session could have been receiving —
+// messageInterest.IsProducerInScope, the same filter the session applies
+// to deliveries. A LiveOnly session's loss must not fail a prematch
+// producer's in-flight event recoveries or force it through a snapshot
+// it does not need; a connection drop loses every session's channel, so
+// the union of their interests still covers every producer in use. The
+// alive-only session's loss carries no odds gap and flags nothing. A
+// producer whose catalog entry cannot be read is flagged anyway (the
+// conservative answer). Only actors that exist are told — an actor is
+// spawned by the first alive/message of its producer, and a producer
+// never seen has never recovered, so its first alive recovers
 // regardless. A no-op before Open (replay-only clients never open the
 // recovery manager).
-func (m *Manager) OnFeedChannelLost() {
+func (m *Manager) OnFeedChannelLost(messageInterest types.MessageInterest) {
 	m.channelLosses.Add(1)
-	if m.state.Load() != mgrStateOpen {
+	if m.state.Load() != mgrStateOpen || messageInterest == types.SystemAliveOnly {
 		return
 	}
 	m.actorsMu.RLock()
@@ -654,6 +664,9 @@ func (m *Manager) OnFeedChannelLost() {
 	}
 	m.actorsMu.RUnlock()
 	for _, a := range actors {
+		if prod, err := m.producerManager.GetProducer(context.Background(), a.producerID); err == nil && !messageInterest.IsProducerInScope(prod) {
+			continue
+		}
 		a.enqueueChannelLost()
 	}
 }

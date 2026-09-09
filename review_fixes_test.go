@@ -348,7 +348,7 @@ func (r *recordingRecoveryProcessor) OnSnapshotCompleteReceived(context.Context,
 	return nil
 }
 
-func (r *recordingRecoveryProcessor) OnFeedChannelLost() {}
+func (r *recordingRecoveryProcessor) OnFeedChannelLost(types.MessageInterest) {}
 
 // stubMessage implements every public message interface (OddsChange,
 // BetStop, BetCancel, BetSettlement, FixtureChangeMessage,
@@ -530,7 +530,7 @@ func (noopRecoveryProcessor) OnSnapshotCompleteReceived(context.Context, int, in
 	return nil
 }
 
-func (noopRecoveryProcessor) OnFeedChannelLost() {}
+func (noopRecoveryProcessor) OnFeedChannelLost(types.MessageInterest) {}
 
 func TestSession_ProcessFeedMessage_ReplayDoesNotNotifyCache(t *testing.T) {
 	for _, tc := range []struct {
@@ -1764,7 +1764,7 @@ func (c *countingRecoveryProcessor) OnSnapshotCompleteReceived(context.Context, 
 	return nil
 }
 
-func (c *countingRecoveryProcessor) OnFeedChannelLost() {}
+func (c *countingRecoveryProcessor) OnFeedChannelLost(types.MessageInterest) {}
 
 type erroringMessageBuilder struct{}
 

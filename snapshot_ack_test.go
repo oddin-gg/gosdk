@@ -30,7 +30,7 @@ func (f *fakeSnapshotProcessor) OnSnapshotCompleteReceived(context.Context, int,
 	return f.err
 }
 
-func (f *fakeSnapshotProcessor) OnFeedChannelLost() {}
+func (f *fakeSnapshotProcessor) OnFeedChannelLost(types.MessageInterest) {}
 
 // TestSession_SnapshotComplete_AckOnlyWhenAdmitted pins the High-finding
 // fix: a snapshot_complete delivery is acked ONLY when the recovery

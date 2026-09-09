@@ -199,19 +199,24 @@ func (a *recoveryActor) enqueueChannelLost() {
 	a.send(evChannelLossNudge{})
 }
 
-// drainPendingChannelLoss acts on a pending channel loss, if any. The
-// flag is cleared only once the reaction took effect: when the producer
-// manager cannot answer (a network fault that dropped AMQP may well be
-// failing the producer catalog too) the flag is put back so the next
-// nudge or tick retries — unlike alive, nothing upstream repeats this
-// notice. Actor-goroutine only.
-func (a *recoveryActor) drainPendingChannelLoss() {
+// drainPendingChannelLoss acts on a pending channel loss, if any, and
+// reports whether nothing is left pending. The flag is cleared only once
+// the reaction took effect: when the producer manager cannot answer (a
+// network fault that dropped AMQP may well be failing the producer
+// catalog too) the flag is put back so the next nudge or tick retries —
+// unlike alive, nothing upstream repeats this notice. While it is
+// pending the caller must NOT process alives: an alive handled with the
+// producer still up would advance the recovery cursor past the gap the
+// deferred reaction is meant to recover. Actor-goroutine only.
+func (a *recoveryActor) drainPendingChannelLoss() (settled bool) {
 	if !a.pendingChannelLoss.Swap(false) {
-		return
+		return true
 	}
 	if !a.onChannelLost() {
 		a.pendingChannelLoss.Store(true)
+		return false
 	}
+	return true
 }
 
 // onChannelLost closes the gap a lost consumer channel opens. Every
@@ -444,8 +449,12 @@ func (a *recoveryActor) dispatch(ev actorEvent) {
 	case evAliveNudge:
 		// A channel loss that preceded this alive must be applied first,
 		// so the alive sees the producer flagged down and starts recovery.
-		a.drainPendingChannelLoss()
-		a.drainPendingAlive()
+		// If it could not be applied yet, the alive stays coalesced for
+		// the retry — processing it now would advance the cursor past
+		// the gap.
+		if a.drainPendingChannelLoss() {
+			a.drainPendingAlive()
+		}
 	case evChannelLossNudge:
 		a.drainPendingChannelLoss()
 	case evSnapshotComplete:
@@ -460,9 +469,12 @@ func (a *recoveryActor) dispatch(ev actorEvent) {
 		// Drain any coalesced channel loss and alive FIRST: the tick must
 		// never evaluate producer staleness while a fresher alive sits
 		// unprocessed, and the tick is the fallback that applies a
-		// channel loss whose nudge was dropped by a full inbox.
-		a.drainPendingChannelLoss()
-		a.drainPendingAlive()
+		// channel loss whose nudge was dropped by a full inbox. An alive
+		// stays coalesced while a loss is still pending (see
+		// drainPendingChannelLoss).
+		if a.drainPendingChannelLoss() {
+			a.drainPendingAlive()
+		}
 		a.onTick(e.now, e.inactivityArmed)
 	default:
 		a.logger.Warnf("recovery actor: unknown event type %T", ev)

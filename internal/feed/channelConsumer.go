@@ -42,8 +42,11 @@ const (
 // the pump, after the message lands in the public subscription buffer,
 // or the session, when it intentionally consumes/drops it (alive
 // handling, out-of-scope filtering). A delivery abandoned mid-pipeline
-// by an abrupt shutdown is simply never acked; the broker releases
-// unacked deliveries when the channel closes.
+// by an abrupt shutdown is simply never acked — and never redelivered
+// either: the queue is exclusive and auto-delete, so it dies with the
+// channel and takes every unacked and not-yet-delivered message with
+// it. That gap is closed by snapshot recovery (see onChannelLost), not
+// by the broker.
 type QueueEnvelope struct {
 	Msg *types.QueueMessage
 	// Ack acknowledges the underlying delivery (idempotence is NOT
@@ -87,12 +90,20 @@ type ChannelConsumer struct {
 
 	// onChannelLost, when set, is called from run() the moment the
 	// deliveries channel closes for any reason other than drain/ctx —
-	// BEFORE the reopen starts. The exclusive auto-delete queue died
-	// with the channel and everything published until the rebind is
-	// lost; the hook lets the recovery layer flag producers down so the
-	// first alive on the new channel starts a recovery over the gap
+	// BEFORE the channel is torn down and BEFORE the reopen starts. The
+	// exclusive auto-delete queue died with the channel and everything
+	// published until the rebind is lost; the hook lets the recovery
+	// layer flag the producers this consumer's interest covers down, so
+	// the first alive on the new channel starts a recovery over the gap
 	// rather than advancing the recovery cursor past it.
-	onChannelLost func()
+	onChannelLost func(types.MessageInterest)
+
+	// Channel-loss log throttle (run goroutine only). A peer that cancels
+	// the consumer as fast as it is re-declared would otherwise drive
+	// one Warn per round trip; the hook itself stays unconditional (the
+	// recovery side coalesces).
+	lastLossWarnAt  time.Time
+	suppressedLoses int
 
 	mu              sync.Mutex
 	outgoing        chan QueueEnvelope
@@ -157,8 +168,26 @@ type ChannelConsumer struct {
 
 // SetChannelLostHook installs the callback run() invokes when the
 // consumer channel is lost and about to be reopened (see onChannelLost).
+// The callback receives this consumer's message interest so the recovery
+// layer can scope its reaction to the producers this consumer serves.
 // Must be called before Open.
-func (c *ChannelConsumer) SetChannelLostHook(fn func()) { c.onChannelLost = fn }
+func (c *ChannelConsumer) SetChannelLostHook(fn func(types.MessageInterest)) { c.onChannelLost = fn }
+
+// ChannelLostHookInstalled reports whether a channel-lost hook is set —
+// the one seam between a lost queue and the recovery that closes its gap.
+func (c *ChannelConsumer) ChannelLostHookInstalled() bool { return c.onChannelLost != nil }
+
+// minChannelDwell is how long a freshly (re)opened channel must have
+// lived for the next loss to be treated as a fresh incident. A channel
+// that dies faster than this is being cancelled as fast as it is
+// re-declared (queue policy, operator, failover loop): the reopen backs
+// off channelReopenBackoff instead of spinning at the broker's round-trip
+// rate. channelLossWarnInterval bounds the Warn for the same reason.
+const (
+	minChannelDwell         = time.Second
+	channelReopenBackoff    = 500 * time.Millisecond
+	channelLossWarnInterval = 30 * time.Second
+)
 
 // NewChannelConsumer constructs an unstarted consumer. Call Open to begin.
 // prefetch ≤ 0 falls back to the package default.
@@ -416,6 +445,7 @@ func (c *ChannelConsumer) closeGracefulChannel(gch amqpChannel) {
 // topology/permission errors are NOT retried here: they already surfaced
 // synchronously from Open, so the initial channel is known-good.
 func (c *ChannelConsumer) run(ctx context.Context, deliveries <-chan amqp.Delivery, ch *amqp.Channel) {
+	opened := time.Now()
 	for {
 		c.consume(ctx, deliveries, ch)
 
@@ -445,20 +475,36 @@ func (c *ChannelConsumer) run(ctx context.Context, deliveries <-chan amqp.Delive
 			return
 		default:
 		}
-		if ch != nil {
-			_ = ch.Close()
-		}
 		if ctx.Err() != nil {
+			if ch != nil {
+				_ = ch.Close()
+			}
 			return
 		}
 
 		// The channel is gone and so is its exclusive queue: every
 		// message published until the reopen below re-binds is lost.
-		// Tell the recovery layer NOW, before any delivery on the new
-		// channel can be processed (see onChannelLost).
-		if c.onChannelLost != nil {
-			c.logger.Warn("feed: consumer channel lost; queue and everything published until rebind are gone — recovery will close the gap")
-			c.onChannelLost()
+		// Tell the recovery layer NOW — before ch.Close(), which on a
+		// broker-initiated cancel is a real blocking RPC during which a
+		// sibling channel on the same connection can still deliver an
+		// alive, and before any delivery on the new channel can be
+		// processed (see onChannelLost).
+		c.noteChannelLost()
+		if ch != nil {
+			_ = ch.Close()
+		}
+
+		// A channel that died within its dwell is being cancelled as fast
+		// as it is re-declared: back off before re-declaring so the loop
+		// cannot spin at the broker's round-trip rate. Drain/ctx-aware.
+		if time.Since(opened) < minChannelDwell {
+			select {
+			case <-ctx.Done():
+				return
+			case <-c.drainCh:
+				return
+			case <-time.After(channelReopenBackoff):
+			}
 		}
 
 		// Connection dropped mid-consume — reopen. Transient failures
@@ -520,6 +566,7 @@ func (c *ChannelConsumer) run(ctx context.Context, deliveries <-chan amqp.Delive
 		if !ok {
 			return
 		}
+		opened = time.Now()
 	}
 }
 
@@ -580,10 +627,38 @@ func (c *ChannelConsumer) consume(ctx context.Context, deliveries <-chan amqp.De
 	}
 }
 
+// noteChannelLost invokes the channel-lost hook (always) and logs the
+// loss (throttled to channelLossWarnInterval, with the count of losses
+// the throttle swallowed). run goroutine only.
+func (c *ChannelConsumer) noteChannelLost() {
+	if c.onChannelLost == nil {
+		return
+	}
+	now := time.Now()
+	if c.lastLossWarnAt.IsZero() || now.Sub(c.lastLossWarnAt) >= channelLossWarnInterval {
+		log := c.logger
+		if c.suppressedLoses > 0 {
+			log = log.WithField("suppressed_losses", c.suppressedLoses)
+		}
+		log.Warn("feed: consumer channel lost; queue and everything published until rebind are gone — recovery will close the gap")
+		c.lastLossWarnAt = now
+		c.suppressedLoses = 0
+	} else {
+		c.suppressedLoses++
+	}
+	mi := types.AllMessageInterest
+	if c.messageInterest != nil {
+		mi = *c.messageInterest
+	}
+	c.onChannelLost(mi)
+}
+
 // ackFunc builds the envelope's ack closure for one delivery. Ack errors
 // are logged, not propagated — by the time the ack fires the message has
-// already been handed to the consumer (or intentionally dropped), and
-// the broker will simply redeliver on the next channel teardown.
+// already been handed to the consumer (or intentionally dropped); a
+// failed ack leaves it unacked on an exclusive auto-delete queue, which
+// is deleted with the channel, so nothing is redelivered and the
+// consumer already holds the message.
 //
 // Late-ack after teardown: the ack and the graceful-teardown Close are
 // serialized on ackMu (see closeGracefulChannel), so they never run

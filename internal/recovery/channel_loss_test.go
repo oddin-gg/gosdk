@@ -205,13 +205,13 @@ func TestActor_ChannelLost_ProducerManagerErrorKeepsTheNotice(t *testing.T) {
 	}
 }
 
-// TestManager_OnFeedChannelLost_FansOutToEveryKnownActor drives the one
-// line of production wiring between the client and the actors: an OPEN
-// manager with two producer actors signals both, and each ends up
-// flagged down with the connection-down reason.
-func TestManager_OnFeedChannelLost_FansOutToEveryKnownActor(t *testing.T) {
+// openedManagerWithActors returns an OPEN manager (real producer manager
+// against fixtureSrv: producer 1 = live, 2 = prematch, 3 = live|prematch)
+// with an actor spawned for each given producer, all up.
+func openedManagerWithActors(t *testing.T, ids ...int) (*Manager, *producer.Manager) {
+	t.Helper()
 	srv, _ := fixtureSrv(t)
-	defer srv.Close()
+	t.Cleanup(srv.Close)
 	u, _ := url.Parse(srv.URL)
 	cfg := &minimalCfg{apiURL: u.Host, token: "tok"}
 	apiClient := api.New(cfg)
@@ -227,51 +227,140 @@ func TestManager_OnFeedChannelLost_FansOutToEveryKnownActor(t *testing.T) {
 	if _, err := m.Open(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	defer m.Close()
-
-	// Two known producers: their actors exist because the feed has been
-	// heard from. Bring both to steady state (recovered, up).
-	actors := map[int]*recoveryActor{}
-	for _, id := range []int{1, 2} {
-		a := m.findOrSpawn(id)
-		if a == nil {
+	t.Cleanup(m.Close)
+	for _, id := range ids {
+		if m.findOrSpawn(id) == nil {
 			t.Fatalf("no actor for producer %d", id)
 		}
-		actors[id] = a
-	}
-	for id, a := range actors {
 		if err := pm.SetProducerDown(id, false); err != nil {
 			t.Fatal(err)
 		}
-		_ = a // steady: up, not recovering
 	}
+	return m, pm
+}
 
-	m.OnFeedChannelLost()
+func waitDown(t *testing.T, pm *producer.Manager, id int, want bool) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		down, err := pm.IsProducerDown(t.Context(), id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if down == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("producer %d down=%v, want %v", id, down, want)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestManager_OnFeedChannelLost_FansOutToEveryKnownActor drives the one
+// line of production wiring between the session and the actors: an OPEN
+// manager with actors for every producer signals all of them for an
+// all-interest session (a connection drop closes such a session's
+// channel), and each ends up flagged down with the connection-down reason.
+func TestManager_OnFeedChannelLost_FansOutToEveryKnownActor(t *testing.T) {
+	m, pm := openedManagerWithActors(t, 1, 2, 3)
+
+	m.OnFeedChannelLost(types.AllMessageInterest)
 	if m.ChannelLossCount() != 1 {
 		t.Fatalf("ChannelLossCount = %d, want 1", m.ChannelLossCount())
 	}
+	for _, id := range []int{1, 2, 3} {
+		waitDown(t, pm, id, true)
+	}
+}
 
-	deadline := time.Now().Add(3 * time.Second)
-	for id := range actors {
-		for {
-			down, err := pm.IsProducerDown(t.Context(), id)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if down {
-				break
-			}
-			if time.Now().After(deadline) {
-				t.Fatalf("producer %d not flagged down after OnFeedChannelLost", id)
-			}
-			time.Sleep(5 * time.Millisecond)
-		}
+// TestManager_OnFeedChannelLost_ScopedToTheLostSessionsInterest: a
+// LiveOnly session losing its channel could not have been receiving the
+// prematch-only producer, so that producer keeps its state (and its
+// in-flight event recoveries); the live and mixed producers are flagged.
+func TestManager_OnFeedChannelLost_ScopedToTheLostSessionsInterest(t *testing.T) {
+	m, pm := openedManagerWithActors(t, 1, 2, 3)
+
+	m.OnFeedChannelLost(types.LiveOnlyMessageInterest)
+	waitDown(t, pm, 1, true) // live
+	waitDown(t, pm, 3, true) // live|prematch
+	// Give the prematch actor every chance to misbehave before asserting.
+	time.Sleep(50 * time.Millisecond)
+	waitDown(t, pm, 2, false) // prematch: out of scope, untouched
+}
+
+// TestManager_OnFeedChannelLost_AliveOnlySessionFlagsNothing: the alive
+// session carries no odds, so losing its queue opens no gap to recover.
+func TestManager_OnFeedChannelLost_AliveOnlySessionFlagsNothing(t *testing.T) {
+	m, pm := openedManagerWithActors(t, 1, 2, 3)
+
+	m.OnFeedChannelLost(types.SystemAliveOnly)
+	if m.ChannelLossCount() != 1 {
+		t.Fatalf("ChannelLossCount = %d, want 1 (counted even when nothing is flagged)", m.ChannelLossCount())
+	}
+	time.Sleep(50 * time.Millisecond)
+	for _, id := range []int{1, 2, 3} {
+		waitDown(t, pm, id, false)
+	}
+}
+
+// TestActor_ChannelLost_DisabledProducerConsumesTheNotice: a disabled
+// producer has no recovery to run; the notice is consumed (one-shot) and
+// the producer is not flagged down.
+func TestActor_ChannelLost_DisabledProducerConsumesTheNotice(t *testing.T) {
+	fake := newFakeManagerOps()
+	a, _ := steadyActor(t, fake, time.Now())
+	if err := a.pm.SetProducerState(t.Context(), a.producerID, false); err != nil {
+		t.Fatal(err)
+	}
+	fake.mu.Lock()
+	emittedBefore := len(fake.emittedMsgs)
+	fake.mu.Unlock()
+
+	a.enqueueChannelLost()
+	a.dispatch(evChannelLossNudge{})
+
+	if a.pendingChannelLoss.Load() {
+		t.Fatal("notice must be consumed for a disabled producer")
+	}
+	if a.downReason == types.ConnectionDownProducerDownReason {
+		t.Fatal("disabled producer must not be flagged down for a channel loss")
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if len(fake.emittedMsgs) != emittedBefore {
+		t.Fatalf("disabled producer emitted %d status message(s) on channel loss", len(fake.emittedMsgs)-emittedBefore)
+	}
+}
+
+// TestActor_ChannelLost_PendingNoticeHoldsBackAlives: while the loss
+// could not be applied, an alive must stay coalesced — processing it
+// with the producer still up would advance the recovery cursor past the
+// gap the deferred reaction exists to recover.
+func TestActor_ChannelLost_PendingNoticeHoldsBackAlives(t *testing.T) {
+	srv, _ := fixtureSrv(t)
+	defer srv.Close()
+	a := newWiredActorForProducer(t, srv, newFakeManagerOps(), 999) // unknown producer → pm errors
+
+	a.pendingChannelLoss.Store(true)
+	a.enqueueAlive(evAlive{timestamp: aliveAt(time.Now()), isSubscribed: true, messageInterest: types.SystemAliveOnly})
+	a.dispatch(evAliveNudge{})
+
+	if !a.pendingChannelLoss.Load() {
+		t.Fatal("notice must stay pending when the producer manager errors")
+	}
+	if a.pendingSystemAlive.Load() == nil {
+		t.Fatal("alive must stay coalesced while the channel loss is pending")
+	}
+	a.dispatch(evTick{now: time.Now(), inactivityArmed: false})
+	if a.pendingSystemAlive.Load() == nil {
+		t.Fatal("tick must not process the alive either while the loss is pending")
 	}
 }
 
 func TestManager_OnFeedChannelLost_BeforeOpenIsNoop(t *testing.T) {
 	m := newTestManager(t)
-	m.OnFeedChannelLost() // must not panic on a never-opened manager
+	m.OnFeedChannelLost(types.AllMessageInterest) // must not panic on a never-opened manager
 	if m.ChannelLossCount() != 1 {
 		t.Fatalf("ChannelLossCount = %d, want 1", m.ChannelLossCount())
 	}
