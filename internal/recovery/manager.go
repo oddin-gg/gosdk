@@ -634,9 +634,10 @@ func (m *Manager) OnMessageProcessingEnded(sessionID uuid.UUID, producerID int, 
 // lostAt, whether with the whole AMQP connection or alone on a
 // channel-level exception. Everything published until the consumer
 // re-binds is gone from the broker; each affected actor flags its
-// producer down (ConnectionDown) and floors its recovery cursor at
-// lostAt, so the next system alive starts a snapshot recovery that
-// covers the gap — whatever order this notice and that alive arrive in.
+// producer down (ConnectionDown) and floors its recovery at the
+// earlier of its current recovery cursor and lostAt, so the next system
+// alive starts a snapshot recovery that covers the gap — whatever order
+// this notice and that alive arrive in.
 //
 // Scope: only producers the lost session could have been receiving —
 // messageInterest.IsProducerInScope, the same filter the session applies

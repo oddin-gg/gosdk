@@ -593,6 +593,7 @@ func (c *ChannelConsumer) run(ctx context.Context, deliveries <-chan amqp.Delive
 			c.ReportChannelLost(time.Now())
 		}
 		stopWatch()
+		watch = nil // stopped; the deferred stopWatch must not close it again
 		if ch != nil {
 			_ = ch.Close()
 		}

@@ -76,7 +76,8 @@ type recoveryActor struct {
 
 	// recoveryFloor is the earliest instant a snapshot recovery must
 	// reach back to: the earliest channel loss not yet covered by a
-	// completed recovery, and the cursor of any recovery a loss
+	// completed recovery (anchored at the pre-loss recovery cursor, see
+	// enqueueChannelLost), and the cursor of any recovery a loss
 	// interrupted (its replay was lost with the queue). makeSnapshotRecovery
 	// never starts later than it, and snapshotRecoveryFinished clears it
 	// only when the completed recovery started at or before it. This is
@@ -206,8 +207,25 @@ func (a *recoveryActor) enqueueAlive(ev evAlive) {
 // exclusive queue — was lost at lostAt, and nudges the actor. Coalesced
 // like alive, keeping the EARLIEST instant: the flag is what carries the
 // fact, the nudge may be dropped by a full inbox.
+//
+// The instant recorded is the earlier of lostAt and the producer's
+// recovery cursor AS IT STANDS NOW, on the reporting goroutine, before
+// any alive that follows the loss can be applied. The cursor is the
+// last alive gen timestamp before the loss (or an explicit rewind), in
+// the producer's clock domain; it also covers messages the dead queue
+// still held undelivered — a lagging consumer's queue may hold a span
+// timestamped well before the loss, and those die with it too. lostAt
+// alone (client wall clock) is the fallback when the producer has no
+// cursor yet, or when the cursor already moved past the loss because
+// the notice was created late.
 func (a *recoveryActor) enqueueChannelLost(lostAt time.Time) {
-	a.notePendingLoss(lostAt)
+	anchor := lostAt
+	if prod, err := a.pm.GetProducerCached(a.producerID); err == nil {
+		if cursor := prod.TimestampForRecovery(); !cursor.IsZero() && cursor.Before(anchor) {
+			anchor = cursor
+		}
+	}
+	a.notePendingLoss(anchor)
 	a.send(evChannelLossNudge{})
 }
 

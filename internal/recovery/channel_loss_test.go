@@ -118,11 +118,47 @@ func TestActor_ChannelLost_RecoversFromTheCursorBeforeTheLoss(t *testing.T) {
 	}
 }
 
-// TestActor_ChannelLost_OvertakenByAliveStillCoversTheGap is the race the
-// design must survive: the alive session re-binds first and its
-// post-loss alive is processed BEFORE the loss notice reaches the actor,
-// advancing the producer's cursor past the outage. The recovery floor
-// pulls the recovery back to the loss instant regardless.
+// TestActor_ChannelLost_NoticeBeforeOvertakingAlive_RecoversFromPreLossCursor
+// is the race the design must survive, in its realistic shape: the loss
+// is REPORTED promptly (watcher), but the actor applies a post-loss alive
+// before it drains the notice — the two are separate atomics. The notice
+// captured the producer's recovery cursor at report time, so the recovery
+// reaches back to the last alive BEFORE the loss, exactly as in the
+// ordinary order — covering, too, whatever the dead queue still held
+// undelivered from before the loss.
+func TestActor_ChannelLost_NoticeBeforeOvertakingAlive_RecoversFromPreLossCursor(t *testing.T) {
+	now := time.Now().Truncate(time.Millisecond)
+	a, hits := steadyActor(t, newFakeManagerOps(), now.Add(-10*time.Second))
+	preLoss := now.Add(-6 * time.Second)
+	if err := a.systemAliveReceived(aliveAt(preLoss), true); err != nil {
+		t.Fatal(err)
+	}
+
+	a.enqueueChannelLost(now.Add(-4 * time.Second)) // reported now, cursor = preLoss
+	// The overtaking alive slips in before the notice is drained.
+	if err := a.systemAliveReceived(aliveAt(now.Add(-1*time.Second)), true); err != nil {
+		t.Fatal(err)
+	}
+	a.dispatch(evChannelLossNudge{})
+	if !a.isFlaggedDown() {
+		t.Fatal("loss notice must flag the producer down")
+	}
+
+	if err := a.systemAliveReceived(aliveAt(now), true); err != nil {
+		t.Fatal(err)
+	}
+	waitRecoverHits(t, hits, 2)
+	if got, want := hits.lastAfterMillis.Load(), preLoss.UnixMilli(); got != want {
+		t.Fatalf("recovery after= %d (%s), want the pre-loss cursor %d (%s) — same as the ordinary order",
+			got, time.UnixMilli(got).UTC(), want, preLoss.UTC())
+	}
+}
+
+// TestActor_ChannelLost_OvertakenByAliveStillCoversTheGap is the fallback
+// shape: the notice itself is created only AFTER a post-loss alive already
+// advanced the producer's cursor (nothing captured the pre-loss cursor).
+// The loss instant then floors the recovery, so the outage window is
+// still covered.
 func TestActor_ChannelLost_OvertakenByAliveStillCoversTheGap(t *testing.T) {
 	now := time.Now().Truncate(time.Millisecond)
 	a, hits := steadyActor(t, newFakeManagerOps(), now.Add(-10*time.Second))

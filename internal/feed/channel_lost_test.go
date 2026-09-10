@@ -394,3 +394,93 @@ func TestChannelConsumer_NoHookNoPanic(t *testing.T) {
 	close(opener.chans[0])
 	opener.waitCalls(t, 2)
 }
+
+// failAfterOpener serves one good channel and fails every CreateChannel
+// after it, so the reopen loop sits in its retry until closed.
+type failAfterOpener struct {
+	sequencedOpener
+}
+
+func (o *failAfterOpener) CreateChannel(ctx context.Context, keys []string, ex string, prefetch int) (<-chan amqp.Delivery, amqpChannel, error) {
+	if o.calls.Load() >= 1 {
+		o.calls.Add(1)
+		return nil, nil, context.DeadlineExceeded
+	}
+	return o.sequencedOpener.CreateChannel(ctx, keys, ex, prefetch)
+}
+
+// TestChannelConsumer_CloseDuringReopenBackoffDoesNotPanic: a lost
+// channel followed by Close while the reopen is waiting out the dwell
+// backoff. The watcher was already stopped in-loop; the deferred stop on
+// the ctx exit must not close it again (that was a process-killing panic
+// on the consumer goroutine).
+func TestChannelConsumer_CloseDuringReopenBackoffDoesNotPanic(t *testing.T) {
+	oldDwell, oldBackoff := minChannelDwell, channelReopenBackoff
+	minChannelDwell, channelReopenBackoff = 10*time.Second, 2*time.Second
+	t.Cleanup(func() { minChannelDwell, channelReopenBackoff = oldDwell, oldBackoff })
+
+	for _, graceful := range []bool{false, true} {
+		opener := newSequencedOpener(2, false)
+		c := NewChannelConsumer(opener, &factory.FeedMessageFactory{}, discardConsumerLogger(), "ex", "od:sport:", 0)
+		c.SetChannelLostHook(func(types.MessageInterest, time.Time) {})
+		mi := types.AllMessageInterest
+		if _, err := c.Open(context.Background(), []string{"k"}, &mi); err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+		close(opener.chans[0])
+		time.Sleep(50 * time.Millisecond) // run() is now inside the backoff select
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		if graceful {
+			c.CloseGraceful(ctx)
+		} else {
+			_ = c.Close(ctx)
+		}
+		cancel()
+		done := make(chan struct{})
+		go func() { c.wg.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Fatalf("graceful=%v: consumer goroutines did not exit after close during backoff", graceful)
+		}
+		if got := opener.calls.Load(); got != 1 {
+			t.Fatalf("graceful=%v: CreateChannel calls = %d, want 1 (closed before reopen)", graceful, got)
+		}
+	}
+}
+
+// TestChannelConsumer_CloseDuringFailingReopenDoesNotPanic: the other
+// exit in the same window — the reopen keeps failing and Close lands in
+// its retry loop.
+func TestChannelConsumer_CloseDuringFailingReopenDoesNotPanic(t *testing.T) {
+	oldDwell := minChannelDwell
+	minChannelDwell = 0 // no backoff: go straight to the failing reopen
+	t.Cleanup(func() { minChannelDwell = oldDwell })
+
+	opener := &failAfterOpener{sequencedOpener: *newSequencedOpener(1, false)}
+	c := NewChannelConsumer(opener, &factory.FeedMessageFactory{}, discardConsumerLogger(), "ex", "od:sport:", 0)
+	c.SetChannelLostHook(func(types.MessageInterest, time.Time) {})
+	mi := types.AllMessageInterest
+	if _, err := c.Open(context.Background(), []string{"k"}, &mi); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	close(opener.chans[0])
+	deadline := time.Now().Add(2 * time.Second)
+	for opener.calls.Load() < 2 { // at least one failed reopen attempt
+		if time.Now().After(deadline) {
+			t.Fatal("reopen never attempted")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = c.Close(ctx)
+	done := make(chan struct{})
+	go func() { c.wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("consumer goroutines did not exit after close during a failing reopen")
+	}
+}
