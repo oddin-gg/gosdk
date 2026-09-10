@@ -156,15 +156,17 @@ func TestActor_ChannelLost_NoticeBeforeOvertakingAlive_RecoversFromPreLossCursor
 	}
 }
 
-// TestActor_ChannelLost_OvertakenByAliveStillCoversTheGap is the fallback
-// shape: the notice itself is created only AFTER a post-loss alive already
-// advanced the producer's cursor (nothing captured the pre-loss cursor).
-// The loss instant then floors the recovery, so the outage window is
-// still covered.
+// TestActor_ChannelLost_OvertakenByAliveStillCoversTheGap is the shape
+// where the notice itself is created only AFTER a post-loss alive already
+// advanced the producer's cursor. The anchor is the alive before that
+// latest one — here the last healthy alive before the loss — so the
+// recovery still reaches back past the loss instant; the loss instant
+// is only ever a fallback for a producer with no cursor at all.
 func TestActor_ChannelLost_OvertakenByAliveStillCoversTheGap(t *testing.T) {
 	now := time.Now().Truncate(time.Millisecond)
 	a, hits := steadyActor(t, newFakeManagerOps(), now.Add(-10*time.Second))
-	if err := a.systemAliveReceived(aliveAt(now.Add(-6*time.Second)), true); err != nil {
+	healthy := now.Add(-6 * time.Second)
+	if err := a.systemAliveReceived(aliveAt(healthy), true); err != nil {
 		t.Fatal(err)
 	}
 
@@ -186,12 +188,17 @@ func TestActor_ChannelLost_OvertakenByAliveStillCoversTheGap(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitRecoverHits(t, hits, 2)
-	if got, want := hits.lastAfterMillis.Load(), lost.UnixMilli(); got != want {
-		t.Fatalf("recovery after= %d (%s), want the loss instant %d (%s) — the overtaking alive must not hide the gap",
-			got, time.UnixMilli(got).UTC(), want, lost.UTC())
+	got := hits.lastAfterMillis.Load()
+	if got > lost.UnixMilli() {
+		t.Fatalf("recovery after= %d (%s) is past the loss instant %d (%s) — the overtaking alive hid the gap",
+			got, time.UnixMilli(got).UTC(), lost.UnixMilli(), lost.UTC())
 	}
-	if !a.recoveryFloor.Equal(lost) {
-		t.Fatalf("floor = %v after starting the covering recovery, want kept until it completes (%v)", a.recoveryFloor, lost)
+	if got != healthy.UnixMilli() {
+		t.Fatalf("recovery after= %d (%s), want the alive before the latest, %d (%s)",
+			got, time.UnixMilli(got).UTC(), healthy.UnixMilli(), healthy.UTC())
+	}
+	if !a.recoveryFloor.Equal(healthy) {
+		t.Fatalf("floor = %v after starting the covering recovery, want kept until it completes (%v)", a.recoveryFloor, healthy)
 	}
 	if err := a.snapshotRecoveryFinished(a.currentRecovery.recoveryID); err != nil {
 		t.Fatal(err)
@@ -705,4 +712,58 @@ func TestManager_ChannelRestored_NudgesDeferredActors(t *testing.T) {
 
 	m.OnFeedChannelRestored(sess)
 	waitRecoverHits(t, hits, 1)
+}
+
+// --- Anchor: the alive before the last one ---
+
+// TestActor_ChannelLost_AnchorsBeforeTheLatestAlive: with two healthy
+// alives A1 < A2 before the loss, the recovery after the loss starts at
+// A1, not A2. A2 arrives on the alive session's own channel and may have
+// been generated after the broker deleted the consumer's queue yet been
+// processed before the loss was seen, so it is not trusted; A1 is a full
+// alive interval older.
+func TestActor_ChannelLost_AnchorsBeforeTheLatestAlive(t *testing.T) {
+	now := time.Now().Truncate(time.Millisecond)
+	a, hits := steadyActor(t, newFakeManagerOps(), now.Add(-30*time.Second))
+	a1 := now.Add(-12 * time.Second)
+	a2 := now.Add(-6 * time.Second)
+	for _, at := range []time.Time{a1, a2} {
+		if err := a.systemAliveReceived(aliveAt(at), true); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	lossAt(t, a, now.Add(-3*time.Second))
+	if err := a.systemAliveReceived(aliveAt(now), true); err != nil {
+		t.Fatal(err)
+	}
+	waitRecoverHits(t, hits, 2)
+	if got := hits.lastAfterMillis.Load(); got != a1.UnixMilli() {
+		t.Fatalf("recovery after= %d (%s), want the alive BEFORE the latest, %d (%s); got the latest? %v",
+			got, time.UnixMilli(got).UTC(), a1.UnixMilli(), a1.UTC(), got == a2.UnixMilli())
+	}
+}
+
+// TestActor_FloorDischargedByFullRecovery: a recovery issued with a zero
+// cursor ("everything the producer has") covers any floor and clears it.
+func TestActor_FloorDischargedByFullRecovery(t *testing.T) {
+	srv, hits := fixtureSrv(t)
+	defer srv.Close()
+	a := newWiredActor(t, srv, newFakeManagerOps())
+	// First alive on a producer with no cursor: the initial recovery is
+	// issued with a zero cursor.
+	if err := a.systemAliveReceived(aliveAt(time.Now()), true); err != nil {
+		t.Fatal(err)
+	}
+	waitRecoverHits(t, hits, 1)
+	if !a.currentRecovery.recoverFrom.IsZero() {
+		t.Fatalf("initial recovery cursor = %v, want zero (everything)", a.currentRecovery.recoverFrom)
+	}
+	a.recoveryFloor = time.Now().Add(-time.Minute) // a loss floor raised meanwhile
+	if err := a.snapshotRecoveryFinished(a.currentRecovery.recoveryID); err != nil {
+		t.Fatal(err)
+	}
+	if !a.recoveryFloor.IsZero() {
+		t.Fatalf("floor = %v after a full recovery completed, want cleared", a.recoveryFloor)
+	}
 }

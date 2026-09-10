@@ -217,22 +217,24 @@ func (a *recoveryActor) enqueueAlive(ev evAlive) {
 // like alive, keeping the EARLIEST instant: the flag is what carries the
 // fact, the nudge may be dropped by a full inbox.
 //
-// The instant recorded is the earlier of lostAt and the producer's
-// recovery cursor AS IT STANDS NOW, on the reporting goroutine, before
-// any alive that follows the loss can be applied. The cursor is the
-// last alive gen timestamp before the loss (or an explicit rewind), in
-// the producer's clock domain; it also covers messages the dead queue
-// still held undelivered — a lagging consumer's queue may hold a span
-// timestamped well before the loss, and those die with it too. lostAt
-// alone (client wall clock) is the fallback when the producer has no
-// cursor yet, or when the cursor already moved past the loss because
-// the notice was created late.
+// The instant recorded is the earlier of lostAt and the producer's loss
+// anchor (producer.Manager.LossAnchor): the recovery cursor as it stood
+// BEFORE the most recent alive, or an explicit rewind. The most recent
+// alive is not trusted because it arrives on the alive session's own
+// channel and may have been generated after the broker deleted the
+// consumer's queue yet processed — concurrently with this call, on the
+// actor goroutine — before the loss was seen locally; sampling the
+// cursor here on the reporting goroutine cannot order itself against
+// that. The alive before it is a full alive interval older, safely
+// pre-loss. In the producer's clock domain, the anchor also covers
+// messages the dead queue still held undelivered — a lagging consumer's
+// queue may hold a span timestamped well before the loss, and those die
+// with it too. lostAt alone (client wall clock) is the fallback when the
+// producer has no cursor yet.
 func (a *recoveryActor) enqueueChannelLost(lostAt time.Time) {
 	anchor := lostAt
-	if prod, err := a.pm.GetProducerCached(a.producerID); err == nil {
-		if cursor := prod.TimestampForRecovery(); !cursor.IsZero() && cursor.Before(anchor) {
-			anchor = cursor
-		}
+	if cursor, err := a.pm.LossAnchor(a.producerID); err == nil && !cursor.IsZero() && cursor.Before(anchor) {
+		anchor = cursor
 	}
 	a.notePendingLoss(anchor)
 	a.send(evChannelLossNudge{})
@@ -1477,11 +1479,13 @@ func (a *recoveryActor) snapshotRecoveryFinished(requestID int) error {
 		a.firstRecoveryCompleted = true
 	}
 
-	// The floor is discharged only by a recovery that reached back to it.
-	// A recovery that started from a later cursor (a loss whose reaction
-	// is still pending lowered the floor after this one began) leaves
-	// the floor in place for the recovery that follows.
-	if a.currentRecovery != nil && !a.recoveryFloor.IsZero() && !a.currentRecovery.recoverFrom.IsZero() && !a.currentRecovery.recoverFrom.After(a.recoveryFloor) {
+	// The floor is discharged only by a recovery that reached back to it
+	// — a zero cursor means "everything the producer has" and covers any
+	// floor. A recovery that started from a later cursor (a loss whose
+	// reaction is still pending lowered the floor after this one began)
+	// leaves the floor in place for the recovery that follows.
+	if a.currentRecovery != nil && !a.recoveryFloor.IsZero() &&
+		(a.currentRecovery.recoverFrom.IsZero() || !a.currentRecovery.recoverFrom.After(a.recoveryFloor)) {
 		a.recoveryFloor = time.Time{}
 	}
 	a.currentRecovery = newRecoveryData(requestID, started)

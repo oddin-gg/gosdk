@@ -39,7 +39,12 @@ type data struct {
 	flaggedDown                      bool
 	lastProcessedMessageGenTimestamp time.Time
 	lastAliveReceivedGenTimestamp    time.Time
-	recoveryFromTimestamp            time.Time
+	// previousAliveReceivedGenTimestamp is the cursor lastAliveReceivedGen-
+	// Timestamp held before its latest advance. LossAnchor prefers it:
+	// the latest alive may have been generated after the broker deleted a
+	// consumer's queue but processed before the loss was seen locally.
+	previousAliveReceivedGenTimestamp time.Time
+	recoveryFromTimestamp             time.Time
 	// recoveryFromExplicit marks recoveryFromTimestamp as an explicit
 	// caller override (SetProducerRecoveryFromTimestamp) that must win
 	// over lastAliveReceivedGenTimestamp for the NEXT snapshot recovery —

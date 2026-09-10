@@ -241,7 +241,8 @@ it and every message published until the SDK re-binds is lost from the
 broker. At that moment the SDK flags every known producer that
 subscription served down (`ConnectionDownProducerStatusReason`) and, once
 the subscription has re-bound its queue, the next alive starts a snapshot
-recovery reaching back at least to the loss. Watch
+recovery reaching back at least to the loss (one alive interval further
+back than strictly needed, on purpose). Watch
 `RecoveryEvents()` / `ProducerStatus()` for the down → up cycle.
 
 ### Recovery

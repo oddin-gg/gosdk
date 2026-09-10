@@ -305,10 +305,45 @@ func (m *Manager) SetLastAliveReceivedGenTimestamp(id int, timestamp time.Time) 
 	}
 	return m.mutateProducerByID(id, func(p *data) error {
 		if timestamp.After(p.lastAliveReceivedGenTimestamp) {
+			p.previousAliveReceivedGenTimestamp = p.lastAliveReceivedGenTimestamp
 			p.lastAliveReceivedGenTimestamp = timestamp
 		}
 		return nil
 	})
+}
+
+// LossAnchor returns the point a snapshot recovery must reach back to
+// after the producer's consumer queue was lost: the recovery cursor as
+// it stood BEFORE the most recent alive, or an explicit rewind when one
+// is in force. Zero means the producer has no cursor yet.
+//
+// The most recent alive is deliberately not trusted. It arrives on the
+// alive session's own channel and may have been generated after the
+// broker deleted a consumer's queue but before the loss was seen
+// locally; a cursor advanced by it would start the recovery past
+// messages that died with the queue. The alive before it is at least
+// one alive interval older — far more than the detection latency — so
+// it is safely pre-loss. The price is one interval of already-received
+// replay, which the recovery contract tolerates.
+//
+// Cached read, no I/O; safe from any goroutine.
+func (m *Manager) LossAnchor(id int) (time.Time, error) {
+	d, err := m.producerCached(id)
+	if err != nil {
+		return time.Time{}, err
+	}
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	if d.recoveryFromExplicit {
+		return d.recoveryFromTimestamp, nil
+	}
+	switch {
+	case !d.previousAliveReceivedGenTimestamp.IsZero():
+		return d.previousAliveReceivedGenTimestamp, nil
+	case !d.lastAliveReceivedGenTimestamp.IsZero():
+		return d.lastAliveReceivedGenTimestamp, nil
+	}
+	return d.recoveryFromTimestamp, nil
 }
 
 // SetProducerRecoveryInfo records the summary of a snapshot recovery. It
