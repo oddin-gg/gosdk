@@ -15,21 +15,25 @@ import (
 // lossRecordingProcessor records OnFeedChannelLost calls; every other
 // hook is a no-op.
 type lossRecordingProcessor struct {
-	mu    sync.Mutex
-	calls []struct {
+	mu      sync.Mutex
+	session uuid.UUID
+	calls   []struct {
 		interest types.MessageInterest
 		lostAt   time.Time
 	}
 }
 
-func (p *lossRecordingProcessor) OnFeedChannelLost(mi types.MessageInterest, lostAt time.Time) {
+func (p *lossRecordingProcessor) OnFeedChannelLost(session uuid.UUID, mi types.MessageInterest, lostAt time.Time) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.session = session
 	p.calls = append(p.calls, struct {
 		interest types.MessageInterest
 		lostAt   time.Time
 	}{mi, lostAt})
 }
+func (*lossRecordingProcessor) OnFeedChannelRestored(uuid.UUID)                      {}
+func (*lossRecordingProcessor) OnFeedSessionGone(uuid.UUID)                          {}
 func (*lossRecordingProcessor) OnMessageProcessingStarted(uuid.UUID, int, time.Time) {}
 func (*lossRecordingProcessor) OnMessageProcessingEnded(uuid.UUID, int, time.Time)   {}
 func (*lossRecordingProcessor) OnAliveReceived(int, types.MessageTimestamp, bool, types.MessageInterest) {
@@ -64,6 +68,9 @@ func TestNewSession_ChannelLostHookDelegatesToRecovery(t *testing.T) {
 			if got := impl.channelConsumer.ChannelLostHookInstalled(); got != (tc.wantCalls > 0) {
 				t.Fatalf("hook installed = %v, want %v", got, tc.wantCalls > 0)
 			}
+			if r, g := impl.channelConsumer.ChannelLifecycleHooksInstalled(); r != (tc.wantCalls > 0) || g != (tc.wantCalls > 0) {
+				t.Fatalf("restored/gone hooks installed = %v/%v, want %v", r, g, tc.wantCalls > 0)
+			}
 			lost := time.Now().Add(-time.Second)
 			impl.channelConsumer.ReportChannelLost(lost)
 			rec.mu.Lock()
@@ -73,6 +80,9 @@ func TestNewSession_ChannelLostHookDelegatesToRecovery(t *testing.T) {
 			}
 			if tc.wantCalls == 1 && !rec.calls[0].lostAt.Equal(lost) {
 				t.Fatalf("lostAt = %v, want %v passed through unchanged", rec.calls[0].lostAt, lost)
+			}
+			if tc.wantCalls == 1 && rec.session != impl.sessionID {
+				t.Fatalf("hook reported session %s, want the session's own id %s", rec.session, impl.sessionID)
 			}
 		})
 	}

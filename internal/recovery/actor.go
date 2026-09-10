@@ -85,7 +85,13 @@ type recoveryActor struct {
 	// irrelevant: an alive that overtakes the notice may advance the
 	// producer's cursor, but not past the floor. Actor goroutine only.
 	recoveryFloor time.Time
-	done          chan struct{}
+
+	// deferredRecovery is set when a snapshot recovery was due but a
+	// lost session in this producer's scope had not re-bound its queue
+	// yet; resumeDeferredRecovery starts it once the rebind is reported
+	// (evChannelRebound) or, as fallback, on the next tick or alive.
+	deferredRecovery bool
+	done             chan struct{}
 
 	// Manager-lifetime ctx, used for API calls. Cancelled at shutdown.
 	ctx context.Context
@@ -116,6 +122,9 @@ type actorManagerOps interface {
 	LookupHandle(requestID int) (*Handle, bool)
 	nextRequestID() int
 	emitRecoveryMessage(types.RecoveryMessage)
+	// rebindPending reports whether a lost session in the producer's
+	// scope still has no queue; see Manager.rebindPending.
+	rebindPending(producerID int) bool
 }
 
 // maxPendingEventRecoveries bounds concurrent pending event recoveries
@@ -519,6 +528,8 @@ func (a *recoveryActor) dispatch(ev actorEvent) {
 		}
 	case evChannelLossNudge:
 		a.drainPendingChannelLoss()
+	case evChannelRebound:
+		a.resumeDeferredRecovery()
 	case evSnapshotComplete:
 		a.onSnapshotComplete(e)
 	case evRecoverEvent:
@@ -537,6 +548,7 @@ func (a *recoveryActor) dispatch(ev actorEvent) {
 		if a.drainPendingChannelLoss() {
 			a.drainPendingAlive()
 		}
+		a.resumeDeferredRecovery() // fallback for a dropped evChannelRebound
 		a.onTick(e.now, e.inactivityArmed)
 	default:
 		a.logger.Warnf("recovery actor: unknown event type %T", ev)
@@ -1016,7 +1028,7 @@ func (a *recoveryActor) systemAliveReceived(timestamp types.MessageTimestamp, su
 			a.recoveryState = types.InterruptedRecoveryState
 			return nil
 		}
-		return a.makeSnapshotRecovery(recoveryTimestamp)
+		return a.startSnapshotRecovery(recoveryTimestamp)
 	}
 
 	now := time.Now()
@@ -1035,7 +1047,7 @@ func (a *recoveryActor) systemAliveReceived(timestamp types.MessageTimestamp, su
 		err = a.producerUp(types.ReturnedFromInactivityProducerUpReason)
 	case isInRecovery:
 		if a.isFlaggedDown() && !a.isPerformingRecovery() && a.downReason != types.ProcessingQueueDelayViolationProducerDownReason {
-			if err := a.makeSnapshotRecovery(recoveryTimestamp); err != nil {
+			if err := a.startSnapshotRecovery(recoveryTimestamp); err != nil {
 				return err
 			}
 		}
@@ -1044,12 +1056,12 @@ func (a *recoveryActor) systemAliveReceived(timestamp types.MessageTimestamp, su
 		if a.isPerformingRecovery() && recoveryTiming > maxInterval {
 			a.recoveryState = types.ErrorRecoveryState
 			a.currentRecovery = nil
-			if err := a.makeSnapshotRecovery(recoveryTimestamp); err != nil {
+			if err := a.startSnapshotRecovery(recoveryTimestamp); err != nil {
 				return err
 			}
 		}
 	default:
-		err = a.makeSnapshotRecovery(recoveryTimestamp)
+		err = a.startSnapshotRecovery(recoveryTimestamp)
 	}
 	if err != nil {
 		return err
@@ -1245,6 +1257,45 @@ func (a *recoveryActor) currentStatus() types.ProducerStatus {
 // complete/recover-event for this producer queued behind it; under
 // load the 256-slot inbox dropped alives and triggered false
 // producer-down. Mirrors the v2.24 detach-event-recovery restructure.
+// startSnapshotRecovery is the gate in front of makeSnapshotRecovery: a
+// snapshot recovery must not be requested while a lost session in this
+// producer's scope has no queue yet — the replay would be published
+// into nothing, and its snapshot_complete with it (a recovery stalled
+// until MaxRecoveryExecution, or completed with its head lost). The
+// request is deferred instead and issued by resumeDeferredRecovery once
+// the rebind is reported; the producer stays flagged down meanwhile and
+// the recovery floor keeps the eventual request reaching back to the
+// loss.
+func (a *recoveryActor) startSnapshotRecovery(timestamp time.Time) error {
+	if a.mgr.rebindPending(a.producerID) {
+		if !a.deferredRecovery {
+			a.logger.WithField("producer_id", a.producerID).
+				Info("recovery: snapshot recovery deferred until the lost subscription queue is re-bound")
+		}
+		a.deferredRecovery = true
+		return nil
+	}
+	a.deferredRecovery = false
+	return a.makeSnapshotRecovery(timestamp)
+}
+
+// resumeDeferredRecovery issues a snapshot recovery that startSnapshotRecovery
+// deferred, once no lost session in scope is pending any more. The
+// cursor is recomputed: the floor makes it reach back to the loss.
+func (a *recoveryActor) resumeDeferredRecovery() {
+	if !a.deferredRecovery || a.mgr.rebindPending(a.producerID) {
+		return
+	}
+	ts, err := a.timestampForRecovery()
+	if err != nil {
+		a.logger.WithError(err).WithField("producer_id", a.producerID).Warn("recovery: resume deferred snapshot recovery: recovery timestamp")
+		return
+	}
+	if err := a.startSnapshotRecovery(ts); err != nil {
+		a.logger.WithError(err).WithField("producer_id", a.producerID).Error("recovery: resume deferred snapshot recovery")
+	}
+}
+
 func (a *recoveryActor) makeSnapshotRecovery(timestamp time.Time) error {
 	now := time.Now()
 	recoverFrom := timestamp
@@ -1415,7 +1466,7 @@ func (a *recoveryActor) snapshotRecoveryFinished(requestID int) error {
 	// longer matched currentRecovery.recoveryID and be silently
 	// ignored — the new recovery hung forever.
 	if a.recoveryState == types.InterruptedRecoveryState {
-		return a.makeSnapshotRecovery(a.lastValidAliveGen)
+		return a.startSnapshotRecovery(a.lastValidAliveGen)
 	}
 
 	var reason types.ProducerUpReason

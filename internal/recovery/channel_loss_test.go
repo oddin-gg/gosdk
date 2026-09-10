@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/oddin-gg/gosdk/internal/api"
 	"github.com/oddin-gg/gosdk/internal/producer"
 	"github.com/oddin-gg/gosdk/types"
@@ -422,8 +424,13 @@ func TestActor_ChannelLost_DisabledProducerConsumesTheNotice(t *testing.T) {
 // against fixtureSrv: producer 1 = live, 2 = prematch, 3 = live|prematch)
 // with an actor spawned for each given producer, all up.
 func openedManagerWithActors(t *testing.T, ids ...int) (*Manager, *producer.Manager) {
+	m, pm, _ := openedManagerWithActorsAndHits(t, ids...)
+	return m, pm
+}
+
+func openedManagerWithActorsAndHits(t *testing.T, ids ...int) (*Manager, *producer.Manager, *recoveryHits) {
 	t.Helper()
-	srv, _ := fixtureSrv(t)
+	srv, hits := fixtureSrv(t)
 	t.Cleanup(srv.Close)
 	u, _ := url.Parse(srv.URL)
 	cfg := &minimalCfg{apiURL: u.Host, token: "tok"}
@@ -451,7 +458,7 @@ func openedManagerWithActors(t *testing.T, ids ...int) (*Manager, *producer.Mana
 			}
 		}
 	}
-	return m, pm
+	return m, pm, hits
 }
 
 func actorOf(t *testing.T, m *Manager, id int) *recoveryActor {
@@ -493,16 +500,17 @@ func TestManager_OnFeedChannelLost_FansOutToEveryKnownActor(t *testing.T) {
 	m, pm := openedManagerWithActors(t, 1, 2, 3)
 	lost := time.Now().Add(-time.Second)
 
-	m.OnFeedChannelLost(types.AllMessageInterest, lost)
+	m.OnFeedChannelLost(uuid.New(), types.AllMessageInterest, lost)
+	_ = lost
 	if m.ChannelLossCount() != 1 {
 		t.Fatalf("ChannelLossCount = %d, want 1", m.ChannelLossCount())
 	}
 	for _, id := range []int{1, 2, 3} {
 		waitDown(t, pm, id)
-		if a := actorOf(t, m, id); !a.recoveryFloor.Equal(lost) && a.pendingLossAt.Load() != lost.UnixNano() {
-			t.Fatalf("producer %d: floor=%v pending=%d, want the loss instant %v", id, a.recoveryFloor, a.pendingLossAt.Load(), lost)
-		}
 	}
+	// (The instant itself is pinned by the actor tests through
+	// enqueueChannelLost; actor fields are not read here — the actors
+	// are running.)
 }
 
 // TestManager_OnFeedChannelLost_ScopedToTheLostSessionsInterest: a
@@ -514,7 +522,7 @@ func TestManager_OnFeedChannelLost_FansOutToEveryKnownActor(t *testing.T) {
 func TestManager_OnFeedChannelLost_ScopedToTheLostSessionsInterest(t *testing.T) {
 	m, pm := openedManagerWithActors(t, 1, 2, 3)
 
-	m.OnFeedChannelLost(types.LiveOnlyMessageInterest, time.Now())
+	m.OnFeedChannelLost(uuid.New(), types.LiveOnlyMessageInterest, time.Now())
 	if a := actorOf(t, m, 2); a.pendingLossAt.Load() != 0 {
 		t.Fatal("prematch-only producer 2 was signalled for a LiveOnly session's loss")
 	}
@@ -522,9 +530,6 @@ func TestManager_OnFeedChannelLost_ScopedToTheLostSessionsInterest(t *testing.T)
 	waitDown(t, pm, 3) // live|prematch
 	if down, _ := pm.IsProducerDown(t.Context(), 2); down {
 		t.Fatal("prematch-only producer 2 flagged down for a LiveOnly session's loss")
-	}
-	if a := actorOf(t, m, 2); a.downReason == types.ConnectionDownProducerDownReason {
-		t.Fatal("prematch-only producer 2 reacted to a LiveOnly session's loss")
 	}
 }
 
@@ -534,7 +539,7 @@ func TestManager_OnFeedChannelLost_ScopedToTheLostSessionsInterest(t *testing.T)
 // counts for every producer.
 func TestManager_OnFeedChannelLost_AliveSessionLossFlagsEveryProducer(t *testing.T) {
 	m, pm := openedManagerWithActors(t, 1, 2, 3)
-	m.OnFeedChannelLost(types.SystemAliveOnly, time.Now())
+	m.OnFeedChannelLost(uuid.New(), types.SystemAliveOnly, time.Now())
 	for _, id := range []int{1, 2, 3} {
 		waitDown(t, pm, id)
 	}
@@ -546,10 +551,13 @@ func TestManager_OnFeedChannelLost_AliveSessionLossFlagsEveryProducer(t *testing
 // makes the catalog unreadable too).
 func TestManager_OnFeedChannelLost_UnreadableProducerIsFlaggedAnyway(t *testing.T) {
 	m, _ := openedManagerWithActors(t, 1, 999)
-	m.OnFeedChannelLost(types.LiveOnlyMessageInterest, time.Now())
+	m.OnFeedChannelLost(uuid.New(), types.LiveOnlyMessageInterest, time.Now())
+	// The actor's reaction fails (the catalog cannot describe 999) and
+	// re-stores the notice, so the atomic pending slot settles non-zero;
+	// it is the only actor state safe to read while the actor runs.
 	a := actorOf(t, m, 999)
 	deadline := time.Now().Add(2 * time.Second)
-	for a.pendingLossAt.Load() == 0 && a.recoveryFloor.IsZero() {
+	for a.pendingLossAt.Load() == 0 {
 		if time.Now().After(deadline) {
 			t.Fatal("producer 999 (unreadable from the catalog) was not signalled")
 		}
@@ -559,7 +567,7 @@ func TestManager_OnFeedChannelLost_UnreadableProducerIsFlaggedAnyway(t *testing.
 
 func TestManager_OnFeedChannelLost_BeforeOpenIsNoop(t *testing.T) {
 	m := newTestManager(t)
-	m.OnFeedChannelLost(types.AllMessageInterest, time.Now()) // must not panic on a never-opened manager
+	m.OnFeedChannelLost(uuid.New(), types.AllMessageInterest, time.Now()) // must not panic on a never-opened manager
 	if m.ChannelLossCount() != 1 {
 		t.Fatalf("ChannelLossCount = %d, want 1", m.ChannelLossCount())
 	}
@@ -569,4 +577,132 @@ func TestProducerDownReason_ConnectionDownMapsToStatusReason(t *testing.T) {
 	if got := types.ConnectionDownProducerDownReason.ToProducerStatusReason(); got != types.ConnectionDownProducerStatusReason {
 		t.Fatalf("ToProducerStatusReason = %v, want ConnectionDown", got)
 	}
+}
+
+// --- Recovery is held back until the lost queue is re-bound ---
+
+// TestActor_ChannelLost_RecoveryWaitsForRebind: while a lost session in
+// the producer's scope has no queue, an alive must NOT issue the snapshot
+// recovery — the replay would be published into nothing and its
+// snapshot_complete lost with it. The producer stays flagged down; once
+// the rebind is reported the recovery starts, from the floor.
+func TestActor_ChannelLost_RecoveryWaitsForRebind(t *testing.T) {
+	fake := newFakeManagerOps()
+	now := time.Now().Truncate(time.Millisecond)
+	a, hits := steadyActor(t, fake, now.Add(-10*time.Second))
+	preLoss := now.Add(-4 * time.Second)
+	if err := a.systemAliveReceived(aliveAt(preLoss), true); err != nil {
+		t.Fatal(err)
+	}
+
+	fake.pendingRebind.Store(true) // the lost session has not re-bound
+	lossAt(t, a, now.Add(-2*time.Second))
+	if err := a.systemAliveReceived(aliveAt(now), true); err != nil {
+		t.Fatal(err)
+	}
+	if a.recoveryState == types.StartedRecoveryState {
+		t.Fatal("recovery must not start while the lost queue is not re-bound")
+	}
+	if !a.deferredRecovery || !a.isFlaggedDown() {
+		t.Fatalf("expected deferred=true and producer down, got deferred=%v down=%v", a.deferredRecovery, a.isFlaggedDown())
+	}
+	time.Sleep(30 * time.Millisecond)
+	if got := hits.recover.Load(); got != 1 {
+		t.Fatalf("recovery POSTs = %d while rebind pending, want 1 (only the initial)", got)
+	}
+	// A tick while still pending changes nothing.
+	a.dispatch(evTick{now: time.Now(), inactivityArmed: false})
+	if a.recoveryState == types.StartedRecoveryState {
+		t.Fatal("tick must not start the recovery while the rebind is pending")
+	}
+
+	fake.pendingRebind.Store(false)
+	a.dispatch(evChannelRebound{})
+	if a.recoveryState != types.StartedRecoveryState || a.deferredRecovery {
+		t.Fatalf("rebind must start the deferred recovery: state=%v deferred=%v", a.recoveryState, a.deferredRecovery)
+	}
+	waitRecoverHits(t, hits, 2)
+	if got := hits.lastAfterMillis.Load(); got != preLoss.UnixMilli() {
+		t.Fatalf("deferred recovery after= %d, want the pre-loss cursor %d", got, preLoss.UnixMilli())
+	}
+}
+
+// TestActor_ChannelLost_DeferredRecoveryResumesOnTick: the rebound nudge
+// is lossy; the tick is the fallback.
+func TestActor_ChannelLost_DeferredRecoveryResumesOnTick(t *testing.T) {
+	fake := newFakeManagerOps()
+	a, hits := steadyActor(t, fake, time.Now())
+	fake.pendingRebind.Store(true)
+	lossAt(t, a, time.Now())
+	if err := a.systemAliveReceived(aliveAt(time.Now()), true); err != nil {
+		t.Fatal(err)
+	}
+	if !a.deferredRecovery {
+		t.Fatal("expected the recovery to be deferred")
+	}
+	fake.pendingRebind.Store(false)
+	a.dispatch(evTick{now: time.Now(), inactivityArmed: false})
+	if a.recoveryState != types.StartedRecoveryState {
+		t.Fatalf("tick must resume the deferred recovery, state = %v", a.recoveryState)
+	}
+	waitRecoverHits(t, hits, 2)
+}
+
+// TestManager_RebindPending_TracksLostSessionsByScope pins the manager's
+// bookkeeping: a lost LiveOnly session holds back the live and mixed
+// producers only; a restore or a gone releases it; unknown sessions are
+// ignored; the alive-only session holds back everyone.
+func TestManager_RebindPending_TracksLostSessionsByScope(t *testing.T) {
+	m, _ := openedManagerWithActors(t, 1, 2, 3)
+	if m.rebindPending(1) {
+		t.Fatal("nothing lost yet, nothing pending")
+	}
+	live := uuid.New()
+	m.OnFeedChannelLost(live, types.LiveOnlyMessageInterest, time.Now())
+	if !m.rebindPending(1) || !m.rebindPending(3) || m.rebindPending(2) {
+		t.Fatalf("LiveOnly loss: pending 1=%v 2=%v 3=%v, want true/false/true", m.rebindPending(1), m.rebindPending(2), m.rebindPending(3))
+	}
+	m.OnFeedChannelRestored(uuid.New()) // unknown session: no effect
+	if !m.rebindPending(1) {
+		t.Fatal("restoring an unknown session must not release the lost one")
+	}
+	m.OnFeedChannelRestored(live)
+	if m.rebindPending(1) || m.rebindPending(3) {
+		t.Fatal("restored session must release its producers")
+	}
+
+	alive := uuid.New()
+	m.OnFeedChannelLost(alive, types.SystemAliveOnly, time.Now())
+	for _, id := range []int{1, 2, 3} {
+		if !m.rebindPending(id) {
+			t.Fatalf("alive-session loss must hold back producer %d", id)
+		}
+	}
+	m.OnFeedSessionGone(alive)
+	for _, id := range []int{1, 2, 3} {
+		if m.rebindPending(id) {
+			t.Fatalf("a session that is gone must not hold back producer %d", id)
+		}
+	}
+}
+
+// TestManager_ChannelRestored_NudgesDeferredActors: end to end through
+// the real manager and a running actor, observed only through the
+// recovery API — a loss flags the producer down; its next alive issues
+// no recovery request while the lost session has no queue; the restore
+// lets the request go out.
+func TestManager_ChannelRestored_NudgesDeferredActors(t *testing.T) {
+	m, pm, hits := openedManagerWithActorsAndHits(t, 1)
+	sess := uuid.New()
+	m.OnFeedChannelLost(sess, types.LiveOnlyMessageInterest, time.Now())
+	waitDown(t, pm, 1)
+
+	m.OnAliveReceived(1, aliveAt(time.Now()), true, types.SystemAliveOnly)
+	time.Sleep(150 * time.Millisecond) // ample time for a wrongly issued POST to land
+	if got := hits.recover.Load(); got != 0 {
+		t.Fatalf("recovery POSTs = %d while the lost session had no queue, want 0", got)
+	}
+
+	m.OnFeedChannelRestored(sess)
+	waitRecoverHits(t, hits, 1)
 }

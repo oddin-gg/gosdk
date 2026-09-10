@@ -169,6 +169,16 @@ type Manager struct {
 
 	// channelLosses counts OnFeedChannelLost calls (diagnostics).
 	channelLosses atomic.Uint64
+
+	// lostSessions holds the sessions whose consumer channel was lost
+	// and has not re-bound (or gone away) yet, with their interest. A
+	// producer's snapshot recovery is held back while any session in
+	// its scope is here: a replay published before the queue exists
+	// routes nowhere — and its snapshot_complete with it, which would
+	// stall the recovery until MaxRecoveryExecution, or worse, complete
+	// a recovery whose head was lost and discharge the floor.
+	lostMu       sync.Mutex
+	lostSessions map[uuid.UUID]types.MessageInterest
 }
 
 // tickDropWarnInterval bounds how often per-producer tick-drop warns are
@@ -657,11 +667,21 @@ func (m *Manager) OnMessageProcessingEnded(sessionID uuid.UUID, producerID int, 
 // Runs on the consumer's goroutine between losing the queue and
 // re-binding it, so it must not do I/O: the catalog read is the cached
 // one.
-func (m *Manager) OnFeedChannelLost(messageInterest types.MessageInterest, lostAt time.Time) {
+func (m *Manager) OnFeedChannelLost(session uuid.UUID, messageInterest types.MessageInterest, lostAt time.Time) {
 	m.channelLosses.Add(1)
 	if m.state.Load() != mgrStateOpen {
 		return
 	}
+	// Register the loss BEFORE any actor can react to it, so an alive
+	// processed right after the flag-down already sees the rebind as
+	// pending.
+	m.lostMu.Lock()
+	if m.lostSessions == nil {
+		m.lostSessions = make(map[uuid.UUID]types.MessageInterest)
+	}
+	m.lostSessions[session] = messageInterest
+	m.lostMu.Unlock()
+
 	m.actorsMu.RLock()
 	actors := make([]*recoveryActor, 0, len(m.actors))
 	for _, a := range m.actors {
@@ -679,6 +699,56 @@ func (m *Manager) OnFeedChannelLost(messageInterest types.MessageInterest, lostA
 // ChannelLossCount reports how many consumer-channel losses were
 // signalled to the manager over its lifetime (opened or not).
 func (m *Manager) ChannelLossCount() uint64 { return m.channelLosses.Load() }
+
+// OnFeedChannelRestored reports that a lost session's consumer has
+// re-declared and re-bound its queue: recoveries held back for the
+// producers in its scope may now start.
+func (m *Manager) OnFeedChannelRestored(session uuid.UUID) { m.sessionQueueSettled(session) }
+
+// OnFeedSessionGone reports that a session's consumer exited for good.
+// It needs no queue, so it must not hold recoveries back.
+func (m *Manager) OnFeedSessionGone(session uuid.UUID) { m.sessionQueueSettled(session) }
+
+func (m *Manager) sessionQueueSettled(session uuid.UUID) {
+	m.lostMu.Lock()
+	mi, wasLost := m.lostSessions[session]
+	delete(m.lostSessions, session)
+	m.lostMu.Unlock()
+	if !wasLost || m.state.Load() != mgrStateOpen {
+		return
+	}
+	m.actorsMu.RLock()
+	actors := make([]*recoveryActor, 0, len(m.actors))
+	for _, a := range m.actors {
+		actors = append(actors, a)
+	}
+	m.actorsMu.RUnlock()
+	for _, a := range actors {
+		if prod, err := m.producerManager.GetProducerCached(a.producerID); err == nil && !mi.IsProducerInScope(prod) {
+			continue
+		}
+		a.send(evChannelRebound{}) // lossy nudge; the tick is the fallback
+	}
+}
+
+// rebindPending reports whether any lost session whose interest covers
+// producerID has not re-bound its queue yet. A producer the catalog
+// cannot describe is treated as covered (the conservative answer: hold
+// the recovery rather than replay into a missing queue).
+func (m *Manager) rebindPending(producerID int) bool {
+	m.lostMu.Lock()
+	defer m.lostMu.Unlock()
+	if len(m.lostSessions) == 0 {
+		return false
+	}
+	prod, err := m.producerManager.GetProducerCached(producerID)
+	for _, mi := range m.lostSessions {
+		if err != nil || mi.IsProducerInScope(prod) {
+			return true
+		}
+	}
+	return false
+}
 
 // OnAliveReceived dispatches to the producer's actor via the COALESCED
 // latest-alive mailbox: a full inbox can only delay an alive, never

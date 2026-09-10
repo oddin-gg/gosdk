@@ -239,8 +239,9 @@ Gaps are closed by recovery, not by the broker. When a consumer channel
 is lost — with the whole AMQP connection or alone — its queue dies with
 it and every message published until the SDK re-binds is lost from the
 broker. At that moment the SDK flags every known producer that
-subscription served down (`ConnectionDownProducerStatusReason`) and the
-next alive starts a snapshot recovery reaching back at least to the loss. Watch
+subscription served down (`ConnectionDownProducerStatusReason`) and, once
+the subscription has re-bound its queue, the next alive starts a snapshot
+recovery reaching back at least to the loss. Watch
 `RecoveryEvents()` / `ProducerStatus()` for the down → up cycle.
 
 ### Recovery

@@ -106,6 +106,19 @@ type ChannelConsumer struct {
 	// the loss can move the recovery past the gap.
 	onChannelLost func(mi types.MessageInterest, lostAt time.Time)
 
+	// onChannelRestored, when set, is called from run() right after a
+	// lost channel has been re-declared and re-bound — before any
+	// delivery on it is processed. The recovery layer holds a snapshot
+	// recovery back until every lost consumer in the producer's scope
+	// has reported this: a replay published before the queue exists
+	// routes nowhere, and its snapshot_complete with it.
+	onChannelRestored func()
+
+	// onConsumerGone, when set, is called once when run() exits for
+	// good (close, drain, or a reopen abandoned on ctx). A consumer that
+	// is gone needs no queue, so it must stop holding recoveries back.
+	onConsumerGone func()
+
 	// Channel-loss log throttle, guarded by lossMu (the watcher and run
 	// goroutines both report). A peer that cancels the consumer as fast
 	// as it is re-declared would otherwise drive one Warn per round
@@ -185,9 +198,24 @@ func (c *ChannelConsumer) SetChannelLostHook(fn func(mi types.MessageInterest, l
 	c.onChannelLost = fn
 }
 
+// SetChannelRestoredHook installs the callback run() invokes after a
+// lost channel has been re-declared and re-bound (see onChannelRestored).
+// Must be called before Open.
+func (c *ChannelConsumer) SetChannelRestoredHook(fn func()) { c.onChannelRestored = fn }
+
+// SetConsumerGoneHook installs the callback run() invokes once on its
+// final exit (see onConsumerGone). Must be called before Open.
+func (c *ChannelConsumer) SetConsumerGoneHook(fn func()) { c.onConsumerGone = fn }
+
 // ChannelLostHookInstalled reports whether a channel-lost hook is set —
 // the one seam between a lost queue and the recovery that closes its gap.
 func (c *ChannelConsumer) ChannelLostHookInstalled() bool { return c.onChannelLost != nil }
+
+// ChannelLifecycleHooksInstalled reports whether the restored and gone
+// hooks are set alongside the lost hook.
+func (c *ChannelConsumer) ChannelLifecycleHooksInstalled() (restored, gone bool) {
+	return c.onChannelRestored != nil, c.onConsumerGone != nil
+}
 
 // ReportChannelLost is the single entry point through which a lost
 // channel reaches the hook: it logs the loss (throttled) and invokes the
@@ -543,7 +571,12 @@ func (c *ChannelConsumer) run(ctx context.Context, deliveries <-chan amqp.Delive
 			close(watch.stop)
 		}
 	}
-	defer func() { stopWatch() }()
+	defer func() {
+		stopWatch()
+		if c.onConsumerGone != nil {
+			c.onConsumerGone()
+		}
+	}()
 	for {
 		c.consume(ctx, deliveries, ch)
 
@@ -672,6 +705,12 @@ func (c *ChannelConsumer) run(ctx context.Context, deliveries <-chan amqp.Delive
 		}
 		opened = time.Now()
 		watch = c.watchChannel(ctx, ch)
+		// The replacement queue is declared and bound: whatever is
+		// published from now on reaches this consumer, so a recovery
+		// held back for it may start.
+		if c.onChannelRestored != nil {
+			c.onChannelRestored()
+		}
 	}
 }
 

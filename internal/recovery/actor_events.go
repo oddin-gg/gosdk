@@ -45,6 +45,13 @@ type evChannelLossNudge struct{}
 
 func (evChannelLossNudge) isActorEvent() {}
 
+// evChannelRebound nudges the actor after a lost session in its scope
+// re-bound its queue (or went away): a snapshot recovery held back for
+// the rebind may start. Lossy; the tick re-checks as fallback.
+type evChannelRebound struct{}
+
+func (evChannelRebound) isActorEvent() {}
+
 // evSnapshotComplete: a snapshot-complete arrived. The actor decides
 // whether it terminates a snapshot recovery, an event recovery, or is
 // stale/unknown.

@@ -168,9 +168,15 @@ func TestChannelConsumer_ChannelLost_HookBeforeCloseAndReopen(t *testing.T) {
 	rec := &lossRecorder{seq: &opener.seq}
 	c := NewChannelConsumer(opener, &factory.FeedMessageFactory{}, discardConsumerLogger(), "ex", "od:sport:", 0)
 	c.SetChannelLostHook(rec.hook)
+	var restoredAt, goneCalls atomic.Int32
+	c.SetChannelRestoredHook(func() { restoredAt.Store(opener.seq.Add(1)) })
+	c.SetConsumerGoneHook(func() { goneCalls.Add(1) })
 	closeConsumer(t, c)
 	if !c.ChannelLostHookInstalled() {
 		t.Fatal("ChannelLostHookInstalled must report the installed hook")
+	}
+	if r, g := c.ChannelLifecycleHooksInstalled(); !r || !g {
+		t.Fatalf("ChannelLifecycleHooksInstalled = %v/%v, want both", r, g)
 	}
 
 	mi := types.LiveOnlyMessageInterest
@@ -211,6 +217,27 @@ func TestChannelConsumer_ChannelLost_HookBeforeCloseAndReopen(t *testing.T) {
 	opener.mu.Unlock()
 	if !(calls[0].ordinal < closedAt && closedAt < reopenedAt) {
 		t.Fatalf("ordering hook(%d) < Close(%d) < CreateChannel#2(%d) violated", calls[0].ordinal, closedAt, reopenedAt)
+	}
+	// The restored hook fires once the replacement queue is bound, and
+	// the gone hook not before the consumer is closed.
+	deadline = time.Now().Add(2 * time.Second)
+	for restoredAt.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("restored hook did not fire after the reopen")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if got := restoredAt.Load(); got < reopenedAt {
+		t.Fatalf("restored hook ran at %d, before CreateChannel#2 at %d", got, reopenedAt)
+	}
+	if goneCalls.Load() != 0 {
+		t.Fatal("gone hook fired while the consumer is still running")
+	}
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelShutdown()
+	_ = c.Close(shutdownCtx)
+	if got := goneCalls.Load(); got != 1 {
+		t.Fatalf("gone hook calls after close = %d, want exactly 1", got)
 	}
 	if elapsed := time.Since(lost); elapsed < channelReopenBackoff-50*time.Millisecond {
 		t.Fatalf("reopen after %v; want ≥ %v backoff for a channel that died within its dwell", elapsed, channelReopenBackoff)
@@ -461,6 +488,8 @@ func TestChannelConsumer_CloseDuringFailingReopenDoesNotPanic(t *testing.T) {
 	opener := &failAfterOpener{sequencedOpener: *newSequencedOpener(1, false)}
 	c := NewChannelConsumer(opener, &factory.FeedMessageFactory{}, discardConsumerLogger(), "ex", "od:sport:", 0)
 	c.SetChannelLostHook(func(types.MessageInterest, time.Time) {})
+	var goneCalls atomic.Int32
+	c.SetConsumerGoneHook(func() { goneCalls.Add(1) })
 	mi := types.AllMessageInterest
 	if _, err := c.Open(context.Background(), []string{"k"}, &mi); err != nil {
 		t.Fatalf("Open: %v", err)
@@ -482,5 +511,10 @@ func TestChannelConsumer_CloseDuringFailingReopenDoesNotPanic(t *testing.T) {
 	case <-done:
 	case <-time.After(3 * time.Second):
 		t.Fatal("consumer goroutines did not exit after close during a failing reopen")
+	}
+	// A consumer that never got its queue back but is closed must report
+	// gone, so it stops holding recoveries back.
+	if got := goneCalls.Load(); got != 1 {
+		t.Fatalf("gone hook calls = %d, want 1 after close during a failing reopen", got)
 	}
 }

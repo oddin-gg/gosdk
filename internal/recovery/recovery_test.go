@@ -126,11 +126,12 @@ func TestEventRecovery_CarriesEventID(t *testing.T) {
 // fakeManagerOps captures actorManagerOps invocations so tests can
 // observe what the actor emitted.
 type fakeManagerOps struct {
-	mu          sync.Mutex
-	registered  []*Handle
-	completed   []completedHandle
-	nextID      atomic.Uint32
-	emittedMsgs []types.RecoveryMessage
+	pendingRebind atomic.Bool
+	mu            sync.Mutex
+	registered    []*Handle
+	completed     []completedHandle
+	nextID        atomic.Uint32
+	emittedMsgs   []types.RecoveryMessage
 }
 
 type completedHandle struct {
@@ -172,6 +173,8 @@ func (f *fakeManagerOps) LookupHandle(id int) (*Handle, bool) {
 	}
 	return nil, false
 }
+
+func (f *fakeManagerOps) rebindPending(int) bool { return f.pendingRebind.Load() }
 
 func (f *fakeManagerOps) emitRecoveryMessage(msg types.RecoveryMessage) {
 	f.mu.Lock()
