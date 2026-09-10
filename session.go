@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -145,6 +146,14 @@ type oddsFeedSessionImpl struct {
 
 	errMu sync.RWMutex
 	err   error
+
+	// TEMP tracing counters (atomics: read by the watchdog goroutine).
+	traceMsgTotal      atomic.Uint64
+	traceDropTotal     atomic.Uint64
+	traceSendBlockedNS atomic.Int64
+	traceSendMaxNS     atomic.Int64
+	traceInFlightSince atomic.Int64 // unix nanos of the message being processed, 0 = idle
+	traceInFlightRoute atomic.Pointer[string]
 }
 
 func (o *oddsFeedSessionImpl) RespCh() <-chan sessionEnvelope {
@@ -190,6 +199,18 @@ func (o *oddsFeedSessionImpl) Open(
 	loopCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	o.closeFn = cancel
 	o.done = make(chan struct{})
+
+	o.logger.Info("trace: session: opened",
+		"session_id", o.sessionID.String(),
+		"mgr_gen", o.traceMgrGen(),
+		"message_interest", string(*messageInterest),
+		"exchange", o.exchangeName,
+		"is_replay", o.isReplay,
+		"report_extended_data", reportExtendedData,
+		"routing_keys", routingKeys,
+		"msg_buffer_cap", cap(o.msgCh))
+
+	go o.traceWatchdog(loopCtx)
 
 	go func(messageInterest *types.MessageInterest) {
 		// The goroutine owns msgCh: it's the sole sender and the sole
@@ -319,6 +340,7 @@ func (o *oddsFeedSessionImpl) processMessage(ctx context.Context, env feed.Queue
 	// but a future channel-shape change shouldn't panic the goroutine.
 	// Nothing to deliver == intentional drop: ack.
 	if msg == nil {
+		o.traceDrop("nil queue message", 0, "")
 		runAck(env.Ack)
 		return
 	}
@@ -334,6 +356,7 @@ func (o *oddsFeedSessionImpl) processMessage(ctx context.Context, env feed.Queue
 		// No parsed message will be built, so there is no shared-state
 		// race with a downstream parse. The raw side-channel, if any, is
 		// the delivery's only output and carries the ack.
+		o.traceDrop("nil feed message", 0, "")
 		o.dropDelivery(ctx, emitRaw, msg.RawFeedMessage, env.Ack)
 		return
 	}
@@ -377,9 +400,11 @@ func (o *oddsFeedSessionImpl) processMessage(ctx context.Context, env feed.Queue
 		o.emitUnparsable(ctx, unparsableMsg, fmt.Errorf("gosdk: session: is producer enabled %d: %w", producerID, err), env.Ack, emitRaw, msg.RawFeedMessage)
 		return
 	case !isProducerEnabled:
+		o.traceDrop("producer disabled", producerID, traceRoute(msg.FeedMessage))
 		o.dropDelivery(ctx, emitRaw, msg.RawFeedMessage, env.Ack)
 		return
 	case !messageInterest.IsProducerInScope(producerData):
+		o.traceDrop("producer out of interest scope", producerID, traceRoute(msg.FeedMessage))
 		o.dropDelivery(ctx, emitRaw, msg.RawFeedMessage, env.Ack)
 		return
 	}
@@ -389,6 +414,9 @@ func (o *oddsFeedSessionImpl) processMessage(ctx context.Context, env feed.Queue
 
 func (o *oddsFeedSessionImpl) processFeedMessage(ctx context.Context, feedMessage *types.FeedMessage, messageInterest types.MessageInterest, ack func(), emitRaw bool, rawMsg *types.RawFeedMessage) {
 	producerID := feedMessage.Message.Product()
+	route := traceRoute(feedMessage)
+	o.traceBeginMessage(route)
+	defer o.traceEndMessage()
 	o.recoveryMessageProcessor.OnMessageProcessingStarted(o.sessionID, producerID, time.Now())
 
 	// Pair every OnMessageProcessingStarted with exactly one
@@ -426,7 +454,16 @@ func (o *oddsFeedSessionImpl) processFeedMessage(ctx context.Context, feedMessag
 
 	switch msg := feedMessage.Message.(type) {
 	case *feedXML.Alive:
-		o.recoveryMessageProcessor.OnAliveReceived(producerID, feedMessage.Timestamp, msg.Subscribed != nil && *msg.Subscribed == 1, messageInterest)
+		subscribed := msg.Subscribed != nil && *msg.Subscribed == 1
+		o.logger.Debug("trace: session: alive",
+			"session_id", o.sessionID.String(),
+			"mgr_gen", o.traceMgrGen(),
+			"producer_id", producerID,
+			"subscribed", subscribed,
+			"message_interest", string(messageInterest),
+			"route", route,
+			"gen_age_ms", time.Since(feedMessage.Timestamp.Created).Milliseconds())
+		o.recoveryMessageProcessor.OnAliveReceived(producerID, feedMessage.Timestamp, subscribed, messageInterest)
 		endProcessing(feedMessage.Timestamp.Created)
 		// Terminal handling: consumed by the recovery machinery, never
 		// forwarded — intentional drop. The reads of feedMessage are done,
@@ -440,6 +477,14 @@ func (o *oddsFeedSessionImpl) processFeedMessage(ctx context.Context, feedMessag
 		// (default 6h), so if admission fails (ctx cancelled / recovery
 		// manager shutting down) we leave the delivery unacked and let
 		// the broker redeliver.
+		o.logger.Info("trace: session: snapshot_complete DELIVERED to session",
+			"session_id", o.sessionID.String(),
+			"mgr_gen", o.traceMgrGen(),
+			"producer_id", producerID,
+			"request_id", msg.RequestID,
+			"message_interest", string(messageInterest),
+			"route", route,
+			"gen_age_ms", time.Since(feedMessage.Timestamp.Created).Milliseconds())
 		if err := o.recoveryMessageProcessor.OnSnapshotCompleteReceived(ctx, producerID, msg.RequestID, messageInterest); err != nil {
 			o.logger.WithError(err).
 				WithField("producer_id", producerID).
@@ -542,10 +587,13 @@ func (o *oddsFeedSessionImpl) processFeedMessage(ctx context.Context, feedMessag
 // send a FOLLOW-UP ack-bearing envelope must abort when an earlier
 // required envelope (the raw side-channel) failed admission.
 func (o *oddsFeedSessionImpl) send(ctx context.Context, env sessionEnvelope) bool {
+	start := time.Now()
 	select {
 	case o.msgCh <- env:
+		o.traceSend(start, true)
 		return true
 	case <-ctx.Done():
+		o.traceSend(start, false)
 		return false
 	}
 }

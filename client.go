@@ -813,10 +813,27 @@ func validateConfigBounds(cfg *Config) error {
 // because those calls only need the latest, not a generation-paired
 // pair (Subscribe and Connect get coherent pairs via runtime snapshots).
 func (c *Client) resetConnectionLayer() {
-	c.recoveryManager.Store(recovery.NewManager(c.cfgAdpt, c.producerManager, c.apiClient, c.logger, c.cfg.initialSnapshotTime))
+	mgr := recovery.NewManager(c.cfgAdpt, c.producerManager, c.apiClient, c.logger, c.cfg.initialSnapshotTime)
+	// TEMP tracing: a rebuilt manager starts with an EMPTY actor map. A
+	// session opened against the previous generation keeps calling the
+	// old one, and a snapshot_complete admitted to a manager with no
+	// actor for the producer is acked and discarded.
+	c.logger.Info("trace: client: connection layer (re)created",
+		"mgr_gen", mgr.TraceGen(),
+		"node_id", nodeIDTrace(c.cfg.SdkNodeID()),
+		"exchange", c.cfg.exchangeName)
+	c.recoveryManager.Store(mgr)
 	rmq := feed.NewClient(c.cfgAdpt, c.whoAmIManager, c.logger)
 	rmq.SetEventEmitter(c.onFeedEvent)
 	c.rabbitMQClient.Store(rmq)
+}
+
+// nodeIDTrace renders an unset node id as -1 (TEMP tracing).
+func nodeIDTrace(nodeID *int) int {
+	if nodeID == nil {
+		return -1
+	}
+	return *nodeID
 }
 
 // setMode is the only writer of mode + connectState. Caller MUST hold

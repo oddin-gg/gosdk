@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
@@ -105,6 +106,16 @@ type ChannelConsumer struct {
 	drainOnce sync.Once
 	drainCh   chan struct{}
 
+	// TEMP tracing counters.
+	traceDeliveries     atomic.Uint64
+	traceBytes          atomic.Uint64
+	traceAdmitNS        atomic.Int64
+	traceAdmitMaxNS     atomic.Int64
+	traceLastSummary    atomic.Int64
+	traceSystemMsgs     atomic.Uint64
+	traceReopens        atomic.Uint64
+	traceLastDeliveries atomic.Uint64
+
 	// Settlement accounting: unsettledN counts deliveries handed to the
 	// session whose terminal disposition (ack on public-buffer
 	// admission, drop-ack, or nack) has not yet fired. Graceful close
@@ -195,10 +206,19 @@ func (c *ChannelConsumer) Open(ctx context.Context, routingKeys []string, messag
 	// to the struct on failure, so a fresh Open can retry. Reconnect
 	// after a LATER connection drop is still handled asynchronously by
 	// run() (transient errors retried there).
+	c.logger.Info("trace: feed: opening consumer channel",
+		"exchange", c.exchangeName,
+		"message_interest", string(*messageInterest),
+		"prefetch", c.prefetch,
+		"routing_keys", c.routingKeys)
+
 	deliveries, ch, err := c.client.CreateChannel(ctx, c.routingKeys, c.exchangeName, c.prefetch)
 	if err != nil {
 		return nil, fmt.Errorf("feed: open consumer channel (interest=%s, keys=%d): %w", *messageInterest, len(routingKeys), err)
 	}
+	c.logger.Info("trace: feed: consumer channel open",
+		"exchange", c.exchangeName,
+		"routing_keys", c.routingKeys)
 
 	c.mu.Lock()
 	// UNBUFFERED on purpose: elastic buffering lives solely in the
@@ -492,6 +512,12 @@ func (c *ChannelConsumer) run(ctx context.Context, deliveries <-chan amqp.Delive
 				}
 			}
 		}
+		c.traceReopens.Add(1)
+		c.logger.Warn("trace: feed: reopening consumer channel (deliveries stopped)",
+			"reopens_total", c.traceReopens.Load(),
+			"routing_keys", c.routingKeys,
+			"deliveries_total", c.traceDeliveries.Load())
+
 		ok := reopen()
 		<-relayDone // join the relay so it never outlives the loop
 		if !ok {
@@ -529,8 +555,12 @@ func (c *ChannelConsumer) consume(ctx context.Context, deliveries <-chan amqp.De
 		case d, ok := <-deliveries:
 			if !ok {
 				// Channel closed (connection drop or broker close).
+				c.logger.Warn("trace: feed: delivery channel closed",
+					"deliveries_total", c.traceDeliveries.Load(),
+					"unsettled", c.unsettled())
 				return
 			}
+			c.traceDelivery(d)
 			// processDelivery always returns a non-nil *QueueMessage
 			// — every branch (parse error, empty body, decode error,
 			// successful decode) builds and returns one. It does NOT
@@ -549,10 +579,14 @@ func (c *ChannelConsumer) consume(ctx context.Context, deliveries <-chan amqp.De
 			// not-admitted paths settle explicitly below since their ack
 			// closure never fires.
 			c.addUnsettled()
-			if !c.admit(ctx, d, QueueEnvelope{Msg: qm, Ack: c.ackFunc(d)}) {
+			admitStart := time.Now()
+			admitted := c.admit(ctx, d, QueueEnvelope{Msg: qm, Ack: c.ackFunc(d)})
+			c.traceAdmit(d, admitStart, admitted)
+			if !admitted {
 				c.settleOne()
 				return
 			}
+			c.traceSummary()
 		}
 	}
 }

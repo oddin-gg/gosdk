@@ -364,6 +364,13 @@ func (a *recoveryActor) stopBounded(ctx context.Context) bool {
 // dispatch routes an event to the matching handler. New event types
 // must be added here.
 func (a *recoveryActor) dispatch(ev actorEvent) {
+	a.logger.Debug("trace: recovery: actor event",
+		"producer_id", a.producerID,
+		"event", fmt.Sprintf("%T", ev),
+		"inbox_len", len(a.inbox),
+		"inbox_cap", cap(a.inbox),
+		"recovery_state", recoveryStateName(a.recoveryState))
+
 	switch e := ev.(type) {
 	case evMsgProcessingStarted:
 		a.onMessageProcessingStarted(e.timestamp)
@@ -569,6 +576,15 @@ func (a *recoveryActor) onAlive(e evAlive) {
 }
 
 func (a *recoveryActor) onSnapshotComplete(e evSnapshotComplete) {
+	now := time.Now()
+	a.logger.Info("trace: recovery: snapshot_complete reached actor",
+		append([]any{
+			"event_request_id", e.requestID,
+			"message_interest", string(e.messageInterest),
+			"validation_needed", a.snapshotValidationNeeded(e.messageInterest),
+			"known_recovery", a.isKnownRecovery(e.requestID),
+		}, a.traceState(now)...)...)
+
 	switch {
 	case a.isDisabled():
 		a.logger.WithField("producer_id", a.producerID).WithField("request_id", e.requestID).Info("recovery: snapshot complete for disabled producer")
@@ -582,10 +598,23 @@ func (a *recoveryActor) onSnapshotComplete(e evSnapshotComplete) {
 		if err := a.snapshotRecoveryFinished(e.requestID); err != nil {
 			a.logger.WithError(err).WithField("producer_id", a.producerID).WithField("request_id", e.requestID).Error("recovery: snapshot recovery finished")
 		}
+	default:
+		// Upstream this branch is silent: the completion matched a known
+		// recovery but neither validator accepted it, so recovery stays
+		// Started and the producer stays down until MaxRecoveryExecution.
+		a.logger.Error("trace: recovery: snapshot_complete IGNORED (validation refused)",
+			append([]any{
+				"event_request_id", e.requestID,
+				"message_interest", string(e.messageInterest),
+				"validation_needed", a.snapshotValidationNeeded(e.messageInterest),
+			}, a.traceState(now)...)...)
 	}
 }
 
 func (a *recoveryActor) onTick(now time.Time, inactivityArmed bool) {
+	a.logger.Info("trace: recovery: tick",
+		append([]any{"inactivity_armed", inactivityArmed}, a.traceState(now)...)...)
+
 	// Timeout scan for in-flight event recoveries: per NEXT.md the
 	// configured MaxRecoveryExecution caps the wall time a single
 	// recovery may take. Without this scan, an event recovery whose
@@ -616,9 +645,13 @@ func (a *recoveryActor) onTick(now time.Time, inactivityArmed bool) {
 	switch {
 	case aliveInterval > a.cfg.MaxInactivity():
 		downReason = types.AliveInternalViolationProducerDownReason
+		a.logger.Warn("trace: recovery: tick flags producer down (alive interval)",
+			append([]any{"alive_interval_ms", aliveInterval.Milliseconds()}, a.traceState(now)...)...)
 		err = a.producerDown(downReason)
 	case !a.calculateTiming(now):
 		downReason = types.ProcessingQueueDelayViolationProducerDownReason
+		a.logger.Warn("trace: recovery: tick flags producer down (processing queue delay)",
+			append([]any{"alive_interval_ms", aliveInterval.Milliseconds()}, a.traceState(now)...)...)
 		err = a.producerDown(downReason)
 	}
 	if err != nil {
@@ -878,6 +911,16 @@ func (a *recoveryActor) systemAliveReceived(timestamp types.MessageTimestamp, su
 		state != types.ErrorRecoveryState &&
 		state != types.InterruptedRecoveryState
 
+	a.logger.Info("trace: recovery: alive decision",
+		append([]any{
+			"subscribed", subscribed,
+			"back_from_inactivity", isBackFromInactivity,
+			"in_recovery", isInRecovery,
+			"branch", aliveBranchName(isBackFromInactivity, isInRecovery),
+			"alive_gen_age_ms", ageMS(now, timestamp.Created),
+			"recovery_timestamp_age_ms", ageMS(now, recoveryTimestamp),
+		}, a.traceState(now)...)...)
+
 	switch {
 	case isBackFromInactivity:
 		err = a.producerUp(types.ReturnedFromInactivityProducerUpReason)
@@ -961,6 +1004,9 @@ func (a *recoveryActor) calculateTiming(now time.Time) bool {
 // then notifyProducerChangedState emitted on msgCh. The actor flow is
 // the same — only the actor's own state mutates without locks.
 func (a *recoveryActor) producerDown(reason types.ProducerDownReason) error {
+	a.logger.Warn("trace: recovery: producerDown",
+		append([]any{"new_down_reason", downReasonName(reason)}, a.traceState(time.Now())...)...)
+
 	if a.isDisabled() {
 		return nil
 	}
@@ -1019,6 +1065,9 @@ func (a *recoveryActor) failAllEventRecoveries(err error) {
 }
 
 func (a *recoveryActor) producerUp(reason types.ProducerUpReason) error {
+	a.logger.Info("trace: recovery: producerUp",
+		append([]any{"up_reason", int(reason)}, a.traceState(time.Now())...)...)
+
 	if a.isDisabled() {
 		return nil
 	}
@@ -1119,6 +1168,15 @@ func (a *recoveryActor) makeSnapshotRecovery(timestamp time.Time) error {
 	a.recoveryState = types.StartedRecoveryState
 
 	a.logger.WithField("producer_id", a.producerID).WithField("request_id", requestID).Info("recovery: snapshot recovery started")
+	a.logger.Info("trace: recovery: snapshot recovery requested",
+		"producer_id", a.producerID,
+		"producer_name", producerName,
+		"request_id", requestID,
+		"node_id", nodeIDValue(a.cfg.SdkNodeID()),
+		"recover_from", recoverFrom.UTC().Format(time.RFC3339Nano),
+		"recover_from_age_ms", ageMS(now, recoverFrom),
+		"cursor_timestamp_age_ms", ageMS(now, timestamp),
+		"expected_snapshot_key", fmt.Sprintf("-.-.-.snapshot_complete.-.-.-.%d", nodeIDValue(a.cfg.SdkNodeID())))
 
 	// Detach the API call from the actor goroutine. Use a.ctx for the
 	// request so a manager Close cancels in-flight recoveries; the
@@ -1161,6 +1219,14 @@ func (a *recoveryActor) makeSnapshotRecovery(timestamp time.Time) error {
 // that never arrives (the recovery never started on the upstream side).
 // The next tick / alive will then be free to re-issue.
 func (a *recoveryActor) onSnapshotRecoveryAPICompleted(e evSnapshotRecoveryAPICompleted) {
+	a.logger.Info("trace: recovery: snapshot recovery POST completed",
+		append([]any{
+			"event_request_id", e.requestID,
+			"success", e.success,
+			"api_err", e.err,
+			"post_ms", time.Since(e.startedAt).Milliseconds(),
+		}, a.traceState(time.Now())...)...)
+
 	// Stale-event guard: if currentRecovery has rotated (e.g.,
 	// makeSnapshotRecovery was called again with a fresh requestID
 	// between our send and arrival), this completion no longer
@@ -1211,6 +1277,12 @@ func (a *recoveryActor) snapshotRecoveryFinished(requestID int) error {
 	}
 	finished := time.Now()
 	a.logger.WithField("producer_id", a.producerID).WithField("request_id", requestID).WithField("elapsed_ms", finished.Sub(started).Milliseconds()).Info("recovery: snapshot recovery finished")
+	a.logger.Info("trace: recovery: snapshot recovery finished",
+		append([]any{
+			"finished_request_id", requestID,
+			"elapsed_ms", finished.Sub(started).Milliseconds(),
+			"reissue_because_interrupted", a.recoveryState == types.InterruptedRecoveryState,
+		}, a.traceState(finished)...)...)
 
 	// Interrupted re-issue: an alive with subscribed=false arrived
 	// while the just-completed recovery was in flight (see H1 fix in

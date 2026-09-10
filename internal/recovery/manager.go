@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -159,6 +160,10 @@ type Manager struct {
 	tickDropWarnMu     sync.Mutex
 	tickDropLastWarnAt map[int]time.Time
 
+	// gen numbers this Manager instance (TEMP tracing) so a session
+	// holding an older generation is visible in the logs.
+	gen int64
+
 	// inboxDrops counts residual lossy inbox drops. NOTE the correctness
 	// inputs no longer flow through the lossy path at all:
 	// snapshot_complete uses reliable ctx-bounded admission (sendCtx),
@@ -185,6 +190,7 @@ func NewManager(cfg config.Config, producerManager *producer.Manager, apiClient 
 		logger:              logger,
 		initialSnapshotTime: initialSnapshotTime,
 		sequence:            newGenerator(1),
+		gen:                 nextManagerGen(),
 		actors:              make(map[int]*recoveryActor),
 		handles:             make(map[int]*Handle),
 		processingTimes:     make(map[uuid.UUID]time.Time),
@@ -313,7 +319,7 @@ func (m *Manager) Open(ctx context.Context) (<-chan types.RecoveryMessage, error
 	// a concurrent findOrSpawn would observe state==Opening and bail.
 	localActors := make(map[int]*recoveryActor, len(activeProducers))
 	for id := range activeProducers {
-		a := newRecoveryActor(mgrCtx, id, m.cfg, m.apiClient, m.producerManager, m, m.logger, 256, m.initialSnapshotTime)
+		a := newRecoveryActor(mgrCtx, id, m.cfg, m.apiClient, m.producerManager, m, m.traceLogger(), 256, m.initialSnapshotTime)
 		localActors[id] = a
 	}
 
@@ -368,6 +374,20 @@ func (m *Manager) Open(ctx context.Context) (<-chan types.RecoveryMessage, error
 	}
 	settled = true
 	m.lifecycleMu.Unlock()
+
+	ids := make([]int, 0, len(localActors))
+	for id := range localActors {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	m.logger.Info("trace: recovery: manager opened",
+		"mgr_gen", m.gen,
+		"actors", ids,
+		"node_id", nodeIDValue(m.cfg.SdkNodeID()),
+		"max_inactivity_ms", m.cfg.MaxInactivity().Milliseconds(),
+		"max_recovery_execution_ms", m.cfg.MaxRecoveryExecution().Milliseconds(),
+		"initial_snapshot_time_ms", m.initialSnapshotTime.Milliseconds(),
+		"out_cap", cap(out))
 	return out, nil
 }
 
@@ -578,9 +598,12 @@ func (m *Manager) findOrSpawn(producerID int) *recoveryActor {
 	if sess == nil {
 		return nil
 	}
-	a = newRecoveryActor(sess.ctx, producerID, m.cfg, m.apiClient, m.producerManager, m, m.logger, 256, m.initialSnapshotTime)
+	a = newRecoveryActor(sess.ctx, producerID, m.cfg, m.apiClient, m.producerManager, m, m.traceLogger(), 256, m.initialSnapshotTime)
 	m.actors[producerID] = a
 	go a.run()
+	m.logger.Info("trace: recovery: actor spawned lazily",
+		"mgr_gen", m.gen,
+		"producer_id", producerID)
 	return a
 }
 
@@ -622,7 +645,12 @@ func (m *Manager) OnMessageProcessingEnded(sessionID uuid.UUID, producerID int, 
 	case !ok || start.IsZero():
 		m.logger.Warn("message processing ended, but was not started")
 	case time.Since(start).Milliseconds() > 1000:
-		m.logger.Warnf("processing message took more than 1s - %d ms", time.Since(start).Milliseconds())
+		m.logger.Warn("trace: recovery: slow message processing",
+			"mgr_gen", m.gen,
+			"producer_id", producerID,
+			"session_id", sessionID.String(),
+			"took_ms", time.Since(start).Milliseconds(),
+			"gen_timestamp_age_ms", ageMS(time.Now(), timestamp))
 	}
 }
 
@@ -651,9 +679,21 @@ func (m *Manager) OnAliveReceived(producerID int, timestamp types.MessageTimesta
 // An unknown producer is a no-op success: there is no recovery to
 // complete, so the delivery can be acked.
 func (m *Manager) OnSnapshotCompleteReceived(ctx context.Context, producerID int, requestID int, messageInterest types.MessageInterest) error {
+	m.logger.Info("trace: recovery: snapshot_complete handed to manager",
+		"mgr_gen", m.gen,
+		"producer_id", producerID,
+		"request_id", requestID,
+		"message_interest", string(messageInterest),
+		"mgr_state", m.state.Load())
+
 	m.actorsMu.RLock()
 	a, ok := m.actors[producerID]
+	known := make([]int, 0, len(m.actors))
+	for id := range m.actors {
+		known = append(known, id)
+	}
 	m.actorsMu.RUnlock()
+	slices.Sort(known)
 	if !ok {
 		// Distinguish "genuinely unknown producer" (no recovery to
 		// complete → safe to ack) from "actor map already reset by
@@ -664,11 +704,35 @@ func (m *Manager) OnSnapshotCompleteReceived(ctx context.Context, producerID int
 		// always observes a non-Open state here; the delivery then stays
 		// unacked and the broker redelivers it.
 		if m.state.Load() != mgrStateOpen {
+			m.logger.Warn("trace: recovery: snapshot_complete DISCARDED (manager closed)",
+				"mgr_gen", m.gen,
+				"producer_id", producerID,
+				"request_id", requestID,
+				"known_actors", known)
 			return ErrManagerClosed
 		}
+		// The silent path this instrumentation exists to catch: no actor
+		// for this producer while the manager reports Open. The
+		// completion is acked and thrown away, and recovery then hangs
+		// until MaxRecoveryExecution (6h by default).
+		m.logger.Error("trace: recovery: snapshot_complete DISCARDED (no actor for producer)",
+			"mgr_gen", m.gen,
+			"producer_id", producerID,
+			"request_id", requestID,
+			"known_actors", known)
 		return nil // unknown producer; nothing to validate, safe to ack
 	}
-	return a.sendCtx(ctx, evSnapshotComplete{requestID: requestID, messageInterest: messageInterest})
+	sendStart := time.Now()
+	err := a.sendCtx(ctx, evSnapshotComplete{requestID: requestID, messageInterest: messageInterest})
+	m.logger.Info("trace: recovery: snapshot_complete admission result",
+		"mgr_gen", m.gen,
+		"producer_id", producerID,
+		"request_id", requestID,
+		"admitted", err == nil,
+		"admit_ms", time.Since(sendStart).Milliseconds(),
+		"inbox_len", len(a.inbox),
+		"err", err)
+	return err
 }
 
 // --- Synchronous commands ---
@@ -873,15 +937,28 @@ func (m *Manager) emitRecoveryMessage(msg types.RecoveryMessage) {
 		return
 	default:
 	}
-	// Channel full — drain one to make room, then push.
+	// Channel full — drain one to make room, then push. Both the
+	// dropped-oldest event and a failed push are invisible upstream: a
+	// consumer that does not read RecoveryEvents fast enough loses
+	// producer up/down transitions here.
+	dropped := false
 	select {
 	case <-out:
+		dropped = true
 	default:
 	}
+	pushed := false
 	select {
 	case out <- msg:
+		pushed = true
 	default:
 	}
+	m.logger.Warn("trace: recovery: RecoveryEvents channel full",
+		"mgr_gen", m.gen,
+		"out_len", len(out),
+		"out_cap", cap(out),
+		"dropped_oldest", dropped,
+		"pushed", pushed)
 }
 
 // eventRecoveryMessageImpl satisfies types.EventRecoveryMessage —

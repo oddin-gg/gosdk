@@ -407,11 +407,23 @@ func (c *Client) CreateChannel(ctx context.Context, routingKeys []string, exchan
 			fail("declare queue", err)
 			return
 		}
+		// TEMP tracing: the queue is exclusive + autoDelete, so its name
+		// and its bindings are the ground truth for "could the broker
+		// have routed us this message at all".
+		c.logger.Info("trace: feed: queue declared",
+			"queue", queue.Name,
+			"exchange", exchangeName,
+			"prefetch", prefetch,
+			"routing_keys", routingKeys)
 		for _, routingKey := range routingKeys {
 			if err := channel.QueueBind(queue.Name, routingKey, exchangeName, false, nil); err != nil {
 				fail(fmt.Sprintf("bind %q", routingKey), err)
 				return
 			}
+			c.logger.Info("trace: feed: queue bound",
+				"queue", queue.Name,
+				"exchange", exchangeName,
+				"routing_key", routingKey)
 		}
 		deliveries, err := channel.Consume(
 			queue.Name,

@@ -29,3 +29,8 @@ func (d DummyManager) OnAliveReceived(producerID int, timestamp types.MessageTim
 func (d DummyManager) OnSnapshotCompleteReceived(ctx context.Context, producerID int, requestID int, messageInterest types.MessageInterest) error {
 	return nil
 }
+
+// TraceGen ... (TEMP tracing) replay sessions have no real manager.
+func (d DummyManager) TraceGen() int64 {
+	return 0
+}
