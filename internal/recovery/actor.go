@@ -131,7 +131,16 @@ const maxPendingEventRecoveries = 128
 // window. Observed completions land in 1-2 minutes; a marker that has
 // not arrived in three is not going to, and until the actor gives up the
 // producer stays down and the consumer buffers or drops the live feed.
-const snapshotCompleteTimeout = 3 * time.Minute
+//
+// Five minutes, not three: the marker rides the same FIFO queue as the
+// snapshot it terminates, so a completion cannot land before the
+// consumer has worked through the whole replay. Measured completions on
+// test span 83s-139s, and a busier catalog is slower still — the
+// deadline has to clear that comfortably or a healthy recovery gets
+// aborted and re-requested in a loop. Five also stays under the ~7.5
+// minutes a 15000-message consumer buffer holds at 33 messages/s, so a
+// genuinely stuck recovery still costs no messages.
+const snapshotCompleteTimeout = 5 * time.Minute
 
 // ErrTooManyPendingEventRecoveries is returned by RecoverEventOdds /
 // RecoverEventStateful when the producer already has
