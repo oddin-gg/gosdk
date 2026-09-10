@@ -20,6 +20,7 @@ import (
 type recordingChannel struct {
 	seq       *atomic.Int32
 	closedAt  atomic.Int32 // ordinal of Close (0 = not closed)
+	watchedAt atomic.Int32 // ordinal of NotifyClose registration (0 = not yet)
 	notifyMu  sync.Mutex
 	closeCh   chan *amqp.Error
 	cancelCh  chan string
@@ -38,6 +39,7 @@ func (r *recordingChannel) NotifyClose(c chan *amqp.Error) chan *amqp.Error {
 	r.notifyMu.Lock()
 	defer r.notifyMu.Unlock()
 	r.closeCh = c
+	r.watchedAt.Store(r.seq.Add(1))
 	return c
 }
 
@@ -230,6 +232,19 @@ func TestChannelConsumer_ChannelLost_HookBeforeCloseAndReopen(t *testing.T) {
 	if got := restoredAt.Load(); got < reopenedAt {
 		t.Fatalf("restored hook ran at %d, before CreateChannel#2 at %d", got, reopenedAt)
 	}
+	// … and before the replacement's watcher is armed, so a replacement
+	// that dies at once cannot have its loss reported ahead of this
+	// restore and erased by it.
+	deadline = time.Now().Add(2 * time.Second)
+	for opener.channels[1].watchedAt.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("replacement channel's watcher never armed")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if w, r := opener.channels[1].watchedAt.Load(), restoredAt.Load(); w < r {
+		t.Fatalf("replacement watcher armed at %d, before the restore at %d", w, r)
+	}
 	if goneCalls.Load() != 0 {
 		t.Fatal("gone hook fired while the consumer is still running")
 	}
@@ -322,7 +337,7 @@ func TestChannelConsumer_ChannelLost_SecondLossReportsAgain(t *testing.T) {
 		t.Fatalf("hook calls = %d after two losses, want 2 (hook must not be throttled with the log)", len(calls))
 	}
 	c.lossMu.Lock()
-	suppressed := c.suppressedLoses
+	suppressed := c.suppressedLosses
 	c.lossMu.Unlock()
 	if suppressed != 1 {
 		t.Fatalf("suppressed log lines = %d, want 1 (second loss inside the warn interval)", suppressed)
@@ -516,5 +531,59 @@ func TestChannelConsumer_CloseDuringFailingReopenDoesNotPanic(t *testing.T) {
 	// gone, so it stops holding recoveries back.
 	if got := goneCalls.Load(); got != 1 {
 		t.Fatalf("gone hook calls = %d, want 1 after close during a failing reopen", got)
+	}
+}
+
+// TestChannelConsumer_ReplacementLostAtOnce_ReportsLossAfterRestore: a
+// replacement channel that the broker takes away immediately must be
+// reported as lost AFTER its restore was reported, exactly once, however
+// the watcher and run() interleave — otherwise the stale restore would
+// erase the newer loss in a session-keyed ledger.
+func TestChannelConsumer_ReplacementLostAtOnce_ReportsLossAfterRestore(t *testing.T) {
+	shortDwell(t)
+	opener := newSequencedOpener(3, false)
+	rec := &lossRecorder{seq: &opener.seq}
+	c := NewChannelConsumer(opener, &factory.FeedMessageFactory{}, discardConsumerLogger(), "ex", "od:sport:", 0)
+	c.SetChannelLostHook(rec.hook)
+	var restored []int32
+	var restoredMu sync.Mutex
+	c.SetChannelRestoredHook(func() {
+		restoredMu.Lock()
+		restored = append(restored, opener.seq.Add(1))
+		restoredMu.Unlock()
+	})
+	closeConsumer(t, c)
+	mi := types.AllMessageInterest
+	if _, err := c.Open(context.Background(), []string{"k"}, &mi); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	close(opener.chans[0]) // first loss
+	opener.waitCalls(t, 2)
+	// Take the replacement away the instant it exists: fire its
+	// NotifyClose (watcher path) and close its deliveries (run path).
+	opener.channels[1].fireClose(t)
+	close(opener.chans[1])
+	opener.waitCalls(t, 3)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for len(rec.snapshot()) < 2 {
+		if time.Now().After(deadline) {
+			t.Fatalf("second loss not reported: %d report(s)", len(rec.snapshot()))
+		}
+		time.Sleep(time.Millisecond)
+	}
+	calls := rec.snapshot()
+	if len(calls) != 2 {
+		t.Fatalf("loss reports = %d, want exactly 2", len(calls))
+	}
+	restoredMu.Lock()
+	rs := append([]int32(nil), restored...)
+	restoredMu.Unlock()
+	if len(rs) < 1 {
+		t.Fatal("no restore reported for the first reopen")
+	}
+	if !(calls[0].ordinal < rs[0] && rs[0] < calls[1].ordinal) {
+		t.Fatalf("ordering loss#1(%d) < restore#1(%d) < loss#2(%d) violated", calls[0].ordinal, rs[0], calls[1].ordinal)
 	}
 }

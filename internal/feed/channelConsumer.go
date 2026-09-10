@@ -124,9 +124,9 @@ type ChannelConsumer struct {
 	// as it is re-declared would otherwise drive one Warn per round
 	// trip; the hook itself stays unconditional (the recovery side
 	// coalesces).
-	lossMu          sync.Mutex
-	lastLossWarnAt  time.Time
-	suppressedLoses int
+	lossMu           sync.Mutex
+	lastLossWarnAt   time.Time
+	suppressedLosses int
 
 	mu              sync.Mutex
 	outgoing        chan QueueEnvelope
@@ -237,14 +237,14 @@ func (c *ChannelConsumer) ReportChannelLost(lostAt time.Time) {
 	now := time.Now()
 	if c.lastLossWarnAt.IsZero() || now.Sub(c.lastLossWarnAt) >= channelLossWarnInterval {
 		log := c.logger.WithField("interest", string(mi))
-		if c.suppressedLoses > 0 {
-			log = log.WithField("suppressed_losses", c.suppressedLoses)
+		if c.suppressedLosses > 0 {
+			log = log.WithField("suppressed_losses", c.suppressedLosses)
 		}
 		log.Warn("feed: consumer channel lost; queue and everything published until rebind are gone — recovery will close the gap")
 		c.lastLossWarnAt = now
-		c.suppressedLoses = 0
+		c.suppressedLosses = 0
 	} else {
-		c.suppressedLoses++
+		c.suppressedLosses++
 	}
 	c.lossMu.Unlock()
 
@@ -704,13 +704,20 @@ func (c *ChannelConsumer) run(ctx context.Context, deliveries <-chan amqp.Delive
 			return
 		}
 		opened = time.Now()
-		watch = c.watchChannel(ctx, ch)
 		// The replacement queue is declared and bound: whatever is
 		// published from now on reaches this consumer, so a recovery
-		// held back for it may start.
+		// held back for it may start. Report that BEFORE arming the
+		// replacement's watcher: the loss bookkeeping is keyed by
+		// session, not by channel generation, so a replacement that dies
+		// at once must not have its loss reported ahead of this restore
+		// — the restore would then erase the newer loss and the
+		// per-channel once would keep run() from reporting it again.
+		// Arming late loses nothing: NotifyClose on an already-closed
+		// channel is signalled immediately, and run() reports too.
 		if c.onChannelRestored != nil {
 			c.onChannelRestored()
 		}
+		watch = c.watchChannel(ctx, ch)
 	}
 }
 
