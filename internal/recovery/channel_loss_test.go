@@ -18,8 +18,10 @@ import (
 // until the rebind; only a snapshot recovery can close the gap, and the
 // alive-based checks miss any connection drop shorter than MaxInactivity
 // and never see a single channel's loss. The actor therefore flags the
-// producer down the moment the loss is reported, so the next system
-// alive starts a recovery from the cursor BEFORE the loss.
+// producer down when the loss is reported AND floors its recovery cursor
+// at the loss instant, so the next system alive starts a recovery that
+// reaches back to the loss whatever order the notice and the alives
+// around it arrived in.
 
 func aliveAt(t time.Time) types.MessageTimestamp {
 	return types.MessageTimestamp{Created: t, Sent: t, Received: t, Published: t}
@@ -61,18 +63,22 @@ func waitRecoverHits(t *testing.T, hits *recoveryHits, want int32) {
 	}
 }
 
+func lossAt(t *testing.T, a *recoveryActor, at time.Time) {
+	t.Helper()
+	a.enqueueChannelLost(at)
+	a.dispatch(evChannelLossNudge{})
+}
+
 // TestActor_ChannelLost_RecoversFromTheCursorBeforeTheLoss is the core
-// contract: after a channel loss the producer is flagged down with the
-// connection-down reason, the consumer sees that transition, and the
-// next alive POSTs a snapshot recovery whose `after=` cursor is the LAST
-// ALIVE BEFORE THE LOSS — not the alive that arrived after it.
+// contract in the ordinary order: after a channel loss the producer is
+// flagged down with the connection-down reason, the consumer sees that
+// transition, and the next alive POSTs a snapshot recovery whose `after=`
+// cursor is the LAST ALIVE BEFORE THE LOSS — not the alive after it.
 func TestActor_ChannelLost_RecoversFromTheCursorBeforeTheLoss(t *testing.T) {
 	fake := newFakeManagerOps()
 	now := time.Now().Truncate(time.Millisecond)
 	a, hits := steadyActor(t, fake, now.Add(-10*time.Second))
 
-	// Steady state: a healthy alive advances the recovery cursor and
-	// starts nothing.
 	preLoss := now.Add(-4 * time.Second)
 	if err := a.systemAliveReceived(aliveAt(preLoss), true); err != nil {
 		t.Fatal(err)
@@ -81,10 +87,7 @@ func TestActor_ChannelLost_RecoversFromTheCursorBeforeTheLoss(t *testing.T) {
 		t.Fatalf("steady alive changed state to %v", a.recoveryState)
 	}
 
-	// The consumer channel is lost (a blip far shorter than MaxInactivity
-	// — the alive interval check alone would never notice).
-	a.enqueueChannelLost()
-	a.dispatch(evChannelLossNudge{})
+	lossAt(t, a, now.Add(-2*time.Second))
 
 	if !a.isFlaggedDown() {
 		t.Fatal("producer should be flagged down after a channel loss")
@@ -92,8 +95,8 @@ func TestActor_ChannelLost_RecoversFromTheCursorBeforeTheLoss(t *testing.T) {
 	if a.downReason != types.ConnectionDownProducerDownReason {
 		t.Fatalf("down reason = %v, want ConnectionDown", a.downReason)
 	}
-	if a.pendingChannelLoss.Load() {
-		t.Fatal("pending flag must be cleared once applied")
+	if a.pendingLossAt.Load() != 0 {
+		t.Fatal("pending notice must be cleared once applied")
 	}
 	fake.mu.Lock()
 	last := fake.emittedMsgs[len(fake.emittedMsgs)-1]
@@ -103,8 +106,6 @@ func TestActor_ChannelLost_RecoversFromTheCursorBeforeTheLoss(t *testing.T) {
 		t.Fatalf("last emitted status = %+v, want down with ConnectionDown reason", last.ProducerStatus)
 	}
 
-	// The first alive after the rebind starts the snapshot recovery —
-	// from the cursor before the loss, so the gap is covered.
 	if err := a.systemAliveReceived(aliveAt(now), true); err != nil {
 		t.Fatal(err)
 	}
@@ -113,43 +114,138 @@ func TestActor_ChannelLost_RecoversFromTheCursorBeforeTheLoss(t *testing.T) {
 	}
 	waitRecoverHits(t, hits, 2)
 	if got, want := hits.lastAfterMillis.Load(), preLoss.UnixMilli(); got != want {
-		t.Fatalf("recovery after= %d (%s), want the pre-loss alive %d (%s) — the gap would not be covered",
-			got, time.UnixMilli(got).UTC(), want, preLoss.UTC())
+		t.Fatalf("recovery after= %d (%s), want the pre-loss alive %d (%s)", got, time.UnixMilli(got).UTC(), want, preLoss.UTC())
 	}
 }
 
-// TestActor_ChannelLost_DuringRecoveryRestartsIt: a recovery that was in
-// flight when the channel was lost lost its replayed messages too; the
-// loss interrupts it and the next alive starts a fresh one.
-func TestActor_ChannelLost_DuringRecoveryRestartsIt(t *testing.T) {
+// TestActor_ChannelLost_OvertakenByAliveStillCoversTheGap is the race the
+// design must survive: the alive session re-binds first and its
+// post-loss alive is processed BEFORE the loss notice reaches the actor,
+// advancing the producer's cursor past the outage. The recovery floor
+// pulls the recovery back to the loss instant regardless.
+func TestActor_ChannelLost_OvertakenByAliveStillCoversTheGap(t *testing.T) {
+	now := time.Now().Truncate(time.Millisecond)
+	a, hits := steadyActor(t, newFakeManagerOps(), now.Add(-10*time.Second))
+	if err := a.systemAliveReceived(aliveAt(now.Add(-6*time.Second)), true); err != nil {
+		t.Fatal(err)
+	}
+
+	lost := now.Add(-4 * time.Second)
+	// The overtaking alive: processed with the producer still up.
+	if err := a.systemAliveReceived(aliveAt(now.Add(-1*time.Second)), true); err != nil {
+		t.Fatal(err)
+	}
+	if a.recoveryState != types.CompletedRecoveryState || a.isFlaggedDown() {
+		t.Fatalf("overtaking alive must look healthy: state=%v down=%v", a.recoveryState, a.isFlaggedDown())
+	}
+	// The loss notice arrives late, stamped with when it really happened.
+	lossAt(t, a, lost)
+	if !a.isFlaggedDown() {
+		t.Fatal("late loss notice must still flag the producer down")
+	}
+
+	if err := a.systemAliveReceived(aliveAt(now), true); err != nil {
+		t.Fatal(err)
+	}
+	waitRecoverHits(t, hits, 2)
+	if got, want := hits.lastAfterMillis.Load(), lost.UnixMilli(); got != want {
+		t.Fatalf("recovery after= %d (%s), want the loss instant %d (%s) — the overtaking alive must not hide the gap",
+			got, time.UnixMilli(got).UTC(), want, lost.UTC())
+	}
+	if !a.recoveryFloor.Equal(lost) {
+		t.Fatalf("floor = %v after starting the covering recovery, want kept until it completes (%v)", a.recoveryFloor, lost)
+	}
+	if err := a.snapshotRecoveryFinished(a.currentRecovery.recoveryID); err != nil {
+		t.Fatal(err)
+	}
+	if !a.recoveryFloor.IsZero() {
+		t.Fatalf("floor = %v after the covering recovery completed, want cleared", a.recoveryFloor)
+	}
+}
+
+// TestActor_ChannelLost_DuringRecoveryRestartsFromItsCursor: a recovery
+// in flight when the channel was lost lost its replayed messages too;
+// the loss interrupts it and the next alive starts a fresh one that
+// reaches back at least to the interrupted request's own cursor. The
+// hazard it pins: the interrupted request was issued from a one-shot
+// explicit rewind, which recording its PostRecovery result consumed, so
+// a naive restart would recompute the cursor as the (later) last-alive
+// cursor and skip the rewound span for good.
+func TestActor_ChannelLost_DuringRecoveryRestartsFromItsCursor(t *testing.T) {
 	srv, hits := fixtureSrv(t)
 	defer srv.Close()
 	a := newWiredActor(t, srv, newFakeManagerOps())
-	if err := a.systemAliveReceived(aliveAt(time.Now()), true); err != nil {
+	now := time.Now().Truncate(time.Millisecond)
+
+	// Steady state with the alive cursor at T1.
+	if err := a.systemAliveReceived(aliveAt(now.Add(-30*time.Second)), true); err != nil {
 		t.Fatal(err)
 	}
 	waitRecoverHits(t, hits, 1)
+	if err := a.snapshotRecoveryFinished(a.currentRecovery.recoveryID); err != nil {
+		t.Fatal(err)
+	}
+	cursorT1 := now.Add(-15 * time.Second)
+	if err := a.systemAliveReceived(aliveAt(cursorT1), true); err != nil {
+		t.Fatal(err)
+	}
+
+	// An explicit rewind to T0 < T1, then a recovery that uses it.
+	rewind := now.Add(-20 * time.Second)
+	if err := a.pm.SetProducerRecoveryFromTimestamp(t.Context(), a.producerID, rewind); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.systemAliveReceived(aliveAt(now.Add(-10*time.Second)), false); err != nil { // subscribed=false → recovery
+		t.Fatal(err)
+	}
+	waitRecoverHits(t, hits, 2)
+	if got := hits.lastAfterMillis.Load(); got != rewind.UnixMilli() {
+		t.Fatalf("rewound recovery after= %d, want %d", got, rewind.UnixMilli())
+	}
 	first := a.currentRecovery.recoveryID
 
-	a.pendingChannelLoss.Store(true)
-	a.dispatch(evTick{now: time.Now(), inactivityArmed: false})
+	// Record the PostRecovery result the way the actor loop would; that
+	// consumes the one-shot rewind, so the producer's cursor is T1 again.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		prod, err := a.pm.GetProducer(t.Context(), a.producerID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if prod.TimestampForRecovery().Equal(cursorT1) {
+			break
+		}
+		select {
+		case ev := <-a.inbox:
+			a.dispatch(ev)
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("PostRecovery result never recorded: cursor still %v", prod.TimestampForRecovery())
+		}
+	}
 
+	lossAt(t, a, now.Add(-5*time.Second))
 	if a.recoveryState != types.InterruptedRecoveryState {
 		t.Fatalf("state = %v, want Interrupted", a.recoveryState)
 	}
-	if err := a.systemAliveReceived(aliveAt(time.Now()), true); err != nil {
+	if err := a.systemAliveReceived(aliveAt(now), true); err != nil {
 		t.Fatal(err)
 	}
 	if a.recoveryState != types.StartedRecoveryState || a.currentRecovery.recoveryID == first {
 		t.Fatalf("expected a NEW snapshot recovery after the loss, state=%v req=%d (first %d)", a.recoveryState, a.currentRecovery.recoveryID, first)
 	}
-	waitRecoverHits(t, hits, 2)
+	waitRecoverHits(t, hits, 3)
+	if got := hits.lastAfterMillis.Load(); got != rewind.UnixMilli() {
+		t.Fatalf("restarted recovery after= %d (%s), want the interrupted request's own cursor %d (%s), not the later alive cursor %d",
+			got, time.UnixMilli(got).UTC(), rewind.UnixMilli(), rewind.UTC(), cursorT1.UnixMilli())
+	}
 }
 
 // TestActor_ChannelLost_AppliedBeforeCoalescedAlive: the loss and the
 // first alive on the new channel can land in the same inbox drain; the
-// loss must be applied first so that alive starts recovery rather than
-// being read as "all is well" and advancing the cursor past the gap.
+// loss is applied first so that alive starts recovery immediately.
 func TestActor_ChannelLost_AppliedBeforeCoalescedAlive(t *testing.T) {
 	now := time.Now().Truncate(time.Millisecond)
 	a, hits := steadyActor(t, newFakeManagerOps(), now.Add(-10*time.Second))
@@ -158,7 +254,7 @@ func TestActor_ChannelLost_AppliedBeforeCoalescedAlive(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	a.pendingChannelLoss.Store(true)
+	a.notePendingLoss(now.Add(-2 * time.Second))
 	a.enqueueAlive(evAlive{timestamp: aliveAt(now), isSubscribed: true, messageInterest: types.SystemAliveOnly})
 	a.dispatch(evAliveNudge{})
 
@@ -172,38 +268,119 @@ func TestActor_ChannelLost_AppliedBeforeCoalescedAlive(t *testing.T) {
 }
 
 // TestActor_ChannelLost_NudgeDroppedTickApplies: with a full inbox the
-// nudge is dropped but the flag survives; the next tick applies it.
+// nudge is dropped but the notice survives; the next tick applies it.
 func TestActor_ChannelLost_NudgeDroppedTickApplies(t *testing.T) {
 	a, _ := steadyActor(t, newFakeManagerOps(), time.Now())
 
 	for a.send(evMsgProcessingEnded{}) { // non-blocking: stops once the inbox is full
 	}
-	a.enqueueChannelLost() // nudge dropped: inbox full
-	if !a.pendingChannelLoss.Load() {
-		t.Fatal("flag must be set regardless of the nudge")
+	a.enqueueChannelLost(time.Now()) // nudge dropped: inbox full
+	if a.pendingLossAt.Load() == 0 {
+		t.Fatal("notice must be recorded regardless of the nudge")
 	}
 	a.dispatch(evTick{now: time.Now(), inactivityArmed: false})
 	if !a.isFlaggedDown() || a.downReason != types.ConnectionDownProducerDownReason {
 		t.Fatalf("tick must apply the pending loss: down=%v reason=%v", a.isFlaggedDown(), a.downReason)
 	}
-	if a.pendingChannelLoss.Load() {
-		t.Fatal("flag must be consumed once applied")
+	if a.pendingLossAt.Load() != 0 {
+		t.Fatal("notice must be consumed once applied")
 	}
 }
 
-// TestActor_ChannelLost_ProducerManagerErrorKeepsTheNotice: when the
-// producer manager cannot answer, the reaction is deferred, not dropped.
-func TestActor_ChannelLost_ProducerManagerErrorKeepsTheNotice(t *testing.T) {
-	srv, _ := fixtureSrv(t)
+// TestActor_ChannelLost_EarliestLossWins: two losses coalesced before the
+// actor ran keep the EARLIER instant.
+func TestActor_ChannelLost_EarliestLossWins(t *testing.T) {
+	a, _ := steadyActor(t, newFakeManagerOps(), time.Now())
+	early := time.Now().Add(-5 * time.Second)
+	a.notePendingLoss(time.Now())
+	a.notePendingLoss(early)
+	a.notePendingLoss(time.Now())
+	if got := time.Unix(0, a.pendingLossAt.Load()); !got.Equal(early) {
+		t.Fatalf("pending = %v, want the earliest %v", got, early)
+	}
+	a.dispatch(evChannelLossNudge{})
+	if !a.recoveryFloor.Equal(early) {
+		t.Fatalf("floor = %v, want %v", a.recoveryFloor, early)
+	}
+}
+
+// TestActor_ChannelLost_ProducerManagerErrorKeepsTheNoticeAndRetries:
+// when the producer manager cannot answer, the reaction is deferred —
+// the floor is already in place, coalesced alives are held back on both
+// the nudge and the tick path — and a later dispatch, once the manager
+// answers, applies it and lets the held alive start the recovery.
+func TestActor_ChannelLost_ProducerManagerErrorKeepsTheNoticeAndRetries(t *testing.T) {
+	srv, hits := fixtureSrv(t)
 	defer srv.Close()
 	a := newWiredActorForProducer(t, srv, newFakeManagerOps(), 999) // unknown producer → pm errors
+	lost := time.Now().Add(-3 * time.Second)
 
-	a.pendingChannelLoss.Store(true)
-	a.dispatch(evChannelLossNudge{})
-	if !a.pendingChannelLoss.Load() {
+	a.notePendingLoss(lost)
+	a.enqueueAlive(evAlive{timestamp: aliveAt(time.Now()), isSubscribed: true, messageInterest: types.SystemAliveOnly})
+	a.dispatch(evAliveNudge{})
+	if a.pendingLossAt.Load() == 0 {
 		t.Fatal("notice must stay pending when the producer manager errors")
 	}
+	if !a.recoveryFloor.Equal(lost) {
+		t.Fatalf("floor = %v, want lowered to the loss (%v) even while the reaction is deferred", a.recoveryFloor, lost)
+	}
+	if a.pendingSystemAlive.Load() == nil {
+		t.Fatal("alive must stay coalesced while the channel loss is pending")
+	}
+	a.dispatch(evTick{now: time.Now(), inactivityArmed: false})
+	if a.pendingSystemAlive.Load() == nil {
+		t.Fatal("tick must not process the alive either while the loss is pending")
+	}
+
+	// The producer manager answers again (the actor now serves a
+	// catalogued producer): the retry applies the loss and releases the
+	// alive, which starts the recovery — from the floor.
+	a.producerID = 1
+	a.dispatch(evTick{now: time.Now(), inactivityArmed: false})
+	if a.pendingLossAt.Load() != 0 {
+		t.Fatal("retry must consume the notice once the producer manager answers")
+	}
+	if !a.isFlaggedDown() || a.downReason != types.ConnectionDownProducerDownReason {
+		t.Fatalf("retry must flag the producer down: down=%v reason=%v", a.isFlaggedDown(), a.downReason)
+	}
+	if a.pendingSystemAlive.Load() != nil {
+		t.Fatal("held alive must be released by the successful retry")
+	}
+	if a.recoveryState != types.StartedRecoveryState {
+		t.Fatalf("released alive should start a recovery, state = %v", a.recoveryState)
+	}
+	waitRecoverHits(t, hits, 1)
 }
+
+// TestActor_ChannelLost_DisabledProducerConsumesTheNotice: a disabled
+// producer has no recovery to run; the notice is consumed (one-shot) and
+// the producer is not flagged down.
+func TestActor_ChannelLost_DisabledProducerConsumesTheNotice(t *testing.T) {
+	fake := newFakeManagerOps()
+	a, _ := steadyActor(t, fake, time.Now())
+	if err := a.pm.SetProducerState(t.Context(), a.producerID, false); err != nil {
+		t.Fatal(err)
+	}
+	fake.mu.Lock()
+	emittedBefore := len(fake.emittedMsgs)
+	fake.mu.Unlock()
+
+	lossAt(t, a, time.Now())
+
+	if a.pendingLossAt.Load() != 0 {
+		t.Fatal("notice must be consumed for a disabled producer")
+	}
+	if a.downReason == types.ConnectionDownProducerDownReason {
+		t.Fatal("disabled producer must not be flagged down for a channel loss")
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if len(fake.emittedMsgs) != emittedBefore {
+		t.Fatalf("disabled producer emitted %d status message(s) on channel loss", len(fake.emittedMsgs)-emittedBefore)
+	}
+}
+
+// --- Manager fan-out ---
 
 // openedManagerWithActors returns an OPEN manager (real producer manager
 // against fixtureSrv: producer 1 = live, 2 = prematch, 3 = live|prematch)
@@ -232,14 +409,27 @@ func openedManagerWithActors(t *testing.T, ids ...int) (*Manager, *producer.Mana
 		if m.findOrSpawn(id) == nil {
 			t.Fatalf("no actor for producer %d", id)
 		}
-		if err := pm.SetProducerDown(id, false); err != nil {
-			t.Fatal(err)
+		if id <= 3 {
+			if err := pm.SetProducerDown(id, false); err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
 	return m, pm
 }
 
-func waitDown(t *testing.T, pm *producer.Manager, id int, want bool) {
+func actorOf(t *testing.T, m *Manager, id int) *recoveryActor {
+	t.Helper()
+	m.actorsMu.RLock()
+	defer m.actorsMu.RUnlock()
+	a, ok := m.actors[id]
+	if !ok {
+		t.Fatalf("no actor %d", id)
+	}
+	return a
+}
+
+func waitDown(t *testing.T, pm *producer.Manager, id int) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for {
@@ -247,11 +437,11 @@ func waitDown(t *testing.T, pm *producer.Manager, id int, want bool) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if down == want {
+		if down {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("producer %d down=%v, want %v", id, down, want)
+			t.Fatalf("producer %d not flagged down", id)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
@@ -261,16 +451,21 @@ func waitDown(t *testing.T, pm *producer.Manager, id int, want bool) {
 // line of production wiring between the session and the actors: an OPEN
 // manager with actors for every producer signals all of them for an
 // all-interest session (a connection drop closes such a session's
-// channel), and each ends up flagged down with the connection-down reason.
+// channel), each ends up flagged down with the connection-down reason,
+// and each carries the loss instant.
 func TestManager_OnFeedChannelLost_FansOutToEveryKnownActor(t *testing.T) {
 	m, pm := openedManagerWithActors(t, 1, 2, 3)
+	lost := time.Now().Add(-time.Second)
 
-	m.OnFeedChannelLost(types.AllMessageInterest)
+	m.OnFeedChannelLost(types.AllMessageInterest, lost)
 	if m.ChannelLossCount() != 1 {
 		t.Fatalf("ChannelLossCount = %d, want 1", m.ChannelLossCount())
 	}
 	for _, id := range []int{1, 2, 3} {
-		waitDown(t, pm, id, true)
+		waitDown(t, pm, id)
+		if a := actorOf(t, m, id); !a.recoveryFloor.Equal(lost) && a.pendingLossAt.Load() != lost.UnixNano() {
+			t.Fatalf("producer %d: floor=%v pending=%d, want the loss instant %v", id, a.recoveryFloor, a.pendingLossAt.Load(), lost)
+		}
 	}
 }
 
@@ -278,89 +473,57 @@ func TestManager_OnFeedChannelLost_FansOutToEveryKnownActor(t *testing.T) {
 // LiveOnly session losing its channel could not have been receiving the
 // prematch-only producer, so that producer keeps its state (and its
 // in-flight event recoveries); the live and mixed producers are flagged.
+// The negative assertion is on the actor's own pending notice, which
+// OnFeedChannelLost sets synchronously — no sleep involved.
 func TestManager_OnFeedChannelLost_ScopedToTheLostSessionsInterest(t *testing.T) {
 	m, pm := openedManagerWithActors(t, 1, 2, 3)
 
-	m.OnFeedChannelLost(types.LiveOnlyMessageInterest)
-	waitDown(t, pm, 1, true) // live
-	waitDown(t, pm, 3, true) // live|prematch
-	// Give the prematch actor every chance to misbehave before asserting.
-	time.Sleep(50 * time.Millisecond)
-	waitDown(t, pm, 2, false) // prematch: out of scope, untouched
+	m.OnFeedChannelLost(types.LiveOnlyMessageInterest, time.Now())
+	if a := actorOf(t, m, 2); a.pendingLossAt.Load() != 0 {
+		t.Fatal("prematch-only producer 2 was signalled for a LiveOnly session's loss")
+	}
+	waitDown(t, pm, 1) // live
+	waitDown(t, pm, 3) // live|prematch
+	if down, _ := pm.IsProducerDown(t.Context(), 2); down {
+		t.Fatal("prematch-only producer 2 flagged down for a LiveOnly session's loss")
+	}
+	if a := actorOf(t, m, 2); a.downReason == types.ConnectionDownProducerDownReason {
+		t.Fatal("prematch-only producer 2 reacted to a LiveOnly session's loss")
+	}
 }
 
-// TestManager_OnFeedChannelLost_AliveOnlySessionFlagsNothing: the alive
-// session carries no odds, so losing its queue opens no gap to recover.
-func TestManager_OnFeedChannelLost_AliveOnlySessionFlagsNothing(t *testing.T) {
+// TestManager_OnFeedChannelLost_AliveSessionLossFlagsEveryProducer: the
+// alive session's channel dies with every connection drop and is never
+// parked behind a reader, so its loss is the promptest drop signal — and
+// counts for every producer.
+func TestManager_OnFeedChannelLost_AliveSessionLossFlagsEveryProducer(t *testing.T) {
 	m, pm := openedManagerWithActors(t, 1, 2, 3)
-
-	m.OnFeedChannelLost(types.SystemAliveOnly)
-	if m.ChannelLossCount() != 1 {
-		t.Fatalf("ChannelLossCount = %d, want 1 (counted even when nothing is flagged)", m.ChannelLossCount())
-	}
-	time.Sleep(50 * time.Millisecond)
+	m.OnFeedChannelLost(types.SystemAliveOnly, time.Now())
 	for _, id := range []int{1, 2, 3} {
-		waitDown(t, pm, id, false)
+		waitDown(t, pm, id)
 	}
 }
 
-// TestActor_ChannelLost_DisabledProducerConsumesTheNotice: a disabled
-// producer has no recovery to run; the notice is consumed (one-shot) and
-// the producer is not flagged down.
-func TestActor_ChannelLost_DisabledProducerConsumesTheNotice(t *testing.T) {
-	fake := newFakeManagerOps()
-	a, _ := steadyActor(t, fake, time.Now())
-	if err := a.pm.SetProducerState(t.Context(), a.producerID, false); err != nil {
-		t.Fatal(err)
-	}
-	fake.mu.Lock()
-	emittedBefore := len(fake.emittedMsgs)
-	fake.mu.Unlock()
-
-	a.enqueueChannelLost()
-	a.dispatch(evChannelLossNudge{})
-
-	if a.pendingChannelLoss.Load() {
-		t.Fatal("notice must be consumed for a disabled producer")
-	}
-	if a.downReason == types.ConnectionDownProducerDownReason {
-		t.Fatal("disabled producer must not be flagged down for a channel loss")
-	}
-	fake.mu.Lock()
-	defer fake.mu.Unlock()
-	if len(fake.emittedMsgs) != emittedBefore {
-		t.Fatalf("disabled producer emitted %d status message(s) on channel loss", len(fake.emittedMsgs)-emittedBefore)
-	}
-}
-
-// TestActor_ChannelLost_PendingNoticeHoldsBackAlives: while the loss
-// could not be applied, an alive must stay coalesced — processing it
-// with the producer still up would advance the recovery cursor past the
-// gap the deferred reaction exists to recover.
-func TestActor_ChannelLost_PendingNoticeHoldsBackAlives(t *testing.T) {
-	srv, _ := fixtureSrv(t)
-	defer srv.Close()
-	a := newWiredActorForProducer(t, srv, newFakeManagerOps(), 999) // unknown producer → pm errors
-
-	a.pendingChannelLoss.Store(true)
-	a.enqueueAlive(evAlive{timestamp: aliveAt(time.Now()), isSubscribed: true, messageInterest: types.SystemAliveOnly})
-	a.dispatch(evAliveNudge{})
-
-	if !a.pendingChannelLoss.Load() {
-		t.Fatal("notice must stay pending when the producer manager errors")
-	}
-	if a.pendingSystemAlive.Load() == nil {
-		t.Fatal("alive must stay coalesced while the channel loss is pending")
-	}
-	a.dispatch(evTick{now: time.Now(), inactivityArmed: false})
-	if a.pendingSystemAlive.Load() == nil {
-		t.Fatal("tick must not process the alive either while the loss is pending")
+// TestManager_OnFeedChannelLost_UnreadableProducerIsFlaggedAnyway: when
+// the catalog cannot say what scope a producer has, the manager signals
+// it rather than risk skipping a gap (the fault that dropped AMQP often
+// makes the catalog unreadable too).
+func TestManager_OnFeedChannelLost_UnreadableProducerIsFlaggedAnyway(t *testing.T) {
+	m, _ := openedManagerWithActors(t, 1, 999)
+	m.OnFeedChannelLost(types.LiveOnlyMessageInterest, time.Now())
+	a := actorOf(t, m, 999)
+	deadline := time.Now().Add(2 * time.Second)
+	for a.pendingLossAt.Load() == 0 && a.recoveryFloor.IsZero() {
+		if time.Now().After(deadline) {
+			t.Fatal("producer 999 (unreadable from the catalog) was not signalled")
+		}
+		time.Sleep(2 * time.Millisecond)
 	}
 }
 
 func TestManager_OnFeedChannelLost_BeforeOpenIsNoop(t *testing.T) {
 	m := newTestManager(t)
-	m.OnFeedChannelLost(types.AllMessageInterest) // must not panic on a never-opened manager
+	m.OnFeedChannelLost(types.AllMessageInterest, time.Now()) // must not panic on a never-opened manager
 	if m.ChannelLossCount() != 1 {
 		t.Fatalf("ChannelLossCount = %d, want 1", m.ChannelLossCount())
 	}

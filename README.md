@@ -226,8 +226,10 @@ The SDK consumes with manual acknowledgement and acks a delivery when its
 decoded message has been placed into the subscription's `Messages()`
 buffer (`WithSubscriptionBuffer`, default 256). Broker prefetch
 (`WithAMQPPrefetch`, default 1000) therefore bounds what a slow consumer
-can hold unacked, and a consumer that stops reading stalls the broker
-instead of growing memory. The boundary also means that if the process
+can hold unacked in process — not queue depth: a consumer that stops
+reading leaves its exclusive queue accumulating on the broker for as long
+as the subscription stays open, so close a subscription you cannot drain
+rather than stalling it. The boundary also means that if the process
 dies, whatever sits **unread in that buffer is gone**: it was acked and
 the queue is exclusive and auto-delete, so nothing is redelivered. Size
 the buffer for how much you can afford to lose on a crash, and read
@@ -238,7 +240,7 @@ is lost — with the whole AMQP connection or alone — its queue dies with
 it and every message published until the SDK re-binds is lost from the
 broker. At that moment the SDK flags every known producer that
 subscription served down (`ConnectionDownProducerStatusReason`) and the
-next alive starts a snapshot recovery from the last alive before the loss. Watch
+next alive starts a snapshot recovery reaching back at least to the loss. Watch
 `RecoveryEvents()` / `ProducerStatus()` for the down → up cycle.
 
 ### Recovery

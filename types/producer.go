@@ -111,7 +111,7 @@ const (
 	// published until the SDK re-binds is gone from the broker. Raised
 	// at the moment of loss, before any reconnect, for the producers the
 	// lost subscription served; the next system alive then starts a
-	// snapshot recovery from the last alive before the loss.
+	// snapshot recovery reaching back at least to the loss.
 	ConnectionDownProducerStatusReason ProducerStatusReason = 7
 )
 
