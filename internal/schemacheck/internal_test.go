@@ -98,6 +98,24 @@ func TestXSDReader_RejectsDuplicateTypes(t *testing.T) {
 	if _, err := loadXSDs(dir); err == nil {
 		t.Fatal("two files defining complexType t must not load silently")
 	}
+
+	// Simple types are held to the same rule …
+	dir = t.TempDir()
+	const dupSimple = `<?xml version="1.0"?><xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"><xs:simpleType name="s"><xs:restriction base="xs:string"/></xs:simpleType></xs:schema>`
+	writeXSD(t, dir, "a.xsd", dupSimple)
+	writeXSD(t, dir, "b.xsd", dupSimple)
+	if _, err := loadXSDs(dir); err == nil {
+		t.Fatal("two files defining simpleType s must not load silently")
+	}
+
+	// … and a name shared across kinds would silently flatten the
+	// element into a text leaf, so it is refused too.
+	dir = t.TempDir()
+	writeXSD(t, dir, "a.xsd", `<?xml version="1.0"?><xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"><xs:complexType name="x"><xs:attribute name="id" type="xs:int"/></xs:complexType></xs:schema>`)
+	writeXSD(t, dir, "b.xsd", `<?xml version="1.0"?><xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"><xs:simpleType name="x"><xs:restriction base="xs:string"/></xs:simpleType></xs:schema>`)
+	if _, err := loadXSDs(dir); err == nil {
+		t.Fatal("a name declared as both simpleType and complexType must not load silently")
+	}
 }
 
 type reflectEmbedded struct {
@@ -171,10 +189,19 @@ func TestCompareAndReconcile(t *testing.T) {
 	sdk.elems["shared"].attrs["y"] = true
 	sdk.elems["only_sdk_el"] = newShape()
 
+	schema.elems["label"] = newShape()
+	schema.elems["label"].text = true // simpleContent
+	sdk.elems["label"] = newShape()   // attributes only
+	sdk.elems["note"] = newShape()
+	sdk.elems["note"].text = true // chardata field
+	schema.elems["note"] = newShape()
+
 	got := compare("/r", schema, sdk)
 	want := []finding{
 		{schemaOnlyAttr, "/r@only_schema"},
 		{sdkOnlyAttr, "/r@only_sdk"},
+		{schemaOnlyText, "/r/label#text"},
+		{sdkOnlyText, "/r/note#text"},
 		{schemaOnlyElem, "/r/only_schema_el"},
 		{schemaOnlyAttr, "/r/shared@x"},
 		{sdkOnlyAttr, "/r/shared@y"},
@@ -190,8 +217,8 @@ func TestCompareAndReconcile(t *testing.T) {
 		{"/r/gone", "fixed long ago"},
 	}
 	unexpected, stale := reconcile(got, ledger)
-	if len(unexpected) != 4 {
-		t.Errorf("unexpected = %v, want the 4 unledgered findings", unexpected)
+	if len(unexpected) != 6 {
+		t.Errorf("unexpected = %v, want the 6 unledgered findings", unexpected)
 	}
 	if len(stale) != 1 || stale[0].path != "/r/gone" {
 		t.Errorf("stale = %v, want only /r/gone", stale)

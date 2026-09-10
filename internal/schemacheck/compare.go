@@ -27,6 +27,13 @@ const (
 	sdkOnlyAttr = "sdk-only attribute"
 	// sdkOnlyElem: as sdkOnlyAttr for a child element.
 	sdkOnlyElem = "sdk-only element"
+	// schemaOnlyText: the XSD gives the element text content (a simple
+	// type, simpleContent, or mixed) and the Go model has no chardata
+	// field for it — the text is dropped on decode. Path suffix "#text".
+	schemaOnlyText = "schema-only text"
+	// sdkOnlyText: the Go model reads text content the XSD does not
+	// declare.
+	sdkOnlyText = "sdk-only text"
 )
 
 func (f finding) String() string { return f.kind + " " + f.path }
@@ -36,6 +43,12 @@ func (f finding) String() string { return f.kind + " " + f.path }
 // element only one side has is reported once, not expanded.
 func compare(path string, schema, sdk *shape) []finding {
 	var out []finding
+	switch {
+	case schema.text && !sdk.text:
+		out = append(out, finding{schemaOnlyText, path + "#text"})
+	case sdk.text && !schema.text:
+		out = append(out, finding{sdkOnlyText, path + "#text"})
+	}
 	for _, a := range schema.sortedAttrs() {
 		if !sdk.attrs[a] {
 			out = append(out, finding{schemaOnlyAttr, path + "@" + a})

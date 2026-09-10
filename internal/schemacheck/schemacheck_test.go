@@ -65,8 +65,9 @@ var restRoots = map[string]reflect.Type{
 // so this list is always exactly the current state.
 //
 // Path syntax: "/root/child@attr" for attributes, "/root/child" for
-// elements; a leading "**" matches by suffix wherever the element is
-// nested (one line for a shared Go type used in many places).
+// elements, "/root/child#text" for an element's text content; a leading
+// "**" matches by suffix wherever the element is nested (one line for a
+// shared Go type used in many places).
 //
 // Two reasons recur:
 //
@@ -97,6 +98,8 @@ var feedLedger = []ledgerEntry{
 	{"/odds_change/odds/market@void_reason_id", "shared Go type feedXML.MarketWithOutcome (cancel attributes on an odds market)"},
 	{"/odds_change/odds/market@void_reason_params", "shared Go type feedXML.MarketWithOutcome"},
 	{"/odds_change/sport_event_status/statistics", "SDK decodes <statistics> (yellow/red cards, corners) into types.Statistics; the schema does not declare it — schema owners to confirm whether any producer emits it"},
+	{"/rollback_bet_cancel/market#text", "schema declares <market> as simpleContent over xs:string; the producer sends it empty and the SDK reads only its attributes"},
+	{"/rollback_bet_settlement/market#text", "schema declares <market> as simpleContent over xs:string; the producer sends it empty and the SDK reads only its attributes"},
 }
 
 var restLedger = []ledgerEntry{
@@ -117,6 +120,8 @@ var restLedger = []ledgerEntry{
 	{"**/tournament/category", "SDK decodes <category> under <tournament> and exposes it via the tournament cache; the schema does not declare it — schema owners to confirm"},
 	{"**/competitor/category", "SDK decodes <category> under a competitor profile; the schema does not declare it — schema owners to confirm"},
 	{"**/reference_ids", "SDK decodes <reference_ids> on sport events and tournaments (match cache keys off them); the schema does not declare it — schema owners to confirm"},
+	{"/void_reasons/void_reason#text", "schema declares <void_reason> as mixed content; the producer sends no text and the SDK reads its attributes and <param> children only"},
+	{"/void_reasons/void_reason/param#text", "schema declares <param> as simpleContent over xs:string; the producer sends it empty and the SDK reads only the name attribute"},
 }
 
 var wires = []wire{

@@ -193,7 +193,18 @@ func (s *xsdSet) addFile(path string) error {
 		s.attrGroups[ag.Name] = ag
 	}
 	for _, st := range doc.SimpleTypes {
+		if s.simpleTypes[st.Name] {
+			return fmt.Errorf("%s: simpleType %q declared twice", path, st.Name)
+		}
 		s.simpleTypes[st.Name] = true
+	}
+	// Named types share one symbol space: elementShape resolves a simple
+	// type before a complex one, so a name used for both would silently
+	// flatten the element into a text leaf. Refuse the ambiguity.
+	for name := range s.simpleTypes {
+		if _, both := s.complexTypes[name]; both {
+			return fmt.Errorf("%s: %q declared as both a simpleType and a complexType", path, name)
+		}
 	}
 	return nil
 }
