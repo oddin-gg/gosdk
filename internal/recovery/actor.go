@@ -82,6 +82,20 @@ type recoveryActor struct {
 	downReason             types.ProducerDownReason
 	statusReason           types.ProducerStatusReason
 
+	// recoveryFailures counts consecutive FAILED snapshot-recovery
+	// requests (the API refused them, e.g. HTTP 429), and
+	// nextSnapshotAttemptAt is the earliest the actor may ask again.
+	//
+	// Without this the state machine hammers the recovery endpoint: a
+	// failed request transitions to Error, and the very next alive
+	// (every ~10s) takes the "no recovery in progress" branch and
+	// issues a fresh full request. Against a rate limiter that is
+	// self-sustaining — every retry renews the 429, the producer never
+	// comes up, and the consumer drops the live feed for as long as it
+	// lasts. Reset by a successful request or a completed recovery.
+	recoveryFailures      int
+	nextSnapshotAttemptAt time.Time
+
 	// statusSnapshot is the most recent ProducerStatus emitted by this
 	// actor. Read by external callers (Client.ProducerStatus) under the
 	// atomic-pointer pattern — the actor goroutine is the only writer.
@@ -897,7 +911,7 @@ func (a *recoveryActor) systemAliveReceived(timestamp types.MessageTimestamp, su
 			a.recoveryState = types.InterruptedRecoveryState
 			return nil
 		}
-		return a.makeSnapshotRecovery(recoveryTimestamp)
+		return a.requestSnapshotRecovery(recoveryTimestamp)
 	}
 
 	now := time.Now()
@@ -926,7 +940,7 @@ func (a *recoveryActor) systemAliveReceived(timestamp types.MessageTimestamp, su
 		err = a.producerUp(types.ReturnedFromInactivityProducerUpReason)
 	case isInRecovery:
 		if a.isFlaggedDown() && !a.isPerformingRecovery() && a.downReason != types.ProcessingQueueDelayViolationProducerDownReason {
-			if err := a.makeSnapshotRecovery(recoveryTimestamp); err != nil {
+			if err := a.requestSnapshotRecovery(recoveryTimestamp); err != nil {
 				return err
 			}
 		}
@@ -935,12 +949,12 @@ func (a *recoveryActor) systemAliveReceived(timestamp types.MessageTimestamp, su
 		if a.isPerformingRecovery() && recoveryTiming > maxInterval {
 			a.recoveryState = types.ErrorRecoveryState
 			a.currentRecovery = nil
-			if err := a.makeSnapshotRecovery(recoveryTimestamp); err != nil {
+			if err := a.requestSnapshotRecovery(recoveryTimestamp); err != nil {
 				return err
 			}
 		}
 	default:
-		err = a.makeSnapshotRecovery(recoveryTimestamp)
+		err = a.requestSnapshotRecovery(recoveryTimestamp)
 	}
 	if err != nil {
 		return err
@@ -1133,6 +1147,41 @@ func (a *recoveryActor) currentStatus() types.ProducerStatus {
 // complete/recover-event for this producer queued behind it; under
 // load the 256-slot inbox dropped alives and triggered false
 // producer-down. Mirrors the v2.24 detach-event-recovery restructure.
+// snapshotRetryBackoff is the wait after n consecutive failed snapshot
+// recovery requests: 30s, 1m, 2m, then 5m for every further failure.
+// Short enough that a transient refusal costs no messages (the consumer
+// buffers), long enough that a rate limiter is given room to reset.
+func snapshotRetryBackoff(failures int) time.Duration {
+	switch {
+	case failures <= 1:
+		return 30 * time.Second
+	case failures == 2:
+		return time.Minute
+	case failures == 3:
+		return 2 * time.Minute
+	default:
+		return 5 * time.Minute
+	}
+}
+
+// requestSnapshotRecovery issues a snapshot recovery unless a previous
+// request failed and its backoff has not elapsed. Every alive-path
+// caller goes through here; makeSnapshotRecovery itself stays
+// unconditional for the paths that must not be deferred (first
+// connect).
+func (a *recoveryActor) requestSnapshotRecovery(timestamp time.Time) error {
+	if a.recoveryFailures > 0 {
+		if now := time.Now(); now.Before(a.nextSnapshotAttemptAt) {
+			a.logger.Info("recovery: snapshot recovery deferred, previous request failed",
+				"producer_id", a.producerID,
+				"consecutive_failures", a.recoveryFailures,
+				"retry_in_ms", a.nextSnapshotAttemptAt.Sub(now).Milliseconds())
+			return nil
+		}
+	}
+	return a.makeSnapshotRecovery(timestamp)
+}
+
 func (a *recoveryActor) makeSnapshotRecovery(timestamp time.Time) error {
 	now := time.Now()
 	recoverFrom := timestamp
@@ -1253,14 +1302,23 @@ func (a *recoveryActor) onSnapshotRecoveryAPICompleted(e evSnapshotRecoveryAPICo
 				Warn("recovery: late PostRecovery API error after recovery already settled; dropping")
 			return
 		}
+		a.recoveryFailures++
+		backoff := snapshotRetryBackoff(a.recoveryFailures)
+		a.nextSnapshotAttemptAt = time.Now().Add(backoff)
 		a.logger.WithError(e.err).
 			WithField("producer_id", a.producerID).
 			WithField("request_id", e.requestID).
+			WithField("consecutive_failures", a.recoveryFailures).
+			WithField("retry_backoff_ms", backoff.Milliseconds()).
 			Error("recovery: PostRecovery API failed; transitioning to Error")
 		a.currentRecovery = nil
 		a.recoveryState = types.ErrorRecoveryState
 		return
 	}
+	// The request was accepted: clear the failure backoff so the next
+	// legitimate re-request is immediate.
+	a.recoveryFailures = 0
+	a.nextSnapshotAttemptAt = time.Time{}
 	recoveryInfo := newRecoveryInfoImpl(e.recoverFrom, e.startedAt, e.requestID, e.success, a.cfg.SdkNodeID())
 	if err := a.pm.SetProducerRecoveryInfo(a.producerID, recoveryInfo); err != nil {
 		a.logger.WithError(err).
