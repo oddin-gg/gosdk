@@ -121,6 +121,18 @@ type actorManagerOps interface {
 // coalesce onto one handle and don't consume extra slots.
 const maxPendingEventRecoveries = 128
 
+// snapshotCompleteTimeout bounds how long ONE snapshot recovery may wait
+// for its snapshot_complete before the actor gives up on it and asks
+// again.
+//
+// Deliberately separate from MaxRecoveryExecution: that value ALSO
+// clamps how far back a recovery may ask (makeSnapshotRecovery), so
+// lowering it to shorten this wait would silently narrow the recovered
+// window. Observed completions land in 1-2 minutes; a marker that has
+// not arrived in three is not going to, and until the actor gives up the
+// producer stays down and the consumer buffers or drops the live feed.
+const snapshotCompleteTimeout = 3 * time.Minute
+
 // ErrTooManyPendingEventRecoveries is returned by RecoverEventOdds /
 // RecoverEventStateful when the producer already has
 // maxPendingEventRecoveries recoveries awaiting snapshot_complete.
@@ -696,6 +708,7 @@ func (a *recoveryActor) expireStuckSnapshotRecovery(now time.Time) {
 	if maxAge <= 0 {
 		return // defense-in-depth; New rejects non-positive values
 	}
+	maxAge = min(maxAge, snapshotCompleteTimeout)
 	started := a.lastRecoveryStartedAt()
 	if started.IsZero() || now.Sub(started) <= maxAge {
 		return
@@ -704,7 +717,8 @@ func (a *recoveryActor) expireStuckSnapshotRecovery(now time.Time) {
 		WithField("producer_id", a.producerID).
 		WithField("request_id", a.currentRecovery.recoveryID).
 		WithField("started_at", started).
-		Error("recovery: snapshot recovery exceeded MaxRecoveryExecution; transitioning to Error")
+		WithField("max_age_ms", maxAge.Milliseconds()).
+		Error("recovery: snapshot recovery exceeded its snapshot_complete deadline; transitioning to Error")
 	a.currentRecovery = nil
 	a.recoveryState = types.ErrorRecoveryState
 }
