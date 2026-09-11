@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
@@ -128,6 +129,12 @@ type ChannelConsumer struct {
 	lastLossWarnAt   time.Time
 	suppressedLosses int
 
+	// gone is set just before the consumer-gone report; a loss reported
+	// afterwards would re-enter the manager's ledger with nothing left
+	// to settle it. run joins the watcher before setting this, so the
+	// flag only guards paths that could be added later.
+	gone atomic.Bool
+
 	mu              sync.Mutex
 	outgoing        chan QueueEnvelope
 	closeFn         context.CancelFunc
@@ -223,7 +230,7 @@ func (c *ChannelConsumer) ChannelLifecycleHooksInstalled() (restored, gone bool)
 // it through a per-channel once; it is exported so the session's wiring
 // can be exercised without a broker.
 func (c *ChannelConsumer) ReportChannelLost(lostAt time.Time) {
-	if c.onChannelLost == nil {
+	if c.onChannelLost == nil || c.gone.Load() {
 		return
 	}
 	mi := types.AllMessageInterest
@@ -271,11 +278,29 @@ var (
 type channelWatch struct {
 	once sync.Once
 	stop chan struct{}
+	// done closes when the watcher goroutine has returned — after any
+	// report it was already making has completed. stopAndJoin waits on
+	// it so the consumer-gone report can never overtake a loss report
+	// (the manager's ledger is keyed by session: a loss landing after
+	// gone would stay there forever, deferring every future recovery
+	// for the producers that session served).
+	done chan struct{}
 }
 
 // report reports the loss exactly once per channel.
 func (w *channelWatch) report(c *ChannelConsumer, lostAt time.Time) {
 	w.once.Do(func() { c.ReportChannelLost(lostAt) })
+}
+
+// stopAndJoin signals the watcher and waits for it to return. Safe on a
+// nil watch; must not be called twice for the same watch (run clears
+// its reference after the in-loop stop).
+func (w *channelWatch) stopAndJoin() {
+	if w == nil {
+		return
+	}
+	close(w.stop)
+	<-w.done
 }
 
 // watchChannel starts the watcher for ch. Drain and ctx suppress the
@@ -286,10 +311,11 @@ func (c *ChannelConsumer) watchChannel(ctx context.Context, ch amqpChannel) *cha
 	if ch == nil || c.onChannelLost == nil {
 		return nil
 	}
-	w := &channelWatch{stop: make(chan struct{})}
+	w := &channelWatch{stop: make(chan struct{}), done: make(chan struct{})}
 	closed := ch.NotifyClose(make(chan *amqp.Error, 1))
 	cancelled := ch.NotifyCancel(make(chan string, 1))
 	c.wg.Go(func() {
+		defer close(w.done)
 		select {
 		case <-w.stop:
 			return
@@ -566,13 +592,15 @@ func (c *ChannelConsumer) closeGracefulChannel(gch amqpChannel) {
 func (c *ChannelConsumer) run(ctx context.Context, deliveries <-chan amqp.Delivery, ch amqpChannel) {
 	opened := time.Now()
 	watch := c.watchChannel(ctx, ch)
-	stopWatch := func() {
-		if watch != nil {
-			close(watch.stop)
-		}
-	}
+	stopWatch := func() { watch.stopAndJoin() }
 	defer func() {
+		// Join the watcher BEFORE reporting gone: a loss it was already
+		// reporting must be ordered ahead of the gone that settles the
+		// session, or the manager's session-keyed ledger keeps the
+		// session as lost forever and defers every later recovery for
+		// the producers it served.
 		stopWatch()
+		c.gone.Store(true)
 		if c.onConsumerGone != nil {
 			c.onConsumerGone()
 		}

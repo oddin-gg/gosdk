@@ -587,3 +587,61 @@ func TestChannelConsumer_ReplacementLostAtOnce_ReportsLossAfterRestore(t *testin
 		t.Fatalf("ordering loss#1(%d) < restore#1(%d) < loss#2(%d) violated", calls[0].ordinal, rs[0], calls[1].ordinal)
 	}
 }
+
+// TestChannelConsumer_GoneIsOrderedAfterAnInFlightLoss: the watcher can
+// be mid-report when the consumer is closed. The gone report — which
+// settles the session in the recovery manager's session-keyed ledger —
+// must not overtake it: a loss landing after gone would stay in that
+// ledger forever and defer every later recovery for the producers the
+// session served.
+func TestChannelConsumer_GoneIsOrderedAfterAnInFlightLoss(t *testing.T) {
+	opener := newSequencedOpener(2, false)
+	c := NewChannelConsumer(opener, &factory.FeedMessageFactory{}, discardConsumerLogger(), "ex", "od:sport:", 0)
+
+	inHook := make(chan struct{})
+	release := make(chan struct{})
+	var lossDone, goneAt atomic.Int32
+	var hookOnce sync.Once
+	c.SetChannelLostHook(func(types.MessageInterest, time.Time) {
+		hookOnce.Do(func() { close(inHook) })
+		<-release
+		lossDone.Store(opener.seq.Add(1))
+	})
+	c.SetConsumerGoneHook(func() { goneAt.Store(opener.seq.Add(1)) })
+
+	mi := types.AllMessageInterest
+	if _, err := c.Open(context.Background(), []string{"k"}, &mi); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	opener.channels[0].fireClose(t) // the broker takes the channel away
+	select {
+	case <-inHook:
+	case <-time.After(2 * time.Second):
+		t.Fatal("watcher never entered the loss hook")
+	}
+
+	// Close lands while the loss report is still running.
+	closed := make(chan struct{})
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = c.Close(ctx)
+		close(closed)
+	}()
+	time.Sleep(50 * time.Millisecond)
+	if goneAt.Load() != 0 {
+		t.Fatal("gone reported while a loss report was still in flight")
+	}
+
+	close(release)
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not return after the loss report completed")
+	}
+	l, g := lossDone.Load(), goneAt.Load()
+	if l == 0 || g == 0 || g < l {
+		t.Fatalf("ordering loss(%d) < gone(%d) violated", l, g)
+	}
+}
