@@ -74,11 +74,13 @@ func fixtureSrv(t *testing.T) (*httptest.Server, *recoveryHits) {
 		case strings.HasSuffix(r.URL.Path, "/descriptions/producers"):
 			_, _ = io.WriteString(w, producersBody)
 		case strings.Contains(r.URL.Path, "/recovery/initiate_request"):
+			ms := int64(0) // 0 = no after= at all: the full-history request
 			if after := r.URL.Query().Get("after"); after != "" {
-				if ms, err := strconv.ParseInt(after, 10, 64); err == nil {
-					hits.lastAfterMillis.Store(ms)
+				if parsed, err := strconv.ParseInt(after, 10, 64); err == nil {
+					ms = parsed
 				}
 			}
+			hits.lastAfterMillis.Store(ms)
 			hits.recover.Add(1)
 			_, _ = io.WriteString(w, `<?xml version="1.0"?><response response_code="OK"/>`)
 		case strings.Contains(r.URL.Path, "/odds/events/"):

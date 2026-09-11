@@ -767,3 +767,163 @@ func TestActor_FloorDischargedByFullRecovery(t *testing.T) {
 		t.Fatalf("floor = %v after a full recovery completed, want cleared", a.recoveryFloor)
 	}
 }
+
+// --- Floor completeness: every interrupt folds, every cursor shape ---
+
+// TestActor_ChannelLost_InterruptedWhileAlreadyDownStillFolds: the
+// subscribed=false path transitions straight to Interrupted when the
+// producer is already flagged down, bypassing producerDown. That
+// transition must fold the interrupted request's cursor into the floor
+// too, or the restart — which recomputes the cursor from
+// lastValidAliveGen, advanced by alives that arrived meanwhile — lands
+// after a rewind the interrupted request had already consumed, and the
+// span in between is never recovered.
+func TestActor_ChannelLost_InterruptedWhileAlreadyDownStillFolds(t *testing.T) {
+	srv, hits := fixtureSrv(t)
+	defer srv.Close()
+	a := newWiredActor(t, srv, newFakeManagerOps())
+	now := time.Now().Truncate(time.Millisecond)
+
+	// Up and recovered, cursor at C1.
+	if err := a.systemAliveReceived(aliveAt(now.Add(-40*time.Second)), true); err != nil {
+		t.Fatal(err)
+	}
+	waitRecoverHits(t, hits, 1)
+	if err := a.snapshotRecoveryFinished(a.currentRecovery.recoveryID); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.systemAliveReceived(aliveAt(now.Add(-30*time.Second)), true); err != nil {
+		t.Fatal(err)
+	}
+
+	// An explicit rewind to T0 drives a recovery through subscribed=false
+	// (which also flags the producer down).
+	rewind := now.Add(-25 * time.Second)
+	if err := a.pm.SetProducerRecoveryFromTimestamp(t.Context(), a.producerID, rewind); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.systemAliveReceived(aliveAt(now.Add(-20*time.Second)), false); err != nil {
+		t.Fatal(err)
+	}
+	waitRecoverHits(t, hits, 2)
+	if got := hits.lastAfterMillis.Load(); got != rewind.UnixMilli() {
+		t.Fatalf("rewound recovery after= %d, want %d", got, rewind.UnixMilli())
+	}
+	// Record the API result: the one-shot rewind is consumed.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		prod, err := a.pm.GetProducer(t.Context(), a.producerID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !prod.TimestampForRecovery().Equal(rewind) {
+			break
+		}
+		select {
+		case ev := <-a.inbox:
+			a.dispatch(ev)
+		default:
+			time.Sleep(2 * time.Millisecond)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("PostRecovery result never recorded")
+		}
+	}
+
+	// Healthy alives during the recovery advance lastValidAliveGen well
+	// past the rewind — that is what the restart would otherwise use.
+	healthy := now.Add(-10 * time.Second)
+	if err := a.systemAliveReceived(aliveAt(healthy), true); err != nil {
+		t.Fatal(err)
+	}
+	if !a.lastValidAliveGen.After(rewind) {
+		t.Fatalf("test setup: lastValidAliveGen %v must be after the rewind %v", a.lastValidAliveGen, rewind)
+	}
+
+	// A second subscribed=false alive while still down: producerDown is
+	// skipped and the state goes straight to Interrupted.
+	if err := a.systemAliveReceived(aliveAt(now.Add(-8*time.Second)), false); err != nil {
+		t.Fatal(err)
+	}
+	if a.recoveryState != types.InterruptedRecoveryState {
+		t.Fatalf("state = %v, want Interrupted", a.recoveryState)
+	}
+	if !a.recoveryFloor.Equal(rewind) {
+		t.Fatalf("floor = %v after the direct Interrupted transition, want the interrupted request's cursor %v", a.recoveryFloor, rewind)
+	}
+
+	// Its completion restarts it; the restart must not land after the
+	// rewind the interrupted request had used.
+	if err := a.snapshotRecoveryFinished(a.currentRecovery.recoveryID); err != nil {
+		t.Fatal(err)
+	}
+	waitRecoverHits(t, hits, 3)
+	got := hits.lastAfterMillis.Load()
+	if got == 0 || got > rewind.UnixMilli() {
+		t.Fatalf("restart after= %d (%s), want at or before the rewind %d (%s) — it would otherwise start at the later alive cursor %d",
+			got, time.UnixMilli(got).UTC(), rewind.UnixMilli(), rewind.UTC(), healthy.UnixMilli())
+	}
+}
+
+// TestActor_ChannelLost_FloorBeatsTheInitialSnapshotWindow: with
+// WithInitialSnapshotTime set, a producer with no cursor asks for that
+// window — which must not hide a loss older than it.
+func TestActor_ChannelLost_FloorBeatsTheInitialSnapshotWindow(t *testing.T) {
+	srv, hits := fixtureSrv(t)
+	defer srv.Close()
+	a := newActorWithSnapshotWindow(t, srv, 30*time.Second)
+	lost := time.Now().Add(-5 * time.Minute).Truncate(time.Millisecond)
+
+	a.enqueueChannelLost(lost) // no cursor yet: the anchor is the loss
+	a.dispatch(evChannelLossNudge{})
+	if err := a.systemAliveReceived(aliveAt(time.Now()), true); err != nil {
+		t.Fatal(err)
+	}
+	waitRecoverHits(t, hits, 1)
+	if got := hits.lastAfterMillis.Load(); got != lost.UnixMilli() {
+		t.Fatalf("recovery after= %d (%s), want the loss %d (%s) — the %v initial-snapshot window must not hide an older loss",
+			got, time.UnixMilli(got).UTC(), lost.UnixMilli(), lost.UTC(), 30*time.Second)
+	}
+}
+
+// TestActor_FullHistoryRecoveryInterrupted_RestartsFullHistory: a
+// recovery for the producer's whole history (zero cursor, the default
+// first snapshot) that a loss interrupts must restart as full history
+// too — no timestamp floor can express "everything".
+func TestActor_FullHistoryRecoveryInterrupted_RestartsFullHistory(t *testing.T) {
+	srv, hits := fixtureSrv(t)
+	defer srv.Close()
+	a := newWiredActor(t, srv, newFakeManagerOps())
+
+	// First alive on a producer with no cursor → full-history request.
+	if err := a.systemAliveReceived(aliveAt(time.Now().Add(-time.Minute)), true); err != nil {
+		t.Fatal(err)
+	}
+	waitRecoverHits(t, hits, 1)
+	if hits.lastAfterMillis.Load() != 0 {
+		t.Fatalf("initial request carried after= %d, want none (full history)", hits.lastAfterMillis.Load())
+	}
+
+	lossAt(t, a, time.Now())
+	if a.recoveryState != types.InterruptedRecoveryState {
+		t.Fatalf("state = %v, want Interrupted", a.recoveryState)
+	}
+	if !a.recoveryFloorFull {
+		t.Fatal("interrupting a full-history recovery must record a full-history floor")
+	}
+
+	if err := a.snapshotRecoveryFinished(a.currentRecovery.recoveryID); err != nil {
+		t.Fatal(err)
+	}
+	waitRecoverHits(t, hits, 2)
+	if got := hits.lastAfterMillis.Load(); got != 0 {
+		t.Fatalf("restart after= %d, want none — a full-history recovery must restart as full history", got)
+	}
+	// Completing the full restart discharges the floor.
+	if err := a.snapshotRecoveryFinished(a.currentRecovery.recoveryID); err != nil {
+		t.Fatal(err)
+	}
+	if a.recoveryFloorFull || !a.recoveryFloor.IsZero() {
+		t.Fatalf("floor not discharged by the completed full recovery: full=%v floor=%v", a.recoveryFloorFull, a.recoveryFloor)
+	}
+}

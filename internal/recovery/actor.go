@@ -86,6 +86,12 @@ type recoveryActor struct {
 	// producer's cursor, but not past the floor. Actor goroutine only.
 	recoveryFloor time.Time
 
+	// recoveryFloorFull is the strongest floor: the interrupted recovery
+	// asked for the producer's FULL history (a zero cursor), which no
+	// timestamp can express, so its replacement must ask for everything
+	// too. Discharged only by a completed full recovery.
+	recoveryFloorFull bool
+
 	// deferredRecovery is set when a snapshot recovery was due but a
 	// lost session in this producer's scope had not re-bound its queue
 	// yet; resumeDeferredRecovery starts it once the rebind is reported
@@ -252,6 +258,28 @@ func (a *recoveryActor) notePendingLoss(lostAt time.Time) {
 			return
 		}
 	}
+}
+
+// interruptRecovery marks the in-flight recovery interrupted and folds
+// its cursor into the floor, so whatever restarts it cannot reach back
+// less far — a one-shot explicit rewind it consumed, or an initial
+// snapshot window measured from an earlier "now", is otherwise gone by
+// the time the restart recomputes its cursor. A zero cursor means the
+// request covered the producer's full history; that is recorded as
+// recoveryFloorFull, since no timestamp expresses it.
+//
+// Every transition into InterruptedRecoveryState goes through here: the
+// subscribed=false path reaches it directly when the producer is
+// already flagged down, bypassing producerDown.
+func (a *recoveryActor) interruptRecovery() {
+	if a.currentRecovery != nil {
+		if a.currentRecovery.recoverFrom.IsZero() {
+			a.recoveryFloorFull = true
+		} else {
+			a.lowerRecoveryFloor(a.currentRecovery.recoverFrom)
+		}
+	}
+	a.recoveryState = types.InterruptedRecoveryState
 }
 
 // lowerRecoveryFloor moves the recovery floor to t if t is earlier (or
@@ -1027,7 +1055,7 @@ func (a *recoveryActor) systemAliveReceived(timestamp types.MessageTimestamp, su
 		// transition it to Interrupted so snapshotRecoveryFinished
 		// re-issues a fresh recovery on completion (mirrors Java/.NET).
 		if a.isPerformingRecovery() {
-			a.recoveryState = types.InterruptedRecoveryState
+			a.interruptRecovery()
 			return nil
 		}
 		return a.startSnapshotRecovery(recoveryTimestamp)
@@ -1145,16 +1173,7 @@ func (a *recoveryActor) producerDown(reason types.ProducerDownReason) error {
 	}
 
 	if a.recoveryState == types.StartedRecoveryState && reason != types.ProcessingQueueDelayViolationProducerDownReason {
-		// The interrupted recovery's replay is lost or about to be
-		// superseded: whatever restarts it must reach back at least as
-		// far as it did, so its cursor becomes a floor — a one-shot
-		// explicit rewind it consumed, or an initial-snapshot window
-		// measured from an earlier "now", is otherwise gone by the time
-		// the restart recomputes its cursor.
-		if a.currentRecovery != nil {
-			a.lowerRecoveryFloor(a.currentRecovery.recoverFrom)
-		}
-		a.recoveryState = types.InterruptedRecoveryState
+		a.interruptRecovery()
 	}
 
 	if !a.isFlaggedDown() {
@@ -1300,15 +1319,34 @@ func (a *recoveryActor) resumeDeferredRecovery() {
 
 func (a *recoveryActor) makeSnapshotRecovery(timestamp time.Time) error {
 	now := time.Now()
+
+	// 1. The cursor this request would use on its own. A zero cursor
+	//    means "everything the producer has"; WithInitialSnapshotTime
+	//    (Java/.NET parity) narrows that to a window for a producer with
+	//    no cursor yet — first snapshot after connect, or a post-error
+	//    reset before any message landed. The window is resolved HERE, so
+	//    the floor below is compared against what will actually be
+	//    requested: a loss older than the window must still be covered.
 	recoverFrom := timestamp
-	// The floor wins over a later cursor: a channel loss (or a recovery
-	// it interrupted) must be reached back to even if alives processed
-	// since moved the producer's cursor forward. A zero cursor means
-	// "everything the producer has" and is left alone — the floor only
-	// ever pulls a later cursor back.
-	if !a.recoveryFloor.IsZero() && !recoverFrom.IsZero() && a.recoveryFloor.Before(recoverFrom) {
+	if recoverFrom.IsZero() && a.initialSnapshotTime > 0 {
+		recoverFrom = now.Add(-a.initialSnapshotTime)
+	}
+
+	// 2. The floor pulls the cursor back: a channel loss (or a recovery
+	//    it interrupted) must be reached back to even if alives
+	//    processed since moved the producer's cursor forward. Full
+	//    history is the strongest floor and beats any window; a zero
+	//    cursor already covers every timestamp floor, so it is left
+	//    alone.
+	switch {
+	case a.recoveryFloorFull:
+		recoverFrom = time.Time{}
+	case !a.recoveryFloor.IsZero() && !recoverFrom.IsZero() && a.recoveryFloor.Before(recoverFrom):
 		recoverFrom = a.recoveryFloor
 	}
+
+	// 3. Clamp what remains. A zero cursor is the unbounded
+	//    full-history request and is not clamped.
 	if !recoverFrom.IsZero() {
 		maxRecovery := a.cfg.MaxRecoveryExecution()
 		if now.Sub(recoverFrom) > maxRecovery {
@@ -1321,14 +1359,6 @@ func (a *recoveryActor) makeSnapshotRecovery(timestamp time.Time) error {
 		if recoverFrom.After(now) {
 			recoverFrom = now
 		}
-	} else if a.initialSnapshotTime > 0 {
-		// No recovery cursor for this producer (first snapshot after
-		// connect, or post-error reset before any message landed):
-		// look back the configured initial-snapshot window instead of
-		// requesting the producer's full history. Wires
-		// WithInitialSnapshotTime (Java/.NET parity), which was
-		// previously stored on Config but never read.
-		recoverFrom = now.Add(-a.initialSnapshotTime)
 	}
 
 	requestID := a.mgr.nextRequestID()
@@ -1479,14 +1509,21 @@ func (a *recoveryActor) snapshotRecoveryFinished(requestID int) error {
 		a.firstRecoveryCompleted = true
 	}
 
-	// The floor is discharged only by a recovery that reached back to it
-	// — a zero cursor means "everything the producer has" and covers any
-	// floor. A recovery that started from a later cursor (a loss whose
-	// reaction is still pending lowered the floor after this one began)
-	// leaves the floor in place for the recovery that follows.
-	if a.currentRecovery != nil && !a.recoveryFloor.IsZero() &&
-		(a.currentRecovery.recoverFrom.IsZero() || !a.currentRecovery.recoverFrom.After(a.recoveryFloor)) {
-		a.recoveryFloor = time.Time{}
+	// The floor is discharged only by a recovery that reached back to it.
+	// A zero cursor means "everything the producer has" and covers every
+	// floor, full-history included; a timestamp cursor covers only a
+	// timestamp floor at or after it. A recovery that started from a
+	// later cursor (a loss whose reaction is still pending lowered the
+	// floor after this one began) leaves the floor in place for the
+	// recovery that follows.
+	if a.currentRecovery != nil {
+		switch {
+		case a.currentRecovery.recoverFrom.IsZero():
+			a.recoveryFloor = time.Time{}
+			a.recoveryFloorFull = false
+		case !a.recoveryFloorFull && !a.recoveryFloor.IsZero() && !a.currentRecovery.recoverFrom.After(a.recoveryFloor):
+			a.recoveryFloor = time.Time{}
+		}
 	}
 	a.currentRecovery = newRecoveryData(requestID, started)
 	a.recoveryState = types.CompletedRecoveryState
