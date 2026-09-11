@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
@@ -42,8 +43,11 @@ const (
 // the pump, after the message lands in the public subscription buffer,
 // or the session, when it intentionally consumes/drops it (alive
 // handling, out-of-scope filtering). A delivery abandoned mid-pipeline
-// by an abrupt shutdown is simply never acked; the broker releases
-// unacked deliveries when the channel closes.
+// by an abrupt shutdown is simply never acked — and never redelivered
+// either: the queue is exclusive and auto-delete, so it dies with the
+// channel and takes every unacked and not-yet-delivered message with
+// it. That gap is closed by snapshot recovery (see onChannelLost), not
+// by the broker.
 type QueueEnvelope struct {
 	Msg *types.QueueMessage
 	// Ack acknowledges the underlying delivery (idempotence is NOT
@@ -57,16 +61,21 @@ type QueueEnvelope struct {
 // keys bound, and consumption started. *Client satisfies it; the seam
 // keeps the consumer unit-testable without a live broker.
 type channelOpener interface {
-	CreateChannel(ctx context.Context, routingKeys []string, exchangeName string, prefetch int) (<-chan amqp.Delivery, *amqp.Channel, error)
+	CreateChannel(ctx context.Context, routingKeys []string, exchangeName string, prefetch int) (<-chan amqp.Delivery, amqpChannel, error)
 }
 
 // amqpChannel is the narrow surface the consumer needs from an AMQP
 // channel: closing it (which also deletes the exclusive autoDelete
-// queue). *amqp.Channel satisfies it; the seam lets graceful-teardown
-// tests observe the Close on the deadline/abandon path without standing
-// up a live broker.
+// queue) and being told when the broker or the connection closed it or
+// cancelled the consumer (which is how a lost queue is detected without
+// depending on the consume loop's progress — see watchChannel).
+// *amqp.Channel satisfies it; the seam lets tests observe Close ordering
+// and inject a loss without standing up a live broker. A nil interface
+// (no channel) is tolerated everywhere.
 type amqpChannel interface {
 	Close() error
+	NotifyClose(chan *amqp.Error) chan *amqp.Error
+	NotifyCancel(chan string) chan string
 }
 
 // ChannelConsumer drains AMQP deliveries, decodes them, and admits decoded
@@ -84,6 +93,47 @@ type ChannelConsumer struct {
 	sportIDPrefix      string
 
 	prefetch int
+
+	// onChannelLost, when set, is called exactly once per lost channel,
+	// with this consumer's message interest and the instant the loss was
+	// detected. It fires the moment the loss is seen — from the channel
+	// watcher on NotifyClose/NotifyCancel, or from run() when the
+	// deliveries channel closes, whichever is first — for any reason
+	// other than drain/ctx, BEFORE the channel is torn down and BEFORE
+	// the reopen starts. The exclusive auto-delete queue died with the
+	// channel and everything published until the rebind is lost; the
+	// recovery layer flags the producers this consumer serves down and
+	// floors the recovery cursor at lostAt, so no alive processed after
+	// the loss can move the recovery past the gap.
+	onChannelLost func(mi types.MessageInterest, lostAt time.Time)
+
+	// onChannelRestored, when set, is called from run() right after a
+	// lost channel has been re-declared and re-bound — before any
+	// delivery on it is processed. The recovery layer holds a snapshot
+	// recovery back until every lost consumer in the producer's scope
+	// has reported this: a replay published before the queue exists
+	// routes nowhere, and its snapshot_complete with it.
+	onChannelRestored func()
+
+	// onConsumerGone, when set, is called once when run() exits for
+	// good (close, drain, or a reopen abandoned on ctx). A consumer that
+	// is gone needs no queue, so it must stop holding recoveries back.
+	onConsumerGone func()
+
+	// Channel-loss log throttle, guarded by lossMu (the watcher and run
+	// goroutines both report). A peer that cancels the consumer as fast
+	// as it is re-declared would otherwise drive one Warn per round
+	// trip; the hook itself stays unconditional (the recovery side
+	// coalesces).
+	lossMu           sync.Mutex
+	lastLossWarnAt   time.Time
+	suppressedLosses int
+
+	// gone is set just before the consumer-gone report; a loss reported
+	// afterwards would re-enter the manager's ledger with nothing left
+	// to settle it. run joins the watcher before setting this, so the
+	// flag only guards paths that could be added later.
+	gone atomic.Bool
 
 	mu              sync.Mutex
 	outgoing        chan QueueEnvelope
@@ -144,6 +194,144 @@ type ChannelConsumer struct {
 	// longer block the close, so the channel + queue can't leak.
 	ackMu    sync.Mutex
 	chClosed bool
+}
+
+// SetChannelLostHook installs the callback invoked once per lost
+// consumer channel (see onChannelLost). The callback receives this
+// consumer's message interest, so the recovery layer can scope its
+// reaction to the producers this consumer serves, and the instant the
+// loss was detected. Must be called before Open.
+func (c *ChannelConsumer) SetChannelLostHook(fn func(mi types.MessageInterest, lostAt time.Time)) {
+	c.onChannelLost = fn
+}
+
+// SetChannelRestoredHook installs the callback run() invokes after a
+// lost channel has been re-declared and re-bound (see onChannelRestored).
+// Must be called before Open.
+func (c *ChannelConsumer) SetChannelRestoredHook(fn func()) { c.onChannelRestored = fn }
+
+// SetConsumerGoneHook installs the callback run() invokes once on its
+// final exit (see onConsumerGone). Must be called before Open.
+func (c *ChannelConsumer) SetConsumerGoneHook(fn func()) { c.onConsumerGone = fn }
+
+// ChannelLostHookInstalled reports whether a channel-lost hook is set —
+// the one seam between a lost queue and the recovery that closes its gap.
+func (c *ChannelConsumer) ChannelLostHookInstalled() bool { return c.onChannelLost != nil }
+
+// ChannelLifecycleHooksInstalled reports whether the restored and gone
+// hooks are set alongside the lost hook.
+func (c *ChannelConsumer) ChannelLifecycleHooksInstalled() (restored, gone bool) {
+	return c.onChannelRestored != nil, c.onConsumerGone != nil
+}
+
+// ReportChannelLost is the single entry point through which a lost
+// channel reaches the hook: it logs the loss (throttled) and invokes the
+// hook with this consumer's interest. run() and the channel watcher call
+// it through a per-channel once; it is exported so the session's wiring
+// can be exercised without a broker.
+func (c *ChannelConsumer) ReportChannelLost(lostAt time.Time) {
+	if c.onChannelLost == nil || c.gone.Load() {
+		return
+	}
+	mi := types.AllMessageInterest
+	c.mu.Lock()
+	if c.messageInterest != nil {
+		mi = *c.messageInterest
+	}
+	c.mu.Unlock()
+
+	c.lossMu.Lock()
+	now := time.Now()
+	if c.lastLossWarnAt.IsZero() || now.Sub(c.lastLossWarnAt) >= channelLossWarnInterval {
+		log := c.logger.WithField("interest", string(mi))
+		if c.suppressedLosses > 0 {
+			log = log.WithField("suppressed_losses", c.suppressedLosses)
+		}
+		log.Warn("feed: consumer channel lost; queue and everything published until rebind are gone — recovery will close the gap")
+		c.lastLossWarnAt = now
+		c.suppressedLosses = 0
+	} else {
+		c.suppressedLosses++
+	}
+	c.lossMu.Unlock()
+
+	c.onChannelLost(mi, lostAt)
+}
+
+// minChannelDwell is how long a freshly (re)opened channel must have
+// lived for the next loss to be treated as a fresh incident. A channel
+// that dies faster than this is being cancelled as fast as it is
+// re-declared (queue policy, operator, failover loop): the reopen backs
+// off channelReopenBackoff instead of spinning at the broker's round-trip
+// rate. channelLossWarnInterval bounds the Warn for the same reason.
+var (
+	minChannelDwell         = 10 * time.Second
+	channelReopenBackoff    = 500 * time.Millisecond
+	channelLossWarnInterval = 30 * time.Second
+)
+
+// channelWatch is the per-channel loss detector: a goroutine parked on
+// the channel's NotifyClose/NotifyCancel that reports the loss the
+// instant the broker (or the connection) takes the channel away — even
+// while run() is parked in admit behind a slow session or reader — plus
+// a once that makes the report idempotent between the watcher and run().
+type channelWatch struct {
+	once sync.Once
+	stop chan struct{}
+	// done closes when the watcher goroutine has returned — after any
+	// report it was already making has completed. stopAndJoin waits on
+	// it so the consumer-gone report can never overtake a loss report
+	// (the manager's ledger is keyed by session: a loss landing after
+	// gone would stay there forever, deferring every future recovery
+	// for the producers that session served).
+	done chan struct{}
+}
+
+// report reports the loss exactly once per channel.
+func (w *channelWatch) report(c *ChannelConsumer, lostAt time.Time) {
+	w.once.Do(func() { c.ReportChannelLost(lostAt) })
+}
+
+// stopAndJoin signals the watcher and waits for it to return. Safe on a
+// nil watch; must not be called twice for the same watch (run clears
+// its reference after the in-loop stop).
+func (w *channelWatch) stopAndJoin() {
+	if w == nil {
+		return
+	}
+	close(w.stop)
+	<-w.done
+}
+
+// watchChannel starts the watcher for ch. Drain and ctx suppress the
+// report (a close we initiated is not a loss); a wake-up that races
+// either re-checks them before reporting. Returns nil when there is no
+// channel to watch or no hook to report to.
+func (c *ChannelConsumer) watchChannel(ctx context.Context, ch amqpChannel) *channelWatch {
+	if ch == nil || c.onChannelLost == nil {
+		return nil
+	}
+	w := &channelWatch{stop: make(chan struct{}), done: make(chan struct{})}
+	closed := ch.NotifyClose(make(chan *amqp.Error, 1))
+	cancelled := ch.NotifyCancel(make(chan string, 1))
+	c.wg.Go(func() {
+		defer close(w.done)
+		select {
+		case <-w.stop:
+			return
+		case <-ctx.Done():
+			return
+		case <-c.drainCh:
+			return
+		case <-closed:
+		case <-cancelled:
+		}
+		if ctx.Err() != nil || c.draining() {
+			return
+		}
+		w.report(c, time.Now())
+	})
+	return w
 }
 
 // NewChannelConsumer constructs an unstarted consumer. Call Open to begin.
@@ -401,7 +589,22 @@ func (c *ChannelConsumer) closeGracefulChannel(gch amqpChannel) {
 // until ctx is cancelled or a graceful drain is requested. Permanent
 // topology/permission errors are NOT retried here: they already surfaced
 // synchronously from Open, so the initial channel is known-good.
-func (c *ChannelConsumer) run(ctx context.Context, deliveries <-chan amqp.Delivery, ch *amqp.Channel) {
+func (c *ChannelConsumer) run(ctx context.Context, deliveries <-chan amqp.Delivery, ch amqpChannel) {
+	opened := time.Now()
+	watch := c.watchChannel(ctx, ch)
+	stopWatch := func() { watch.stopAndJoin() }
+	defer func() {
+		// Join the watcher BEFORE reporting gone: a loss it was already
+		// reporting must be ordered ahead of the gone that settles the
+		// session, or the manager's session-keyed ledger keeps the
+		// session as lost forever and defers every later recovery for
+		// the producers it served.
+		stopWatch()
+		c.gone.Store(true)
+		if c.onConsumerGone != nil {
+			c.onConsumerGone()
+		}
+	}()
 	for {
 		c.consume(ctx, deliveries, ch)
 
@@ -431,11 +634,42 @@ func (c *ChannelConsumer) run(ctx context.Context, deliveries <-chan amqp.Delive
 			return
 		default:
 		}
+		if ctx.Err() != nil {
+			if ch != nil {
+				_ = ch.Close()
+			}
+			return
+		}
+
+		// The channel is gone and so is its exclusive queue: every
+		// message published until the reopen below re-binds is lost.
+		// Report NOW (once per channel — the watcher may already have) —
+		// before ch.Close(), which on a broker-initiated cancel is a real
+		// blocking RPC during which a sibling channel on the same
+		// connection can still deliver an alive, and before any delivery
+		// on the new channel can be processed (see onChannelLost).
+		if watch != nil {
+			watch.report(c, time.Now())
+		} else if c.onChannelLost != nil {
+			c.ReportChannelLost(time.Now())
+		}
+		stopWatch()
+		watch = nil // stopped; the deferred stopWatch must not close it again
 		if ch != nil {
 			_ = ch.Close()
 		}
-		if ctx.Err() != nil {
-			return
+
+		// A channel that died within its dwell is being cancelled as fast
+		// as it is re-declared: back off before re-declaring so the loop
+		// cannot spin at the broker's round-trip rate. Drain/ctx-aware.
+		if time.Since(opened) < minChannelDwell {
+			select {
+			case <-ctx.Done():
+				return
+			case <-c.drainCh:
+				return
+			case <-time.After(channelReopenBackoff):
+			}
 		}
 
 		// Connection dropped mid-consume — reopen. Transient failures
@@ -497,12 +731,27 @@ func (c *ChannelConsumer) run(ctx context.Context, deliveries <-chan amqp.Delive
 		if !ok {
 			return
 		}
+		opened = time.Now()
+		// The replacement queue is declared and bound: whatever is
+		// published from now on reaches this consumer, so a recovery
+		// held back for it may start. Report that BEFORE arming the
+		// replacement's watcher: the loss bookkeeping is keyed by
+		// session, not by channel generation, so a replacement that dies
+		// at once must not have its loss reported ahead of this restore
+		// — the restore would then erase the newer loss and the
+		// per-channel once would keep run() from reporting it again.
+		// Arming late loses nothing: NotifyClose on an already-closed
+		// channel is signalled immediately, and run() reports too.
+		if c.onChannelRestored != nil {
+			c.onChannelRestored()
+		}
+		watch = c.watchChannel(ctx, ch)
 	}
 }
 
 // consume drives a single AMQP-channel session. Returns when the delivery
 // channel closes (typical reason: connection drop) or ctx cancels.
-func (c *ChannelConsumer) consume(ctx context.Context, deliveries <-chan amqp.Delivery, ch *amqp.Channel) {
+func (c *ChannelConsumer) consume(ctx context.Context, deliveries <-chan amqp.Delivery, ch amqpChannel) {
 	for {
 		// Hard bound on post-drain intake: in the main select below,
 		// drainCh and deliveries can BOTH be ready, and Go picks
@@ -559,8 +808,10 @@ func (c *ChannelConsumer) consume(ctx context.Context, deliveries <-chan amqp.De
 
 // ackFunc builds the envelope's ack closure for one delivery. Ack errors
 // are logged, not propagated — by the time the ack fires the message has
-// already been handed to the consumer (or intentionally dropped), and
-// the broker will simply redeliver on the next channel teardown.
+// already been handed to the consumer (or intentionally dropped); a
+// failed ack leaves it unacked on an exclusive auto-delete queue, which
+// is deleted with the channel, so nothing is redelivered and the
+// consumer already holds the message.
 //
 // Late-ack after teardown: the ack and the graceful-teardown Close are
 // serialized on ackMu (see closeGracefulChannel), so they never run

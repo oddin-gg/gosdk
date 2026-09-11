@@ -348,6 +348,10 @@ func (r *recordingRecoveryProcessor) OnSnapshotCompleteReceived(context.Context,
 	return nil
 }
 
+func (r *recordingRecoveryProcessor) OnFeedChannelLost(uuid.UUID, types.MessageInterest, time.Time) {}
+func (r *recordingRecoveryProcessor) OnFeedChannelRestored(uuid.UUID)                               {}
+func (r *recordingRecoveryProcessor) OnFeedSessionGone(uuid.UUID)                                   {}
+
 // stubMessage implements every public message interface (OddsChange,
 // BetStop, BetCancel, BetSettlement, FixtureChangeMessage,
 // RollbackBetSettlement, RollbackBetCancel) so each subtest can re-use
@@ -527,6 +531,10 @@ func (noopRecoveryProcessor) OnAliveReceived(int, types.MessageTimestamp, bool, 
 func (noopRecoveryProcessor) OnSnapshotCompleteReceived(context.Context, int, int, types.MessageInterest) error {
 	return nil
 }
+
+func (noopRecoveryProcessor) OnFeedChannelLost(uuid.UUID, types.MessageInterest, time.Time) {}
+func (noopRecoveryProcessor) OnFeedChannelRestored(uuid.UUID)                               {}
+func (noopRecoveryProcessor) OnFeedSessionGone(uuid.UUID)                                   {}
 
 func TestSession_ProcessFeedMessage_ReplayDoesNotNotifyCache(t *testing.T) {
 	for _, tc := range []struct {
@@ -1759,6 +1767,10 @@ func (c *countingRecoveryProcessor) OnAliveReceived(int, types.MessageTimestamp,
 func (c *countingRecoveryProcessor) OnSnapshotCompleteReceived(context.Context, int, int, types.MessageInterest) error {
 	return nil
 }
+
+func (c *countingRecoveryProcessor) OnFeedChannelLost(uuid.UUID, types.MessageInterest, time.Time) {}
+func (c *countingRecoveryProcessor) OnFeedChannelRestored(uuid.UUID)                               {}
+func (c *countingRecoveryProcessor) OnFeedSessionGone(uuid.UUID)                                   {}
 
 type erroringMessageBuilder struct{}
 

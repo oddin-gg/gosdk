@@ -104,6 +104,15 @@ const (
 	AliveIntervalViolationProducerStatusReason         ProducerStatusReason = 4
 	ProcessingQueueDelayViolationProducerStatusReason  ProducerStatusReason = 5
 	OtherProducerStatusReason                          ProducerStatusReason = 6
+	// ConnectionDownProducerStatusReason: a subscription's consumer
+	// channel was lost — with the whole AMQP connection, or alone on a
+	// channel-level exception. The subscription queues are exclusive and
+	// auto-delete, so the queue died with the channel and everything
+	// published until the SDK re-binds is gone from the broker. Raised
+	// at the moment of loss, before any reconnect, for the producers the
+	// lost subscription served; the next system alive then starts a
+	// snapshot recovery reaching back at least to the loss.
+	ConnectionDownProducerStatusReason ProducerStatusReason = 7
 )
 
 // ProducerDownReason narrows the reason for a producer-down
@@ -115,7 +124,10 @@ const (
 	DefaultProducerDownReason                       ProducerDownReason = 0
 	AliveInternalViolationProducerDownReason        ProducerDownReason = 1
 	ProcessingQueueDelayViolationProducerDownReason ProducerDownReason = 2
-	OtherProducerDownReason                         ProducerDownReason = 6
+	// ConnectionDownProducerDownReason is raised the moment a consumer
+	// channel is lost; see ConnectionDownProducerStatusReason.
+	ConnectionDownProducerDownReason ProducerDownReason = 3
+	OtherProducerDownReason          ProducerDownReason = 6
 )
 
 // ToProducerStatusReason maps a producer-down reason to the broader
@@ -126,6 +138,8 @@ func (p ProducerDownReason) ToProducerStatusReason() ProducerStatusReason {
 		return AliveIntervalViolationProducerStatusReason
 	case ProcessingQueueDelayViolationProducerDownReason:
 		return ProcessingQueueDelayViolationProducerStatusReason
+	case ConnectionDownProducerDownReason:
+		return ConnectionDownProducerStatusReason
 	case OtherProducerDownReason:
 		return OtherProducerStatusReason
 	default:

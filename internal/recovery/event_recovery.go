@@ -1,6 +1,7 @@
 package recovery
 
 import (
+	"context"
 	"sync"
 	"time"
 
@@ -8,8 +9,15 @@ import (
 )
 
 type recoveryData struct {
-	recoveryID                  int
-	recoveryStartedAt           time.Time
+	recoveryID        int
+	recoveryStartedAt time.Time
+	// recoverFrom is the cursor the snapshot request was issued with
+	// (zero = everything). Kept so a loss that interrupts this recovery
+	// can floor its replacement at the same point.
+	recoverFrom time.Time
+	// cancelAPI cancels this snapshot recovery's PostRecovery when the
+	// recovery is superseded. Nil for completed/placeholder data.
+	cancelAPI                   context.CancelFunc
 	lock                        sync.Mutex
 	interestsOfSnapshotComplete map[types.MessageInterest]struct{}
 }
