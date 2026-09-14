@@ -66,7 +66,38 @@ type recoveryActor struct {
 	// Coalescing is now scoped WITHIN each interest class only.
 	pendingSystemAlive atomic.Pointer[evAlive]
 	pendingUserAlive   atomic.Pointer[evAlive]
-	done               chan struct{}
+
+	// pendingLossAt holds the EARLIEST unapplied channel-loss instant as
+	// unix nanoseconds (0 = none), set by enqueueChannelLost; drained
+	// (and acted on) before any alive or tick is evaluated, so the
+	// producer is already flagged down when the first alive after the
+	// rebind arrives.
+	pendingLossAt atomic.Int64
+
+	// recoveryFloor is the earliest instant a snapshot recovery must
+	// reach back to: the earliest channel loss not yet covered by a
+	// completed recovery (anchored at the pre-loss recovery cursor, see
+	// enqueueChannelLost), and the cursor of any recovery a loss
+	// interrupted (its replay was lost with the queue). makeSnapshotRecovery
+	// never starts later than it, and snapshotRecoveryFinished clears it
+	// only when the completed recovery started at or before it. This is
+	// what makes the ordering of a loss notice and the alives around it
+	// irrelevant: an alive that overtakes the notice may advance the
+	// producer's cursor, but not past the floor. Actor goroutine only.
+	recoveryFloor time.Time
+
+	// recoveryFloorFull is the strongest floor: the interrupted recovery
+	// asked for the producer's FULL history (a zero cursor), which no
+	// timestamp can express, so its replacement must ask for everything
+	// too. Discharged only by a completed full recovery.
+	recoveryFloorFull bool
+
+	// deferredRecovery is set when a snapshot recovery was due but a
+	// lost session in this producer's scope had not re-bound its queue
+	// yet; resumeDeferredRecovery starts it once the rebind is reported
+	// (evChannelRebound) or, as fallback, on the next tick or alive.
+	deferredRecovery bool
+	done             chan struct{}
 
 	// Manager-lifetime ctx, used for API calls. Cancelled at shutdown.
 	ctx context.Context
@@ -97,6 +128,9 @@ type actorManagerOps interface {
 	LookupHandle(requestID int) (*Handle, bool)
 	nextRequestID() int
 	emitRecoveryMessage(types.RecoveryMessage)
+	// rebindPending reports whether a lost session in the producer's
+	// scope still has no queue; see Manager.rebindPending.
+	rebindPending(producerID int) bool
 }
 
 // maxPendingEventRecoveries bounds concurrent pending event recoveries
@@ -182,6 +216,148 @@ func (a *recoveryActor) enqueueAlive(ev evAlive) {
 		a.pendingUserAlive.Store(&ev)
 	}
 	a.send(evAliveNudge{})
+}
+
+// enqueueChannelLost records that a consumer channel — and with it its
+// exclusive queue — was lost at lostAt, and nudges the actor. Coalesced
+// like alive, keeping the EARLIEST instant: the flag is what carries the
+// fact, the nudge may be dropped by a full inbox.
+//
+// The instant recorded is the earlier of lostAt and the producer's loss
+// anchor (producer.Manager.LossAnchor): the recovery cursor as it stood
+// BEFORE the most recent alive, or an explicit rewind. The most recent
+// alive is not trusted because it arrives on the alive session's own
+// channel and may have been generated after the broker deleted the
+// consumer's queue yet processed — concurrently with this call, on the
+// actor goroutine — before the loss was seen locally; sampling the
+// cursor here on the reporting goroutine cannot order itself against
+// that. The alive before it is a full alive interval older, safely
+// pre-loss. In the producer's clock domain, the anchor also covers
+// messages the dead queue still held undelivered — a lagging consumer's
+// queue may hold a span timestamped well before the loss, and those die
+// with it too. lostAt alone (client wall clock) is the fallback when the
+// producer has no cursor yet.
+func (a *recoveryActor) enqueueChannelLost(lostAt time.Time) {
+	anchor := lostAt
+	if cursor, err := a.pm.LossAnchor(a.producerID); err == nil && !cursor.IsZero() && cursor.Before(anchor) {
+		anchor = cursor
+	}
+	a.notePendingLoss(anchor)
+	a.send(evChannelLossNudge{})
+}
+
+// notePendingLoss folds lostAt into pendingLossAt, keeping the earliest.
+func (a *recoveryActor) notePendingLoss(lostAt time.Time) {
+	ns := lostAt.UnixNano()
+	for {
+		cur := a.pendingLossAt.Load()
+		if cur != 0 && cur <= ns {
+			return
+		}
+		if a.pendingLossAt.CompareAndSwap(cur, ns) {
+			return
+		}
+	}
+}
+
+// interruptRecovery marks the in-flight recovery interrupted and folds
+// its cursor into the floor, so whatever restarts it cannot reach back
+// less far — a one-shot explicit rewind it consumed, or an initial
+// snapshot window measured from an earlier "now", is otherwise gone by
+// the time the restart recomputes its cursor. A zero cursor means the
+// request covered the producer's full history; that is recorded as
+// recoveryFloorFull, since no timestamp expresses it.
+//
+// Every transition into InterruptedRecoveryState goes through here: the
+// subscribed=false path reaches it directly when the producer is
+// already flagged down, bypassing producerDown.
+func (a *recoveryActor) interruptRecovery() {
+	if a.currentRecovery != nil {
+		if a.currentRecovery.recoverFrom.IsZero() {
+			a.recoveryFloorFull = true
+		} else {
+			a.lowerRecoveryFloor(a.currentRecovery.recoverFrom)
+		}
+	}
+	a.recoveryState = types.InterruptedRecoveryState
+}
+
+// lowerRecoveryFloor moves the recovery floor to t if t is earlier (or
+// no floor is set). Actor goroutine only.
+func (a *recoveryActor) lowerRecoveryFloor(t time.Time) {
+	if t.IsZero() {
+		return
+	}
+	if a.recoveryFloor.IsZero() || t.Before(a.recoveryFloor) {
+		a.recoveryFloor = t
+	}
+}
+
+// drainPendingChannelLoss acts on a pending channel loss, if any, and
+// reports whether nothing is left pending. The flag is cleared only once
+// the reaction took effect: when the producer manager cannot answer (a
+// network fault that dropped AMQP may well be failing the producer
+// catalog too) the flag is put back so the next nudge or tick retries —
+// unlike alive, nothing upstream repeats this notice. While it is
+// pending the caller must NOT process alives: an alive handled with the
+// producer still up would advance the recovery cursor past the gap the
+// deferred reaction is meant to recover. Actor-goroutine only.
+func (a *recoveryActor) drainPendingChannelLoss() (settled bool) {
+	ns := a.pendingLossAt.Swap(0)
+	if ns == 0 {
+		return true
+	}
+	lostAt := time.Unix(0, ns)
+	// Floor FIRST, before the reaction that may fail: from here on no
+	// alive — however it interleaves — can move the recovery past the
+	// loss.
+	a.lowerRecoveryFloor(lostAt)
+	if !a.onChannelLost() {
+		a.notePendingLoss(lostAt)
+		return false
+	}
+	return true
+}
+
+// onChannelLost closes the gap a lost consumer channel opens. Every
+// subscription consumes from an exclusive, auto-delete queue: when its
+// channel goes — with the whole connection, or alone on a channel-level
+// exception — the broker deletes the queue, and everything published to
+// the exchange until the consumer re-binds is lost; nothing is
+// "released" or redelivered. The alive-based checks only notice a
+// connection drop longer than MaxInactivity and never notice a single
+// channel's loss while alives keep flowing on another, so both used to
+// pass silently. Flagging the producer down makes the next system alive
+// issue a snapshot recovery from the last alive gen timestamp before the
+// loss (systemAliveReceived: flagged down + not performing recovery →
+// makeSnapshotRecovery); an in-flight recovery is interrupted by
+// producerDown and restarted the same way, since its replayed messages
+// were lost along with the rest.
+//
+// The notice is raised at the moment of loss, before the consumer starts
+// re-binding; and independently of timing, drainPendingChannelLoss has
+// already lowered the recovery floor to the loss instant, so an alive
+// that reaches the actor first cannot move the recovery past the gap.
+//
+// Returns false when the reaction could not be applied because the
+// producer manager errored; the caller then keeps the notice pending.
+func (a *recoveryActor) onChannelLost() bool {
+	enabled, err := a.pm.IsProducerEnabled(a.ctx, a.producerID)
+	if err != nil {
+		a.logger.WithError(err).WithField("producer_id", a.producerID).
+			Warn("recovery: channel lost but producer state unavailable; will retry")
+		return false
+	}
+	if !enabled {
+		return true
+	}
+	a.logger.WithField("producer_id", a.producerID).
+		Warn("recovery: consumer channel lost; messages published until the queue is re-bound are lost with it — flagging producer down to force a snapshot recovery")
+	if err := a.producerDown(types.ConnectionDownProducerDownReason); err != nil {
+		a.logger.WithError(err).WithField("producer_id", a.producerID).Error("recovery: producer-down after channel loss; will retry")
+		return false
+	}
+	return true
 }
 
 // drainPendingAlive processes the latest coalesced alive of each interest
@@ -372,7 +548,18 @@ func (a *recoveryActor) dispatch(ev actorEvent) {
 	case evAlive:
 		a.onAlive(e)
 	case evAliveNudge:
-		a.drainPendingAlive()
+		// A channel loss that preceded this alive must be applied first,
+		// so the alive sees the producer flagged down and starts recovery.
+		// If it could not be applied yet, the alive stays coalesced for
+		// the retry — processing it now would advance the cursor past
+		// the gap.
+		if a.drainPendingChannelLoss() {
+			a.drainPendingAlive()
+		}
+	case evChannelLossNudge:
+		a.drainPendingChannelLoss()
+	case evChannelRebound:
+		a.resumeDeferredRecovery()
 	case evSnapshotComplete:
 		a.onSnapshotComplete(e)
 	case evRecoverEvent:
@@ -382,9 +569,16 @@ func (a *recoveryActor) dispatch(ev actorEvent) {
 	case evSnapshotRecoveryAPICompleted:
 		a.onSnapshotRecoveryAPICompleted(e)
 	case evTick:
-		// Drain any coalesced alive FIRST: the tick must never evaluate
-		// producer staleness while a fresher alive sits unprocessed.
-		a.drainPendingAlive()
+		// Drain any coalesced channel loss and alive FIRST: the tick must
+		// never evaluate producer staleness while a fresher alive sits
+		// unprocessed, and the tick is the fallback that applies a
+		// channel loss whose nudge was dropped by a full inbox. An alive
+		// stays coalesced while a loss is still pending (see
+		// drainPendingChannelLoss).
+		if a.drainPendingChannelLoss() {
+			a.drainPendingAlive()
+		}
+		a.resumeDeferredRecovery() // fallback for a dropped evChannelRebound
 		a.onTick(e.now, e.inactivityArmed)
 	default:
 		a.logger.Warnf("recovery actor: unknown event type %T", ev)
@@ -861,10 +1055,10 @@ func (a *recoveryActor) systemAliveReceived(timestamp types.MessageTimestamp, su
 		// transition it to Interrupted so snapshotRecoveryFinished
 		// re-issues a fresh recovery on completion (mirrors Java/.NET).
 		if a.isPerformingRecovery() {
-			a.recoveryState = types.InterruptedRecoveryState
+			a.interruptRecovery()
 			return nil
 		}
-		return a.makeSnapshotRecovery(recoveryTimestamp)
+		return a.startSnapshotRecovery(recoveryTimestamp)
 	}
 
 	now := time.Now()
@@ -883,7 +1077,7 @@ func (a *recoveryActor) systemAliveReceived(timestamp types.MessageTimestamp, su
 		err = a.producerUp(types.ReturnedFromInactivityProducerUpReason)
 	case isInRecovery:
 		if a.isFlaggedDown() && !a.isPerformingRecovery() && a.downReason != types.ProcessingQueueDelayViolationProducerDownReason {
-			if err := a.makeSnapshotRecovery(recoveryTimestamp); err != nil {
+			if err := a.startSnapshotRecovery(recoveryTimestamp); err != nil {
 				return err
 			}
 		}
@@ -892,12 +1086,12 @@ func (a *recoveryActor) systemAliveReceived(timestamp types.MessageTimestamp, su
 		if a.isPerformingRecovery() && recoveryTiming > maxInterval {
 			a.recoveryState = types.ErrorRecoveryState
 			a.currentRecovery = nil
-			if err := a.makeSnapshotRecovery(recoveryTimestamp); err != nil {
+			if err := a.startSnapshotRecovery(recoveryTimestamp); err != nil {
 				return err
 			}
 		}
 	default:
-		err = a.makeSnapshotRecovery(recoveryTimestamp)
+		err = a.startSnapshotRecovery(recoveryTimestamp)
 	}
 	if err != nil {
 		return err
@@ -979,7 +1173,7 @@ func (a *recoveryActor) producerDown(reason types.ProducerDownReason) error {
 	}
 
 	if a.recoveryState == types.StartedRecoveryState && reason != types.ProcessingQueueDelayViolationProducerDownReason {
-		a.recoveryState = types.InterruptedRecoveryState
+		a.interruptRecovery()
 	}
 
 	if !a.isFlaggedDown() {
@@ -1084,10 +1278,76 @@ func (a *recoveryActor) currentStatus() types.ProducerStatus {
 // complete/recover-event for this producer queued behind it; under
 // load the 256-slot inbox dropped alives and triggered false
 // producer-down. Mirrors the v2.24 detach-event-recovery restructure.
+// startSnapshotRecovery is the gate in front of makeSnapshotRecovery: a
+// snapshot recovery must not be requested while a lost session in this
+// producer's scope has no queue yet — the replay would be published
+// into nothing, and its snapshot_complete with it (a recovery stalled
+// until MaxRecoveryExecution, or completed with its head lost). The
+// request is deferred instead and issued by resumeDeferredRecovery once
+// the rebind is reported; the producer stays flagged down meanwhile and
+// the recovery floor keeps the eventual request reaching back to the
+// loss.
+func (a *recoveryActor) startSnapshotRecovery(timestamp time.Time) error {
+	if a.mgr.rebindPending(a.producerID) {
+		if !a.deferredRecovery {
+			a.logger.WithField("producer_id", a.producerID).
+				Info("recovery: snapshot recovery deferred until the lost subscription queue is re-bound")
+		}
+		a.deferredRecovery = true
+		return nil
+	}
+	a.deferredRecovery = false
+	return a.makeSnapshotRecovery(timestamp)
+}
+
+// resumeDeferredRecovery issues a snapshot recovery that startSnapshotRecovery
+// deferred, once no lost session in scope is pending any more. The
+// cursor is recomputed: the floor makes it reach back to the loss.
+func (a *recoveryActor) resumeDeferredRecovery() {
+	if !a.deferredRecovery || a.mgr.rebindPending(a.producerID) {
+		return
+	}
+	ts, err := a.timestampForRecovery()
+	if err != nil {
+		a.logger.WithError(err).WithField("producer_id", a.producerID).Warn("recovery: resume deferred snapshot recovery: recovery timestamp")
+		return
+	}
+	if err := a.startSnapshotRecovery(ts); err != nil {
+		a.logger.WithError(err).WithField("producer_id", a.producerID).Error("recovery: resume deferred snapshot recovery")
+	}
+}
+
 func (a *recoveryActor) makeSnapshotRecovery(timestamp time.Time) error {
 	now := time.Now()
+
+	// 1. The cursor this request would use on its own. A zero cursor
+	//    means "everything the producer has"; WithInitialSnapshotTime
+	//    (Java/.NET parity) narrows that to a window for a producer with
+	//    no cursor yet — first snapshot after connect, or a post-error
+	//    reset before any message landed. The window is resolved HERE, so
+	//    the floor below is compared against what will actually be
+	//    requested: a loss older than the window must still be covered.
 	recoverFrom := timestamp
-	if !timestamp.IsZero() {
+	if recoverFrom.IsZero() && a.initialSnapshotTime > 0 {
+		recoverFrom = now.Add(-a.initialSnapshotTime)
+	}
+
+	// 2. The floor pulls the cursor back: a channel loss (or a recovery
+	//    it interrupted) must be reached back to even if alives
+	//    processed since moved the producer's cursor forward. Full
+	//    history is the strongest floor and beats any window; a zero
+	//    cursor already covers every timestamp floor, so it is left
+	//    alone.
+	switch {
+	case a.recoveryFloorFull:
+		recoverFrom = time.Time{}
+	case !a.recoveryFloor.IsZero() && !recoverFrom.IsZero() && a.recoveryFloor.Before(recoverFrom):
+		recoverFrom = a.recoveryFloor
+	}
+
+	// 3. Clamp what remains. A zero cursor is the unbounded
+	//    full-history request and is not clamped.
+	if !recoverFrom.IsZero() {
 		maxRecovery := a.cfg.MaxRecoveryExecution()
 		if now.Sub(recoverFrom) > maxRecovery {
 			recoverFrom = now.Add(-maxRecovery)
@@ -1099,14 +1359,6 @@ func (a *recoveryActor) makeSnapshotRecovery(timestamp time.Time) error {
 		if recoverFrom.After(now) {
 			recoverFrom = now
 		}
-	} else if a.initialSnapshotTime > 0 {
-		// No recovery cursor for this producer (first snapshot after
-		// connect, or post-error reset before any message landed):
-		// look back the configured initial-snapshot window instead of
-		// requesting the producer's full history. Wires
-		// WithInitialSnapshotTime (Java/.NET parity), which was
-		// previously stored on Config but never read.
-		recoverFrom = now.Add(-a.initialSnapshotTime)
 	}
 
 	requestID := a.mgr.nextRequestID()
@@ -1115,10 +1367,20 @@ func (a *recoveryActor) makeSnapshotRecovery(timestamp time.Time) error {
 		return fmt.Errorf("recovery: producer %d snapshot req=%d: producer name: %w", a.producerID, requestID, err)
 	}
 
+	// A superseded snapshot request must not keep retrying its POST
+	// alongside the replacement (a flapping channel would otherwise stack
+	// one detached retry loop per loss); event recoveries already carry
+	// this cancel.
+	if a.currentRecovery != nil && a.currentRecovery.cancelAPI != nil {
+		a.currentRecovery.cancelAPI()
+	}
+	apiCtx, cancelAPI := context.WithCancel(a.ctx)
 	a.currentRecovery = newRecoveryData(requestID, now)
+	a.currentRecovery.recoverFrom = recoverFrom
+	a.currentRecovery.cancelAPI = cancelAPI
 	a.recoveryState = types.StartedRecoveryState
 
-	a.logger.WithField("producer_id", a.producerID).WithField("request_id", requestID).Info("recovery: snapshot recovery started")
+	a.logger.WithField("producer_id", a.producerID).WithField("request_id", requestID).WithField("recover_from", recoverFrom).Info("recovery: snapshot recovery started")
 
 	// Detach the API call from the actor goroutine. Use a.ctx for the
 	// request so a manager Close cancels in-flight recoveries; the
@@ -1130,7 +1392,13 @@ func (a *recoveryActor) makeSnapshotRecovery(timestamp time.Time) error {
 	a.detached.Add(1) // joined (bounded) by stopBounded
 	go func() {
 		defer a.detached.Done()
-		success, apiErr := a.api.PostRecovery(a.ctx, producerName, requestID, a.cfg.SdkNodeID(), recoverFrom)
+		defer cancelAPI()
+		success, apiErr := a.api.PostRecovery(apiCtx, producerName, requestID, a.cfg.SdkNodeID(), recoverFrom)
+		// Inbox delivery deliberately uses a.ctx, not apiCtx: a superseded
+		// request's cancel must not also drop its (now late) result on
+		// the floor — the actor still wants to log/ignore it by request
+		// id, and only actor shutdown may cancel the delivery.
+		//nolint:contextcheck // see above
 		// a.ctx is the right context for inbox delivery; it's only
 		// cancelled at actor shutdown, in which case sendCtx returns
 		// ErrManagerClosed. Log the drop so an operator correlating
@@ -1230,7 +1498,7 @@ func (a *recoveryActor) snapshotRecoveryFinished(requestID int) error {
 	// longer matched currentRecovery.recoveryID and be silently
 	// ignored — the new recovery hung forever.
 	if a.recoveryState == types.InterruptedRecoveryState {
-		return a.makeSnapshotRecovery(a.lastValidAliveGen)
+		return a.startSnapshotRecovery(a.lastValidAliveGen)
 	}
 
 	var reason types.ProducerUpReason
@@ -1241,6 +1509,22 @@ func (a *recoveryActor) snapshotRecoveryFinished(requestID int) error {
 		a.firstRecoveryCompleted = true
 	}
 
+	// The floor is discharged only by a recovery that reached back to it.
+	// A zero cursor means "everything the producer has" and covers every
+	// floor, full-history included; a timestamp cursor covers only a
+	// timestamp floor at or after it. A recovery that started from a
+	// later cursor (a loss whose reaction is still pending lowered the
+	// floor after this one began) leaves the floor in place for the
+	// recovery that follows.
+	if a.currentRecovery != nil {
+		switch {
+		case a.currentRecovery.recoverFrom.IsZero():
+			a.recoveryFloor = time.Time{}
+			a.recoveryFloorFull = false
+		case !a.recoveryFloorFull && !a.recoveryFloor.IsZero() && !a.currentRecovery.recoverFrom.After(a.recoveryFloor):
+			a.recoveryFloor = time.Time{}
+		}
+	}
 	a.currentRecovery = newRecoveryData(requestID, started)
 	a.recoveryState = types.CompletedRecoveryState
 	return a.producerUp(reason)

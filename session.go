@@ -104,6 +104,24 @@ type messageBuilder interface {
 // consumer implements or receives it, which is why it lives unexported
 // here rather than in the public types/ package (v1.0.0 surface pass).
 type recoveryMessageProcessor interface {
+	// OnFeedChannelLost reports that session's consumer channel — and
+	// with it its exclusive, auto-delete queue — was lost at lostAt, so
+	// every message published until the consumer re-binds is gone from
+	// the broker. messageInterest is the lost session's: the recovery
+	// manager flags the known producers IN THAT SCOPE down and floors
+	// their recovery at the pre-loss cursor, so the next alive starts a
+	// snapshot recovery over the gap whatever order the alive and this
+	// notice arrive in — but not before OnFeedChannelRestored (or
+	// OnFeedSessionGone) for every lost session in the scope, since a
+	// replay published before the queue exists is lost as well. Raised
+	// at the moment of loss, before the rebind.
+	OnFeedChannelLost(session uuid.UUID, messageInterest types.MessageInterest, lostAt time.Time)
+	// OnFeedChannelRestored reports that the session's consumer has
+	// re-declared and re-bound its queue after a loss.
+	OnFeedChannelRestored(session uuid.UUID)
+	// OnFeedSessionGone reports that the session's consumer has exited
+	// for good; it needs no queue and must not hold recoveries back.
+	OnFeedSessionGone(session uuid.UUID)
 	OnMessageProcessingStarted(sessionID uuid.UUID, producerID int, timestamp time.Time)
 	OnMessageProcessingEnded(sessionID uuid.UUID, producerID int, timestamp time.Time)
 	OnAliveReceived(producerID int, timestamp types.MessageTimestamp, isSubscribed bool, messageInterest types.MessageInterest)
@@ -639,22 +657,36 @@ func newSession(
 	exceptionStrategy ExceptionStrategy,
 	amqpPrefetch int,
 ) sdkOddsFeedSession {
+	consumer := feed.NewChannelConsumer(
+		rabbitMQClient,
+		feedMessageFactory,
+		logger,
+		exchangeName,
+		sportIDPrefix,
+		amqpPrefetch,
+	)
+	sessionID := uuid.New()
+	if !isReplay {
+		// A lost channel loses the exclusive queue and everything
+		// published until the rebind; the recovery manager closes that
+		// gap once the queue is back. Replay traffic is historical — a
+		// replay queue loss has no live gap to recover, so replay
+		// sessions stay silent.
+		consumer.SetChannelLostHook(func(mi types.MessageInterest, lostAt time.Time) {
+			recoverMessageProcessor.OnFeedChannelLost(sessionID, mi, lostAt)
+		})
+		consumer.SetChannelRestoredHook(func() { recoverMessageProcessor.OnFeedChannelRestored(sessionID) })
+		consumer.SetConsumerGoneHook(func() { recoverMessageProcessor.OnFeedSessionGone(sessionID) })
+	}
 	return &oddsFeedSessionImpl{
-		channelConsumer: feed.NewChannelConsumer(
-			rabbitMQClient,
-			feedMessageFactory,
-			logger,
-			exchangeName,
-			sportIDPrefix,
-			amqpPrefetch,
-		),
+		channelConsumer:          consumer,
 		producerManager:          producerManager,
 		cacheManager:             cacheManager,
 		feedMessageFactory:       feedMessageFactory,
 		recoveryMessageProcessor: recoverMessageProcessor,
 		exchangeName:             exchangeName,
 		sportIDPrefix:            sportIDPrefix,
-		sessionID:                uuid.New(),
+		sessionID:                sessionID,
 		isReplay:                 isReplay,
 		logger:                   logger,
 		exceptionStrategy:        exceptionStrategy,

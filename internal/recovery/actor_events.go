@@ -36,6 +36,22 @@ type evAliveNudge struct{}
 
 func (evAliveNudge) isActorEvent() {}
 
+// evChannelLossNudge signals that pendingChannelLoss is set: a consumer
+// channel (and with it its exclusive queue) was lost. Like alive, the
+// fact itself is coalesced into an atomic flag and the nudge is the
+// lossy wake-up — a full inbox can only delay the reaction (the next
+// tick drains the flag too), never lose it.
+type evChannelLossNudge struct{}
+
+func (evChannelLossNudge) isActorEvent() {}
+
+// evChannelRebound nudges the actor after a lost session in its scope
+// re-bound its queue (or went away): a snapshot recovery held back for
+// the rebind may start. Lossy; the tick re-checks as fallback.
+type evChannelRebound struct{}
+
+func (evChannelRebound) isActorEvent() {}
+
 // evSnapshotComplete: a snapshot-complete arrived. The actor decides
 // whether it terminates a snapshot recovery, an event recovery, or is
 // stale/unknown.

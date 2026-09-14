@@ -220,6 +220,31 @@ need no market/outcome display names at all, or are prepared to compose
 them yourself. The SDK logs one Info line at `Client.New` when the option
 is off, so an unexpected `None` later has a findable cause.
 
+### Delivery guarantees
+
+The SDK consumes with manual acknowledgement and acks a delivery when its
+decoded message has been placed into the subscription's `Messages()`
+buffer (`WithSubscriptionBuffer`, default 256). Broker prefetch
+(`WithAMQPPrefetch`, default 1000) therefore bounds what a slow consumer
+can hold unacked in process — not queue depth: a consumer that stops
+reading leaves its exclusive queue accumulating on the broker for as long
+as the subscription stays open, so close a subscription you cannot drain
+rather than stalling it. The boundary also means that if the process
+dies, whatever sits **unread in that buffer is gone**: it was acked and
+the queue is exclusive and auto-delete, so nothing is redelivered. Size
+the buffer for how much you can afford to lose on a crash, and read
+`Messages()` promptly.
+
+Gaps are closed by recovery, not by the broker. When a consumer channel
+is lost — with the whole AMQP connection or alone — its queue dies with
+it and every message published until the SDK re-binds is lost from the
+broker. At that moment the SDK flags every known producer that
+subscription served down (`ConnectionDownProducerStatusReason`) and, once
+the subscription has re-bound its queue, the next alive starts a snapshot
+recovery reaching back at least to the loss (one alive interval further
+back than strictly needed, on purpose). Watch
+`RecoveryEvents()` / `ProducerStatus()` for the down → up cycle.
+
 ### Recovery
 
 ```go

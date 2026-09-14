@@ -23,12 +23,12 @@ import (
 // without a live broker.
 type fakeChannelOpener struct {
 	deliveries <-chan amqp.Delivery
-	ch         *amqp.Channel
+	ch         amqpChannel
 	err        error
 	calls      atomic.Int32
 }
 
-func (f *fakeChannelOpener) CreateChannel(context.Context, []string, string, int) (<-chan amqp.Delivery, *amqp.Channel, error) {
+func (f *fakeChannelOpener) CreateChannel(context.Context, []string, string, int) (<-chan amqp.Delivery, amqpChannel, error) {
 	f.calls.Add(1)
 	return f.deliveries, f.ch, f.err
 }
@@ -383,7 +383,9 @@ func TestCloseGraceful_ReportsUnsettledOnDeadline(t *testing.T) {
 // fakeAMQPChannel is an amqpChannel test double that records Close.
 type fakeAMQPChannel struct{ closed atomic.Int32 }
 
-func (f *fakeAMQPChannel) Close() error { f.closed.Add(1); return nil }
+func (f *fakeAMQPChannel) Close() error                                    { f.closed.Add(1); return nil }
+func (f *fakeAMQPChannel) NotifyClose(c chan *amqp.Error) chan *amqp.Error { return c }
+func (f *fakeAMQPChannel) NotifyCancel(c chan string) chan string          { return c }
 
 // TestCloseGracefulChannel_ClosesDespiteAbandonedDelivery is the
 // regression for the graceful-drain leak (3/3-reviewer Require Change):

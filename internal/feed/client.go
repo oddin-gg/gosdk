@@ -330,7 +330,7 @@ const closeHandshakeBudget = 3 * time.Second
 //
 // Phase 4 change: noAck=false (was: noAck=true) so broker prefetch becomes
 // meaningful for backpressure. Callers MUST Ack each delivery.
-func (c *Client) CreateChannel(ctx context.Context, routingKeys []string, exchangeName string, prefetch int) (<-chan amqp.Delivery, *amqp.Channel, error) {
+func (c *Client) CreateChannel(ctx context.Context, routingKeys []string, exchangeName string, prefetch int) (<-chan amqp.Delivery, amqpChannel, error) {
 	conn, err := c.connection(ctx)
 	if err != nil {
 		return nil, nil, err
