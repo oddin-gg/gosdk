@@ -1111,8 +1111,8 @@ func (c *Client) do(ctx context.Context, method, path string, locale *types.Loca
 		case r.StatusCode >= 200 && r.StatusCode < 300:
 			// Any 2xx is success — pinning this to exactly 200 would
 			// route 201/202/204 into the server-error branch below and
-			// retry them. (Betradar-style feeds answer some recovery
-			// initiations with 202 Accepted.)
+			// retry them. (Some feeds answer a recovery initiation
+			// with 202 Accepted.)
 			//
 			// Defer emission: install a TeeReader-backed capture, return the
 			// pendingCapture, and have the caller (fetchData / doNoBody)

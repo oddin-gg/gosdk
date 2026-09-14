@@ -231,7 +231,7 @@ func TestMatchCache_ReferenceIDsDecode(t *testing.T) {
   <sport_event id="` + matchURN + `" name="X" scheduled="2026-01-01T12:00:00Z">
     <tournament id="od:tournament:7"><sport id="od:sport:1"/></tournament>
     <reference_ids>
-      <reference_id name="betradar" value="abc123"/>
+      <reference_id name="provider" value="abc123"/>
       <reference_id name="external" value="xyz789"/>
     </reference_ids>
   </sport_event>
@@ -250,8 +250,8 @@ func TestMatchCache_ReferenceIDsDecode(t *testing.T) {
 	}
 
 	_, _, _, _, _, _, _, _, _, refIDs := entry.snapshot()
-	if got, want := refIDs["betradar"], "abc123"; got != want {
-		t.Errorf("refIDs[betradar] = %q, want %q", got, want)
+	if got, want := refIDs["provider"], "abc123"; got != want {
+		t.Errorf("refIDs[provider] = %q, want %q", got, want)
 	}
 	if got, want := refIDs["external"], "xyz789"; got != want {
 		t.Errorf("refIDs[external] = %q, want %q", got, want)
