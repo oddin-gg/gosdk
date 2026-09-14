@@ -72,7 +72,7 @@ var restRoots = map[string]reflect.Type{
 // Two reasons recur:
 //
 //   - "legacy wire field": ref_id / event_ref_id / sport_event_ref_id /
-//     extended_specifiers. Betradar-heritage attributes the Go models
+//     extended_specifiers. Legacy attributes the Go models
 //     still decode but no Oddin producer sends (oddsfeedschema declares
 //     what the producers actually emit). Candidates for removal from
 //     the models; harmless until then.
@@ -108,10 +108,10 @@ var restLedger = []ledgerEntry{
 	{"**/sport_event@start_time_tbd", "producer sends it; the SDK has no API surface for it yet"},
 	{"**/fixture@type", "producer sends it; the SDK has no API surface for it yet"},
 	{"**/fixture@start_time_tbd", "producer sends it; the SDK has no API surface for it yet"},
-	{"/match_summary/sport_event_status@status_code", "declared Betradar heritage, never emitted (schema comment); the SDK ignores it"},
-	{"/match_summary/sport_event_status@aggregate_home_score", "declared Betradar heritage, never emitted; the SDK ignores it"},
-	{"/match_summary/sport_event_status@aggregate_away_score", "declared Betradar heritage, never emitted; the SDK ignores it"},
-	{"/match_summary/sport_event_status@aggregate_winner_id", "declared Betradar heritage, never emitted; the SDK ignores it"},
+	{"/match_summary/sport_event_status@status_code", "declared legacy, never emitted (schema comment); the SDK ignores it"},
+	{"/match_summary/sport_event_status@aggregate_home_score", "declared legacy, never emitted; the SDK ignores it"},
+	{"/match_summary/sport_event_status@aggregate_away_score", "declared legacy, never emitted; the SDK ignores it"},
+	{"/match_summary/sport_event_status@aggregate_winner_id", "declared legacy, never emitted; the SDK ignores it"},
 	{"/player_profile@generated_at", "the SDK does not read the generation time of a player profile"},
 	// Decoded by the SDK, not declared by the schema.
 	{"**@ref_id", "legacy wire field"},
