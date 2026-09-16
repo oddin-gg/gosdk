@@ -874,6 +874,11 @@ func (m *MarketDescriptionCache) upsert(description data.MarketDescription, loca
 		m.mu.Unlock()
 		return nil
 	}
+	if description.Outcomes == nil && dynamicOutcomeType(description.OutcomeType) {
+		// A dynamic-outcome market (outcome_type set) lists no static
+		// outcomes; treat a missing block like an empty one.
+		description.Outcomes = &data.OutcomesWrapper{}
+	}
 	if description.Outcomes == nil {
 		// Malformed row (no <outcomes> block): record the cause per
 		// (key, locale), contribute nothing, and RETRACT this locale's
@@ -1198,7 +1203,7 @@ func (d *LocalizedMarketDescription) removeLocale(locale types.Locale) (empty bo
 		lo.mu.Unlock()
 		return !gone
 	})
-	return len(d.name) == 0 || len(d.outcomes) == 0
+	return len(d.name) == 0 || (len(d.outcomes) == 0 && !d.dynamicOutcomesLocked())
 }
 
 // coversLocaleLocked reports full coverage of one locale: market name +
@@ -1216,8 +1221,14 @@ func (d *LocalizedMarketDescription) removeLocale(locale types.Locale) (empty bo
 // then empties a single-locale entry's outcome map while its name
 // survives. Such a market is unusable for odds resolution either way;
 // reads classify it as ErrMarketLocaleIncomplete.
+//
+// The exception is a dynamic-outcome market (outcome_type set, e.g.
+// Anytime Goalscorer): its outcomes are player or competitor URNs that
+// arrive with the odds, never in the catalog, and OutcomeName resolves
+// them through the player/competitor caches. Zero static outcomes is its
+// normal shape.
 func (d *LocalizedMarketDescription) coversLocaleLocked(locale types.Locale) bool {
-	if len(d.outcomes) == 0 {
+	if len(d.outcomes) == 0 && !d.dynamicOutcomesLocked() {
 		return false
 	}
 	if _, ok := d.name[locale]; !ok {
@@ -1232,6 +1243,18 @@ func (d *LocalizedMarketDescription) coversLocaleLocked(locale types.Locale) boo
 		}
 	}
 	return true
+}
+
+// dynamicOutcomesLocked reports a market whose outcomes are resolved from
+// the message (outcome_type set), so it is complete without static outcomes.
+// Caller must hold d.mu.
+func (d *LocalizedMarketDescription) dynamicOutcomesLocked() bool {
+	return dynamicOutcomeType(d.OutcomeType)
+}
+
+// dynamicOutcomeType reports whether a catalog row declares an outcome_type.
+func dynamicOutcomeType(outcomeType *string) bool {
+	return outcomeType != nil && *outcomeType != ""
 }
 
 // merge folds one freshly fetched catalog row into the entry.
