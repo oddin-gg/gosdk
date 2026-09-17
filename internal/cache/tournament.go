@@ -60,6 +60,7 @@ type LocalizedTournament struct {
 	scheduledEndTime *time.Time
 	riskTier         int
 	category         *apiXML.Category
+	categoryName     map[types.Locale]string
 	competitorIDs    map[types.URN]struct{}
 	// competitorsLoaded distinguishes "extended payload merged" from
 	// "legitimately empty competitor list". Pre-v2.23, BuildTournament
@@ -139,6 +140,7 @@ func (l *LocalizedTournament) cloneForUpdate() *LocalizedTournament {
 		scheduledEndTime:  l.scheduledEndTime,
 		riskTier:          l.riskTier,
 		category:          l.category,
+		categoryName:      make(map[types.Locale]string, len(l.categoryName)+1),
 		competitorIDs:     make(map[types.URN]struct{}, len(l.competitorIDs)),
 		competitorsLoaded: l.competitorsLoaded,
 		name:              make(map[types.Locale]string, len(l.name)+1),
@@ -153,6 +155,9 @@ func (l *LocalizedTournament) cloneForUpdate() *LocalizedTournament {
 	}
 	for k, v := range l.abbreviation {
 		c.abbreviation[k] = v
+	}
+	for k, v := range l.categoryName {
+		c.categoryName[k] = v
 	}
 	return c
 }
@@ -212,6 +217,12 @@ func (l *LocalizedTournament) merge(locale types.Locale, t TournamentWrapper) er
 	l.scheduledEndTime = t.GetScheduledEndTime()
 	l.riskTier = t.GetRiskTier()
 	l.category = t.GetCategory()
+	if c := t.GetCategory(); c != nil {
+		if l.categoryName == nil {
+			l.categoryName = make(map[types.Locale]string)
+		}
+		l.categoryName[locale] = c.Name
+	}
 	l.name[locale] = t.GetName()
 	l.abbreviation[locale] = t.GetAbbreviation()
 	if refIDs != nil {
@@ -419,6 +430,7 @@ func newTournamentCache(lifeCtx context.Context, client *api.Client, logger *log
 					id:            id,
 					name:          make(map[types.Locale]string),
 					abbreviation:  make(map[types.Locale]string),
+					categoryName:  make(map[types.Locale]string),
 					competitorIDs: make(map[types.URN]struct{}),
 				}
 			}
@@ -451,6 +463,7 @@ func (l *LocalizedTournament) tournamentSnapshot(
 	ctx context.Context,
 	icon *string,
 	sportSummary types.SportSummary,
+	locales []types.Locale,
 ) types.Tournament {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
@@ -477,9 +490,16 @@ func (l *LocalizedTournament) tournamentSnapshot(
 	}
 	var category *types.Category
 	if l.category != nil {
+		categoryName := l.category.Name
+		for _, locale := range locales {
+			if v, ok := l.categoryName[locale]; ok && v != "" {
+				categoryName = v
+				break
+			}
+		}
 		category = &types.Category{
 			ID:   l.category.ID,
-			Name: l.category.Name,
+			Name: categoryName,
 			// types.FromPtr copies the pointee — pre-v2.32 the
 			// snapshot aliased the cache's *string CountryCode.
 			CountryCode: types.FromPtr(l.category.CountryCode),
@@ -577,6 +597,6 @@ func BuildTournament(
 		return nil, fmt.Errorf("build tournament %s: resolve sport %s: %w", id.ToString(), resolvedSport.ToString(), err)
 	}
 	sportSummary := sport.SportSummary
-	tournament := item.tournamentSnapshot(ctx, icon, sportSummary)
+	tournament := item.tournamentSnapshot(ctx, icon, sportSummary, locales)
 	return &tournament, nil
 }
