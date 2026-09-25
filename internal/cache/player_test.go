@@ -372,3 +372,45 @@ func TestPlayersCache_ClearStorm_NeverLeaksStaleFlightOrDiverges(t *testing.T) {
 		t.Fatal(err) // any escape of errStaleFlight (or divergence) lands here
 	}
 }
+
+// TestPlayersCache_UnderageDecoded pins the wire encoding of underage
+// (-1 / 0 / 1) onto types.UnderageStatus, and that an absent attribute
+// reads as unknown rather than zero (which would mean "not underage").
+func TestPlayersCache_UnderageDecoded(t *testing.T) {
+	bodies := map[string]string{
+		"od:player:1": `<player_profile><player id="od:player:1" name="P1" sport="od:sport:1" underage="1"/></player_profile>`,
+		"od:player:2": `<player_profile><player id="od:player:2" name="P2" sport="od:sport:1" underage="0"/></player_profile>`,
+		"od:player:3": `<player_profile><player id="od:player:3" name="P3" sport="od:sport:1" underage="-1"/></player_profile>`,
+		"od:player:4": `<player_profile><player id="od:player:4" name="P4" sport="od:sport:1"/></player_profile>`,
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		for i, p := range parts {
+			if p == "players" && i+1 < len(parts) {
+				w.Header().Set("Content-Type", "application/xml")
+				_, _ = io.WriteString(w, bodies[parts[i+1]])
+				return
+			}
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	pc := newPlayersCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+
+	want := map[string]types.UnderageStatus{
+		"od:player:1": types.UnderageYes,
+		"od:player:2": types.UnderageNo,
+		"od:player:3": types.UnderageUnknown,
+		"od:player:4": types.UnderageUnknown,
+	}
+	for id, status := range want {
+		p, err := pc.GetPlayer(t.Context(), PlayerCacheKey{PlayerID: id, Locale: types.EnLocale})
+		if err != nil {
+			t.Fatalf("GetPlayer(%s): %v", id, err)
+		}
+		if p.Underage != status {
+			t.Errorf("%s: Underage = %d, want %d", id, p.Underage, status)
+		}
+	}
+}

@@ -1,9 +1,7 @@
 package types
 
-// UnderageStatus indicates whether a competitor is flagged as
-// involving underage participants. Surfaced as Competitor.Underage
-// (Player carries no underage field — the upstream player profile does
-// not report one).
+// UnderageStatus indicates whether a competitor or player is flagged
+// as underage. Surfaced as Competitor.Underage and Player.Underage.
 type UnderageStatus int
 
 // UnderageStatus values.

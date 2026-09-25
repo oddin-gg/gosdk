@@ -252,6 +252,7 @@ func (c *PlayersCache) loadPlayer(ctx context.Context, key PlayerCacheKey) (type
 				Name:     data.Player.Name,
 				FullName: data.Player.FullName,
 				SportID:  data.Player.SportID,
+				Underage: parseUnderage(data.Player.Underage),
 				Locale:   key.Locale,
 			}
 			// Caller still receives p; a suppressed store just means
