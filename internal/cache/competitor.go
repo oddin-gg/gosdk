@@ -192,15 +192,7 @@ func (l *LocalizedCompetitor) playersAreLoaded() bool {
 func (l *LocalizedCompetitor) merge(locale types.Locale, team TeamWrapper) error {
 	var underage *types.UnderageStatus
 	if u := team.GetUnderage(); u != "" {
-		var parsed types.UnderageStatus
-		switch u {
-		case "0":
-			parsed = types.UnderageNo
-		case "1":
-			parsed = types.UnderageYes
-		default:
-			parsed = types.UnderageUnknown
-		}
+		parsed := parseUnderage(u)
 		underage = &parsed
 	}
 
@@ -469,4 +461,17 @@ func BuildTeamCompetitor(
 		Competitor: *c,
 		Qualifier:  types.FromPtr(qualifier),
 	}, nil
+}
+
+// parseUnderage maps the wire encoding (-1 / 0 / 1) to UnderageStatus;
+// anything else, including an absent attribute, reads as unknown.
+func parseUnderage(u string) types.UnderageStatus {
+	switch u {
+	case "0":
+		return types.UnderageNo
+	case "1":
+		return types.UnderageYes
+	default:
+		return types.UnderageUnknown
+	}
 }

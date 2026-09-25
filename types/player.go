@@ -15,5 +15,6 @@ type Player struct {
 	Name     string
 	FullName string
 	SportID  string
+	Underage UnderageStatus
 	Locale   Locale
 }
