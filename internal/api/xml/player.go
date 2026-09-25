@@ -6,4 +6,5 @@ type Player struct {
 	Name     string `xml:"name,attr"`
 	FullName string `xml:"full_name,attr,omitempty"`
 	SportID  string `xml:"sport,attr"`
+	Underage string `xml:"underage,attr,omitempty"`
 }
