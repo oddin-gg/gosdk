@@ -1,4 +1,3 @@
-GOLANGCI_LINT_VERSION := v2.12.1
 GOFLAGS               ?=
 PKG                   ?= ./...
 
@@ -11,13 +10,13 @@ help:
 	@echo "  test-smoke         - tests with -tags=smoke"
 	@echo "  fmt                - gofmt + goimports across the tree"
 	@echo "  tidy               - go mod tidy"
+	@echo "  update-local-dep   - update the pinned golangci-lint tool"
 	@echo "  vet                - go vet ./..."
 	@echo "  staticcheck        - run staticcheck via go tool"
 	@echo "  govulncheck        - run govulncheck via go tool"
 	@echo "  codecheck          - fmt + vet + staticcheck"
-	@echo "  lint               - run golangci-lint inside docker (uses .golangci.yml)"
-	@echo "  lint-local         - run a locally-installed golangci-lint binary"
-	@echo "  lint-fix           - golangci-lint with --fix (apply autofixes)"
+	@echo "  lint               - run golangci-lint via go tool (uses .golangci.yml)"
+	@echo "  lint-fix           - golangci-lint via go tool with --fix (apply autofixes)"
 	@echo "  coverage           - test + open coverage HTML report"
 	@echo "  clean              - remove build artefacts (coverage.txt, etc.)"
 	@echo "  golangci-lint-version - print the pinned golangci-lint version"
@@ -75,38 +74,29 @@ govulncheck:
 .PHONY: codecheck
 codecheck: fmt vet staticcheck
 
-# --- linter (docker — pinned version, reproducible across machines) ---
+# --- linter (Go tool — pinned version, reproducible across machines) ---
+
+# Lint under the Go release go.mod declares, as CI does: golangci-lint cannot analyse a Go release newer than the one it was built for.
+GOLANGCI_LINT := GOTOOLCHAIN=$(shell awk '/^toolchain /{t=$$2} /^go /{g=$$2} END{if(t!="")print t; else print "go" g (split(g,p,".")==2?".0":"")}' go.mod) go tool golangci-lint
 
 .PHONY: golangci-lint-version
 golangci-lint-version:
-	@echo $(GOLANGCI_LINT_VERSION)
+	@grep -m1 -oE 'github.com/golangci/golangci-lint/v2 v[0-9]+\.[0-9]+\.[0-9]+' go.mod | cut -d' ' -f2
 
 .PHONY: lint
 lint:
-	docker run --rm -v $(shell pwd):/app:cached \
-		-v $(shell go env GOCACHE):/cache/go \
-		-v $(shell go env GOPATH)/pkg:/go/pkg \
-		-e GOCACHE=/cache/go \
-		-e GOLANGCI_LINT_CACHE=/cache/go \
-		-e GOPRIVATE=oddin.gg,github.com/oddin-gg \
-		-w /app golangci/golangci-lint:$(GOLANGCI_LINT_VERSION) \
-		golangci-lint run --config .golangci.yml -v
-
-# Convenience target for fast local iteration. Uses whatever golangci-lint
-# is on PATH (intentionally NOT version-pinned — for CI parity, use `make lint`).
-.PHONY: lint-local
-lint-local:
-	@command -v golangci-lint >/dev/null 2>&1 || { \
-		echo "golangci-lint not installed. Run: brew install golangci-lint"; exit 1; }
-	golangci-lint run --config .golangci.yml
+	$(GOLANGCI_LINT) run --config .golangci.yml -v
 
 .PHONY: lint-fix
 lint-fix:
-	@command -v golangci-lint >/dev/null 2>&1 || { \
-		echo "golangci-lint not installed. Run: brew install golangci-lint"; exit 1; }
-	golangci-lint run --config .golangci.yml --fix
+	$(GOLANGCI_LINT) run --config .golangci.yml --fix
 
 # --- maintenance ---
+
+.PHONY: update-local-dep
+update-local-dep:
+	@echo "Updating golangci-lint@v2.12.1" && go get -tool github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.1
+	@go mod tidy
 
 .PHONY: clean
 clean:
