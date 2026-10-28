@@ -91,8 +91,8 @@ func TestClient_Close_DoesNotHangOnWedgedConnect(t *testing.T) {
 		t.Fatal("Close(context.Background()) hung on a wedged connect — pre-shutdown deadlock")
 	}
 
-	release() // let the wedged connect unwind
-	<-connectDone
+	release()     // let the wedged connect unwind
+	<-connectDone //nolint:errcheck // join only; the connect outcome is not asserted here
 }
 
 // rewriteTransport reroutes outbound requests to a test server's host
