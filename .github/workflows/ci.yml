@@ -27,12 +27,12 @@ jobs:
     name: Build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # No job pushes with git credentials; don't persist the token
           # into .git/config where checked-out repo code could read it.
           persist-credentials: false
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
           cache-dependency-path: 'go.sum'
@@ -47,20 +47,20 @@ jobs:
     needs: [ build ]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # No job pushes with git credentials; don't persist the token
           # into .git/config where checked-out repo code could read it.
           persist-credentials: false
       - name: Prepare go environment
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
           cache-dependency-path: 'go.sum'
       - name: Run tests
         run: make test
       - name: Archive code coverage results
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: code-coverage
           path: coverage.txt
@@ -78,7 +78,7 @@ jobs:
       # Third-party action pinned to a full commit SHA (immutable) rather
       # than a mutable tag, so a compromised/retagged release can't inject
       # code into CI. Bump both the SHA and the version comment together.
-      - uses: fgrosse/go-coverage-report@cbeb2ab2e32591d690337146ba02a911cc566f3f # v1.3.0
+      - uses: fgrosse/go-coverage-report@c4bf7e78d1379325814b4dd42d80e526082e788b # v1.5.0
         continue-on-error: true
         with:
           coverage-artifact-name: "code-coverage" # can be omitted if you used this default value
@@ -93,12 +93,12 @@ jobs:
       pull-requests: read # only-new-issues resolution
       checks: write       # inline check annotations on the PR
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # No job pushes with git credentials; don't persist the token
           # into .git/config where checked-out repo code could read it.
           persist-credentials: false
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
           cache: false
@@ -109,7 +109,7 @@ jobs:
       - name: golangci-lint
         # v6 of this action does NOT support golangci-lint v2.x
         # ("invalid version string 'v2.12.1'"); v7+ is required for v2.
-        # v8 explicitly requires golangci-lint >= v2.1.0 (we use v2.12.1).
+        # v8 explicitly requires golangci-lint >= v2.1.0 (we use v2.15.0).
         # v9 bumps the action runtime to node24. The pinned binary version
         # is in the Makefile (GOLANGCI_LINT_VERSION).
         #
@@ -129,13 +129,13 @@ jobs:
     # check, not just annotate it (release below depends on this job).
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # No job pushes with git credentials; don't persist the token
           # into .git/config where checked-out repo code could read it.
           persist-credentials: false
       - name: Prepare go environment
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
           cache: false
@@ -148,12 +148,12 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # No job pushes with git credentials; don't persist the token
           # into .git/config where checked-out repo code could read it.
           persist-credentials: false
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
           cache-dependency-path: 'go.sum'
@@ -187,13 +187,13 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # No job pushes with git credentials; don't persist the token
           # into .git/config where checked-out repo code could read it.
           persist-credentials: false
       - name: Create GitHub Release
         # Third-party action pinned to a full commit SHA (see coverage job).
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           generate_release_notes: true
