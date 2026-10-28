@@ -1,7 +1,9 @@
 package cache
 
 import (
+	"encoding/xml"
 	"testing"
+	"time"
 
 	apiXML "github.com/oddin-gg/gosdk/internal/api/xml"
 	"github.com/oddin-gg/gosdk/types"
@@ -102,5 +104,53 @@ func TestMerge_NonExtendedPayloadDoesNotFlagLoaded(t *testing.T) {
 
 	if l.competitorsAreLoaded() {
 		t.Error("competitorsAreLoaded() = true after non-extended merge — flag must not lie about /competitors knowledge")
+	}
+}
+
+// TestTournamentSnapshot_AbsentLengthDatesStayNil: tournament_length may
+// carry only one of its two dates (or none). The decoded zero value used
+// to surface as a non-nil year-one date, so the public Tournament reported
+// an absent date as a present one. An absent date must reach the snapshot
+// as nil; a present one is kept.
+func TestTournamentSnapshot_AbsentLengthDatesStayNil(t *testing.T) {
+	cases := []struct {
+		name               string
+		length             string
+		wantStart, wantEnd string // "" = nil
+	}{
+		{"no tournament_length", ``, "", ""},
+		{"empty tournament_length", `<tournament_length/>`, "", ""},
+		{"start only", `<tournament_length start_date="2026-03-01"/>`, "2026-03-01", ""},
+		{"end only", `<tournament_length end_date="2026-04-02"/>`, "", "2026-04-02"},
+		{"both", `<tournament_length start_date="2026-03-01" end_date="2026-04-02"/>`, "2026-03-01", "2026-04-02"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := `<tournament id="od:tournament:1" name="Cup" abbreviation="C" risk_tier="1">` +
+				tc.length + `<sport id="od:sport:1" name="Soccer"/></tournament>`
+			var tour apiXML.Tournament
+			if err := xml.Unmarshal([]byte(payload), &tour); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			l := newTestLocalizedTournament()
+			if err := l.merge(types.EnLocale, tour); err != nil {
+				t.Fatalf("merge: %v", err)
+			}
+			got := l.tournamentSnapshot(t.Context(), nil, types.SportSummary{})
+			for _, d := range []struct {
+				label string
+				got   *time.Time
+				want  string
+			}{{"StartDate", got.StartDate, tc.wantStart}, {"EndDate", got.EndDate, tc.wantEnd}} {
+				switch {
+				case d.want == "" && d.got != nil:
+					t.Errorf("%s = %v, want nil for an absent date", d.label, *d.got)
+				case d.want != "" && d.got == nil:
+					t.Errorf("%s = nil, want %s", d.label, d.want)
+				case d.want != "" && d.got.Format("2006-01-02") != d.want:
+					t.Errorf("%s = %v, want %s", d.label, *d.got, d.want)
+				}
+			}
+		})
 	}
 }
