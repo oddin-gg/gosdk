@@ -488,7 +488,7 @@ func TestMatchStatusCache_PostClearCallerDoesNotJoinOldFlight(t *testing.T) {
 		t.Fatalf("server hits = %d, want 2 (post-clear caller joined the pre-clear flight)", got)
 	}
 	close(gate)
-	<-pre // pre-clear caller outcome is not contractual here; just join it
+	<-pre //nolint:errcheck // pre-clear caller outcome is not contractual here; just join it
 }
 
 // TestMarketDescriptionCache_PostClearCallerDoesNotJoinOldFlight pins
@@ -528,7 +528,7 @@ func TestMarketDescriptionCache_PostClearCallerDoesNotJoinOldFlight(t *testing.T
 		t.Fatalf("server hits = %d, want 2 (post-clear caller joined the pre-clear flight)", got)
 	}
 	close(gate)
-	<-pre
+	<-pre //nolint:errcheck // join only; the pre-clear outcome is not contractual here
 }
 
 // TestSportCache_ClearDuringLoad_NotResurrected pins the fifth-pass P1
@@ -619,7 +619,7 @@ func TestSportCache_PostClearCallerDoesNotJoinOldFlight(t *testing.T) {
 		t.Fatalf("server hits = %d, want 2 (post-clear caller joined the pre-clear flight)", got)
 	}
 	close(gate)
-	<-pre
+	<-pre //nolint:errcheck // join only; the pre-clear outcome is not contractual here
 }
 
 // TestSportCache_TournamentFetchDoesNotResurrectClearedSport pins the

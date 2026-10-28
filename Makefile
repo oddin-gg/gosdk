@@ -95,7 +95,7 @@ lint-fix:
 
 .PHONY: update-local-dep
 update-local-dep:
-	@echo "Updating golangci-lint@v2.12.1" && go get -tool github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.1
+	@echo "Updating golangci-lint@v2.15.0" && go get -tool github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
 	@go mod tidy
 
 .PHONY: clean

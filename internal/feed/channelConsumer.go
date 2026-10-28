@@ -323,7 +323,7 @@ func (c *ChannelConsumer) watchChannel(ctx context.Context, ch amqpChannel) *cha
 			return
 		case <-c.drainCh:
 			return
-		case <-closed:
+		case <-closed: //nolint:errcheck // wake-up signal only; the close reason is not needed, the loop re-checks state below
 		case <-cancelled:
 		}
 		if ctx.Err() != nil || c.draining() {
