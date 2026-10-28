@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -823,6 +824,195 @@ func TestActor_MakeSnapshotRecovery_DetachedAPI_DoesNotBlockActor(t *testing.T) 
 	case <-apiHit:
 	case <-time.After(2 * time.Second):
 		t.Fatal("recovery initiate endpoint never hit by detached goroutine")
+	}
+}
+
+// TestActor_MakeSnapshotRecovery_ReplacementCancelsTheInFlightPost: a
+// snapshot recovery started while an earlier one's POST is still in
+// flight supersedes it, and the earlier request must be cancelled — not
+// left retrying beside the replacement (a flapping channel would stack one
+// detached retry loop per loss). The first POST is held open by the
+// server; starting the replacement must make the first one observe its
+// request context cancelled, while the replacement's POST goes out and
+// becomes the current recovery.
+func TestActor_MakeSnapshotRecovery_ReplacementCancelsTheInFlightPost(t *testing.T) {
+	var posts atomic.Int32
+	firstStarted := make(chan struct{})
+	firstCancelled := make(chan struct{})
+	replacementPosted := make(chan int, 1)
+	releaseFirst := make(chan struct{})
+	var releaseOnce atomic.Bool
+	release := func() {
+		if releaseOnce.CompareAndSwap(false, true) {
+			close(releaseFirst)
+		}
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/descriptions/producers"):
+			_, _ = io.WriteString(w, producersBody)
+		case strings.Contains(r.URL.Path, "/recovery/initiate_request"):
+			if posts.Add(1) == 1 {
+				close(firstStarted)
+				select {
+				case <-r.Context().Done(): // the client gave up on this request
+					close(firstCancelled)
+				case <-releaseFirst:
+				}
+				return
+			}
+			id, _ := strconv.Atoi(r.URL.Query().Get("request_id"))
+			replacementPosted <- id
+			_, _ = io.WriteString(w, `<?xml version="1.0"?><response response_code="OK"/>`)
+		default:
+			_, _ = io.WriteString(w, `<?xml version="1.0"?><response response_code="OK"/>`)
+		}
+	}))
+	defer srv.Close()
+	defer release() // never leave the handler parked past the test
+
+	a := newWiredActor(t, srv, newFakeManagerOps())
+	if err := a.makeSnapshotRecovery(time.Now()); err != nil {
+		t.Fatalf("first makeSnapshotRecovery: %v", err)
+	}
+	firstID := a.currentRecovery.recoveryID
+	select {
+	case <-firstStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the first recovery POST never reached the server")
+	}
+
+	if err := a.makeSnapshotRecovery(time.Now()); err != nil {
+		t.Fatalf("replacement makeSnapshotRecovery: %v", err)
+	}
+	secondID := a.currentRecovery.recoveryID
+	if secondID == firstID {
+		t.Fatalf("replacement reused request id %d", firstID)
+	}
+
+	// Well inside the client's own 2s timeout, so a cancellation seen here
+	// is the supersede's doing and not the request giving up on its own.
+	select {
+	case <-firstCancelled:
+	case <-time.After(1 * time.Second):
+		t.Fatal("the superseded recovery POST was not cancelled when its replacement started")
+	}
+	select {
+	case id := <-replacementPosted:
+		if id != secondID {
+			t.Fatalf("replacement POST carried request id %d, want %d", id, secondID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the replacement recovery POST never reached the server")
+	}
+	// Both detached goroutines must be done before counting: a retry of the
+	// superseded POST would happen inside its PostRecovery call, i.e. before
+	// the goroutine exits, so after this wait the count is final.
+	waitDetachedDone(t, a, 3*time.Second)
+	if got := posts.Load(); got != 2 {
+		t.Fatalf("recovery POSTs = %d, want 2 (the superseded one must not be retried)", got)
+	}
+	if a.currentRecovery.recoveryID != secondID || a.recoveryState != types.StartedRecoveryState {
+		t.Fatalf("current recovery = %d state=%v, want the replacement %d started", a.currentRecovery.recoveryID, a.recoveryState, secondID)
+	}
+}
+
+// waitDetachedDone waits for the actor's detached PostRecovery goroutines
+// to exit, so a test counts requests only once no retry can still follow.
+func waitDetachedDone(t *testing.T, a *recoveryActor, timeout time.Duration) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		a.detached.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		t.Fatal("detached recovery POST goroutines did not exit")
+	}
+}
+
+// TestActor_MakeSnapshotRecovery_ReplacementStopsTheSupersededRetry: the
+// other way a superseded POST can outlive its replacement is the retry
+// loop. The first POST fails with a retryable 5xx, so the client goes into
+// its backoff (500 ms before the first retry, with jitter); starting the
+// replacement must end that loop, so the first request id is posted once
+// and never again, while the replacement's own request goes out. Without
+// the cancel the loop retries (3 attempts in all) and the count shows it.
+//
+// The replacement starts only once the client has RECEIVED the 503: the
+// API client's event capture reports each attempt synchronously from the
+// request goroutine, right before the attempt returns into the retry
+// loop. That is the latest observable point — the backoff timer itself is
+// internal to the retry library — and it is enough: whether the cancel
+// lands just before or just after the timer is armed, the retry loop
+// honours the context. Starting the replacement earlier (on the server
+// merely seeing the request) would let the cancel interrupt the first
+// attempt instead, and the test would no longer be about the retry.
+func TestActor_MakeSnapshotRecovery_ReplacementStopsTheSupersededRetry(t *testing.T) {
+	var mu sync.Mutex
+	posts := map[int]int{} // request id -> POSTs received
+	var first atomic.Int32 // the first request id seen
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/descriptions/producers"):
+			_, _ = io.WriteString(w, producersBody)
+		case strings.Contains(r.URL.Path, "/recovery/initiate_request"):
+			id, _ := strconv.Atoi(r.URL.Query().Get("request_id"))
+			mu.Lock()
+			posts[id]++
+			mu.Unlock()
+			if first.CompareAndSwap(0, int32(id)) || int32(id) == first.Load() {
+				w.WriteHeader(http.StatusServiceUnavailable) // retryable: the client backs off and retries
+				return
+			}
+			_, _ = io.WriteString(w, `<?xml version="1.0"?><response response_code="OK"/>`)
+		default:
+			_, _ = io.WriteString(w, `<?xml version="1.0"?><response response_code="OK"/>`)
+		}
+	}))
+	defer srv.Close()
+
+	a := newWiredActor(t, srv, newFakeManagerOps())
+	got503 := make(chan struct{})
+	var once sync.Once
+	a.api.SetEventCapture(api.EventCapture{Emit: func(ev api.APIEvent) {
+		if ev.Status == http.StatusServiceUnavailable && strings.Contains(ev.URL, "/recovery/initiate_request") {
+			once.Do(func() { close(got503) })
+		}
+	}})
+
+	if err := a.makeSnapshotRecovery(time.Now()); err != nil {
+		t.Fatalf("first makeSnapshotRecovery: %v", err)
+	}
+	firstID := a.currentRecovery.recoveryID
+	select {
+	case <-got503:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the client never received the first recovery POST's 503")
+	}
+
+	if err := a.makeSnapshotRecovery(time.Now()); err != nil {
+		t.Fatalf("replacement makeSnapshotRecovery: %v", err)
+	}
+	secondID := a.currentRecovery.recoveryID
+
+	// The retry loop is bounded by the client's three attempts (about 1.3 s
+	// of backoff at most before the last), so by the time both goroutines
+	// have exited every retry that was going to happen has happened.
+	waitDetachedDone(t, a, 5*time.Second)
+	mu.Lock()
+	defer mu.Unlock()
+	if posts[firstID] != 1 {
+		t.Fatalf("superseded request %d was POSTed %d times, want exactly 1 (no retry once superseded)", firstID, posts[firstID])
+	}
+	if posts[secondID] != 1 {
+		t.Fatalf("replacement request %d was POSTed %d times, want 1", secondID, posts[secondID])
 	}
 }
 
