@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"net/http"
 	"net/url"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -711,6 +712,80 @@ func TestManager_ChannelRestored_NudgesDeferredActors(t *testing.T) {
 	}
 
 	m.OnFeedChannelRestored(sess)
+	waitRecoverHits(t, hits, 1)
+}
+
+// actorBarrier returns once the actor of producer id has dispatched every
+// event that was in its inbox when the call began. The inbox is FIFO and
+// the actor single-threaded, so a probe event queued behind them proves
+// they ran: evMsgProcessingStarted carries a unique timestamp, and its
+// handler publishes it through the producer manager, where the test reads
+// it back. Without this a test can only sleep and hope the actor already
+// decided what the test is about to assert on.
+func actorBarrier(t *testing.T, m *Manager, pm *producer.Manager, id int) {
+	t.Helper()
+	a := actorOf(t, m, id)
+	probe := time.Now().Add(time.Duration(barrierSeq.Add(1)) * time.Hour) // unique; no other event sets one this late
+	if !a.send(evMsgProcessingStarted{timestamp: probe}) {
+		t.Fatalf("producer %d actor inbox full", id)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		prod, err := pm.GetProducer(t.Context(), id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if prod.LastMessageTimestamp().Equal(probe) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("producer %d actor did not reach the barrier probe", id)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+var barrierSeq atomic.Int64
+
+// TestManager_ChannelRestored_WaitsForEveryLostSession: a connection drop
+// loses several sessions at once, all covering the same producer. The
+// restore of the first must not let the recovery go out while another
+// queue is still absent — the replay would be published into nothing and
+// its snapshot_complete lost with it. Only the last restore releases it.
+// Each step waits for the actor to have processed the event it follows
+// (actorBarrier), so the assertions never run ahead of the actor.
+func TestManager_ChannelRestored_WaitsForEveryLostSession(t *testing.T) {
+	m, pm, hits := openedManagerWithActorsAndHits(t, 1)
+	a := actorOf(t, m, 1)
+	first, second := uuid.New(), uuid.New()
+	m.OnFeedChannelLost(first, types.LiveOnlyMessageInterest, time.Now())
+	m.OnFeedChannelLost(second, types.SystemAliveOnly, time.Now())
+	waitDown(t, pm, 1)
+
+	m.OnAliveReceived(1, aliveAt(time.Now()), true, types.SystemAliveOnly)
+	actorBarrier(t, m, pm, 1) // the alive has been handled — and must have been deferred
+	if !a.deferredRecovery {
+		t.Fatal("the alive must defer the recovery while both lost sessions have no queue")
+	}
+	time.Sleep(100 * time.Millisecond) // only for a wrongly issued POST to land
+	if got := hits.recover.Load(); got != 0 {
+		t.Fatalf("recovery POSTs = %d while both lost sessions had no queue, want 0", got)
+	}
+
+	m.OnFeedChannelRestored(first)
+	actorBarrier(t, m, pm, 1) // the rebound nudge has been handled
+	if !m.rebindPending(1) {
+		t.Fatal("the second lost session must still hold the producer back")
+	}
+	if !a.deferredRecovery {
+		t.Fatal("the recovery must stay deferred after one of two sessions was restored")
+	}
+	time.Sleep(100 * time.Millisecond)
+	if got := hits.recover.Load(); got != 0 {
+		t.Fatalf("recovery POSTs = %d after one of two sessions was restored, want 0", got)
+	}
+
+	m.OnFeedChannelRestored(second)
 	waitRecoverHits(t, hits, 1)
 }
 
