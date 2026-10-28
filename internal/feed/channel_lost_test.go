@@ -1,7 +1,10 @@
 package feed
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -10,6 +13,7 @@ import (
 	amqp "github.com/rabbitmq/amqp091-go"
 
 	"github.com/oddin-gg/gosdk/internal/factory"
+	log "github.com/oddin-gg/gosdk/internal/log"
 	"github.com/oddin-gg/gosdk/types"
 )
 
@@ -344,6 +348,48 @@ func TestChannelConsumer_ChannelLost_SecondLossReportsAgain(t *testing.T) {
 	}
 	if elapsed := time.Since(secondLost); elapsed < channelReopenBackoff-50*time.Millisecond {
 		t.Fatalf("second reopen after %v; want ≥ %v — the dwell clock must reset per channel", elapsed, channelReopenBackoff)
+	}
+}
+
+// TestChannelConsumer_ReportChannelLost_AfterGoneIsSilent: a loss
+// reported once the consumer is gone would re-enter the manager's ledger
+// with nothing left to settle it and defer every later recovery for the
+// producers the session served. The report must reach neither the hook
+// nor the (throttled) log. The same consumer reports normally while it is
+// still alive, so the silence is the guard's doing.
+func TestChannelConsumer_ReportChannelLost_AfterGoneIsSilent(t *testing.T) {
+	var logged bytes.Buffer
+	logger := log.New(slog.New(slog.NewTextHandler(&logged, nil)))
+	c := NewChannelConsumer(newSequencedOpener(1, false), &factory.FeedMessageFactory{}, logger, "ex", "od:sport:", 0)
+	var hookCalls atomic.Int32
+	c.SetChannelLostHook(func(types.MessageInterest, time.Time) { hookCalls.Add(1) })
+
+	c.ReportChannelLost(time.Now())
+	if got := hookCalls.Load(); got != 1 {
+		t.Fatalf("hook calls = %d for a loss on a live consumer, want 1", got)
+	}
+	if !strings.Contains(logged.String(), "consumer channel lost") {
+		t.Fatalf("a loss on a live consumer must be logged, got %q", logged.String())
+	}
+
+	logged.Reset()
+	c.lossMu.Lock()
+	c.lastLossWarnAt, c.suppressedLosses = time.Time{}, 0 // un-throttle: a log line is due again
+	c.lossMu.Unlock()
+	c.gone.Store(true)
+
+	c.ReportChannelLost(time.Now())
+	if got := hookCalls.Load(); got != 1 {
+		t.Fatalf("hook calls = %d after the consumer was gone, want still 1", got)
+	}
+	if logged.Len() != 0 {
+		t.Fatalf("a loss reported after the consumer was gone was logged: %q", logged.String())
+	}
+	c.lossMu.Lock()
+	warnedAt, suppressed := c.lastLossWarnAt, c.suppressedLosses
+	c.lossMu.Unlock()
+	if !warnedAt.IsZero() || suppressed != 0 {
+		t.Fatalf("throttle state touched after gone: lastLossWarnAt=%v suppressed=%d", warnedAt, suppressed)
 	}
 }
 
