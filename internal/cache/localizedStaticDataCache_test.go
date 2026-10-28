@@ -1,8 +1,11 @@
 package cache
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -224,5 +227,74 @@ func TestLocalizedStaticDataCache_FirstRefreshAfterInitialDelay(t *testing.T) {
 		// possibly fire — it came from the immediate post-delay tick.
 	case <-time.After(5 * time.Second):
 		t.Fatal("no refresh within 5s of the initial delay — first refresh is being deferred a full tick period")
+	}
+}
+
+// refreshTestCache builds a cache whose refresh timer is not started, so a
+// test drives timerTick itself.
+func refreshTestCache(fetcher func(ctx context.Context, locale types.Locale) ([]types.StaticData, error)) *LocalizedStaticDataCache {
+	lifeCtx, cancel := context.WithCancel(context.Background())
+	return &LocalizedStaticDataCache{
+		oddsFeedConfiguration: &minimalCfg{},
+		fetcher:               fetcher,
+		locales:               []types.Locale{types.EnLocale},
+		internalCache:         make(map[int]map[types.Locale]string),
+		loadedLocales:         make(map[types.Locale]struct{}),
+		lifeCtx:               lifeCtx,
+		closeFn:               cancel,
+		logger:                log.New(nil),
+	}
+}
+
+// TestLocalizedStaticDataCache_EmptyRefreshKeepsCachedDescriptions: an OK
+// answer with an empty list decodes without error, so the periodic refresh
+// used to treat it as "every id was removed upstream" and delete every
+// description of the locale; with the locale still marked loaded, every
+// lookup then failed until the next tick. An empty answer must not prune.
+// A non-empty one still does, so the removal of a single id keeps working.
+func TestLocalizedStaticDataCache_EmptyRefreshKeepsCachedDescriptions(t *testing.T) {
+	var answer atomic.Pointer[[]types.StaticData]
+	set := func(rows ...types.StaticData) { answer.Store(&rows) }
+	set(
+		types.StaticData{ID: 1, Description: types.Some("one")},
+		types.StaticData{ID: 2, Description: types.Some("two")},
+	)
+	c := refreshTestCache(func(context.Context, types.Locale) ([]types.StaticData, error) {
+		return *answer.Load(), nil
+	})
+	defer c.Close()
+	var logged bytes.Buffer
+	c.logger = log.New(slog.New(slog.NewTextHandler(&logged, nil)))
+
+	locales := []types.Locale{types.EnLocale}
+	if _, err := c.LocalizedItem(t.Context(), 1, locales); err != nil {
+		t.Fatalf("initial load: %v", err)
+	}
+
+	set() // the API answers OK with no rows
+	c.timerTick(t.Context())
+	for id, want := range map[int]string{1: "one", 2: "two"} {
+		item, err := c.LocalizedItem(t.Context(), id, locales)
+		if err != nil {
+			t.Fatalf("id %d after an empty refresh: %v", id, err)
+		}
+		if got, _ := item.LocalizedDescription(types.EnLocale).Get(); got != want {
+			t.Fatalf("id %d description = %q after an empty refresh, want %q", id, got, want)
+		}
+	}
+
+	if !strings.Contains(logged.String(), "empty static data response") {
+		t.Fatalf("the skipped refresh must be logged, got %q", logged.String())
+	}
+
+	set(types.StaticData{ID: 1, Description: types.Some("one v2")}) // id 2 removed upstream
+	c.timerTick(t.Context())
+	if item, err := c.LocalizedItem(t.Context(), 1, locales); err != nil {
+		t.Fatalf("id 1 after a non-empty refresh: %v", err)
+	} else if got, _ := item.LocalizedDescription(types.EnLocale).Get(); got != "one v2" {
+		t.Fatalf("id 1 description = %q, want the refreshed %q", got, "one v2")
+	}
+	if _, err := c.LocalizedItem(t.Context(), 2, locales); err == nil {
+		t.Fatal("id 2 was removed upstream by a non-empty refresh and must be pruned")
 	}
 }

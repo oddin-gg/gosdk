@@ -55,6 +55,26 @@ func RoutePreview(route string) string {
 	return strconv.Quote(route) + truncated
 }
 
+// identifierPreviewBytes bounds the escaped prefix of a publisher-supplied
+// identifier included in an error message. A genuine URN is a few dozen
+// bytes; the payload itself may be up to the feed message size limit.
+const identifierPreviewBytes = 64
+
+// IdentifierPreview renders an untrusted identifier taken from a feed
+// payload (an event id) for an error message that is logged per delivery:
+// an escaped prefix of at most identifierPreviewBytes bytes plus the full
+// length, so the message stays small however large the payload value is,
+// and CR/LF or terminal escapes cannot forge log lines (strconv.Quote).
+func IdentifierPreview(id string) string {
+	prefix := id
+	truncated := ""
+	if len(prefix) > identifierPreviewBytes {
+		prefix = prefix[:identifierPreviewBytes]
+		truncated = "…"
+	}
+	return fmt.Sprintf("%s%s (len=%d)", strconv.Quote(prefix), truncated, len(id))
+}
+
 // EnsureXMLEOF consumes dec's remaining token stream, permitting only
 // trailing whitespace, comments, processing instructions, and
 // directives. Both XML decode paths (feed messages, API responses)

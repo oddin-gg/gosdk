@@ -1108,7 +1108,7 @@ func validateRouteIdentity(rk *types.RoutingKeyInfo, msg types.BasicMessage) err
 			// Message rejects unparseable event ids on their own merits too).
 			gotURN, perr := types.ParseURN(got)
 			if perr != nil || gotURN.ToString() != rk.EventID.ToString() {
-				return fmt.Errorf("payload event id %q does not match route event id %q", got, rk.EventID.ToString())
+				return fmt.Errorf("payload event id %s does not match route event id %q", utils.IdentifierPreview(got), rk.EventID.ToString())
 			}
 		}
 	}
@@ -1208,7 +1208,7 @@ func validateDecodedMessage(rk *types.RoutingKeyInfo, msg types.BasicMessage) er
 				return fmt.Errorf("%T: missing required event_id", msg)
 			}
 			if _, err := types.ParseURN(got); err != nil {
-				return fmt.Errorf("%T: unparseable event_id %q: %w", msg, got, err)
+				return fmt.Errorf("%T: unparseable event_id %s", msg, utils.IdentifierPreview(got))
 			}
 		}
 	}
@@ -1233,8 +1233,11 @@ func validateEventID(rk *types.RoutingKeyInfo, msg eventBasicMessage) error {
 		if got == "" {
 			return fmt.Errorf("%T: missing required event_id", msg)
 		}
+		// The id is publisher-controlled and up to the message size limit,
+		// and processDelivery logs this error per delivery: neither the
+		// value nor ParseURN's own error (which embeds it) may be echoed whole.
 		if _, err := types.ParseURN(got); err != nil {
-			return fmt.Errorf("%T: unparseable event_id %q: %w", msg, got, err)
+			return fmt.Errorf("%T: unparseable event_id %s", msg, utils.IdentifierPreview(got))
 		}
 	}
 	return nil
