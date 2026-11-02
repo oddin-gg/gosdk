@@ -1137,7 +1137,7 @@ func validateRouteIdentity(rk *types.RoutingKeyInfo, msg types.BasicMessage) err
 			// non-canonically. A payload id that does not parse cannot match
 			// the parsed route id and is a genuine mismatch (validateDecoded-
 			// Message rejects unparseable event ids on their own merits too).
-			gotURN, perr := types.ParseURN(got)
+			gotURN, perr := parseEventID(got)
 			if perr != nil || gotURN.ToString() != rk.EventID.ToString() {
 				return fmt.Errorf("payload event id %s does not match route event id %q", utils.IdentifierPreview(got), rk.EventID.ToString())
 			}
@@ -1238,12 +1238,30 @@ func validateDecodedMessage(rk *types.RoutingKeyInfo, msg types.BasicMessage) er
 			if got == "" {
 				return fmt.Errorf("%T: missing required event_id", msg)
 			}
-			if _, err := types.ParseURN(got); err != nil {
+			if _, err := parseEventID(got); err != nil {
 				return fmt.Errorf("%T: unparseable event_id %s", msg, utils.IdentifierPreview(got))
 			}
 		}
 	}
 	return nil
+}
+
+// maxEventIDBytes bounds a payload event id before it is parsed. A genuine
+// URN is a few dozen bytes, but the payload value is publisher-controlled and
+// may be up to the feed message size limit, and ParseURN formats the whole
+// value into its error: a longer id is rejected without parsing, so a flood
+// of such messages costs no allocation the size of each id.
+const maxEventIDBytes = 128
+
+var errEventIDTooLong = errors.New("event id too long")
+
+// parseEventID parses a payload event id, rejecting one longer than
+// maxEventIDBytes before ParseURN sees it.
+func parseEventID(id string) (*types.URN, error) {
+	if len(id) > maxEventIDBytes {
+		return nil, errEventIDTooLong
+	}
+	return types.ParseURN(id)
 }
 
 // eventBasicMessage is the shared surface of every event-addressed feed
@@ -1267,7 +1285,7 @@ func validateEventID(rk *types.RoutingKeyInfo, msg eventBasicMessage) error {
 		// The id is publisher-controlled and up to the message size limit,
 		// and processDelivery logs this error per delivery: neither the
 		// value nor ParseURN's own error (which embeds it) may be echoed whole.
-		if _, err := types.ParseURN(got); err != nil {
+		if _, err := parseEventID(got); err != nil {
 			return fmt.Errorf("%T: unparseable event_id %s", msg, utils.IdentifierPreview(got))
 		}
 	}

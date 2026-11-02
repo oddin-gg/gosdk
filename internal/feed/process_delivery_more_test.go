@@ -1,8 +1,10 @@
 package feed
 
 import (
+	"errors"
 	"io"
 	"log/slog"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -486,6 +488,47 @@ func TestValidate_HugeEventIDErrorsAreBounded(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestValidate_HugeEventIDIsNotParsed: beyond keeping the logged error
+// small, a huge payload event id must be rejected before the URN parser
+// sees it, since the parser's own error copies the whole value; a flood of
+// such messages would otherwise allocate the size of each id per delivery.
+func TestValidate_HugeEventIDIsNotParsed(t *testing.T) {
+	const huge = 4 << 20
+	rk := &types.RoutingKeyInfo{FullRoutingKey: "r", EventID: &types.URN{Prefix: "od", Type: "match", ID: 1}}
+	ts := feedXML.MessageWithTimestamp{Timestamp: utils.Timestamp(time.UnixMilli(1_700_000_000_000))}
+	odds := &feedXML.OddsChange{MessageWithTimestamp: ts, EventID: "x" + strings.Repeat("y", huge), ProductID: 1}
+
+	// The errors are not printed: unguarded, they carry the whole id.
+	if _, err := parseEventID(odds.EventID); !errors.Is(err, errEventIDTooLong) {
+		t.Fatalf("parseEventID(huge) did not reject the id before parsing (error of %d bytes)", errLen(err))
+	}
+	if _, err := parseEventID("od:match:" + strings.Repeat("1", maxEventIDBytes)); !errors.Is(err, errEventIDTooLong) {
+		t.Fatalf("an id one past the bound was parsed (error of %d bytes)", errLen(err))
+	}
+	if u, err := parseEventID("od:match:42"); err != nil || u.ID != 42 {
+		t.Fatalf("parseEventID(od:match:42) = %v, %v", u, err)
+	}
+
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	for i := 0; i < 4; i++ {
+		_ = validateRouteIdentity(rk, odds)
+		_ = validateDecodedMessage(rk, odds)
+	}
+	runtime.ReadMemStats(&after)
+	if got := after.TotalAlloc - before.TotalAlloc; got > huge/2 {
+		t.Fatalf("validating a %d-byte event id 8 times allocated %d bytes: the id was copied", huge, got)
+	}
+}
+
+func errLen(err error) int {
+	if err == nil {
+		return 0
+	}
+	return len(err.Error())
 }
 
 // TestProcessDelivery_MissingSubscribed_AdmitsUnparsable pins the
