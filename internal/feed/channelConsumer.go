@@ -1268,7 +1268,7 @@ func validateOutcomeMarkets(kind string, markets []*feedXML.MarketWithOutcome) e
 func (c *ChannelConsumer) parseRoute(route string) (*types.RoutingKeyInfo, error) {
 	parts := strings.Split(route, ".")
 	if len(parts) != 8 {
-		return nil, fmt.Errorf("incorrect route %s", route)
+		return nil, fmt.Errorf("incorrect route %s", utils.RoutePreview(route))
 	}
 
 	sportID := parts[4]

@@ -155,3 +155,22 @@ func TestParseRoute_BadURNComponents(t *testing.T) {
 		})
 	}
 }
+
+// TestParseRoute_WrongPartCountDoesNotEchoRawRoute verifies that the error
+// for a malformed routing key, which is logged, carries only the bounded
+// preview and never the raw broker-supplied string.
+func TestParseRoute_WrongPartCountDoesNotEchoRawRoute(t *testing.T) {
+	c := &ChannelConsumer{sportIDPrefix: "od:sport:"}
+
+	route := "bad\r\nroute" + strings.Repeat("x", 500)
+	_, err := c.parseRoute(route)
+	if err == nil {
+		t.Fatal("expected an error for a route with the wrong number of parts")
+	}
+	if strings.ContainsAny(err.Error(), "\r\n") {
+		t.Fatalf("error contains raw CR/LF from the route: %q", err.Error())
+	}
+	if strings.Contains(err.Error(), route) {
+		t.Fatalf("error echoes the raw route: %q", err.Error())
+	}
+}
