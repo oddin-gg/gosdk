@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -762,22 +761,6 @@ func TestActor_SnapshotCompleteDeadline_ReissueKeepsAnInterruptedRecoveryInterru
 		t.Fatal("producer reported up before the fresh recovery completed")
 	}
 	waitDetachedDone(t, a, 3*time.Second)
-}
-
-// procClock replaces the producer manager's last processed timestamp (the
-// lookup seam of the actor) with one a test sets, so that "processing lags"
-// and "processing is current" do not depend on the monotonic cursor of the
-// manager or on the wall clock a completion reads.
-type procClock struct{ v atomic.Int64 }
-
-func (p *procClock) set(t time.Time) { p.v.Store(t.UnixNano()) }
-
-// holdProcessing installs a procClock on the actor, behind by a minute.
-func holdProcessing(a *recoveryActor) *procClock {
-	p := &procClock{}
-	p.set(time.Now().Add(-time.Minute))
-	a.lastProcessedFn = func() (time.Time, error) { return time.Unix(0, p.v.Load()), nil }
-	return p
 }
 
 // TestActor_SnapshotCompleteDeadline_AFirstMessageThatEndedWithoutATimestampIsNotInProcessing:

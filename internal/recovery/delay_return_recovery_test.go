@@ -1,6 +1,9 @@
 package recovery
 
 import (
+	"errors"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -60,13 +63,11 @@ func TestActor_ReturnFromProcessingDelayDown_RequestsASnapshotRecovery(t *testin
 		t.Fatalf("status events changed from %d to %d before the recovery completed", eventsWhenDown, got)
 	}
 
-	// Processing stands behind AGAIN while the recovery runs: the producer is
-	// already down for the delay, so this is the same episode, not a new
-	// delay beginning during the request (no follow-up for it below).
-	late := now.Add(10 * time.Minute)
-	a.noteRecoveryMessage(a.currentRecovery.recoveryID, late) // the recovery is alive
-	a.lastSystemAlive = &late
-	a.onTick(late, true)
+	// The recovery runs while processing stays current: the producer is down
+	// for the earlier delay, but no delay begins during the request, so
+	// nothing calls for a repeat below.
+	a.onMessageProcessingEnded(now.Add(time.Second))
+	a.onTick(now.Add(2*time.Second), true)
 	if a.downReason != types.ProcessingQueueDelayViolationProducerDownReason || a.recoveryState != types.StartedRecoveryState {
 		t.Fatalf("setup: down reason %v state %v", a.downReason, a.recoveryState)
 	}
@@ -94,7 +95,7 @@ func TestActor_ReturnFromProcessingDelayDown_RequestsASnapshotRecovery(t *testin
 		t.Fatalf("recovery floor %v not discharged by the recovery that reached it", a.recoveryFloor)
 	}
 	if hits.recover.Load() != 2 {
-		t.Fatalf("recovery POSTs = %d, want 2: a delay down BEFORE the request needs no follow-up", hits.recover.Load())
+		t.Fatalf("recovery POSTs = %d, want 2: a delay down BEFORE the request needs no repeat", hits.recover.Load())
 	}
 	waitDetachedDone(t, a, 3*time.Second)
 }
@@ -188,68 +189,379 @@ func genuineDelayDuringRecovery(t *testing.T, fake *fakeManagerOps) (*recoveryAc
 	return a, hits, r1, stoodAt
 }
 
+// procClock replaces the producer manager's last processed timestamp (the
+// lookup seam of the actor) with one a test sets, so that "processing lags"
+// and "processing is current" do not depend on the monotonic cursor of the
+// manager or on the wall clock a completion reads.
+type procClock struct{ v atomic.Int64 }
+
+func (p *procClock) set(t time.Time) { p.v.Store(t.UnixNano()) }
+
+// holdProcessing installs a procClock on the actor, behind by a minute.
+func holdProcessing(a *recoveryActor) *procClock {
+	p := &procClock{}
+	p.set(time.Now().Add(-time.Minute))
+	a.lastProcessedFn = func() (time.Time, error) { return time.Unix(0, p.v.Load()), nil }
+	return p
+}
+
+func tickAt(a *recoveryActor, at time.Time) {
+	a.lastSystemAlive = &at
+	a.onTick(at, true)
+}
+
+// lag makes processing stand a minute behind `at` and ticks there.
+func lag(a *recoveryActor, p *procClock, at time.Time) {
+	p.set(at.Add(-time.Minute))
+	tickAt(a, at)
+}
+
+// catchUp makes processing current at `at` and ticks there.
+func catchUp(a *recoveryActor, p *procClock, at time.Time) {
+	p.set(at)
+	tickAt(a, at)
+}
+
 // A processing delay that begins while a snapshot recovery is already
 // running does not interrupt it (that exemption keeps a recovery's own
 // replay from looping on itself), but the broker may drop messages after
-// that request went out. When the delay is genuinely newer than the
-// recovery's start (the floor lies later than its recover-from point), its
-// completion requests ONE follow-up from the floor before the producer is
-// reported up, and never a second one in the chain.
-func TestActor_DelayDownDuringRecovery_OneFollowUpBeforeTheProducerIsUp(t *testing.T) {
+// that request went out. Its completion does not report the producer up:
+// the recovery is repeated once processing is current again, from the point
+// it started at.
+func TestActor_DelayDownDuringRecovery_RepeatedAfterTheBacklogDrains(t *testing.T) {
 	fake := newFakeManagerOps()
-	a, hits, r1, stoodAt := genuineDelayDuringRecovery(t, fake)
+	a, hits, r1, _ := genuineDelayDuringRecovery(t, fake)
+	p := holdProcessing(a)
+	from1 := a.currentRecovery.recoverFrom
 	eventsBefore := len(producerStatusEvents(fake))
 
-	// R1 completes: a follow-up from the floor, the producer stays down.
+	// R1 completes while processing still lags: nothing is requested onto
+	// the backlog, the producer stays down, the repeat waits.
 	if err := a.snapshotRecoveryFinished(r1); err != nil {
 		t.Fatal(err)
 	}
-	waitRecoverHits(t, hits, 3)
-	if got := hits.lastAfterMillis.Load(); got != stoodAt.UnixMilli() {
-		t.Fatalf("follow-up after=%d (%v), want the floor %d (%v)", got, time.UnixMilli(got), stoodAt.UnixMilli(), stoodAt)
+	time.Sleep(50 * time.Millisecond)
+	if hits.recover.Load() != 2 {
+		t.Fatalf("recovery POSTs = %d, want 2: no repeat onto a backlog", hits.recover.Load())
 	}
-	r2 := a.currentRecovery.recoveryID
-	if r2 == r1 || a.recoveryState != types.StartedRecoveryState || !a.isFlaggedDown() {
-		t.Fatalf("after R1: id=%d (R1 %d) state=%v down=%v, want a new Started recovery and the producer down",
-			r2, r1, a.recoveryState, a.isFlaggedDown())
-	}
-	if got := len(producerStatusEvents(fake)); got != eventsBefore {
-		t.Fatalf("producer reported up before the follow-up completed (%d new status events)", got-eventsBefore)
+	if !a.delayRepeatWaiting || a.recoveryState != types.CompletedRecoveryState || !a.isFlaggedDown() {
+		t.Fatalf("after R1: waiting=%v state=%v down=%v, want waiting, Completed, down", a.delayRepeatWaiting, a.recoveryState, a.isFlaggedDown())
 	}
 
-	// Even if a delay began again during the follow-up, with its cursor later
-	// than the follow-up's start (so it WOULD qualify), it must not chain
-	// another recovery.
-	a.delayCursor = a.currentRecovery.recoverFrom.Add(time.Minute)
-	a.delayDownRequestID = r2
-	if !a.delayFollowUpNeeded() {
-		t.Fatal("setup: the second delay should qualify for a follow-up on its own")
+	// The backlog drains: the next tick issues the repeat from R1's start
+	// (not from where processing stood, which lies past the replay's head).
+	catchUp(a, p, time.Now())
+	waitRecoverHits(t, hits, 3)
+	if got := hits.lastAfterMillis.Load(); got != from1.UnixMilli() {
+		t.Fatalf("repeat after=%d (%v), want R1's start %d (%v)", got, time.UnixMilli(got), from1.UnixMilli(), from1)
+	}
+	r2 := a.currentRecovery.recoveryID
+	if r2 == r1 || a.recoveryState != types.StartedRecoveryState || !a.isFlaggedDown() || a.delayRepeatWaiting {
+		t.Fatalf("after the catch-up: id=%d (R1 %d) state=%v down=%v waiting=%v, want a new Started recovery and the producer down",
+			r2, r1, a.recoveryState, a.isFlaggedDown(), a.delayRepeatWaiting)
+	}
+	for _, ev := range producerStatusEvents(fake)[eventsBefore:] {
+		if !ev.IsDown() {
+			t.Fatal("producer reported up before the repeat completed")
+		}
+	}
+
+	// The repeat completes without a delay: the producer is up, the chain
+	// state is cleared.
+	if err := a.snapshotRecoveryFinished(r2); err != nil {
+		t.Fatal(err)
+	}
+	if hits.recover.Load() != 3 || a.isFlaggedDown() || a.recoveryState != types.CompletedRecoveryState {
+		t.Fatalf("after the repeat: POSTs=%d down=%v state=%v, want 3, up, Completed", hits.recover.Load(), a.isFlaggedDown(), a.recoveryState)
+	}
+	if a.delayRepeats != 0 || a.delayDownRequestID != 0 || a.delayRepeatWaiting {
+		t.Fatalf("chain state not reset: repeats=%d id=%d waiting=%v", a.delayRepeats, a.delayDownRequestID, a.delayRepeatWaiting)
+	}
+	waitDetachedDone(t, a, 3*time.Second)
+}
+
+// A delay that begins during a repeat counts the same way: it is repeated
+// again, not left for the return path.
+func TestActor_DelayDownDuringARepeat_RepeatsAgain(t *testing.T) {
+	fake := newFakeManagerOps()
+	a, hits, r1, _ := genuineDelayDuringRecovery(t, fake)
+	p := holdProcessing(a)
+	from1 := a.currentRecovery.recoverFrom
+	if err := a.snapshotRecoveryFinished(r1); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Now()
+	catchUp(a, p, at)
+	waitRecoverHits(t, hits, 3)
+	r2 := a.currentRecovery.recoveryID
+
+	// Processing falls behind again during the repeat (the producer is
+	// already down for the delay).
+	lagAt := at.Add(time.Second)
+	lag(a, p, lagAt)
+	if a.recoveryState != types.StartedRecoveryState || a.currentRecovery.recoveryID != r2 {
+		t.Fatalf("the delay interrupted the repeat: state=%v id=%d", a.recoveryState, a.currentRecovery.recoveryID)
 	}
 	if err := a.snapshotRecoveryFinished(r2); err != nil {
 		t.Fatal(err)
 	}
-	if hits.recover.Load() != 3 {
-		t.Fatalf("recovery POSTs = %d, want 3 (one follow-up, not a second)", hits.recover.Load())
+	if !a.delayRepeatWaiting || !a.isFlaggedDown() {
+		t.Fatalf("after R2: waiting=%v down=%v, want another repeat waiting and the producer down", a.delayRepeatWaiting, a.isFlaggedDown())
 	}
-	if a.isFlaggedDown() || a.recoveryState != types.CompletedRecoveryState {
-		t.Fatalf("after the follow-up: down=%v state=%v, want up + Completed", a.isFlaggedDown(), a.recoveryState)
+	catchUp(a, p, at.Add(2*time.Second))
+	waitRecoverHits(t, hits, 4)
+	// The delay during the repeat began with processing a minute behind
+	// lagAt, which is before the first recovery's start: the repeat reaches
+	// back to that cursor.
+	if want := lagAt.Add(-time.Minute); !want.Before(from1) || hits.lastAfterMillis.Load() != want.UnixMilli() {
+		t.Fatalf("second repeat after=%d, want the cursor %d (before %v)", hits.lastAfterMillis.Load(), want.UnixMilli(), from1)
+	}
+	r3 := a.currentRecovery.recoveryID
+	if err := a.snapshotRecoveryFinished(r3); err != nil {
+		t.Fatal(err)
+	}
+	if a.isFlaggedDown() || hits.recover.Load() != 4 {
+		t.Fatalf("POSTs=%d down=%v, want 4 and the producer up", hits.recover.Load(), a.isFlaggedDown())
 	}
 	waitDetachedDone(t, a, 3*time.Second)
-	if a.delayFollowUpIssued {
-		t.Fatal("follow-up allowance not reset when the producer came up")
+}
+
+// A consumer that lags during every attempt gets maxDelayRepeats repeats,
+// then the producer is reported up anyway with ONE warn that says so.
+func TestActor_DelayDownDuringEveryAttempt_BoundedThenUpWithAWarn(t *testing.T) {
+	fake := newFakeManagerOps()
+	a, hits, r1, _ := genuineDelayDuringRecovery(t, fake)
+	p := holdProcessing(a)
+	sink := &lockedBuffer{}
+	a.logger = debugLogger(sink)
+
+	id := r1
+	at := time.Now()
+	for i := 1; i <= maxDelayRepeats; i++ {
+		if err := a.snapshotRecoveryFinished(id); err != nil {
+			t.Fatal(err)
+		}
+		if !a.delayRepeatWaiting || !a.isFlaggedDown() {
+			t.Fatalf("attempt %d: waiting=%v down=%v, want a repeat waiting", i, a.delayRepeatWaiting, a.isFlaggedDown())
+		}
+		catchUp(a, p, at)
+		waitRecoverHits(t, hits, int32(2+i))
+		id = a.currentRecovery.recoveryID
+		at = at.Add(time.Second)
+		lag(a, p, at) // the repeat lags too
+		at = at.Add(time.Second)
+	}
+	// The last repeat falls behind as well: no further repeat.
+	if err := a.snapshotRecoveryFinished(id); err != nil {
+		t.Fatal(err)
+	}
+	if a.isFlaggedDown() || a.recoveryState != types.CompletedRecoveryState || a.delayRepeatWaiting {
+		t.Fatalf("after the bound: down=%v state=%v waiting=%v, want up, Completed, nothing waiting", a.isFlaggedDown(), a.recoveryState, a.delayRepeatWaiting)
+	}
+	if got := hits.recover.Load(); got != int32(2+maxDelayRepeats) {
+		t.Fatalf("recovery POSTs = %d, want %d (the first plus %d repeats)", got, 2+maxDelayRepeats, maxDelayRepeats)
+	}
+	if n := strings.Count(sink.String(), "processing fell behind during every recovery attempt"); n != 1 {
+		t.Fatalf("bound warn logged %d times, want 1:\n%s", n, sink.String())
+	}
+	if !strings.Contains(sink.String(), "producer_id=") || !strings.Contains(sink.String(), "attempts=4") {
+		t.Fatalf("the warn must carry producer_id and the attempts:\n%s", sink.String())
+	}
+	if a.delayRepeats != 0 {
+		t.Fatalf("repeat counter = %d, want it reset when the chain ended", a.delayRepeats)
+	}
+	waitDetachedDone(t, a, 3*time.Second)
+}
+
+// The repeat waits while processing lags and is issued on the first tick
+// that finds it current; ticks in between issue nothing and do not report
+// the producer up, however long they last.
+func TestActor_DelayRepeat_WaitsWhileTimingIsStale(t *testing.T) {
+	fake := newFakeManagerOps()
+	a, hits, r1, _ := genuineDelayDuringRecovery(t, fake)
+	p := holdProcessing(a)
+	if err := a.snapshotRecoveryFinished(r1); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now()
+	for i := 1; i <= 5; i++ {
+		lag(a, p, base.Add(time.Duration(i)*time.Second))
+	}
+	time.Sleep(50 * time.Millisecond)
+	if hits.recover.Load() != 2 || !a.delayRepeatWaiting || !a.isFlaggedDown() || a.recoveryState != types.CompletedRecoveryState {
+		t.Fatalf("stale ticks: POSTs=%d waiting=%v down=%v state=%v, want 2, waiting, down, Completed",
+			hits.recover.Load(), a.delayRepeatWaiting, a.isFlaggedDown(), a.recoveryState)
+	}
+	// The first tick that finds processing current issues it.
+	catchUp(a, p, base.Add(6*time.Second))
+	waitRecoverHits(t, hits, 3)
+	if a.delayRepeatWaiting {
+		t.Fatal("repeat still waiting after a fresh tick")
+	}
+	waitDetachedDone(t, a, 3*time.Second)
+}
+
+// A timing lookup that fails is not "processing is current": the repeat
+// keeps waiting.
+func TestActor_DelayRepeat_TimingLookupErrorMeansNotYet(t *testing.T) {
+	fake := newFakeManagerOps()
+	a, hits, r1, _ := genuineDelayDuringRecovery(t, fake)
+	p := holdProcessing(a)
+	at := time.Now()
+	failing := true
+	lookup := a.lastProcessedFn
+	a.lastProcessedFn = func() (time.Time, error) {
+		if failing {
+			return time.Time{}, errors.New("lookup failed")
+		}
+		return lookup()
+	}
+	if err := a.snapshotRecoveryFinished(r1); err != nil {
+		t.Fatal(err)
+	}
+	p.set(at) // processing is current, but the lookup fails
+	a.serviceDelayRepeat(at)
+	time.Sleep(50 * time.Millisecond)
+	if hits.recover.Load() != 2 || !a.delayRepeatWaiting {
+		t.Fatalf("POSTs=%d waiting=%v, want 2 and still waiting after a failed lookup", hits.recover.Load(), a.delayRepeatWaiting)
+	}
+	failing = false
+	a.serviceDelayRepeat(at)
+	waitRecoverHits(t, hits, 3)
+	waitDetachedDone(t, a, 3*time.Second)
+}
+
+// Waiting for processing to catch up is bounded by the chain's
+// MaxRecoveryExecution: then the producer is reported up with the warn.
+func TestActor_DelayRepeat_WaitingBeyondMaxRecoveryExecutionReportsUp(t *testing.T) {
+	fake := newFakeManagerOps()
+	a, hits, r1, _ := genuineDelayDuringRecovery(t, fake)
+	p := holdProcessing(a)
+	sink := &lockedBuffer{}
+	a.logger = debugLogger(sink)
+	if err := a.snapshotRecoveryFinished(r1); err != nil {
+		t.Fatal(err)
+	}
+	chainStart := a.currentRecovery.chainStartedAt
+
+	// Still within the cap: keeps waiting while processing lags.
+	lag(a, p, chainStart.Add(a.cfg.MaxRecoveryExecution()-time.Minute))
+	if !a.delayRepeatWaiting || !a.isFlaggedDown() {
+		t.Fatalf("within the cap: waiting=%v down=%v, want to keep waiting", a.delayRepeatWaiting, a.isFlaggedDown())
+	}
+
+	// Past it: up, with the warn, and no repeat was ever requested.
+	// (Processing is current then, so the tick does not flag a new delay
+	// right after.)
+	catchUpAfterCap := chainStart.Add(a.cfg.MaxRecoveryExecution() + time.Minute)
+	catchUp(a, p, catchUpAfterCap)
+	if a.isFlaggedDown() || a.delayRepeatWaiting || a.recoveryState != types.CompletedRecoveryState {
+		t.Fatalf("past the cap: down=%v waiting=%v state=%v, want up, nothing waiting, Completed", a.isFlaggedDown(), a.delayRepeatWaiting, a.recoveryState)
+	}
+	if hits.recover.Load() != 2 {
+		t.Fatalf("recovery POSTs = %d, want 2", hits.recover.Load())
+	}
+	if n := strings.Count(sink.String(), "processing fell behind during every recovery attempt"); n != 1 {
+		t.Fatalf("warn logged %d times, want 1:\n%s", n, sink.String())
+	}
+	evs := producerStatusEvents(fake)
+	if last := evs[len(evs)-1]; last.IsDown() {
+		t.Fatal("last status is still down")
 	}
 }
 
-// The need for the follow-up belongs to the chain: when the snapshot-complete
-// deadline replaces the request that was in flight when the delay began, the
-// replacement's completion still follows up (exactly once).
-func TestActor_DelayDownDuringRecovery_FollowUpSurvivesADeadlineReissue(t *testing.T) {
+// While the repeat waits the recovery state is Completed with the producer
+// down for the delay. The alive path must not start a recovery of its own
+// (the return path would otherwise issue a second one, without the repeat's
+// start point) and the producer-timing tick must not mistake the waiting for
+// a stuck recovery.
+func TestActor_DelayRepeat_WaitingDoesNotMisfire(t *testing.T) {
 	fake := newFakeManagerOps()
-	a, hits, r1, stoodAt := genuineDelayDuringRecovery(t, fake)
+	a, hits, r1, _ := genuineDelayDuringRecovery(t, fake)
+	p := holdProcessing(a)
+	if err := a.snapshotRecoveryFinished(r1); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Now()
+	p.set(at)
+
+	// Processing is current and an alive arrives before any tick: the alive
+	// path leaves the issue to the tick.
+	if err := a.systemAliveReceived(aliveAt(at), true); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if hits.recover.Load() != 2 || !a.delayRepeatWaiting {
+		t.Fatalf("alive while waiting: POSTs=%d waiting=%v, want 2 and still waiting", hits.recover.Load(), a.delayRepeatWaiting)
+	}
+
+	// A silent stretch past the snapshot-complete deadline is not a lost
+	// recovery: nothing is in flight to re-issue.
+	silent := a.currentRecovery.recoveryStartedAt.Add(10 * time.Minute)
+	a.expireSnapshotCompleteDeadline(silent)
+	a.expireStuckSnapshotRecovery(silent)
+	if hits.recover.Load() != 2 || a.recoveryState != types.CompletedRecoveryState || !a.delayRepeatWaiting {
+		t.Fatalf("sweeps while waiting: POSTs=%d state=%v waiting=%v", hits.recover.Load(), a.recoveryState, a.delayRepeatWaiting)
+	}
+
+	// The tick issues the repeat once, and a second tick does not stack one.
+	tickAt(a, at)
+	waitRecoverHits(t, hits, 3)
+	tickAt(a, at)
+	time.Sleep(50 * time.Millisecond)
+	if hits.recover.Load() != 3 {
+		t.Fatalf("recovery POSTs = %d, want exactly one repeat", hits.recover.Load())
+	}
+	waitDetachedDone(t, a, 3*time.Second)
+}
+
+// Another down reason taking over while the repeat waits (here the alive
+// stream going silent) ends the chain: the alive path starts an ordinary
+// recovery, and what the repeat was to cover is kept as a floor so that
+// recovery reaches back to it.
+func TestActor_DelayRepeat_AnotherDownReasonTakesOver(t *testing.T) {
+	fake := newFakeManagerOps()
+	a, hits, r1, _ := genuineDelayDuringRecovery(t, fake)
+	p := holdProcessing(a)
+	from1 := a.currentRecovery.recoverFrom
+	if err := a.snapshotRecoveryFinished(r1); err != nil {
+		t.Fatal(err)
+	}
+	// The next tick finds the alive stream silent (lastSystemAlive stale).
+	old := time.Now().Add(-time.Hour)
+	a.lastSystemAlive = &old
+	a.onTick(time.Now().Add(31*time.Second), true)
+	if a.downReason != types.AliveInternalViolationProducerDownReason || a.delayRepeatWaiting {
+		t.Fatalf("down reason %v waiting=%v, want the alive violation and no repeat waiting", a.downReason, a.delayRepeatWaiting)
+	}
+	if !a.recoveryFloor.Equal(from1) {
+		t.Fatalf("floor = %v, want the repeat's start %v kept", a.recoveryFloor, from1)
+	}
+	now := time.Now().Add(32 * time.Second)
+	p.set(now)
+	if err := a.systemAliveReceived(aliveAt(now), true); err != nil {
+		t.Fatal(err)
+	}
+	waitRecoverHits(t, hits, 3)
+	if got := hits.lastAfterMillis.Load(); got != from1.UnixMilli() {
+		t.Fatalf("recovery after=%d, want the kept start %d", got, from1.UnixMilli())
+	}
+	waitDetachedDone(t, a, 3*time.Second)
+}
+
+// The deadline re-issue of the request that was in flight when the delay
+// began keeps the mark: the replacement's completion repeats it.
+func TestActor_DelayDownDuringRecovery_RepeatSurvivesADeadlineReissue(t *testing.T) {
+	fake := newFakeManagerOps()
+	a, hits, r1, _ := genuineDelayDuringRecovery(t, fake)
+	from1 := a.currentRecovery.recoverFrom
 	started := a.currentRecovery.recoveryStartedAt
 
-	// R1 goes silent past the deadline and is replaced by R2.
+	// R1 goes silent past the deadline with processing current (a lagging
+	// processing would hold the re-issue back) and is replaced by R2.
+	p := holdProcessing(a)
 	tickAt := started.Add(6 * time.Minute)
+	p.set(tickAt)
 	a.lastSystemAlive = &tickAt
 	a.onTick(tickAt, true)
 	r2 := a.currentRecovery.recoveryID
@@ -257,32 +569,33 @@ func TestActor_DelayDownDuringRecovery_FollowUpSurvivesADeadlineReissue(t *testi
 		t.Fatal("setup: no deadline re-issue")
 	}
 	waitRecoverHits(t, hits, 3)
-
+	p.set(time.Now().Add(-time.Minute)) // processing lags again
 	if err := a.snapshotRecoveryFinished(r2); err != nil {
 		t.Fatal(err)
 	}
+	if !a.delayRepeatWaiting || !a.isFlaggedDown() {
+		t.Fatalf("after R2: waiting=%v down=%v, want the repeat waiting and the producer down", a.delayRepeatWaiting, a.isFlaggedDown())
+	}
+	catchUp(a, p, tickAt.Add(time.Second))
 	waitRecoverHits(t, hits, 4)
-	if got := hits.lastAfterMillis.Load(); got != stoodAt.UnixMilli() {
-		t.Fatalf("follow-up after=%d, want the floor %d", got, stoodAt.UnixMilli())
+	if got := hits.lastAfterMillis.Load(); got != from1.UnixMilli() {
+		t.Fatalf("repeat after=%d, want %d", got, from1.UnixMilli())
 	}
 	r3 := a.currentRecovery.recoveryID
-	if r3 == r2 || !a.isFlaggedDown() {
-		t.Fatalf("after R2: id=%d down=%v, want a follow-up and the producer down", r3, a.isFlaggedDown())
-	}
 	if err := a.snapshotRecoveryFinished(r3); err != nil {
 		t.Fatal(err)
 	}
 	if hits.recover.Load() != 4 || a.isFlaggedDown() {
-		t.Fatalf("POSTs=%d down=%v, want exactly one follow-up and the producer up", hits.recover.Load(), a.isFlaggedDown())
+		t.Fatalf("POSTs=%d down=%v, want exactly one repeat and the producer up", hits.recover.Load(), a.isFlaggedDown())
 	}
 	waitDetachedDone(t, a, 3*time.Second)
 }
 
 // A delay flagged during the replay of an ordinary recovery after an outage
-// is the outage's own staleness (the cursor is old because of the outage the
-// recovery is repairing): the floor lies at or before the point the recovery
-// starts from, so it already covers it and no second recovery is requested.
-func TestActor_DelayDownDuringOutageRecovery_NoFollowUp(t *testing.T) {
+// has a stale cursor (old because of the outage the recovery is repairing),
+// at or before the recovery's own start. The recovery is repeated all the
+// same, from the cursor: the dropped messages can be the replay itself.
+func TestActor_DelayDownDuringOutageRecovery_IsRepeated(t *testing.T) {
 	fake := newFakeManagerOps()
 	now := time.Now().Truncate(time.Millisecond)
 	a, hits := steadyActor(t, fake, now.Add(-10*time.Second))
@@ -291,6 +604,7 @@ func TestActor_DelayDownDuringOutageRecovery_NoFollowUp(t *testing.T) {
 	}
 	a.onMessageProcessingEnded(now.Add(-2 * time.Minute)) // stale because of the outage
 	r1 := startRecoveryAfterLoss(t, a, hits, now)
+	from1 := a.currentRecovery.recoverFrom
 
 	a.onTick(now, true)
 	if a.downReason != types.ProcessingQueueDelayViolationProducerDownReason {
@@ -299,19 +613,26 @@ func TestActor_DelayDownDuringOutageRecovery_NoFollowUp(t *testing.T) {
 	if a.recoveryFloor.After(a.currentRecovery.recoverFrom) {
 		t.Fatalf("setup: floor %v later than recoverFrom %v", a.recoveryFloor, a.currentRecovery.recoverFrom)
 	}
+	p := holdProcessing(a)
 	if err := a.snapshotRecoveryFinished(r1); err != nil {
 		t.Fatal(err)
 	}
-	if hits.recover.Load() != 2 {
-		t.Fatalf("recovery POSTs = %d, want 2: no redundant second recovery", hits.recover.Load())
+	if !a.delayRepeatWaiting || !a.isFlaggedDown() {
+		t.Fatalf("waiting=%v down=%v, want the repeat waiting and the producer down", a.delayRepeatWaiting, a.isFlaggedDown())
 	}
-	if a.isFlaggedDown() || a.recoveryState != types.CompletedRecoveryState {
-		t.Fatalf("down=%v state=%v, want up + Completed", a.isFlaggedDown(), a.recoveryState)
+	catchUp(a, p, now.Add(time.Second))
+	waitRecoverHits(t, hits, 3)
+	// The delay cursor (where processing stood, before the outage) lies
+	// before the recovery's own start: the repeat reaches back to it.
+	stood := now.Add(-2 * time.Minute)
+	if got := hits.lastAfterMillis.Load(); got != stood.UnixMilli() || !stood.Before(from1) {
+		t.Fatalf("repeat after=%d, want the cursor %d (before the first recovery's start %v)", got, stood.UnixMilli(), from1)
 	}
+	waitDetachedDone(t, a, 3*time.Second)
 }
 
-// Without a delay during the recovery there is no follow-up.
-func TestActor_RecoveryWithoutDelay_NoFollowUp(t *testing.T) {
+// Without a delay during the recovery there is no repeat.
+func TestActor_RecoveryWithoutDelay_NoRepeat(t *testing.T) {
 	fake := newFakeManagerOps()
 	now := time.Now().Truncate(time.Millisecond)
 	a, hits := steadyActor(t, fake, now.Add(-10*time.Second))
@@ -348,14 +669,12 @@ func delayDuringRecoveryFrom(t *testing.T, a *recoveryActor, hits *recoveryHits,
 	return r1
 }
 
-// The follow-up is decided by the DELAY's own cursor, not by the general
-// recovery floor. Here the floor is older than the new delay and equals the
-// point R1 started from (an interrupted recovery restarted from its floor):
-// the floor says "already covered", but processing fell behind AFTER R1's
-// request went out, so what the broker drops from then on is not in its
-// replay. The follow-up starts from where processing stood when the delay
-// began, and the older floor is discharged by R1, not replayed again.
-func TestActor_DelayDownDuringRecovery_OlderFloorDoesNotHideANewDelay(t *testing.T) {
+// The repeat starts at the completed recovery's own start, which here is the
+// older floor (an interrupted recovery restarted from its floor): the older
+// point is where the replay began, and the replay is what the broker may have
+// dropped. The floor is discharged by the recovery that reached it, so the
+// repeat does not pull it in a second time.
+func TestActor_DelayDownDuringRecovery_RepeatStartsAtTheRecoverysOwnStart(t *testing.T) {
 	fake := newFakeManagerOps()
 	now := time.Now().Truncate(time.Millisecond)
 	a, hits := steadyActor(t, fake, now.Add(-10*time.Second))
@@ -371,22 +690,47 @@ func TestActor_DelayDownDuringRecovery_OlderFloorDoesNotHideANewDelay(t *testing
 		t.Fatalf("setup: recoverFrom=%v floor=%v, want both at %v", a.currentRecovery.recoverFrom, a.recoveryFloor, floor)
 	}
 
+	p := holdProcessing(a)
 	if err := a.snapshotRecoveryFinished(r1); err != nil {
 		t.Fatal(err)
 	}
+	if !a.recoveryFloor.IsZero() {
+		t.Fatalf("floor %v not discharged by the recovery that reached it", a.recoveryFloor)
+	}
+	catchUp(a, p, time.Now())
 	waitRecoverHits(t, hits, 3)
-	if got := hits.lastAfterMillis.Load(); got != stoodAt.UnixMilli() {
-		t.Fatalf("follow-up after=%d (%v), want the delay cursor %d (%v), not the older floor", got, time.UnixMilli(got), stoodAt.UnixMilli(), stoodAt)
+	if got := hits.lastAfterMillis.Load(); got != floor.UnixMilli() {
+		t.Fatalf("repeat after=%d (%v), want the recovery's start %d (%v)", got, time.UnixMilli(got), floor.UnixMilli(), floor)
 	}
 	if !a.isFlaggedDown() || a.recoveryState != types.StartedRecoveryState {
-		t.Fatalf("down=%v state=%v, want the producer down and the follow-up Started", a.isFlaggedDown(), a.recoveryState)
+		t.Fatalf("down=%v state=%v, want the producer down and the repeat Started", a.isFlaggedDown(), a.recoveryState)
 	}
 	waitDetachedDone(t, a, 3*time.Second)
 }
 
-// A recovery that started from zero asked for the full history: it covers
-// everything, so a delay during it needs no follow-up.
-func TestActor_DelayDownDuringFullHistoryRecovery_NoFollowUp(t *testing.T) {
+// When the delay cursor lies BEFORE the recovery's start the repeat reaches
+// back to the cursor.
+func TestActor_DelayDownDuringRecovery_RepeatReachesBackToAnEarlierCursor(t *testing.T) {
+	fake := newFakeManagerOps()
+	a, hits, r1, _ := genuineDelayDuringRecovery(t, fake)
+	p := holdProcessing(a)
+	earlier := a.currentRecovery.recoverFrom.Add(-time.Minute)
+	a.delayCursor = earlier
+	if err := a.snapshotRecoveryFinished(r1); err != nil {
+		t.Fatal(err)
+	}
+	catchUp(a, p, time.Now())
+	waitRecoverHits(t, hits, 3)
+	if got := hits.lastAfterMillis.Load(); got != earlier.UnixMilli() {
+		t.Fatalf("repeat after=%d, want the earlier cursor %d", got, earlier.UnixMilli())
+	}
+	waitDetachedDone(t, a, 3*time.Second)
+}
+
+// A recovery that started from zero asked for the full history. A delay
+// during it is repeated like any other, and the repeat asks for the full
+// history again.
+func TestActor_DelayDownDuringFullHistoryRecovery_IsRepeatedFromTheFullHistory(t *testing.T) {
 	fake := newFakeManagerOps()
 	now := time.Now().Truncate(time.Millisecond)
 	a, hits := steadyActor(t, fake, now.Add(-10*time.Second))
@@ -395,15 +739,80 @@ func TestActor_DelayDownDuringFullHistoryRecovery_NoFollowUp(t *testing.T) {
 	if !a.currentRecovery.recoverFrom.IsZero() {
 		t.Fatalf("setup: recoverFrom = %v, want zero (full history)", a.currentRecovery.recoverFrom)
 	}
+	p := holdProcessing(a)
 	if err := a.snapshotRecoveryFinished(r1); err != nil {
 		t.Fatal(err)
 	}
-	if hits.recover.Load() != 2 {
-		t.Fatalf("recovery POSTs = %d, want 2: a full-history recovery needs no follow-up", hits.recover.Load())
+	if !a.delayRepeatWaiting || !a.isFlaggedDown() {
+		t.Fatalf("waiting=%v down=%v, want the repeat waiting and the producer down", a.delayRepeatWaiting, a.isFlaggedDown())
 	}
-	if a.isFlaggedDown() || a.recoveryState != types.CompletedRecoveryState {
-		t.Fatalf("down=%v state=%v, want up + Completed", a.isFlaggedDown(), a.recoveryState)
+	// A window for producers without a cursor (WithInitialSnapshotTime) must
+	// not narrow the repeat of a full-history recovery.
+	a.initialSnapshotTime = time.Hour
+	catchUp(a, p, time.Now())
+	waitRecoverHits(t, hits, 3)
+	if got := hits.lastAfterMillis.Load(); got != 0 {
+		t.Fatalf("repeat after=%d (%v), want none (the full history)", got, time.UnixMilli(got))
 	}
+	if !a.currentRecovery.recoverFrom.IsZero() || a.recoveryState != types.StartedRecoveryState {
+		t.Fatalf("repeat recoverFrom=%v state=%v, want zero and Started", a.currentRecovery.recoverFrom, a.recoveryState)
+	}
+	if err := a.snapshotRecoveryFinished(a.currentRecovery.recoveryID); err != nil {
+		t.Fatal(err)
+	}
+	if a.isFlaggedDown() || a.recoveryFloorFull {
+		t.Fatalf("down=%v floorFull=%v, want up and no floor", a.isFlaggedDown(), a.recoveryFloorFull)
+	}
+	waitDetachedDone(t, a, 3*time.Second)
+}
+
+// A delay with nothing processed yet (a stale user-session alive flags it
+// during a recovery from a resume point) has a zero cursor; the recovery is
+// repeated from the resume point all the same.
+func TestActor_DelayDownWithAZeroCursorDuringRecovery_IsRepeated(t *testing.T) {
+	fake := newFakeManagerOps()
+	now := time.Now().Truncate(time.Millisecond)
+	srv, hits := fixtureSrv(t)
+	t.Cleanup(srv.Close)
+	a := newWiredActor(t, srv, fake)
+	resume := now.Add(-5 * time.Minute)
+	if err := a.pm.SetProducerRecoveryFromTimestamp(t.Context(), a.producerID, resume); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.systemAliveReceived(aliveAt(now), true); err != nil {
+		t.Fatal(err)
+	}
+	waitRecoverHits(t, hits, 1)
+	r1 := a.currentRecovery.recoveryID
+	if !a.currentRecovery.recoverFrom.Equal(resume) {
+		t.Fatalf("setup: recoverFrom = %v, want the resume point %v", a.currentRecovery.recoverFrom, resume)
+	}
+	if lp, _ := a.lastProcessedMessageGenTimestamp(); !lp.IsZero() {
+		t.Fatalf("setup: processed cursor = %v, want none", lp)
+	}
+
+	// The user-session alive is stale: the delay begins during R1.
+	a.lastUserSessionAlive = now.Add(-time.Hour)
+	a.lastSystemAlive = &now
+	a.onTick(now, true)
+	if a.downReason != types.ProcessingQueueDelayViolationProducerDownReason || a.delayDownRequestID != r1 || !a.delayCursor.IsZero() {
+		t.Fatalf("setup: reason=%v marked=%d (R1 %d) cursor=%v, want the delay marked on R1 with a zero cursor",
+			a.downReason, a.delayDownRequestID, r1, a.delayCursor)
+	}
+	if err := a.snapshotRecoveryFinished(r1); err != nil {
+		t.Fatal(err)
+	}
+	if !a.delayRepeatWaiting || !a.isFlaggedDown() {
+		t.Fatalf("waiting=%v down=%v, want the repeat waiting and the producer down", a.delayRepeatWaiting, a.isFlaggedDown())
+	}
+	// The user-session alive is current again.
+	a.lastUserSessionAlive = now.Add(time.Second)
+	a.onTick(now.Add(2*time.Second), true)
+	waitRecoverHits(t, hits, 2)
+	if got := hits.lastAfterMillis.Load(); got != resume.UnixMilli() {
+		t.Fatalf("repeat after=%d, want the resume point %d", got, resume.UnixMilli())
+	}
+	waitDetachedDone(t, a, 3*time.Second)
 }
 
 // A processing delay that begins before anything was processed (a stale
