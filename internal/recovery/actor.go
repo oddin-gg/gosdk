@@ -40,6 +40,10 @@ type recoveryActor struct {
 	// Zero = full history (pre-wiring behaviour).
 	initialSnapshotTime time.Duration
 
+	// lastProcessedFn, when set, replaces the producer-manager lookup of the
+	// last processed message timestamp. Tests only.
+	lastProcessedFn func() (time.Time, error)
+
 	// Inbox + lifecycle.
 	inbox    chan actorEvent
 	shutdown chan struct{}
@@ -627,6 +631,9 @@ func (a *recoveryActor) timestampForRecovery() (time.Time, error) {
 }
 
 func (a *recoveryActor) lastProcessedMessageGenTimestamp() (time.Time, error) {
+	if a.lastProcessedFn != nil { // test seam: a lookup that fails on demand
+		return a.lastProcessedFn()
+	}
 	prod, err := a.pm.GetProducer(a.ctx, a.producerID)
 	if err != nil {
 		return time.Time{}, err
@@ -780,6 +787,11 @@ func (a *recoveryActor) onSnapshotComplete(e evSnapshotComplete) {
 }
 
 func (a *recoveryActor) onTick(now time.Time, inactivityArmed bool) {
+	// Last, after any transition this tick made (a producer-down for a
+	// processing delay emits its own status): keep the published
+	// "delayed" flag in step with the timing. See refreshDelayedFlag.
+	defer a.refreshDelayedFlag(now)
+
 	// Timeout scan for in-flight event recoveries: per NEXT.md the
 	// configured MaxRecoveryExecution caps the wall time a single
 	// recovery may take. Without this scan, an event recovery whose
@@ -1137,17 +1149,29 @@ func (a *recoveryActor) lastRecoveryStartedAt() time.Time {
 // first observation. Genuine alive silence is still caught by the
 // aliveInterval check in onTick, which fires before this one.
 func (a *recoveryActor) calculateTiming(now time.Time) bool {
-	maxInactivity := a.cfg.MaxInactivity()
-	lastProcessed, err := a.lastProcessedMessageGenTimestamp()
+	fresh, err := a.timingFresh(now)
 	if err != nil {
 		a.logger.WithError(err).Warn("failed to get last processed message gen timestamp")
 		return false
+	}
+	return fresh
+}
+
+// timingFresh is calculateTiming without the error folding: it reports
+// the producer manager's error instead of treating it as "delayed", so a
+// caller that must not act on a transient lookup failure can tell the two
+// apart.
+func (a *recoveryActor) timingFresh(now time.Time) (bool, error) {
+	maxInactivity := a.cfg.MaxInactivity()
+	lastProcessed, err := a.lastProcessedMessageGenTimestamp()
+	if err != nil {
+		return false, err
 	}
 	processedFresh := lastProcessed.IsZero() ||
 		now.Sub(lastProcessed).Abs() < maxInactivity
 	userAliveFresh := a.lastUserSessionAlive.IsZero() ||
 		now.Sub(a.lastUserSessionAlive).Abs() < maxInactivity
-	return processedFresh && userAliveFresh
+	return processedFresh && userAliveFresh, nil
 }
 
 // producerDown matches manager.producerDown exactly. Pre-actor:
@@ -1231,12 +1255,18 @@ func (a *recoveryActor) notifyProducerChangedState(reason types.ProducerStatusRe
 	}
 	a.statusReason = reason
 
+	now := time.Now()
+	return a.publishStatus(reason, !a.calculateTiming(now), now)
+}
+
+// publishStatus stores the status snapshot Client.ProducerStatus returns
+// and emits it on the recovery stream. The snapshot survives even when
+// the lossy RecoveryEvents channel drops the corresponding event.
+func (a *recoveryActor) publishStatus(reason types.ProducerStatusReason, delayed bool, now time.Time) error {
 	producerData, err := a.pm.GetProducer(a.ctx, a.producerID)
 	if err != nil {
 		return err
 	}
-	now := time.Now()
-	delayed := !a.calculateTiming(now)
 	impl := &producerStatusImpl{
 		producer: producerData,
 		timestamp: types.MessageTimestamp{
@@ -1246,12 +1276,40 @@ func (a *recoveryActor) notifyProducerChangedState(reason types.ProducerStatusRe
 		isDelayed:            delayed,
 		producerStatusReason: reason,
 	}
-	// Snapshot for Client.ProducerStatus(producerID) — survives even
-	// when the lossy RecoveryEvents channel drops the corresponding
-	// event.
 	a.statusSnapshot.Store(impl)
 	a.mgr.emitRecoveryMessage(types.RecoveryMessage{ProducerStatus: impl})
 	return nil
+}
+
+// refreshDelayedFlag re-evaluates the processing/alive timing on the tick
+// and publishes a new status when ONLY the delayed flag differs from the
+// last published one (reason unchanged). The flag used to be computed once,
+// at the emission of a reason change: a producer that came up delayed
+// (the resume point is old when the first recovery completes) stayed
+// "delayed" in both the event stream and Client.ProducerStatus for as long
+// as its reason did not change — an hour, in a soak test — while it was up
+// and current.
+//
+// It publishes only on a real change of the flag (never per tick), does
+// nothing before the first status exists (the reason-change path owns the
+// first emission) or for a disabled producer, and skips a tick whose
+// timing could not be read rather than reporting a lookup failure as a
+// delay.
+func (a *recoveryActor) refreshDelayedFlag(now time.Time) {
+	cur := a.statusSnapshot.Load()
+	if cur == nil || a.isDisabled() {
+		return
+	}
+	fresh, err := a.timingFresh(now)
+	if err != nil {
+		return
+	}
+	if delayed := !fresh; delayed != cur.isDelayed {
+		if err := a.publishStatus(cur.producerStatusReason, delayed, now); err != nil {
+			a.logger.WithError(err).WithField("producer_id", a.producerID).
+				Warn("recovery: publish refreshed producer status")
+		}
+	}
 }
 
 // currentStatus returns the most recent ProducerStatus this actor
