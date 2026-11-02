@@ -23,12 +23,26 @@ type Manager struct {
 	logger                     *log.Logger
 	MarketVoidReasonsCache     *MarketVoidReasonsCache
 
+	// apiClient is the client every cache loads through; kept for
+	// APISuccessGeneration.
+	apiClient *api.Client
+
 	// lifeCancel tears down the manager-wide lifetime ctx that every
 	// cache uses as the detach root for its singleflight loads. Close
 	// fires it so no detached fetch (including construction-time
 	// preloads) outlives the manager — NEXT.md §8: failed construction
 	// must not leave background work running.
 	lifeCancel context.CancelFunc
+}
+
+// APISuccessGeneration returns a counter that advances on every successful
+// response of the REST API, from any call (see api.Client.SuccessGeneration).
+// Zero, forever, when the manager has no client.
+func (m Manager) APISuccessGeneration() uint64 {
+	if m.apiClient == nil {
+		return 0
+	}
+	return m.apiClient.SuccessGeneration()
 }
 
 // OnFeedMessageReceived ...
@@ -96,6 +110,7 @@ func NewManager(ctx context.Context, client *api.Client, oddsFeedConfiguration c
 		MarketVoidReasonsCache: newMarketVoidReasonsCache(lifeCtx, client),
 		PlayersCache:           newPlayersCache(lifeCtx, client, logger),
 		lifeCancel:             lifeCancel,
+		apiClient:              client,
 
 		LocalizedStaticMatchStatus: newLocalizedStaticDataCache(lifeCtx, oddsFeedConfiguration, logger, preloadLocales, func(ctx context.Context, locale types.Locale) ([]types.StaticData, error) {
 			data, err := client.FetchMatchStatusDescriptions(ctx, locale)

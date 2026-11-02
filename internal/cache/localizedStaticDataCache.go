@@ -8,6 +8,7 @@ import (
 
 	"golang.org/x/sync/singleflight"
 
+	"github.com/oddin-gg/gosdk/internal/apipolicy"
 	"github.com/oddin-gg/gosdk/internal/cache/lru"
 	"github.com/oddin-gg/gosdk/internal/config"
 	log "github.com/oddin-gg/gosdk/internal/log"
@@ -159,7 +160,7 @@ func (l *LocalizedStaticDataCache) loadLocales(ctx context.Context, locales []ty
 			return err
 		}
 		loc := locale
-		ch := l.sf.DoChan(string(loc), func() (interface{}, error) { //nolint:contextcheck // deliberate detach: the shared fetch roots in the cache lifetime, not the caller's ctx (see doc above)
+		ch := l.sf.DoChan(string(loc)+apipolicy.Suffix(ctx), func() (interface{}, error) {
 			// Double-check inside the critical region.
 			l.mux.RLock()
 			_, alreadyLoaded := l.loadedLocales[loc]
@@ -172,6 +173,7 @@ func (l *LocalizedStaticDataCache) loadLocales(ctx context.Context, locales []ty
 			// closure, so coalesced waiters don't each retain a timer.
 			fetchCtx, cancel := context.WithTimeout(l.lifeCtx, lru.LoadTimeout)
 			defer cancel()
+			fetchCtx = apipolicy.Carry(fetchCtx, ctx) // the caller's call policy, not its cancellation
 			data, err := l.fetcher(fetchCtx, loc)
 			if err != nil {
 				return nil, err

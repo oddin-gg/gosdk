@@ -14,11 +14,13 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cenkalti/backoff/v5"
 
 	data "github.com/oddin-gg/gosdk/internal/api/xml"
+	"github.com/oddin-gg/gosdk/internal/apipolicy"
 	"github.com/oddin-gg/gosdk/internal/config"
 	"github.com/oddin-gg/gosdk/internal/sdkerr"
 	"github.com/oddin-gg/gosdk/internal/utils"
@@ -136,7 +138,19 @@ type Client struct {
 	lifeCtx    context.Context
 	lifeCancel context.CancelFunc
 	inflight   sync.WaitGroup
+
+	// successGen counts successful (2xx) responses of any endpoint. A
+	// consumer that remembers a failure together with the value read before
+	// the attempt can tell that the API has answered since: see
+	// SuccessGeneration.
+	successGen atomic.Uint64
 }
+
+// SuccessGeneration returns a counter that advances on every successful
+// (2xx) response of any endpoint. The feed message path uses it to drop
+// everything it remembers about a failing API as soon as the API answers
+// again, whichever call that was.
+func (c *Client) SuccessGeneration() uint64 { return c.successGen.Load() }
 
 // ErrClosed is returned by request methods invoked after Close. It
 // WRAPS the shared closed-client sentinel (sdkerr.ErrClosed ==
@@ -989,6 +1003,21 @@ func wellFormedXML(body []byte) bool {
 // For non-OK statuses do() emits the event inline (those bodies are
 // always small enough not to need streaming) and returns pc=nil.
 func (c *Client) do(ctx context.Context, method, path string, locale *types.Locale, idempotent bool) (*http.Response, *pendingCapture, error) {
+	// Message-path policy (see package apipolicy): never queue behind a
+	// failing API on the session goroutine.
+	policy := apipolicy.ModeOf(ctx)
+	if policy == apipolicy.MessageSkip {
+		return nil, nil, apipolicy.ErrSkipped
+	}
+	var remaining time.Duration
+	if policy == apipolicy.Message {
+		// The build shares one budget across all its requests; a request
+		// that starts after it is spent never goes out.
+		remaining, _ = apipolicy.Remaining(ctx)
+		if remaining <= 0 {
+			return nil, nil, fmt.Errorf("api: %s %s: message-path budget spent: %w", method, path, context.DeadlineExceeded)
+		}
+	}
 	// Reject new requests after Close, and register this one as in-flight
 	// — both under mu so the check and the WaitGroup.Add can't straddle a
 	// concurrent Close (which sets closed under mu BEFORE Wait).
@@ -1003,7 +1032,18 @@ func (c *Client) do(ctx context.Context, method, path string, locale *types.Loca
 	// Derive the request ctx from the caller's ctx AND the client
 	// lifetime: Close cancels lifeCtx, aborting this request even if the
 	// caller passed a ctx that never fires (e.g. context.Background()).
-	reqCtx, cancelReq := context.WithCancel(ctx)
+	var (
+		reqCtx    context.Context
+		cancelReq context.CancelFunc
+	)
+	if policy == apipolicy.Message {
+		// What is left of the build's one budget, body included (cancelReq
+		// fires when the body is closed): a build that makes several
+		// requests is bounded as a whole.
+		reqCtx, cancelReq = context.WithTimeout(ctx, remaining)
+	} else {
+		reqCtx, cancelReq = context.WithCancel(ctx)
+	}
 	//nolint:contextcheck // lifeCtx is the client-lifetime cancellation root; AfterFunc wires it to abort this request, it is not a request-scoped parent
 	stopLife := context.AfterFunc(c.lifeCtx, cancelReq)
 	ctx = reqCtx
@@ -1118,6 +1158,7 @@ func (c *Client) do(ctx context.Context, method, path string, locale *types.Loca
 			// pendingCapture, and have the caller (fetchData / doNoBody)
 			// invoke emit() after consuming the body. Streaming = no full-
 			// body materialization regardless of payload size.
+			c.successGen.Add(1)
 			pc = c.installCapture(r, req, r.StatusCode, latency, attempts, locale, reqBody, reqTruncated)
 			return r, nil
 		case r.StatusCode == http.StatusTooManyRequests:
@@ -1170,6 +1211,9 @@ func (c *Client) do(ctx context.Context, method, path string, locale *types.Loca
 		// backoff/v5 treats WithMaxTries(0) as UNLIMITED attempts —
 		// never let a zero value through the uint conversion.
 		tries = defaultMaxAttempts
+	}
+	if policy == apipolicy.Message {
+		tries = 1 // no retries on the message path
 	}
 	r, err := backoff.Retry(ctx, op,
 		backoff.WithBackOff(exp),

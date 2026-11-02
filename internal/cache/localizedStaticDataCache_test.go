@@ -6,10 +6,12 @@ import (
 	"errors"
 	"log/slog"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/oddin-gg/gosdk/internal/apipolicy"
 	log "github.com/oddin-gg/gosdk/internal/log"
 	"github.com/oddin-gg/gosdk/types"
 )
@@ -336,5 +338,68 @@ func TestLocalizedStaticDataCache_RowsWithoutDescriptionsKeepCachedDescriptions(
 	}
 	if !strings.Contains(logged.String(), "empty static data response") {
 		t.Fatalf("the skipped refresh must be logged, got %q", logged.String())
+	}
+}
+
+// A getter and a feed-message build asking for the same unloaded locale must
+// not share a load: a getter's fetch held open (retrying against a failing
+// API) would hold the message path behind it. The message-policy load starts
+// independently, carries the Message policy into its fetch, and returns on
+// its own.
+func TestLocalizedStaticDataCache_MessagePolicyLoadIsIndependentOfAGettersLoad(t *testing.T) {
+	var mu sync.Mutex
+	modes := map[apipolicy.Mode]int{}
+	getterHeld := make(chan struct{}, 1)
+	releaseGetter := make(chan struct{})
+	fetcher := func(ctx context.Context, locale types.Locale) ([]types.StaticData, error) {
+		mode := apipolicy.ModeOf(ctx)
+		mu.Lock()
+		modes[mode]++
+		mu.Unlock()
+		if mode == apipolicy.Default {
+			getterHeld <- struct{}{}
+			<-releaseGetter // the getter's fetch is retrying
+		}
+		return []types.StaticData{{ID: 1, Description: types.Some("ok")}}, nil
+	}
+	c := newLocalizedStaticDataCache(t.Context(), &minimalCfg{}, log.New(nil), nil, fetcher)
+	defer c.Close()
+
+	getterDone := make(chan error, 1)
+	go func() {
+		_, err := c.LocalizedItem(t.Context(), 1, []types.Locale{types.EnLocale})
+		getterDone <- err
+	}()
+	select {
+	case <-getterHeld:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the getter's fetch did not start")
+	}
+
+	// The message path asks for the same locale while the getter's load is
+	// still open.
+	msgCtx := apipolicy.With(t.Context(), apipolicy.Message)
+	msgDone := make(chan error, 1)
+	go func() {
+		_, err := c.LocalizedItem(msgCtx, 1, []types.Locale{types.EnLocale})
+		msgDone <- err
+	}()
+	select {
+	case err := <-msgDone:
+		if err != nil {
+			t.Fatalf("message-path load: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the message-path load waited behind the getter's open load")
+	}
+	mu.Lock()
+	if modes[apipolicy.Message] != 1 || modes[apipolicy.Default] != 1 {
+		t.Fatalf("fetch policies = %v, want one Default (getter) and one Message", modes)
+	}
+	mu.Unlock()
+
+	close(releaseGetter)
+	if err := <-getterDone; err != nil {
+		t.Fatalf("getter: %v", err)
 	}
 }

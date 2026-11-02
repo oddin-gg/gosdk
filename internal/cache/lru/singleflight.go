@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"golang.org/x/sync/singleflight"
+
+	"github.com/oddin-gg/gosdk/internal/apipolicy"
 )
 
 // LoadTimeout is the soft outer bound applied to every detached
@@ -64,10 +66,12 @@ func LoadCoalesced[T any](
 	if base == nil {
 		base = context.WithoutCancel(ctx)
 	}
-	ch := sf.DoChan(sfKey, func() (any, error) {
+	// The call policy of the caller rides along (see apipolicy): flights of
+	// different policies are separate, and the load keeps its caller's.
+	ch := sf.DoChan(sfKey+apipolicy.Suffix(ctx), func() (any, error) {
 		loadCtx, cancel := context.WithTimeout(base, LoadTimeout)
 		defer cancel()
-		return fn(loadCtx)
+		return fn(apipolicy.Carry(loadCtx, ctx))
 	})
 	select {
 	case r := <-ch:

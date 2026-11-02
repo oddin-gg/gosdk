@@ -23,6 +23,8 @@ import (
 	"time"
 
 	"golang.org/x/sync/singleflight"
+
+	"github.com/oddin-gg/gosdk/internal/apipolicy"
 )
 
 // LocaleKey is the constraint for cache keys that carry localized state.
@@ -103,6 +105,10 @@ var errClearedDuringLoad = errors.New("cache entry cleared during load")
 // and completes unless ANOTHER Clear lands within the same load window —
 // sustained sub-LoadTimeout clear cadence on one key is pathological.
 const maxClearRetries = 3
+
+// maxAdmissionMerges bounds how many times one flight redoes its load on a
+// cache entry another flight admitted in the meantime.
+const maxAdmissionMerges = 3
 
 // clearTombstoneSweepLen is the map size beyond which Clear amortizes a
 // prune of expired tombstones.
@@ -187,6 +193,13 @@ func (c *EventCache[K, L, T]) sfKey(key K) string {
 	return fmt.Sprintf("%d|%v", c.purgeGen.Load(), key)
 }
 
+// sfKeyFor is the key a caller with ctx's call policy flies under: the
+// base key plus the policy suffix, so flights of different policies never
+// share a load (see apipolicy.Suffix).
+func (c *EventCache[K, L, T]) sfKeyFor(ctx context.Context, key K) string {
+	return c.sfKey(key) + apipolicy.Suffix(ctx)
+}
+
 // Get returns the cached entry for key, ensuring it is populated for every
 // locale in `locales`. If any locale is missing, the loader is invoked
 // (deduplicated across concurrent callers via singleflight) and merged into
@@ -248,9 +261,13 @@ func (c *EventCache[K, L, T]) get(ctx context.Context, key K, locales []L, clear
 	// The LoadTimeout ctx is created INSIDE the flight body — only the
 	// winning caller's closure runs, so building it out here would leak
 	// one live timer per coalesced waiter until the 60s timeout fired.
-	ch := c.sf.DoChan(c.sfKey(key), func() (any, error) {
+	ch := c.sf.DoChan(c.sfKeyFor(ctx, key), func() (any, error) {
 		loadCtx, loadCancel := context.WithTimeout(base, LoadTimeout)
 		defer loadCancel()
+		// The load is detached from this caller's cancellation, not from
+		// its call policy: a message-path caller's load must stay a
+		// single short attempt.
+		loadCtx = apipolicy.Carry(loadCtx, ctx)
 		// Snapshot the flight's start BEFORE reading the existing entry:
 		// the pre-Add check below discards this flight's merge if a
 		// Clear lands after this point (see clearedAt field doc).
@@ -275,39 +292,61 @@ func (c *EventCache[K, L, T]) get(ctx context.Context, key K, locales []L, clear
 			return zero, fmt.Errorf("no cached entry for key %v and no locales requested: %w", key, ErrEntryNotPopulated)
 		}
 
-		updated, lerr := c.loader(loadCtx, key, missing, existing, hadExisting)
-		if lerr != nil {
-			return zero, lerr
-		}
+		// A load that finds the cache changed under it (below) is redone
+		// on the new base; bounded so a storm of concurrent admissions
+		// cannot livelock a flight.
+		var updated T
+		for merges := 0; ; merges++ {
+			var lerr error
+			updated, lerr = c.loader(loadCtx, key, missing, existing, hadExisting)
+			if lerr != nil {
+				return zero, lerr
+			}
 
-		// Sanity check: every requested locale should now be present.
-		if !coversAll(updated.Locales(), locales) {
-			return zero, fmt.Errorf("loader for key %v returned without populating all requested locales: %w", key, ErrEntryNotPopulated)
-		}
+			// Sanity check: every requested locale should now be present.
+			if !coversAll(updated.Locales(), locales) {
+				return zero, fmt.Errorf("loader for key %v returned without populating all requested locales: %w", key, ErrEntryNotPopulated)
+			}
 
-		// Admit-or-discard, mutually exclusive with Clear: if a Clear
-		// landed after `started`, our merge base (and thus `updated`)
-		// may contain invalidated data — discard and let the caller
-		// retry from the now-empty entry.
-		//
-		// Close-gate: a flight whose fetch completed just before the
-		// owner's lifetime was cancelled could otherwise pause here,
-		// survive a successful client Close, then resume and mutate the
-		// cache — contradicting Close's quiescence guarantee. The
-		// re-check immediately before admission shrinks that window to
-		// a few instructions. (base is the lifetime ctx when the owner
-		// configured one; the WithoutCancel fallback never fires.)
-		c.clearMu.Lock()
-		cleared := c.clearedAt[key].After(started) || c.purgedAt.After(started) || base.Err() != nil
-		if !cleared {
+			// Admit-or-discard, mutually exclusive with Clear: if a Clear
+			// landed after `started`, our merge base (and thus `updated`)
+			// may contain invalidated data — discard and let the caller
+			// retry from the now-empty entry.
+			//
+			// Close-gate: a flight whose fetch completed just before the
+			// owner's lifetime was cancelled could otherwise pause here,
+			// survive a successful client Close, then resume and mutate the
+			// cache — contradicting Close's quiescence guarantee. The
+			// re-check immediately before admission shrinks that window to
+			// a few instructions. (base is the lifetime ctx when the owner
+			// configured one; the WithoutCancel fallback never fires.)
+			c.clearMu.Lock()
+			cleared := c.clearedAt[key].After(started) || c.purgedAt.After(started) || base.Err() != nil
+			if cleared {
+				c.clearMu.Unlock()
+				return zero, errClearedDuringLoad
+			}
+			// Flights of different call policies for the same key run
+			// concurrently, each merging into a clone of the entry it
+			// saw: the one admitted second would overwrite the locales
+			// the first loaded. If the cache no longer holds the entry
+			// this load was based on, merge on top of what it holds now
+			// (the other flight may already cover everything needed).
+			if cur, curOK := c.lru.Peek(key); merges < maxAdmissionMerges && (curOK != hadExisting || (curOK && any(cur) != any(existing))) {
+				c.clearMu.Unlock()
+				existing, hadExisting = cur, curOK
+				if hadExisting && coversAll(existing.Locales(), locales) {
+					return existing, nil
+				}
+				missing = missingLocales(existingLocales(existing, hadExisting), locales)
+				continue
+			}
 			c.lru.Add(key, updated)
 			if c.onAdmit != nil {
 				c.onAdmit(key, updated)
 			}
-		}
-		c.clearMu.Unlock()
-		if cleared {
-			return zero, errClearedDuringLoad
+			c.clearMu.Unlock()
+			break
 		}
 		return updated, nil
 	})
@@ -400,7 +439,9 @@ func (c *EventCache[K, L, T]) Clear(key K) {
 	// the generation after the unlock: post-Purge callers use a
 	// different key, so this only detaches the pre-clear flight it is
 	// meant to discard.
-	c.sf.Forget(flightKey)
+	for _, suffix := range apipolicy.Suffixes {
+		c.sf.Forget(flightKey + suffix)
+	}
 }
 
 // clearForgetHook is a test-only seam invoked in Clear after the flight

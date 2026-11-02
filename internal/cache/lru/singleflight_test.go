@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"golang.org/x/sync/singleflight"
+
+	"github.com/oddin-gg/gosdk/internal/apipolicy"
 )
 
 // TestLoadCoalesced_Basic exercises the happy path: fn runs once,
@@ -163,5 +165,48 @@ func TestLoadCoalesced_SecondCallerCtxBoundedWait(t *testing.T) {
 	}
 	if elapsed > 200*time.Millisecond {
 		t.Errorf("Get blocked for %v — caller ctx not honored independently", elapsed)
+	}
+}
+
+// TestLoadCoalesced_CarriesCallPolicyAndSeparatesFlights: the shared load is
+// detached from the caller's cancellation but keeps the caller's call
+// policy, and callers of different policies never share a flight.
+func TestLoadCoalesced_CarriesCallPolicyAndSeparatesFlights(t *testing.T) {
+	var sf singleflight.Group
+	var mu sync.Mutex
+	got := map[apipolicy.Mode]int{}
+	release := make(chan struct{})
+	fn := func(ctx context.Context) (int, error) {
+		mu.Lock()
+		got[apipolicy.ModeOf(ctx)]++
+		mu.Unlock()
+		<-release
+		return 1, nil
+	}
+	var wg sync.WaitGroup
+	for _, ctx := range []context.Context{t.Context(), apipolicy.With(t.Context(), apipolicy.Message)} {
+		wg.Go(func() {
+			if _, err := LoadCoalesced(ctx, t.Context(), &sf, "k", fn); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		mu.Lock()
+		n := got[apipolicy.Default] + got[apipolicy.Message]
+		mu.Unlock()
+		if n == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("loads started = %d, want 2 (a flight per policy)", n)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	close(release)
+	wg.Wait()
+	if got[apipolicy.Default] != 1 || got[apipolicy.Message] != 1 {
+		t.Fatalf("loader contexts carried %v, want one Default and one Message", got)
 	}
 }

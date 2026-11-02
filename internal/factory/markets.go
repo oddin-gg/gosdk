@@ -2,10 +2,17 @@ package factory
 
 import (
 	"context"
+	"errors"
+	"net/http"
 	"strings"
+	"sync"
 
+	"github.com/oddin-gg/gosdk/internal/api"
+	"github.com/oddin-gg/gosdk/internal/apipolicy"
+	"github.com/oddin-gg/gosdk/internal/cache"
 	feedXML "github.com/oddin-gg/gosdk/internal/feed/xml"
 	log "github.com/oddin-gg/gosdk/internal/log"
+	"github.com/oddin-gg/gosdk/internal/sdkerr"
 	"github.com/oddin-gg/gosdk/types"
 )
 
@@ -211,7 +218,11 @@ func resolveMarketName(ctx context.Context, md types.MarketData, locale types.Lo
 		return "", false
 	}
 	name, err := md.MarketName(ctx, locale)
-	if err != nil || name == nil {
+	if err != nil {
+		reportNameFailure(ctx, err)
+		return "", false
+	}
+	if name == nil {
 		return "", false
 	}
 	return *name, true
@@ -222,10 +233,63 @@ func resolveOutcomeName(ctx context.Context, md types.MarketData, outcomeID stri
 		return "", false
 	}
 	name, err := md.OutcomeName(ctx, outcomeID, locale)
-	if err != nil || name == nil {
+	if err != nil {
+		reportNameFailure(ctx, err)
+		return "", false
+	}
+	if name == nil {
 		return "", false
 	}
 	return *name, true
+}
+
+// nameFailureKey keys the sink a message build puts on its context to learn
+// that market or outcome name resolution failed against the API: the
+// resolvers swallow the error (a missing name must not fail the message), so
+// without it the failure would leave no trace and every following message of
+// the event would pay for the same failing lookup.
+type nameFailureKey struct{}
+
+type nameFailures struct {
+	mu  sync.Mutex
+	err error
+}
+
+func withNameFailures(ctx context.Context) (context.Context, *nameFailures) {
+	nf := &nameFailures{}
+	return context.WithValue(ctx, nameFailureKey{}, nf), nf
+}
+
+func (nf *nameFailures) first() error {
+	nf.mu.Lock()
+	defer nf.mu.Unlock()
+	return nf.err
+}
+
+// reportNameFailure records err in ctx's sink when it says something about
+// the API being unavailable: not a skipped request (the event is already in
+// the failure window), not the caller's cancellation or a closed client
+// (shutdown), and not an entity the API reports as absent.
+func reportNameFailure(ctx context.Context, err error) {
+	nf, ok := ctx.Value(nameFailureKey{}).(*nameFailures)
+	if !ok || err == nil {
+		return
+	}
+	if errors.Is(err, apipolicy.ErrSkipped) || errors.Is(err, sdkerr.ErrClosed) ||
+		errors.Is(err, context.Canceled) || errors.Is(err, cache.ErrItemNotFoundInCache) {
+		return
+	}
+	// The API answered with a client error (404 for an unknown market, say):
+	// it is up. 429 is the exception — the server is shedding load.
+	var apiErr *api.Error
+	if errors.As(err, &apiErr) && apiErr.Status >= 400 && apiErr.Status < 500 && apiErr.Status != http.StatusTooManyRequests {
+		return
+	}
+	nf.mu.Lock()
+	if nf.err == nil {
+		nf.err = err
+	}
+	nf.mu.Unlock()
 }
 
 // NewMarketFactory ...

@@ -7,6 +7,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/oddin-gg/gosdk/internal/apipolicy"
 )
 
 // localizedFoo is a minimal LocalizedEntry implementation for testing.
@@ -489,4 +491,214 @@ func equalStrSlice(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// TestEventCache_FlightsAreSeparatePerCallPolicy: a getter (default policy,
+// retries) and the message path (one short attempt) asking for the same key
+// must not share a load — a getter waiting through retries would hold the
+// message path behind it, and the message path's single-attempt failure
+// would become the getter's answer. Each load also carries the policy of
+// the caller it belongs to, although the load itself is detached from that
+// caller's cancellation.
+func TestEventCache_FlightsAreSeparatePerCallPolicy(t *testing.T) {
+	var mu sync.Mutex
+	var modes []apipolicy.Mode
+	release := make(chan struct{})
+	loader := func(ctx context.Context, key string, locales []string, existing *localizedFoo, has bool) (*localizedFoo, error) {
+		mu.Lock()
+		modes = append(modes, apipolicy.ModeOf(ctx))
+		mu.Unlock()
+		<-release
+		e := &localizedFoo{id: key, name: map[string]string{}}
+		for _, l := range locales {
+			e.name[l] = "x"
+		}
+		return e, nil
+	}
+	c := NewEventCache[string, string, *localizedFoo](Config{Lifetime: t.Context()}, loader)
+
+	var wg sync.WaitGroup
+	for _, ctx := range []context.Context{
+		t.Context(),
+		apipolicy.With(t.Context(), apipolicy.Message),
+		apipolicy.With(t.Context(), apipolicy.MessageSkip),
+	} {
+		wg.Go(func() {
+			if _, _, err := c.Get(ctx, "k", []string{"en"}); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	// All three loads must start while none has finished.
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		mu.Lock()
+		n := len(modes)
+		mu.Unlock()
+		if n == 3 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("loads started = %d, want 3 (one flight per policy)", n)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	close(release)
+	wg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	got := map[apipolicy.Mode]int{}
+	for _, m := range modes {
+		got[m]++
+	}
+	if got[apipolicy.Default] != 1 || got[apipolicy.Message] != 1 || got[apipolicy.MessageSkip] != 1 {
+		t.Fatalf("loader contexts carried modes %v, want one of each policy", got)
+	}
+}
+
+// Callers of the SAME policy still share one load.
+func TestEventCache_SamePolicyStillCoalesces(t *testing.T) {
+	var calls atomic.Int32
+	release := make(chan struct{})
+	loader := func(ctx context.Context, key string, locales []string, existing *localizedFoo, has bool) (*localizedFoo, error) {
+		calls.Add(1)
+		<-release
+		e := &localizedFoo{id: key, name: map[string]string{}}
+		for _, l := range locales {
+			e.name[l] = "x"
+		}
+		return e, nil
+	}
+	c := NewEventCache[string, string, *localizedFoo](Config{Lifetime: t.Context()}, loader)
+	ctx := apipolicy.With(t.Context(), apipolicy.Message)
+
+	var wg sync.WaitGroup
+	for range 5 {
+		wg.Go(func() {
+			if _, _, err := c.Get(ctx, "k", []string{"en"}); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	time.Sleep(100 * time.Millisecond)
+	close(release)
+	wg.Wait()
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("loader calls = %d, want 1 (single-flight stays)", got)
+	}
+}
+
+// Clear detaches future callers from a pre-clear in-flight load whatever
+// the call policy of that load was.
+func TestEventCache_ClearForgetsFlightsOfEveryPolicy(t *testing.T) {
+	var calls atomic.Int32
+	block := make(chan struct{})
+	loader := func(ctx context.Context, key string, locales []string, existing *localizedFoo, has bool) (*localizedFoo, error) {
+		if calls.Add(1) == 1 {
+			<-block // the first (pre-clear) load hangs
+		}
+		e := &localizedFoo{id: key, name: map[string]string{}}
+		for _, l := range locales {
+			e.name[l] = "x"
+		}
+		return e, nil
+	}
+	c := NewEventCache[string, string, *localizedFoo](Config{Lifetime: t.Context()}, loader)
+	ctx := apipolicy.With(t.Context(), apipolicy.Message)
+
+	first := make(chan struct{})
+	go func() {
+		defer close(first)
+		_, _, _ = c.Get(ctx, "k", []string{"en"})
+	}()
+	for calls.Load() < 1 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	c.Clear("k")
+
+	// A caller arriving after the Clear starts its own load instead of
+	// joining the pre-clear flight (which would return what the Clear
+	// just discarded).
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := c.Get(ctx, "k", []string{"en"})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("post-Clear caller joined the pre-Clear flight of its policy")
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("loader calls = %d, want 2", got)
+	}
+	close(block)
+	<-first
+}
+
+// cloningLoader merges into a CLONE of the existing entry, as the real
+// loaders do (copy-on-write), and blocks until release is closed.
+func cloningLoader(started chan<- struct{}, release <-chan struct{}) Loader[string, string, *localizedFoo] {
+	return func(ctx context.Context, key string, locales []string, existing *localizedFoo, has bool) (*localizedFoo, error) {
+		started <- struct{}{}
+		<-release
+		e := &localizedFoo{id: key, name: map[string]string{}}
+		if has {
+			existing.mu.Lock()
+			for l, v := range existing.name {
+				e.name[l] = v
+			}
+			existing.mu.Unlock()
+		}
+		for _, l := range locales {
+			e.name[l] = "x-" + l
+		}
+		return e, nil
+	}
+}
+
+// Flights of different call policies for the same key run concurrently and
+// each merges into a clone of what it saw; the one admitted second used to
+// overwrite the locales the first loaded, so a later lookup had to fetch
+// them again. The admission now merges on top of the current entry.
+func TestEventCache_ConcurrentFlightsOfDifferentPoliciesKeepEachOthersLocales(t *testing.T) {
+	started := make(chan struct{}, 8)
+	release := make(chan struct{})
+	c := NewEventCache[string, string, *localizedFoo](Config{Lifetime: t.Context()}, cloningLoader(started, release))
+
+	var wg sync.WaitGroup
+	get := func(ctx context.Context, locale string) {
+		wg.Go(func() {
+			if _, _, err := c.Get(ctx, "k", []string{locale}); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	get(t.Context(), "en")                                    // a getter
+	get(apipolicy.With(t.Context(), apipolicy.Message), "de") // the message path
+	for range 2 {
+		select {
+		case <-started:
+		case <-time.After(3 * time.Second):
+			t.Fatal("both flights must be loading concurrently")
+		}
+	}
+	close(release)
+	wg.Wait()
+
+	v, ok := c.Peek("k")
+	if !ok {
+		t.Fatal("entry missing")
+	}
+	got := map[string]bool{}
+	for _, l := range v.Locales() {
+		got[l] = true
+	}
+	if !got["en"] || !got["de"] {
+		t.Fatalf("cached locales = %v, want both en and de (one flight overwrote the other)", v.Locales())
+	}
 }

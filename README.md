@@ -220,6 +220,20 @@ need no market/outcome display names at all, or are prepared to compose
 them yourself. The SDK logs one Info line at `Client.New` when the option
 is off, so an unexpected `None` later has a findable cause.
 
+### When the REST API is down
+
+Building the event of a feed message may need the REST API (a match, its
+tournament, competitors and fixture that are not cached yet). That happens on
+the session goroutine, so it never waits for a failing API the way a public
+getter does: one attempt per request, no retries, and the whole build shares
+one 2 s budget (each request gets what is left of it); market and outcome
+name resolution during the build is covered by the same budget. When the
+build fails (a failed market or outcome name lookup counts too), the message
+is delivered at once with a nil event or nameless markets, and messages for
+the same event skip the API for up to 10 seconds; the first successful API
+response of any call ends that at once. The public entity reads
+(`Client.Match`, ...) keep their retries and are not affected.
+
 ### Delivery guarantees
 
 The SDK consumes with manual acknowledgement and acks a delivery when its

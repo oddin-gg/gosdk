@@ -116,6 +116,15 @@ func (e *EntityFactory) BuildMatch(ctx context.Context, id types.URN, locales []
 	return cache.BuildMatch(ctx, e.cacheManager.MatchCache, e, id, sportID, locales)
 }
 
+// APISuccessGeneration returns a counter that advances whenever the REST
+// API answers successfully, from any call; see cache.Manager.
+func (e *EntityFactory) APISuccessGeneration() uint64 {
+	if e == nil || e.cacheManager == nil {
+		return 0
+	}
+	return e.cacheManager.APISuccessGeneration()
+}
+
 // NewEntityFactory ...
 func NewEntityFactory(cacheManager *cache.Manager) *EntityFactory {
 	return &EntityFactory{
