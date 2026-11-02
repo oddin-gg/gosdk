@@ -691,3 +691,45 @@ func TestChannelConsumer_GoneIsOrderedAfterAnInFlightLoss(t *testing.T) {
 		t.Fatalf("ordering loss(%d) < gone(%d) violated", l, g)
 	}
 }
+
+// TestChannelConsumer_ChannelLost_CloseWaitsForInFlightAck: a broker
+// consumer cancel ends the delivery stream but leaves the AMQP channel
+// open, so the loss path's Close is a real RPC. It must not run while an
+// ack holds ackMu on another goroutine, must not hold up the reopen, and
+// must not set the consumer-wide chClosed (the reopened channel's acks
+// still have to run).
+func TestChannelConsumer_ChannelLost_CloseWaitsForInFlightAck(t *testing.T) {
+	shortDwell(t)
+	opener := newSequencedOpener(2, false)
+	c := NewChannelConsumer(opener, &factory.FeedMessageFactory{}, discardConsumerLogger(), "ex", "od:sport:", 0)
+	closeConsumer(t, c)
+
+	mi := types.LiveOnlyMessageInterest
+	if _, err := c.Open(context.Background(), []string{"k"}, &mi); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	c.ackMu.Lock() // stand in for an ack mid-d.Ack on the old channel
+	close(opener.chans[0])
+	opener.waitCalls(t, 2) // the reopen is not held up by the ack
+
+	time.Sleep(50 * time.Millisecond)
+	if got := opener.channels[0].closedAt.Load(); got != 0 {
+		t.Fatalf("lost channel closed (ordinal %d) while an ack was in flight", got)
+	}
+	c.ackMu.Unlock()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for opener.channels[0].closedAt.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("lost channel not closed after the in-flight ack completed")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	c.ackMu.Lock()
+	closed := c.chClosed
+	c.ackMu.Unlock()
+	if closed {
+		t.Fatal("the loss path set chClosed: the reopened channel's acks would be skipped")
+	}
+}

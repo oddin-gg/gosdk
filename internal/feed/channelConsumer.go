@@ -583,6 +583,27 @@ func (c *ChannelConsumer) closeGracefulChannel(gch amqpChannel) {
 	}()
 }
 
+// closeLostChannel closes a channel whose delivery stream ended while the
+// consumer keeps running (a broker cancel or a connection loss), serialized
+// against an in-flight delivery Ack on ackMu as closeGracefulChannel does.
+// It deliberately leaves chClosed alone: that flag is consumer-wide, and the
+// loop goes on to reopen a channel whose acks must still run. A late ack on
+// this channel then reaches a closed channel and fails, which is harmless:
+// its exclusive queue is gone with it. When an ack is mid-flight the close
+// is left to a goroutine, so a wedged ack cannot hold up the reopen.
+func (c *ChannelConsumer) closeLostChannel(ch amqpChannel) {
+	if c.ackMu.TryLock() {
+		_ = ch.Close()
+		c.ackMu.Unlock()
+		return
+	}
+	go func() {
+		c.ackMu.Lock()
+		_ = ch.Close()
+		c.ackMu.Unlock()
+	}()
+}
+
 // run is the single consumer goroutine. It consumes the initial channel
 // (created synchronously in Open), and on delivery-channel close
 // (connection drop) reopens a fresh channel — retrying transient errors —
@@ -660,13 +681,13 @@ func (c *ChannelConsumer) run(ctx context.Context, deliveries <-chan amqp.Delive
 		}
 		stopWatch()
 		watch = nil // stopped; the deferred stopWatch must not close it again
-		// A plain Close, deliberately outside the ackMu/chClosed
-		// discipline: the delivery channel closed, so amqp091 has already
-		// shut this channel down and Close sends nothing that could race
-		// an ack. chClosed is consumer-wide, so setting it here would make
-		// the acks of the channel reopened below skip d.Ack.
+		// Serialized against an in-flight ack like the other closes: the
+		// delivery channel also closes on a broker consumer cancel, which
+		// leaves the AMQP channel itself open, so Close is a real RPC that
+		// must not run while d.Ack runs on the same channel. Unlike them it
+		// does not set chClosed (see closeLostChannel).
 		if ch != nil {
-			_ = ch.Close()
+			c.closeLostChannel(ch)
 		}
 
 		// A channel that died within its dwell is being cancelled as fast
