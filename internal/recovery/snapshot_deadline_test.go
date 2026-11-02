@@ -303,10 +303,10 @@ func TestActor_SnapshotCompleteDeadline_CappedByMaxRecoveryExecution(t *testing.
 // hook reaches the producer's actor.
 func TestManager_OnRecoveryMessageReceived_RenewsTheActor(t *testing.T) {
 	m, _ := openedManagerWithActors(t, 1)
-	actorOf(t, m, 1).snapshotReqID.Store(77) // the actor's current snapshot request
+	actorOf(t, m, 1).publishSnapshotRequest(77) // the actor's current snapshot request
 	m.OnRecoveryMessageReceived(1, 77)
-	mark := actorOf(t, m, 1).lastRecoveryMsg.Load()
-	if mark == nil || mark.requestID != 77 || mark.at.IsZero() {
+	mark := actorOf(t, m, 1).recoveryMark.Load()
+	if mark == nil || mark.requestID != 77 || mark.seenAt().IsZero() {
 		t.Fatalf("actor mark = %+v, want request 77 stamped", mark)
 	}
 }
@@ -316,7 +316,7 @@ func TestManager_OnRecoveryMessageReceived_RenewsTheActor(t *testing.T) {
 // wins and an older one never replaces it.
 func TestActor_NoteRecoveryMessage_ConcurrentLatestWins(t *testing.T) {
 	a := newTestActor(t, newFakeManagerOps())
-	a.snapshotReqID.Store(5)
+	a.publishSnapshotRequest(5)
 	base := time.Unix(10_000, 0)
 
 	const writers, perWriter = 8, 200
@@ -326,7 +326,7 @@ func TestActor_NoteRecoveryMessage_ConcurrentLatestWins(t *testing.T) {
 			defer func() { done <- struct{}{} }()
 			for i := range perWriter {
 				a.noteRecoveryMessage(5, base.Add(time.Duration(w*perWriter+i)*time.Millisecond))
-				_ = a.lastRecoveryMsg.Load()
+				_ = a.recoveryMark.Load()
 			}
 		}()
 	}
@@ -334,13 +334,13 @@ func TestActor_NoteRecoveryMessage_ConcurrentLatestWins(t *testing.T) {
 		<-done
 	}
 	want := base.Add(time.Duration(writers*perWriter-1) * time.Millisecond)
-	if m := a.lastRecoveryMsg.Load(); m == nil || m.requestID != 5 || !m.at.Equal(want) {
+	if m := a.recoveryMark.Load(); m == nil || m.requestID != 5 || !m.seenAt().Equal(want) {
 		t.Fatalf("mark = %+v, want request 5 at %v", m, want)
 	}
 	// An older observation of the same request never replaces it.
 	a.noteRecoveryMessage(5, base)
-	if m := a.lastRecoveryMsg.Load(); !m.at.Equal(want) {
-		t.Fatalf("an older message replaced the mark: %v", m.at)
+	if m := a.recoveryMark.Load(); !m.seenAt().Equal(want) {
+		t.Fatalf("an older message replaced the mark: %v", m.seenAt())
 	}
 }
 
@@ -363,8 +363,8 @@ func TestActor_SnapshotCompleteDeadline_OtherRequestIDsDoNotEraseTheMark(t *test
 	if a.currentRecovery.recoveryID != id || hits.recover.Load() != 1 {
 		t.Fatalf("a live recovery was re-issued after another request's message: id=%d posts=%d", a.currentRecovery.recoveryID, hits.recover.Load())
 	}
-	if m := a.lastRecoveryMsg.Load(); m == nil || m.requestID != id {
-		t.Fatalf("mark = %+v, want the current request's", m)
+	if m := a.recoveryMark.Load(); m == nil || m.requestID != id || !m.seenAt().Equal(started.Add(time.Minute)) {
+		t.Fatalf("mark = %+v, want the current request's, stamped by its own message", m)
 	}
 }
 
@@ -391,6 +391,42 @@ func TestActor_SnapshotCompleteDeadline_LateMessageOfAbandonedRequestDoesNotEras
 	if a.currentRecovery.recoveryID != newID || hits.recover.Load() != 2 {
 		t.Fatalf("new recovery re-issued after a late old message: id=%d posts=%d", a.currentRecovery.recoveryID, hits.recover.Load())
 	}
+	waitDetachedDone(t, a, 3*time.Second)
+}
+
+// A caller of the abandoned request can pass the id check and pause while the
+// actor installs the replacement. Its write must land in the abandoned
+// request's own mark: it used to be able to overwrite the new request's mark,
+// which made a live recovery look silent.
+func TestActor_NoteRecoveryMessage_PausedCallerOfAnOldRequestCannotTouchTheNewMark(t *testing.T) {
+	srv, hits := fixtureSrv(t)
+	defer srv.Close()
+	a := newWiredActor(t, srv, newFakeManagerOps())
+
+	oldID := startRecovery(t, a, hits, time.Time{}, 1)
+	started := a.currentRecovery.recoveryStartedAt
+
+	// The caller has passed the id check; before it writes, the deadline
+	// re-issues the recovery and the new request's first message arrives.
+	var newMarkAt time.Time
+	a.noteGateHook = func() {
+		a.noteGateHook = nil
+		a.onTick(started.Add(6*time.Minute), false)
+		if a.currentRecovery.recoveryID == oldID {
+			t.Error("setup: no re-issue")
+			return
+		}
+		newMarkAt = a.currentRecovery.recoveryStartedAt.Add(time.Minute)
+		a.noteRecoveryMessage(a.currentRecovery.recoveryID, newMarkAt)
+	}
+	late := started.Add(30 * time.Minute)
+	a.noteRecoveryMessage(oldID, late) // paused in the hook, then writes
+
+	m := a.recoveryMark.Load()
+	if m == nil || m.requestID != a.currentRecovery.recoveryID || !m.seenAt().Equal(newMarkAt) {
+		t.Fatalf("new request's mark = %+v, want its own stamp %v untouched by the old caller", m, newMarkAt)
+	}
+	waitRecoverHits(t, hits, 2)
 	waitDetachedDone(t, a, 3*time.Second)
 }
 

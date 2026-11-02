@@ -117,19 +117,24 @@ type recoveryActor struct {
 	downReason             types.ProducerDownReason
 	statusReason           types.ProducerStatusReason
 
-	// lastRecoveryMsg is the latest message the session path saw carrying a
-	// recovery request id (noteRecoveryMessage). Written from the session
-	// goroutines, read by the tick: a thread-safe setter like the
-	// processing-start/end ones, so a full inbox cannot make a live
-	// recovery look silent. Renews the snapshot-complete deadline of the
-	// request it names.
-	lastRecoveryMsg atomic.Pointer[recoveryMsgMark]
-	// snapshotReqID is the request id of the CURRENT snapshot recovery
-	// (0 = none), published when a snapshot request is made or re-issued.
-	// Only messages of this id may set or replace lastRecoveryMsg: a message
-	// of an event recovery or of an abandoned request must not erase the
-	// current recovery's sign of life.
-	snapshotReqID atomic.Int64
+	// recoveryMark is the sign-of-life mark of the CURRENT snapshot
+	// recovery, replaced by a fresh one whenever a snapshot request is made
+	// or re-issued (nil before the first). The session goroutines stamp it
+	// when a message carrying the request id arrives (noteRecoveryMessage);
+	// the tick reads it: a thread-safe setter like the processing-start/end
+	// ones, so a full inbox cannot make a live recovery look silent. It
+	// renews the snapshot-complete deadline of the request it names.
+	//
+	// The mark is one object per request, and a caller loads the pointer
+	// once, checks the id, and writes into THAT object only. A caller of an
+	// abandoned request that passed the check and paused while the actor
+	// installed the replacement can then only touch the abandoned request's
+	// object, never the new request's mark. A message of an event recovery
+	// or of an abandoned request is ignored for the same reason.
+	recoveryMark atomic.Pointer[recoveryMsgMark]
+	// noteGateHook, when set, runs in noteRecoveryMessage between the id
+	// check and the write. Tests only: it models a caller that paused there.
+	noteGateHook func()
 
 	// statusSnapshot is the most recent ProducerStatus emitted by this
 	// actor. Read by external callers (Client.ProducerStatus) under the
@@ -137,11 +142,39 @@ type recoveryActor struct {
 	statusSnapshot atomic.Pointer[producerStatusImpl]
 }
 
-// recoveryMsgMark is one observation of a message carrying a recovery
-// request id.
+// recoveryMsgMark is the sign of life of one snapshot request: the latest
+// instant a message carrying its id was seen (unix nanoseconds, 0 = none).
 type recoveryMsgMark struct {
 	requestID int
-	at        time.Time
+	at        atomic.Int64
+}
+
+// note advances the mark to at; an older observation never replaces it.
+func (m *recoveryMsgMark) note(at time.Time) {
+	if at.IsZero() {
+		return
+	}
+	ns := at.UnixNano()
+	for {
+		cur := m.at.Load()
+		if ns <= cur || m.at.CompareAndSwap(cur, ns) {
+			return
+		}
+	}
+}
+
+// seenAt is the latest message instant (zero = none).
+func (m *recoveryMsgMark) seenAt() time.Time {
+	if ns := m.at.Load(); ns != 0 {
+		return time.Unix(0, ns)
+	}
+	return time.Time{}
+}
+
+// publishSnapshotRequest makes id the current snapshot request: a fresh mark
+// that only messages of this id may stamp.
+func (a *recoveryActor) publishSnapshotRequest(id int) {
+	a.recoveryMark.Store(&recoveryMsgMark{requestID: id})
 }
 
 // actorManagerOps is the narrow surface the actor needs back into the
@@ -869,18 +902,14 @@ func (a *recoveryActor) onTick(now time.Time, inactivityArmed bool) {
 // request never replaces a newer observation, and a message of any id other
 // than the current snapshot request's is ignored.
 func (a *recoveryActor) noteRecoveryMessage(requestID int, at time.Time) {
-	for {
-		if int64(requestID) != a.snapshotReqID.Load() {
-			return
-		}
-		cur := a.lastRecoveryMsg.Load()
-		if cur != nil && cur.requestID == requestID && !at.After(cur.at) {
-			return
-		}
-		if a.lastRecoveryMsg.CompareAndSwap(cur, &recoveryMsgMark{requestID: requestID, at: at}) {
-			return
-		}
+	m := a.recoveryMark.Load()
+	if m == nil || m.requestID != requestID {
+		return
 	}
+	if a.noteGateHook != nil {
+		a.noteGateHook()
+	}
+	m.note(at)
 }
 
 // snapshotCompleteDeadline is the effective deadline: the configured one,
@@ -902,8 +931,10 @@ func (a *recoveryActor) lastSignOfLife() time.Time {
 	if rec.renewedAt.After(last) {
 		last = rec.renewedAt
 	}
-	if m := a.lastRecoveryMsg.Load(); m != nil && m.requestID == rec.recoveryID && m.at.After(last) {
-		last = m.at
+	if m := a.recoveryMark.Load(); m != nil && m.requestID == rec.recoveryID {
+		if at := m.seenAt(); at.After(last) {
+			last = at
+		}
 	}
 	return last
 }
@@ -1616,7 +1647,7 @@ func (a *recoveryActor) issueSnapshotRecovery(now, recoverFrom time.Time) error 
 	}
 	apiCtx, cancelAPI := context.WithCancel(a.ctx)
 	a.currentRecovery = newRecoveryData(requestID, now)
-	a.snapshotReqID.Store(int64(requestID))
+	a.publishSnapshotRequest(requestID)
 	a.currentRecovery.recoverFrom = recoverFrom
 	a.currentRecovery.cancelAPI = cancelAPI
 	a.recoveryState = types.StartedRecoveryState
