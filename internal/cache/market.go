@@ -14,6 +14,7 @@ import (
 
 	"github.com/oddin-gg/gosdk/internal/api"
 	data "github.com/oddin-gg/gosdk/internal/api/xml"
+	"github.com/oddin-gg/gosdk/internal/apipolicy"
 	"github.com/oddin-gg/gosdk/internal/cache/lru"
 	log "github.com/oddin-gg/gosdk/internal/log"
 	"github.com/oddin-gg/gosdk/internal/utils"
@@ -653,7 +654,11 @@ func (m *MarketDescriptionCache) loadOne(ctx context.Context, marketID *int, var
 					descriptions, err = m.apiClient.FetchMarketDescriptions(loadCtx, loc)
 				}
 				if err != nil {
-					if !isDynamicVariant {
+					// A request that was never sent (the message path skips
+					// calls to an API that just failed) says nothing about
+					// the API: recording it would hold back the refresh of
+					// every public by-id read for the whole backoff window.
+					if !isDynamicVariant && !errors.Is(err, apipolicy.ErrSkipped) {
 						// Feed the warm-path retry backoff (see
 						// refreshFailedAt); cleared again on the next
 						// successful commit below.

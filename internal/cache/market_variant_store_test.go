@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/oddin-gg/gosdk/internal/apipolicy"
 	log "github.com/oddin-gg/gosdk/internal/log"
 	"github.com/oddin-gg/gosdk/types"
 )
@@ -477,6 +478,42 @@ func TestMarketDescriptionCache_FreshnessRefreshBackoff(t *testing.T) {
 	}
 	if got := srv.bulkHits.Load(); got != 3 {
 		t.Fatalf("bulk hits = %d, want 3 (backoff lapse must allow the retry)", got)
+	}
+}
+
+// TestMarketDescriptionCache_SkippedRefreshDoesNotHoldBackTheGetters: the
+// message path resolves market names under the skip policy after a failed
+// build, and on an expired catalog that attempt is refused before any
+// request goes out. It must not count as a failed fetch: recording it
+// suppressed the refresh of every public by-id read for the backoff window,
+// although the API had not been asked at all.
+func TestMarketDescriptionCache_SkippedRefreshDoesNotHoldBackTheGetters(t *testing.T) {
+	srv := newMarketSrv(t, bulkCatalogWithStaticVariants)
+	mc, ctx := newMarketCacheForTest(t, srv)
+	mc.catalogTTL = 50 * time.Millisecond
+	mc.refreshBackoff = time.Hour
+	locales := []types.Locale{types.EnLocale}
+
+	if _, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), locales); err != nil {
+		t.Fatalf("seed lookup: %v", err)
+	}
+	time.Sleep(80 * time.Millisecond) // the catalog mark lapses
+
+	// The message path's refresh attempt is skipped; the stale entry serves.
+	skipCtx := apipolicy.With(ctx, apipolicy.MessageSkip)
+	if _, err := mc.MarketDescriptionByID(skipCtx, 9, types.None[string](), locales); err != nil {
+		t.Fatalf("lookup under the skip policy: %v (the stale entry must be served)", err)
+	}
+	if got := srv.bulkHits.Load(); got != 1 {
+		t.Fatalf("bulk hits = %d, want 1: a skipped call must not reach the API", got)
+	}
+
+	// A public by-id read refreshes at once: nothing failed.
+	if _, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), locales); err != nil {
+		t.Fatalf("public lookup: %v", err)
+	}
+	if got := srv.bulkHits.Load(); got != 2 {
+		t.Fatalf("bulk hits = %d, want 2: the skipped attempt must not suppress the getters' refresh", got)
 	}
 }
 
