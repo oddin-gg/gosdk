@@ -121,6 +121,24 @@ type recoveryActor struct {
 	// too. Discharged only by a completed full recovery.
 	recoveryFloorFull bool
 
+	// delayDownRequestID is the snapshot request that was in flight when the
+	// producer went down for a processing delay (0 = none). A processing
+	// delay does not interrupt a recovery that is already running (its own
+	// replay would make that loop), but the broker may drop messages after
+	// that request went out, which its replay cannot contain: its completion
+	// issues ONE follow-up from the recovery floor before the producer is
+	// reported up. delayFollowUpIssued bounds that to one per chain (until
+	// the producer is reported up), so a delay during the follow-up cannot
+	// start another. Actor goroutine only.
+	delayDownRequestID  int
+	delayFollowUpIssued bool
+	// delayCursor is the last processed message at the moment that delay
+	// began: where processing stood when it fell behind. It is kept apart
+	// from the general recovery floor (which can be older for reasons that
+	// have nothing to do with this delay, e.g. an interrupted recovery
+	// restarted from its floor) and decides the follow-up.
+	delayCursor time.Time
+
 	// deferredRecovery is set when a snapshot recovery was due but a
 	// lost session in this producer's scope had not re-bound its queue
 	// yet; resumeDeferredRecovery starts it once the rebind is reported
@@ -1085,6 +1103,11 @@ func (a *recoveryActor) expireSnapshotCompleteDeadline(now time.Time) {
 		// the interruption requires before the producer is reported up.
 		a.recoveryState = types.InterruptedRecoveryState
 	}
+	// The need for a processing-delay follow-up belongs to the chain, not to
+	// the request id that was in flight when the delay began.
+	if a.delayDownRequestID == old.recoveryID {
+		a.delayDownRequestID = a.currentRecovery.recoveryID
+	}
 }
 
 // expireStuckEventRecoveries scans active event recoveries for
@@ -1338,7 +1361,19 @@ func (a *recoveryActor) systemAliveReceived(timestamp types.MessageTimestamp, su
 
 	switch {
 	case isBackFromInactivity:
-		err = a.producerUp(types.ReturnedFromInactivityProducerUpReason)
+		// The producer was flagged down because its processing fell
+		// behind; the broker may have dropped messages meanwhile (its queue
+		// limit drops the oldest unconsumed ones once a backlog gets long),
+		// and nothing else would ever refill them. It comes back up when a
+		// snapshot recovery from its last processed message completes, as
+		// after any other outage. The floor lowered when the producer went
+		// down (producerDown) makes the request reach back to where the
+		// processing stood then, not to where the backlog has drained to.
+		from, lpErr := a.lastProcessedMessageGenTimestamp()
+		if lpErr != nil || from.IsZero() {
+			from = recoveryTimestamp
+		}
+		err = a.startSnapshotRecovery(from)
 	case isInRecovery:
 		if a.isFlaggedDown() && !a.isPerformingRecovery() && a.downReason != types.ProcessingQueueDelayViolationProducerDownReason {
 			if err := a.startSnapshotRecovery(recoveryTimestamp); err != nil {
@@ -1460,6 +1495,9 @@ func (a *recoveryActor) producerDown(reason types.ProducerDownReason) error {
 	if a.isDisabled() {
 		return nil
 	}
+	// Read before the reason below is changed: is this the BEGINNING of a
+	// processing-delay down (as opposed to its re-evaluation on every tick)?
+	alreadyDelayDown := a.isFlaggedDown() && a.downReason == types.ProcessingQueueDelayViolationProducerDownReason
 
 	if a.isFlaggedDown() && a.downReason != reason {
 		name, err := a.producerName()
@@ -1472,6 +1510,47 @@ func (a *recoveryActor) producerDown(reason types.ProducerDownReason) error {
 		}
 		a.downReason = reason
 		a.failAllEventRecoveries(fmt.Errorf("recovery: producer %d down (reason=%d)", a.producerID, reason))
+	}
+
+	if reason == types.ProcessingQueueDelayViolationProducerDownReason {
+		// Messages the broker drops while processing lags are newer than
+		// what has been processed so far but older than what will be
+		// processed once the backlog drains: remember where processing
+		// stood when it fell behind, so the recovery on the way back
+		// reaches that far (the floor keeps the earliest such point).
+		if ts, err := a.lastProcessedMessageGenTimestamp(); err == nil {
+			if ts.IsZero() {
+				// Nothing has been processed in this run yet (a stale
+				// user-session alive can flag the delay first, e.g.
+				// during the first recovery after an open). The point to
+				// remember is then the one a recovery would start from:
+				// the resume point (timestampForRecovery: an explicit
+				// override, else the alive cursor, else the pre-connect
+				// recovery-from). Only when there is no cursor at all is
+				// the full-history floor used (recoveryFloorFull, the
+				// one an interrupted full-history recovery leaves): the
+				// first recovery is then full-history anyway and
+				// discharges it. A full floor with a resume point would
+				// linger, since a recovery from that point does not
+				// discharge it.
+				if rt, rtErr := a.timestampForRecovery(); rtErr == nil {
+					if rt.IsZero() {
+						a.recoveryFloorFull = true
+					} else {
+						a.lowerRecoveryFloor(rt)
+					}
+				}
+			} else {
+				a.lowerRecoveryFloor(ts)
+			}
+			if !alreadyDelayDown && a.recoveryState == types.StartedRecoveryState && a.currentRecovery != nil {
+				// The delay began while a snapshot request is in flight;
+				// it is not interrupted, so its completion must decide
+				// whether to follow up (snapshotRecoveryFinished).
+				a.delayDownRequestID = a.currentRecovery.recoveryID
+				a.delayCursor = ts
+			}
+		}
 	}
 
 	if a.recoveryState == types.StartedRecoveryState && reason != types.ProcessingQueueDelayViolationProducerDownReason {
@@ -1825,6 +1904,50 @@ func (a *recoveryActor) onSnapshotRecoveryAPICompleted(e evSnapshotRecoveryAPICo
 	}
 }
 
+// delayFollowUpNeeded reports whether the processing delay that began during
+// the recovery now completing calls for a follow-up: only when the delay
+// cursor (where processing stood when it fell behind) lies LATER than the
+// point the recovery started from, i.e. the delay is genuinely newer than the
+// recovery's start. A delay whose cursor is at or before the recovery's start
+// is the lag of the recovery's own replay or of the outage it repairs (the
+// cursor is stale because of the outage itself): that recovery already
+// reached back to it, and a second one would only double the recovery load.
+// A recovery that started from zero asked for the full history and covers
+// everything, so no delay can be older than it. No follow-up is requested
+// after it on purpose: a full-history first recovery is the one most likely
+// to trip the delay through its own replay, and a delay that persists after
+// it completes is caught by the return path (the producer comes back through
+// a recovery of its own).
+func (a *recoveryActor) delayFollowUpNeeded() bool {
+	if a.currentRecovery == nil || a.delayCursor.IsZero() {
+		return false
+	}
+	from := a.currentRecovery.recoverFrom
+	return !from.IsZero() && a.delayCursor.After(from)
+}
+
+// dischargeRecoveryFloor clears the recovery floor if the recovery now
+// completing reached back to it.
+//
+// The floor is discharged only by a recovery that reached back to it.
+// A zero cursor means "everything the producer has" and covers every
+// floor, full-history included; a timestamp cursor covers only a
+// timestamp floor at or after it. A recovery that started from a
+// later cursor (a loss whose reaction is still pending lowered the
+// floor after this one began) leaves the floor in place for the
+// recovery that follows.
+func (a *recoveryActor) dischargeRecoveryFloor() {
+	if a.currentRecovery != nil {
+		switch {
+		case a.currentRecovery.recoverFrom.IsZero():
+			a.recoveryFloor = time.Time{}
+			a.recoveryFloorFull = false
+		case !a.recoveryFloorFull && !a.recoveryFloor.IsZero() && !a.currentRecovery.recoverFrom.After(a.recoveryFloor):
+			a.recoveryFloor = time.Time{}
+		}
+	}
+}
+
 func (a *recoveryActor) snapshotRecoveryFinished(requestID int) error {
 	started := a.lastRecoveryStartedAt()
 	if started.IsZero() {
@@ -1854,6 +1977,31 @@ func (a *recoveryActor) snapshotRecoveryFinished(requestID int) error {
 		return a.startSnapshotRecovery(a.lastValidAliveGen)
 	}
 
+	// A processing delay began while this request was in flight and was
+	// deliberately not allowed to interrupt it: messages the broker dropped
+	// after the request went out are not in its replay. Request ONE
+	// follow-up, from where processing stood when the delay began (an older
+	// floor, if one is still standing after this recovery, pulls it further
+	// back in makeSnapshotRecovery); the producer stays down meanwhile.
+	//
+	// Never a second one in a chain, on purpose: the follow-up's own replay
+	// floods the same queue and can itself trip the processing-delay check,
+	// so allowing one per delay would let a recovery chase its own tail
+	// forever (and the recovery API rate-limits requests). One bounded
+	// follow-up is the trade between that loop and an unbounded one.
+	if a.delayDownRequestID == requestID && !a.delayFollowUpIssued && a.delayFollowUpNeeded() {
+		a.delayFollowUpIssued = true
+		a.delayDownRequestID = 0
+		from := a.delayCursor
+		a.delayCursor = time.Time{}
+		// This recovery has done its part for the floor: discharge it first,
+		// so the follow-up is not pulled back over ground it just covered.
+		a.dischargeRecoveryFloor()
+		a.logger.WithField("producer_id", a.producerID).WithField("request_id", requestID).
+			Info("recovery: processing fell behind while the snapshot recovery ran; requesting one follow-up from where it stood")
+		return a.startSnapshotRecovery(from)
+	}
+
 	var reason types.ProducerUpReason
 	if a.firstRecoveryCompleted {
 		reason = types.ReturnedFromInactivityProducerUpReason
@@ -1862,24 +2010,13 @@ func (a *recoveryActor) snapshotRecoveryFinished(requestID int) error {
 		a.firstRecoveryCompleted = true
 	}
 
-	// The floor is discharged only by a recovery that reached back to it.
-	// A zero cursor means "everything the producer has" and covers every
-	// floor, full-history included; a timestamp cursor covers only a
-	// timestamp floor at or after it. A recovery that started from a
-	// later cursor (a loss whose reaction is still pending lowered the
-	// floor after this one began) leaves the floor in place for the
-	// recovery that follows.
-	if a.currentRecovery != nil {
-		switch {
-		case a.currentRecovery.recoverFrom.IsZero():
-			a.recoveryFloor = time.Time{}
-			a.recoveryFloorFull = false
-		case !a.recoveryFloorFull && !a.recoveryFloor.IsZero() && !a.currentRecovery.recoverFrom.After(a.recoveryFloor):
-			a.recoveryFloor = time.Time{}
-		}
-	}
+	a.dischargeRecoveryFloor()
 	a.currentRecovery = newRecoveryData(requestID, started)
 	a.recoveryState = types.CompletedRecoveryState
+	// The chain ends here: the producer is reported up.
+	a.delayDownRequestID = 0
+	a.delayCursor = time.Time{}
+	a.delayFollowUpIssued = false
 	return a.producerUp(reason)
 }
 

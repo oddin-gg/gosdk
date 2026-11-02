@@ -274,6 +274,12 @@ if res.Status == types.RecoveryStatusCompleted { ... }
 The handle is reliable — even if the lossy `RecoveryEvents()` channel
 drops the event, `Done()` unblocks correctly.
 
+A producer flagged down because its processing fell behind
+(`ProcessingQueueDelayViolation`) comes back up through a snapshot recovery
+too, requested from where processing stood when it fell behind: the broker
+may have dropped messages while the backlog stood, and the recovery refills
+them.
+
 A producer's snapshot recovery has a **snapshot-complete deadline**
 (`WithSnapshotCompleteDeadline`, default 5 minutes): if neither a message
 carrying the recovery's request id nor its `snapshot_complete` arrives for
