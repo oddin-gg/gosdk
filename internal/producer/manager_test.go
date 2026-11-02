@@ -28,6 +28,7 @@ type minimalCfg struct {
 func (c *minimalCfg) AccessToken() *string                    { return &c.token }
 func (c *minimalCfg) DefaultLocale() types.Locale             { return types.EnLocale }
 func (c *minimalCfg) MaxInactivity() time.Duration            { return 20 * time.Second }
+func (c *minimalCfg) SnapshotCompleteDeadline() time.Duration { return 5 * time.Minute }
 func (c *minimalCfg) MaxRecoveryExecution() time.Duration     { return 360 * time.Minute }
 func (c *minimalCfg) MessagingPort() int                      { return 5672 }
 func (c *minimalCfg) SdkNodeID() *int                         { return nil }

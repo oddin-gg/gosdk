@@ -34,6 +34,7 @@ func (p *lossRecordingProcessor) OnFeedChannelLost(session uuid.UUID, mi types.M
 }
 func (*lossRecordingProcessor) OnFeedChannelRestored(uuid.UUID)                      {}
 func (*lossRecordingProcessor) OnFeedSessionGone(uuid.UUID)                          {}
+func (*lossRecordingProcessor) OnRecoveryMessageReceived(int, int)                   {}
 func (*lossRecordingProcessor) OnMessageProcessingStarted(uuid.UUID, int, time.Time) {}
 func (*lossRecordingProcessor) OnMessageProcessingEnded(uuid.UUID, int, time.Time)   {}
 func (*lossRecordingProcessor) OnAliveReceived(int, types.MessageTimestamp, bool, types.MessageInterest) {

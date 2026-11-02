@@ -15,32 +15,39 @@ import (
 // interface via configAdapter (config_adapter.go) — the legacy
 // configuration.go setter-chain type is gone.
 type Config struct {
-	accessToken           string
-	defaultLocale         types.Locale
-	preloadLocales        []types.Locale
-	maxInactivity         time.Duration
-	maxRecoveryExecution  time.Duration
-	initialSnapshotTime   time.Duration
-	httpClientTimeout     time.Duration
-	messagingPort         int
-	sdkNodeID             *int
-	selectedEnvironment   types.Environment
-	selectedRegion        types.Region
-	reportExtendedData    bool
-	forcedAPIHost         string
-	forcedMQHost          string
-	exchangeName          string
-	replayExchangeName    string
-	sportIDPrefix         string
-	exceptionStrategy     ExceptionStrategy
-	logger                *slog.Logger
-	apiCallLogging        APILogLevel
-	apiCallBodyLimit      int
-	amqpPrefetch          int
-	subscriptionBuffer    int
-	httpClient            *http.Client
-	shutdownTimeout       time.Duration
-	messageNameResolution bool
+	accessToken          string
+	defaultLocale        types.Locale
+	preloadLocales       []types.Locale
+	maxInactivity        time.Duration
+	maxRecoveryExecution time.Duration
+	// snapshotCompleteDeadline is how long a snapshot recovery may go
+	// without a message of its own (nor its snapshot_complete) before it
+	// is re-requested; snapshotDeadlineSet records that an option chose it,
+	// so NewConfig can lower the default to fit a small
+	// maxRecoveryExecution.
+	snapshotCompleteDeadline time.Duration
+	snapshotDeadlineSet      bool
+	initialSnapshotTime      time.Duration
+	httpClientTimeout        time.Duration
+	messagingPort            int
+	sdkNodeID                *int
+	selectedEnvironment      types.Environment
+	selectedRegion           types.Region
+	reportExtendedData       bool
+	forcedAPIHost            string
+	forcedMQHost             string
+	exchangeName             string
+	replayExchangeName       string
+	sportIDPrefix            string
+	exceptionStrategy        ExceptionStrategy
+	logger                   *slog.Logger
+	apiCallLogging           APILogLevel
+	apiCallBodyLimit         int
+	amqpPrefetch             int
+	subscriptionBuffer       int
+	httpClient               *http.Client
+	shutdownTimeout          time.Duration
+	messageNameResolution    bool
 }
 
 // redactedToken is what every Config formatting path shows in place of
@@ -55,10 +62,10 @@ const redactedToken = "[REDACTED]"
 // through this redacted rendering.
 func (c Config) String() string {
 	return fmt.Sprintf(
-		"gosdk.Config{accessToken:%s env:%v region:%q defaultLocale:%s preloadLocales:%v node:%v apiHost:%q mqHost:%q port:%d exchange:%q replayExchange:%q maxInactivity:%v maxRecoveryExecution:%v httpTimeout:%v shutdownTimeout:%v strategy:%v extendedData:%v apiLog:%v prefetch:%d subBuffer:%d messageNames:%t}",
+		"gosdk.Config{accessToken:%s env:%v region:%q defaultLocale:%s preloadLocales:%v node:%v apiHost:%q mqHost:%q port:%d exchange:%q replayExchange:%q maxInactivity:%v maxRecoveryExecution:%v snapshotCompleteDeadline:%v httpTimeout:%v shutdownTimeout:%v strategy:%v extendedData:%v apiLog:%v prefetch:%d subBuffer:%d messageNames:%t}",
 		redactedToken, c.selectedEnvironment, c.selectedRegion, c.defaultLocale, c.preloadLocales,
 		c.sdkNodeID, c.forcedAPIHost, c.forcedMQHost, c.messagingPort, c.exchangeName,
-		c.replayExchangeName, c.maxInactivity, c.maxRecoveryExecution, c.httpClientTimeout,
+		c.replayExchangeName, c.maxInactivity, c.maxRecoveryExecution, c.snapshotCompleteDeadline, c.httpClientTimeout,
 		c.shutdownTimeout, c.exceptionStrategy, c.reportExtendedData, c.apiCallLogging,
 		c.amqpPrefetch, c.subscriptionBuffer, c.messageNameResolution,
 	)
@@ -108,40 +115,51 @@ const (
 const (
 	defaultMaxInactivity        = 20 * time.Second
 	defaultMaxRecoveryExecution = 6 * time.Hour
-	defaultHTTPClientTimeoutPub = 30 * time.Second
-	defaultMessagingPort        = 5672
-	defaultExchangeName         = "oddinfeed"
-	defaultReplayExchangeName   = "oddinreplay"
-	defaultSportIDPrefix        = "od:sport:"
-	defaultAPIBodyLimitBytes    = 64 * 1024
-	defaultAMQPPrefetch         = 1000
-	defaultSubscriptionBuffer   = 256
-	defaultShutdownTimeout      = 5 * time.Second
+	// defaultSnapshotCompleteDeadline: a snapshot recovery normally ends
+	// within seconds; five minutes without a sign of life means the
+	// request or its snapshot_complete was lost.
+	defaultSnapshotCompleteDeadline = 5 * time.Minute
+	defaultHTTPClientTimeoutPub     = 30 * time.Second
+	defaultMessagingPort            = 5672
+	defaultExchangeName             = "oddinfeed"
+	defaultReplayExchangeName       = "oddinreplay"
+	defaultSportIDPrefix            = "od:sport:"
+	defaultAPIBodyLimitBytes        = 64 * 1024
+	defaultAMQPPrefetch             = 1000
+	defaultSubscriptionBuffer       = 256
+	defaultShutdownTimeout          = 5 * time.Second
 )
 
 // NewConfig constructs an SDK Config. The required arguments are the access
 // token and the target environment; everything else is supplied via options.
 func NewConfig(token string, env types.Environment, opts ...Option) Config {
 	cfg := Config{
-		accessToken:           token,
-		selectedEnvironment:   env,
-		defaultLocale:         types.EnLocale,
-		maxInactivity:         defaultMaxInactivity,
-		maxRecoveryExecution:  defaultMaxRecoveryExecution,
-		httpClientTimeout:     defaultHTTPClientTimeoutPub,
-		messagingPort:         defaultMessagingPort,
-		exchangeName:          defaultExchangeName,
-		replayExchangeName:    defaultReplayExchangeName,
-		sportIDPrefix:         defaultSportIDPrefix,
-		exceptionStrategy:     StrategyCatch,
-		apiCallBodyLimit:      defaultAPIBodyLimitBytes,
-		amqpPrefetch:          defaultAMQPPrefetch,
-		subscriptionBuffer:    defaultSubscriptionBuffer,
-		shutdownTimeout:       defaultShutdownTimeout,
-		messageNameResolution: true,
+		accessToken:              token,
+		selectedEnvironment:      env,
+		defaultLocale:            types.EnLocale,
+		maxInactivity:            defaultMaxInactivity,
+		maxRecoveryExecution:     defaultMaxRecoveryExecution,
+		snapshotCompleteDeadline: defaultSnapshotCompleteDeadline,
+		httpClientTimeout:        defaultHTTPClientTimeoutPub,
+		messagingPort:            defaultMessagingPort,
+		exchangeName:             defaultExchangeName,
+		replayExchangeName:       defaultReplayExchangeName,
+		sportIDPrefix:            defaultSportIDPrefix,
+		exceptionStrategy:        StrategyCatch,
+		apiCallBodyLimit:         defaultAPIBodyLimitBytes,
+		amqpPrefetch:             defaultAMQPPrefetch,
+		subscriptionBuffer:       defaultSubscriptionBuffer,
+		shutdownTimeout:          defaultShutdownTimeout,
+		messageNameResolution:    true,
 	}
 	for _, opt := range opts {
 		opt(&cfg)
+	}
+	// The default deadline must not exceed a smaller MaxRecoveryExecution
+	// the caller chose (validation rejects deadline > cap, and callers
+	// that only lowered the cap never asked for a deadline).
+	if !cfg.snapshotDeadlineSet && cfg.maxRecoveryExecution > 0 && cfg.snapshotCompleteDeadline > cfg.maxRecoveryExecution {
+		cfg.snapshotCompleteDeadline = cfg.maxRecoveryExecution
 	}
 	return cfg
 }
@@ -282,6 +300,24 @@ func WithMaxInactivity(d time.Duration) Option { return func(c *Config) { c.maxI
 // never asked to replay further back than a single recovery may run.
 func WithMaxRecoveryExecution(d time.Duration) Option {
 	return func(c *Config) { c.maxRecoveryExecution = d }
+}
+
+// WithSnapshotCompleteDeadline sets how long a snapshot recovery may go
+// without any sign of life before it is re-requested (default 5m). Every
+// message carrying the recovery's request id renews the deadline; when it
+// passes without one, the SDK logs once, re-issues the snapshot recovery
+// from the same recover-from point under a NEW request id, and keeps the
+// producer down meanwhile — a snapshot_complete of the abandoned request
+// is ignored. The existing request rate limiting still applies, and
+// WithMaxRecoveryExecution still caps the total time. d must be > 0 and
+// must not exceed WithMaxRecoveryExecution; when only
+// WithMaxRecoveryExecution is lowered below the default, the default
+// follows it. Enforcement is periodic (the recovery manager's ~10s tick).
+func WithSnapshotCompleteDeadline(d time.Duration) Option {
+	return func(c *Config) {
+		c.snapshotCompleteDeadline = d
+		c.snapshotDeadlineSet = true
+	}
 }
 
 // WithInitialSnapshotTime sets the duration to look back when issuing the
@@ -433,6 +469,10 @@ func (c Config) MaxInactivity() time.Duration { return c.maxInactivity }
 
 // MaxRecoveryExecution returns the configured recovery cap.
 func (c Config) MaxRecoveryExecution() time.Duration { return c.maxRecoveryExecution }
+
+// SnapshotCompleteDeadline returns the configured snapshot-complete
+// deadline.
+func (c Config) SnapshotCompleteDeadline() time.Duration { return c.snapshotCompleteDeadline }
 
 // ShutdownTimeout returns the configured graceful-shutdown cap.
 func (c Config) ShutdownTimeout() time.Duration { return c.shutdownTimeout }

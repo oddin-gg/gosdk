@@ -260,6 +260,13 @@ if res.Status == types.RecoveryStatusCompleted { ... }
 The handle is reliable — even if the lossy `RecoveryEvents()` channel
 drops the event, `Done()` unblocks correctly.
 
+A producer's snapshot recovery has a **snapshot-complete deadline**
+(`WithSnapshotCompleteDeadline`, default 5 minutes): if neither a message
+carrying the recovery's request id nor its `snapshot_complete` arrives for
+that long, the SDK logs once at WARN and requests the snapshot again from
+the same point under a new request id; the producer stays down meanwhile.
+`WithMaxRecoveryExecution` (default 6 h) still caps the whole attempt.
+
 ### Memory bound
 
 The per-entity caches are size-capped LRUs with a 12 h TTL; none of the

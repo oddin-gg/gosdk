@@ -21,6 +21,7 @@ type fakeSnapshotProcessor struct {
 	calls atomic.Int32
 }
 
+func (f *fakeSnapshotProcessor) OnRecoveryMessageReceived(int, int)                   {}
 func (f *fakeSnapshotProcessor) OnMessageProcessingStarted(uuid.UUID, int, time.Time) {}
 func (f *fakeSnapshotProcessor) OnMessageProcessingEnded(uuid.UUID, int, time.Time)   {}
 func (f *fakeSnapshotProcessor) OnAliveReceived(int, types.MessageTimestamp, bool, types.MessageInterest) {

@@ -117,10 +117,31 @@ type recoveryActor struct {
 	downReason             types.ProducerDownReason
 	statusReason           types.ProducerStatusReason
 
+	// lastRecoveryMsg is the latest message the session path saw carrying a
+	// recovery request id (noteRecoveryMessage). Written from the session
+	// goroutines, read by the tick: a thread-safe setter like the
+	// processing-start/end ones, so a full inbox cannot make a live
+	// recovery look silent. Renews the snapshot-complete deadline of the
+	// request it names.
+	lastRecoveryMsg atomic.Pointer[recoveryMsgMark]
+	// snapshotReqID is the request id of the CURRENT snapshot recovery
+	// (0 = none), published when a snapshot request is made or re-issued.
+	// Only messages of this id may set or replace lastRecoveryMsg: a message
+	// of an event recovery or of an abandoned request must not erase the
+	// current recovery's sign of life.
+	snapshotReqID atomic.Int64
+
 	// statusSnapshot is the most recent ProducerStatus emitted by this
 	// actor. Read by external callers (Client.ProducerStatus) under the
 	// atomic-pointer pattern — the actor goroutine is the only writer.
 	statusSnapshot atomic.Pointer[producerStatusImpl]
+}
+
+// recoveryMsgMark is one observation of a message carrying a recovery
+// request id.
+type recoveryMsgMark struct {
+	requestID int
+	at        time.Time
 }
 
 // actorManagerOps is the narrow surface the actor needs back into the
@@ -770,6 +791,12 @@ func (a *recoveryActor) onAlive(e evAlive) {
 }
 
 func (a *recoveryActor) onSnapshotComplete(e evSnapshotComplete) {
+	// Any snapshot_complete of the current request is a sign of life, even
+	// a partial one (one scope of a mixed producer): the snapshot-complete
+	// deadline restarts from it.
+	if a.currentRecovery != nil && a.currentRecovery.recoveryID == e.requestID {
+		a.currentRecovery.renewedAt = time.Now()
+	}
 	switch {
 	case a.isDisabled():
 		a.logger.WithField("producer_id", a.producerID).WithField("request_id", e.requestID).Info("recovery: snapshot complete for disabled producer")
@@ -801,6 +828,7 @@ func (a *recoveryActor) onTick(now time.Time, inactivityArmed bool) {
 	// enforcement lag is bounded by tickPeriod, not initialDelay+tickPeriod.
 	a.expireStuckEventRecoveries(now)
 	a.expireStuckSnapshotRecovery(now)
+	a.expireSnapshotCompleteDeadline(now)
 
 	// Suppress the producer-down inactivity check until the warm-up window
 	// has elapsed: with no alive baseline yet, aliveInterval would be huge
@@ -835,6 +863,132 @@ func (a *recoveryActor) onTick(now time.Time, inactivityArmed bool) {
 	}
 }
 
+// noteRecoveryMessage records that a message carrying requestID arrived
+// at `at`: the recovery is alive, so its snapshot-complete deadline is
+// measured from here. Safe from any goroutine; a message of an older
+// request never replaces a newer observation, and a message of any id other
+// than the current snapshot request's is ignored.
+func (a *recoveryActor) noteRecoveryMessage(requestID int, at time.Time) {
+	for {
+		if int64(requestID) != a.snapshotReqID.Load() {
+			return
+		}
+		cur := a.lastRecoveryMsg.Load()
+		if cur != nil && cur.requestID == requestID && !at.After(cur.at) {
+			return
+		}
+		if a.lastRecoveryMsg.CompareAndSwap(cur, &recoveryMsgMark{requestID: requestID, at: at}) {
+			return
+		}
+	}
+}
+
+// snapshotCompleteDeadline is the effective deadline: the configured one,
+// never above MaxRecoveryExecution (which the deadline subdivides).
+func (a *recoveryActor) snapshotCompleteDeadline() time.Duration {
+	d := a.cfg.SnapshotCompleteDeadline()
+	if maxAge := a.cfg.MaxRecoveryExecution(); maxAge > 0 && (d <= 0 || d > maxAge) {
+		d = maxAge
+	}
+	return d
+}
+
+// lastSignOfLife is the latest instant the current snapshot recovery
+// showed life: its request going out, a message carrying its request id,
+// or a (partial) snapshot_complete of it.
+func (a *recoveryActor) lastSignOfLife() time.Time {
+	rec := a.currentRecovery
+	last := rec.recoveryStartedAt
+	if rec.renewedAt.After(last) {
+		last = rec.renewedAt
+	}
+	if m := a.lastRecoveryMsg.Load(); m != nil && m.requestID == rec.recoveryID && m.at.After(last) {
+		last = m.at
+	}
+	return last
+}
+
+// reissueRecoverFrom is the recover-from point of a deadline re-issue: the
+// ORIGINAL resolved point, unchanged. It is not clamped to the lookback limit
+// again (the clamp is relative to now, so a re-issue minutes later would start
+// later than the request it replaces and skip the messages in between). The
+// only thing that may move it is a recovery floor lowered since the original
+// request (a channel loss, a processing delay), which pulls it back as it
+// would for any request, to at most the lookback limit.
+func (a *recoveryActor) reissueRecoverFrom(original time.Time) time.Time {
+	switch {
+	case a.recoveryFloorFull:
+		return time.Time{}
+	case original.IsZero() || a.recoveryFloor.IsZero() || !a.recoveryFloor.Before(original):
+		return original
+	}
+	// A floor lowered since the original request pulls the point back, to at
+	// most the lookback limit — and never later than the original point: the
+	// limit moves with the clock, so a floor older than it, clamped now, can
+	// land after a cursor that was resolved minutes ago.
+	from := a.recoveryFloor
+	if maxRecovery := a.cfg.MaxRecoveryExecution(); time.Since(from) > maxRecovery {
+		from = time.Now().Add(-maxRecovery)
+	}
+	if from.After(original) {
+		return original
+	}
+	return from
+}
+
+// expireSnapshotCompleteDeadline re-issues a snapshot recovery that has
+// shown no sign of life for the snapshot-complete deadline. Before this the
+// only way out of a lost request or a lost snapshot_complete was
+// MaxRecoveryExecution (6 h by default), with the producer down all along.
+//
+// The replacement is a NEW request (new id) from the same recover-from
+// point; the abandoned request's POST is cancelled and its late
+// snapshot_complete is ignored as unknown, so it cannot complete the new
+// recovery. The producer is not touched: it stays down, the recovery state
+// goes back to Started. The chain keeps its original start, so
+// MaxRecoveryExecution still caps the total. A re-issue held back by a
+// lost session that has not re-bound its queue yet waits for the next
+// tick; request rate limiting (HTTP 429 handling) is the API client's.
+func (a *recoveryActor) expireSnapshotCompleteDeadline(now time.Time) {
+	if !a.isPerformingRecovery() || a.currentRecovery == nil {
+		return
+	}
+	deadline := a.snapshotCompleteDeadline()
+	if deadline <= 0 {
+		return
+	}
+	last := a.lastSignOfLife()
+	if last.IsZero() || now.Sub(last) <= deadline {
+		return
+	}
+	if a.mgr.rebindPending(a.producerID) {
+		return
+	}
+	old := a.currentRecovery
+	wasInterrupted := a.recoveryState == types.InterruptedRecoveryState
+	a.logger.
+		WithField("producer_id", a.producerID).
+		WithField("request_id", old.recoveryID).
+		WithField("silent_for", now.Sub(last).Round(time.Second)).
+		WithField("deadline", deadline).
+		Warn("recovery: snapshot recovery did not complete within the deadline; requesting it again")
+	if err := a.issueSnapshotRecovery(time.Now(), a.reissueRecoverFrom(old.recoverFrom)); err != nil {
+		// Nothing was replaced (makeSnapshotRecovery fails before it
+		// touches state), so the next tick retries.
+		a.logger.WithError(err).WithField("producer_id", a.producerID).
+			Error("recovery: re-issue snapshot recovery after the deadline")
+		return
+	}
+	a.currentRecovery.chainStartedAt = old.chainStartedAt
+	if wasInterrupted {
+		// An interrupted recovery (its replay may have been lost, see
+		// interruptRecovery) stays interrupted: the replacement completes
+		// through the interrupted path, which issues the fresh recovery
+		// the interruption requires before the producer is reported up.
+		a.recoveryState = types.InterruptedRecoveryState
+	}
+}
+
 // expireStuckEventRecoveries scans active event recoveries for
 // requests whose start time is older than MaxRecoveryExecution and
 // transitions them to RecoveryStatusTimedOut. Pure-state in the actor
@@ -855,7 +1009,7 @@ func (a *recoveryActor) expireStuckSnapshotRecovery(now time.Time) {
 	if maxAge <= 0 {
 		return // defense-in-depth; New rejects non-positive values
 	}
-	started := a.lastRecoveryStartedAt()
+	started := a.currentRecovery.chainStartedAt
 	if started.IsZero() || now.Sub(started) <= maxAge {
 		return
 	}
@@ -1093,7 +1247,7 @@ func (a *recoveryActor) systemAliveReceived(timestamp types.MessageTimestamp, su
 				return err
 			}
 		}
-		recoveryTiming := now.Sub(a.lastRecoveryStartedAt())
+		recoveryTiming := now.Sub(a.recoveryChainStartedAt())
 		maxInterval := a.cfg.MaxRecoveryExecution()
 		if a.isPerformingRecovery() && recoveryTiming > maxInterval {
 			a.recoveryState = types.ErrorRecoveryState
@@ -1121,6 +1275,16 @@ func (a *recoveryActor) systemAliveReceived(timestamp types.MessageTimestamp, su
 		}
 	}
 	return nil
+}
+
+// recoveryChainStartedAt is when the current recovery first went out,
+// across re-issues after the snapshot-complete deadline (zero without a
+// current recovery).
+func (a *recoveryActor) recoveryChainStartedAt() time.Time {
+	if a.currentRecovery != nil {
+		return a.currentRecovery.chainStartedAt
+	}
+	return time.Time{}
 }
 
 func (a *recoveryActor) lastRecoveryStartedAt() time.Time {
@@ -1419,6 +1583,13 @@ func (a *recoveryActor) makeSnapshotRecovery(timestamp time.Time) error {
 		}
 	}
 
+	return a.issueSnapshotRecovery(now, recoverFrom)
+}
+
+// issueSnapshotRecovery sends a snapshot recovery request for exactly
+// recoverFrom (already resolved, floored and clamped by the caller): new
+// request id, state Started, detached POST.
+func (a *recoveryActor) issueSnapshotRecovery(now, recoverFrom time.Time) error {
 	requestID := a.mgr.nextRequestID()
 	producerName, err := a.producerName()
 	if err != nil {
@@ -1434,6 +1605,7 @@ func (a *recoveryActor) makeSnapshotRecovery(timestamp time.Time) error {
 	}
 	apiCtx, cancelAPI := context.WithCancel(a.ctx)
 	a.currentRecovery = newRecoveryData(requestID, now)
+	a.snapshotReqID.Store(int64(requestID))
 	a.currentRecovery.recoverFrom = recoverFrom
 	a.currentRecovery.cancelAPI = cancelAPI
 	a.recoveryState = types.StartedRecoveryState

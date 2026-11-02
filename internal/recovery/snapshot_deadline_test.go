@@ -1,0 +1,489 @@
+package recovery
+
+import (
+	"crypto/tls"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"testing"
+	"time"
+
+	"github.com/oddin-gg/gosdk/internal/api"
+	"github.com/oddin-gg/gosdk/internal/config"
+	"github.com/oddin-gg/gosdk/types"
+)
+
+// deadlineCfg is minimalCfg with a configurable recovery cap and
+// snapshot-complete deadline.
+type deadlineCfg struct {
+	*minimalCfg
+	maxRecovery time.Duration
+	deadline    time.Duration
+}
+
+func (c *deadlineCfg) MaxRecoveryExecution() time.Duration     { return c.maxRecovery }
+func (c *deadlineCfg) SnapshotCompleteDeadline() time.Duration { return c.deadline }
+
+func newWiredActorWithCfg(t *testing.T, srv *httptest.Server, fake *fakeManagerOps, producerID int, mk func(*minimalCfg) config.Config) *recoveryActor {
+	t.Helper()
+	pm := newProducerManagerFor(t, srv)
+	u, _ := url.Parse(srv.URL)
+	cfg := mk(&minimalCfg{apiURL: u.Host, token: "tok"})
+	apiClient := api.New(cfg)
+	apiClient.SetHTTPClient(&http.Client{
+		Transport: &rewriteTransport{
+			target: srv.URL,
+			base:   &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
+		},
+		Timeout: 2 * time.Second,
+	})
+	return newRecoveryActor(t.Context(), producerID, cfg, apiClient, pm, fake, newDiscardLogger(), 32, 0)
+}
+
+// startRecovery starts a snapshot recovery from `from` on the actor and
+// waits for its POST. Returns the request id.
+func startRecovery(t *testing.T, a *recoveryActor, hits *recoveryHits, from time.Time, wantPosts int32) int {
+	t.Helper()
+	if err := a.makeSnapshotRecovery(from); err != nil {
+		t.Fatal(err)
+	}
+	waitRecoverHits(t, hits, wantPosts)
+	return a.currentRecovery.recoveryID
+}
+
+// TestActor_SnapshotCompleteDeadline_ReissuesWithANewRequestID: a snapshot
+// recovery whose snapshot_complete never comes (or whose request was lost)
+// used to wait for MaxRecoveryExecution, 6 h by default, with the producer
+// down. After the snapshot-complete deadline the actor now re-requests it
+// from the same recover-from point under a NEW request id, the producer
+// stays down, and the abandoned request's late snapshot_complete does not
+// complete the new one.
+func TestActor_SnapshotCompleteDeadline_ReissuesWithANewRequestID(t *testing.T) {
+	fake := newFakeManagerOps()
+	srv, hits := fixtureSrv(t)
+	defer srv.Close()
+	a := newWiredActor(t, srv, fake)
+
+	from := time.Now().Add(-10 * time.Minute).Truncate(time.Millisecond)
+	oldID := startRecovery(t, a, hits, from, 1)
+	if got := hits.lastAfterMillis.Load(); got != from.UnixMilli() {
+		t.Fatalf("first request after=%d, want %d", got, from.UnixMilli())
+	}
+	started := a.currentRecovery.recoveryStartedAt
+
+	// Inside the deadline: nothing happens.
+	a.onTick(started.Add(4*time.Minute), false)
+	if a.currentRecovery.recoveryID != oldID || hits.recover.Load() != 1 {
+		t.Fatalf("re-issued before the deadline: id=%d posts=%d", a.currentRecovery.recoveryID, hits.recover.Load())
+	}
+
+	// Past the deadline: a new request, same recover-from point.
+	a.onTick(started.Add(6*time.Minute), false)
+	newID := a.currentRecovery.recoveryID
+	if newID == oldID {
+		t.Fatal("deadline passed but the recovery kept its request id")
+	}
+	if a.recoveryState != types.StartedRecoveryState {
+		t.Fatalf("state after re-issue = %v, want Started", a.recoveryState)
+	}
+	if !a.currentRecovery.recoverFrom.Equal(from) {
+		t.Fatalf("re-issued recoverFrom = %v, want %v", a.currentRecovery.recoverFrom, from)
+	}
+	waitRecoverHits(t, hits, 2)
+	if got := hits.lastAfterMillis.Load(); got != from.UnixMilli() {
+		t.Fatalf("second request after=%d, want the same %d", got, from.UnixMilli())
+	}
+	if !a.isFlaggedDown() {
+		t.Fatal("producer must stay down while the recovery is re-requested")
+	}
+
+	// The abandoned request's late snapshot_complete must not complete the
+	// new recovery.
+	a.onSnapshotComplete(evSnapshotComplete{requestID: oldID, messageInterest: types.LiveOnlyMessageInterest})
+	if a.recoveryState != types.StartedRecoveryState || a.currentRecovery.recoveryID != newID || !a.isFlaggedDown() {
+		t.Fatalf("late snapshot_complete of the old id changed state: state=%v id=%d down=%v",
+			a.recoveryState, a.currentRecovery.recoveryID, a.isFlaggedDown())
+	}
+	// The new one does.
+	a.onSnapshotComplete(evSnapshotComplete{requestID: newID, messageInterest: types.LiveOnlyMessageInterest})
+	if a.recoveryState != types.CompletedRecoveryState || a.isFlaggedDown() {
+		t.Fatalf("snapshot_complete of the new id: state=%v down=%v", a.recoveryState, a.isFlaggedDown())
+	}
+	waitDetachedDone(t, a, 3*time.Second)
+}
+
+// TestActor_SnapshotCompleteDeadline_RecoveryMessagesRenewIt: a recovery
+// that keeps replaying messages (they carry its request id) is alive and
+// must not be re-requested, however long it runs; the deadline counts from
+// the last sign of life.
+func TestActor_SnapshotCompleteDeadline_RecoveryMessagesRenewIt(t *testing.T) {
+	srv, hits := fixtureSrv(t)
+	defer srv.Close()
+	a := newWiredActor(t, srv, newFakeManagerOps())
+
+	id := startRecovery(t, a, hits, time.Time{}, 1)
+	started := a.currentRecovery.recoveryStartedAt
+
+	// A message of this recovery at +4m, another at +8m.
+	a.noteRecoveryMessage(id, started.Add(4*time.Minute))
+	a.onTick(started.Add(8*time.Minute), false) // 4m since the message: alive
+	a.noteRecoveryMessage(id, started.Add(8*time.Minute))
+	a.onTick(started.Add(12*time.Minute), false) // 4m since the message: alive
+	if a.currentRecovery.recoveryID != id || hits.recover.Load() != 1 {
+		t.Fatalf("a recovery that keeps replaying was re-requested: id=%d posts=%d", a.currentRecovery.recoveryID, hits.recover.Load())
+	}
+
+	// A message of ANOTHER request id renews nothing.
+	a.noteRecoveryMessage(id+100, started.Add(13*time.Minute))
+	a.onTick(started.Add(14*time.Minute), false) // 6m since the last message of this id
+	if a.currentRecovery.recoveryID == id {
+		t.Fatal("a message of a different request id renewed the deadline")
+	}
+	waitDetachedDone(t, a, 3*time.Second)
+}
+
+// A partial snapshot_complete (one scope of a mixed producer) is a sign of
+// life too.
+func TestActor_SnapshotCompleteDeadline_PartialSnapshotCompleteRenewsIt(t *testing.T) {
+	srv, hits := fixtureSrv(t)
+	defer srv.Close()
+	a := newWiredActorForProducer(t, srv, newFakeManagerOps(), 3) // live|prematch
+
+	id := startRecovery(t, a, hits, time.Time{}, 1)
+	// The request went out 10 minutes ago and nothing was heard since.
+	a.currentRecovery.recoveryStartedAt = time.Now().Add(-10 * time.Minute)
+
+	// The live scope reports in: the recovery is alive (and not complete,
+	// the prematch scope is missing).
+	a.onSnapshotComplete(evSnapshotComplete{requestID: id, messageInterest: types.LiveOnlyMessageInterest})
+	if a.recoveryState != types.StartedRecoveryState {
+		t.Fatalf("one scope of a mixed producer completed the recovery: %v", a.recoveryState)
+	}
+	a.onTick(time.Now().Add(time.Minute), false)
+	if a.currentRecovery.recoveryID != id {
+		t.Fatal("a partial snapshot_complete did not renew the deadline")
+	}
+	// Without further signs of life it is re-requested after a full deadline.
+	a.onTick(time.Now().Add(6*time.Minute), false)
+	if a.currentRecovery.recoveryID == id {
+		t.Fatal("not re-requested 6m after the last sign of life")
+	}
+	waitDetachedDone(t, a, 3*time.Second)
+}
+
+// MaxRecoveryExecution still caps the TOTAL: re-issues after the deadline
+// do not restart the clock of the whole attempt.
+func TestActor_SnapshotCompleteDeadline_MaxRecoveryExecutionStillCapsTheTotal(t *testing.T) {
+	srv, hits := fixtureSrv(t)
+	defer srv.Close()
+	a := newWiredActorWithCfg(t, srv, newFakeManagerOps(), 1, func(m *minimalCfg) config.Config {
+		return &deadlineCfg{minimalCfg: m, maxRecovery: 12 * time.Minute, deadline: 5 * time.Minute}
+	})
+
+	id1 := startRecovery(t, a, hits, time.Time{}, 1)
+	start := a.currentRecovery.recoveryStartedAt
+
+	// makeSnapshotRecovery stamps a re-issue with the real clock; move
+	// each one to the simulated tick time, as a real run would have it.
+	t1 := start.Add(5*time.Minute + time.Second)
+	a.onTick(t1, false) // re-issue #1
+	id2 := a.currentRecovery.recoveryID
+	a.currentRecovery.recoveryStartedAt = t1
+	t2 := start.Add(10*time.Minute + 2*time.Second)
+	a.onTick(t2, false) // re-issue #2
+	id3 := a.currentRecovery.recoveryID
+	a.currentRecovery.recoveryStartedAt = t2
+	if id1 == id2 || id2 == id3 {
+		t.Fatalf("expected two re-issues, ids %d %d %d", id1, id2, id3)
+	}
+	if !a.currentRecovery.chainStartedAt.Equal(start) {
+		t.Fatalf("chain start moved to %v, want the first request's %v", a.currentRecovery.chainStartedAt, start)
+	}
+
+	// 12m30s after the FIRST request, only 2m28s after the last one.
+	a.onTick(start.Add(12*time.Minute+30*time.Second), false)
+	if a.currentRecovery != nil || a.recoveryState != types.ErrorRecoveryState {
+		t.Fatalf("MaxRecoveryExecution did not cap the chain: state=%v current=%v", a.recoveryState, a.currentRecovery)
+	}
+	waitDetachedDone(t, a, 3*time.Second)
+}
+
+// A re-issue held back by a lost session that has not re-bound its queue
+// waits (the replay would go nowhere); it happens once the rebind lands.
+func TestActor_SnapshotCompleteDeadline_WaitsForPendingRebind(t *testing.T) {
+	fake := newFakeManagerOps()
+	srv, hits := fixtureSrv(t)
+	defer srv.Close()
+	a := newWiredActor(t, srv, fake)
+
+	id := startRecovery(t, a, hits, time.Time{}, 1)
+	start := a.currentRecovery.recoveryStartedAt
+
+	fake.pendingRebind.Store(true)
+	a.onTick(start.Add(6*time.Minute), false)
+	if a.currentRecovery.recoveryID != id {
+		t.Fatal("re-issued while a lost session in scope has no queue")
+	}
+	fake.pendingRebind.Store(false)
+	a.onTick(start.Add(7*time.Minute), false)
+	if a.currentRecovery.recoveryID == id {
+		t.Fatal("not re-issued after the rebind")
+	}
+	waitDetachedDone(t, a, 3*time.Second)
+}
+
+// The effective deadline never exceeds MaxRecoveryExecution, even for a
+// config that does not enforce the ordering (internal wiring).
+func TestActor_SnapshotCompleteDeadline_CappedByMaxRecoveryExecution(t *testing.T) {
+	srv, _ := fixtureSrv(t)
+	defer srv.Close()
+	a := newWiredActorWithCfg(t, srv, newFakeManagerOps(), 1, func(m *minimalCfg) config.Config {
+		return &deadlineCfg{minimalCfg: m, maxRecovery: time.Minute, deadline: time.Hour}
+	})
+	if got := a.snapshotCompleteDeadline(); got != time.Minute {
+		t.Fatalf("effective deadline = %v, want capped to 1m", got)
+	}
+}
+
+// TestManager_OnRecoveryMessageReceived_RenewsTheActor: the session-facing
+// hook reaches the producer's actor.
+func TestManager_OnRecoveryMessageReceived_RenewsTheActor(t *testing.T) {
+	m, _ := openedManagerWithActors(t, 1)
+	actorOf(t, m, 1).snapshotReqID.Store(77) // the actor's current snapshot request
+	m.OnRecoveryMessageReceived(1, 77)
+	mark := actorOf(t, m, 1).lastRecoveryMsg.Load()
+	if mark == nil || mark.requestID != 77 || mark.at.IsZero() {
+		t.Fatalf("actor mark = %+v, want request 77 stamped", mark)
+	}
+}
+
+// noteRecoveryMessage is called from every session goroutine while the
+// actor reads the mark on its tick: the latest observation of a request id
+// wins and an older one never replaces it.
+func TestActor_NoteRecoveryMessage_ConcurrentLatestWins(t *testing.T) {
+	a := newTestActor(t, newFakeManagerOps())
+	a.snapshotReqID.Store(5)
+	base := time.Unix(10_000, 0)
+
+	const writers, perWriter = 8, 200
+	done := make(chan struct{})
+	for w := range writers {
+		go func() {
+			defer func() { done <- struct{}{} }()
+			for i := range perWriter {
+				a.noteRecoveryMessage(5, base.Add(time.Duration(w*perWriter+i)*time.Millisecond))
+				_ = a.lastRecoveryMsg.Load()
+			}
+		}()
+	}
+	for range writers {
+		<-done
+	}
+	want := base.Add(time.Duration(writers*perWriter-1) * time.Millisecond)
+	if m := a.lastRecoveryMsg.Load(); m == nil || m.requestID != 5 || !m.at.Equal(want) {
+		t.Fatalf("mark = %+v, want request 5 at %v", m, want)
+	}
+	// An older observation of the same request never replaces it.
+	a.noteRecoveryMessage(5, base)
+	if m := a.lastRecoveryMsg.Load(); !m.at.Equal(want) {
+		t.Fatalf("an older message replaced the mark: %v", m.at)
+	}
+}
+
+// Only the CURRENT snapshot request's messages count. A message of another
+// request id (an event recovery's replay, say) arriving shortly after a
+// current-request message used to replace the single mark, so the next tick
+// found the current recovery silent and re-issued one that was still
+// delivering.
+func TestActor_SnapshotCompleteDeadline_OtherRequestIDsDoNotEraseTheMark(t *testing.T) {
+	srv, hits := fixtureSrv(t)
+	defer srv.Close()
+	a := newWiredActor(t, srv, newFakeManagerOps())
+
+	id := startRecovery(t, a, hits, time.Time{}, 1)
+	started := a.currentRecovery.recoveryStartedAt
+
+	a.noteRecoveryMessage(id, started.Add(time.Minute))
+	a.noteRecoveryMessage(id+100, started.Add(2*time.Minute))  // another request's message, later
+	a.onTick(started.Add(5*time.Minute+50*time.Second), false) // 4m50s since the current one's message
+	if a.currentRecovery.recoveryID != id || hits.recover.Load() != 1 {
+		t.Fatalf("a live recovery was re-issued after another request's message: id=%d posts=%d", a.currentRecovery.recoveryID, hits.recover.Load())
+	}
+	if m := a.lastRecoveryMsg.Load(); m == nil || m.requestID != id {
+		t.Fatalf("mark = %+v, want the current request's", m)
+	}
+}
+
+// After a re-issue a late message of the abandoned request must not erase
+// the new request's mark.
+func TestActor_SnapshotCompleteDeadline_LateMessageOfAbandonedRequestDoesNotEraseTheNewMark(t *testing.T) {
+	srv, hits := fixtureSrv(t)
+	defer srv.Close()
+	a := newWiredActor(t, srv, newFakeManagerOps())
+
+	oldID := startRecovery(t, a, hits, time.Time{}, 1)
+	started := a.currentRecovery.recoveryStartedAt
+	a.onTick(started.Add(6*time.Minute), false) // re-issue
+	newID := a.currentRecovery.recoveryID
+	if newID == oldID {
+		t.Fatal("setup: no re-issue")
+	}
+	waitRecoverHits(t, hits, 2)
+	s2 := a.currentRecovery.recoveryStartedAt
+
+	a.noteRecoveryMessage(newID, s2.Add(time.Minute))
+	a.noteRecoveryMessage(oldID, s2.Add(2*time.Minute)) // late message of the abandoned request
+	a.onTick(s2.Add(5*time.Minute+50*time.Second), false)
+	if a.currentRecovery.recoveryID != newID || hits.recover.Load() != 2 {
+		t.Fatalf("new recovery re-issued after a late old message: id=%d posts=%d", a.currentRecovery.recoveryID, hits.recover.Load())
+	}
+	waitDetachedDone(t, a, 3*time.Second)
+}
+
+// waitUntilOlderThan blocks until ts is more than d in the past by the real
+// clock. The lookback limit moves with the clock, so these tests have to let
+// real time pass; waiting for the condition itself (instead of sleeping a
+// fixed time against a margin) keeps them independent of scheduling speed.
+func waitUntilOlderThan(t *testing.T, ts time.Time, d time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(d + 10*time.Second)
+	for time.Since(ts) <= d {
+		if time.Now().After(deadline) {
+			t.Fatal("clock did not advance")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// lookbackActor is a wired actor with a 2 s lookback limit and a 1 s
+// snapshot-complete deadline, plus a first recovery started from a cursor
+// inside the limit. The expectations below derive from what that first
+// request actually RESOLVED, not from what was asked for.
+func lookbackActor(t *testing.T) (*recoveryActor, *recoveryHits, time.Time, time.Time, int) {
+	t.Helper()
+	srv, hits := fixtureSrv(t)
+	t.Cleanup(srv.Close)
+	a := newWiredActorWithCfg(t, srv, newFakeManagerOps(), 1, func(m *minimalCfg) config.Config {
+		return &deadlineCfg{minimalCfg: m, maxRecovery: 2 * time.Second, deadline: time.Second}
+	})
+	asked := time.Now().Add(-time.Second).Truncate(time.Millisecond)
+	id := startRecovery(t, a, hits, asked, 1)
+	resolved := a.currentRecovery.recoverFrom
+	if resolved.IsZero() || resolved.After(asked.Add(time.Second)) {
+		t.Fatalf("setup: resolved recoverFrom = %v", resolved)
+	}
+	return a, hits, resolved, a.currentRecovery.recoveryStartedAt, id
+}
+
+// The re-issue keeps the ORIGINAL resolved recover-from point. Clamping it
+// again to now-MaxRecoveryExecution (a moving limit) would start the
+// replacement later than the request it replaces and skip the messages in
+// between, whose replay the abandoned request can no longer deliver.
+func TestActor_SnapshotCompleteDeadline_ReissueKeepsTheOriginalRecoverFromAtTheLookbackLimit(t *testing.T) {
+	a, hits, resolved, started, id := lookbackActor(t)
+
+	// Real time moves on until a fresh clamp WOULD move the same cursor.
+	waitUntilOlderThan(t, resolved, 2*time.Second)
+	a.onTick(started.Add(1500*time.Millisecond), false)
+	if a.currentRecovery.recoveryID == id {
+		t.Fatal("setup: no re-issue")
+	}
+	waitRecoverHits(t, hits, 2)
+	if got := a.currentRecovery.recoverFrom; !got.Equal(resolved) {
+		t.Fatalf("re-issued recoverFrom = %v, want the original %v (moved forward by %v)", got, resolved, got.Sub(resolved))
+	}
+	if got := hits.lastAfterMillis.Load(); got != resolved.UnixMilli() {
+		t.Fatalf("re-issued request after=%d, want %d", got, resolved.UnixMilli())
+	}
+	waitDetachedDone(t, a, 3*time.Second)
+}
+
+// A floor lowered since the original request, and OLDER than the lookback
+// limit, is clamped against the clock when the re-issue is built; by then
+// that clamped point can lie after the original cursor. The re-issue must
+// never start later than the original.
+func TestActor_SnapshotCompleteDeadline_ReissueWithAFloorBeyondTheLimitNeverStartsLaterThanTheOriginal(t *testing.T) {
+	a, hits, resolved, started, id := lookbackActor(t)
+
+	a.lowerRecoveryFloor(resolved.Add(-time.Hour)) // far beyond the limit
+	waitUntilOlderThan(t, resolved, 2*time.Second)
+	a.onTick(started.Add(1500*time.Millisecond), false)
+	if a.currentRecovery.recoveryID == id {
+		t.Fatal("setup: no re-issue")
+	}
+	waitRecoverHits(t, hits, 2)
+	// The floor, clamped against the clock now, lies after the original
+	// cursor: the original is what the re-issue starts from.
+	if got := a.currentRecovery.recoverFrom; !got.Equal(resolved) {
+		t.Fatalf("re-issued recoverFrom = %v, want the original %v (later by %v)", got, resolved, got.Sub(resolved))
+	}
+	if got := hits.lastAfterMillis.Load(); got != resolved.UnixMilli() {
+		t.Fatalf("re-issued request after=%d, want %d", got, resolved.UnixMilli())
+	}
+	waitDetachedDone(t, a, 3*time.Second)
+}
+
+// A floor lowered since the original request still pulls the re-issue back.
+func TestActor_SnapshotCompleteDeadline_ReissueHonoursALowerFloor(t *testing.T) {
+	srv, hits := fixtureSrv(t)
+	defer srv.Close()
+	a := newWiredActor(t, srv, newFakeManagerOps())
+
+	from := time.Now().Add(-10 * time.Minute).Truncate(time.Millisecond)
+	startRecovery(t, a, hits, from, 1)
+	floor := from.Add(-5 * time.Minute)
+	a.lowerRecoveryFloor(floor)
+	a.onTick(a.currentRecovery.recoveryStartedAt.Add(6*time.Minute), false)
+	waitRecoverHits(t, hits, 2)
+	if got := hits.lastAfterMillis.Load(); got != floor.UnixMilli() {
+		t.Fatalf("re-issue after=%d, want the lowered floor %d", got, floor.UnixMilli())
+	}
+	waitDetachedDone(t, a, 3*time.Second)
+}
+
+// A deadline re-issue of an INTERRUPTED recovery (a subscribed=false alive
+// marked it: its replay may be lost) keeps it interrupted: the replacement
+// completes through the interrupted path, which issues the fresh recovery the
+// interruption requires before the producer is reported up. Resetting it to
+// Started would report the producer up on a replay that may be missing its
+// head.
+func TestActor_SnapshotCompleteDeadline_ReissueKeepsAnInterruptedRecoveryInterrupted(t *testing.T) {
+	fake := newFakeManagerOps()
+	srv, hits := fixtureSrv(t)
+	defer srv.Close()
+	a := newWiredActor(t, srv, fake)
+
+	r1 := startRecovery(t, a, hits, time.Time{}, 1)
+	if err := a.systemAliveReceived(aliveAt(time.Now()), false); err != nil {
+		t.Fatal(err)
+	}
+	if a.recoveryState != types.InterruptedRecoveryState {
+		t.Fatalf("setup: state = %v, want Interrupted", a.recoveryState)
+	}
+	started := a.currentRecovery.recoveryStartedAt
+
+	a.onTick(started.Add(6*time.Minute), false)
+	r2 := a.currentRecovery.recoveryID
+	if r2 == r1 {
+		t.Fatal("setup: no re-issue")
+	}
+	if a.recoveryState != types.InterruptedRecoveryState {
+		t.Fatalf("state after the re-issue = %v, want Interrupted kept", a.recoveryState)
+	}
+	waitRecoverHits(t, hits, 2)
+
+	// Its completion takes the interrupted path: a fresh recovery, producer
+	// still down.
+	eventsBefore := len(producerStatusEvents(fake))
+	if err := a.snapshotRecoveryFinished(r2); err != nil {
+		t.Fatal(err)
+	}
+	waitRecoverHits(t, hits, 3)
+	if r3 := a.currentRecovery.recoveryID; r3 == r2 || a.recoveryState != types.StartedRecoveryState {
+		t.Fatalf("after R2: id=%d state=%v, want a fresh Started recovery", r3, a.recoveryState)
+	}
+	if !a.isFlaggedDown() || len(producerStatusEvents(fake)) != eventsBefore {
+		t.Fatal("producer reported up before the fresh recovery completed")
+	}
+	waitDetachedDone(t, a, 3*time.Second)
+}

@@ -701,12 +701,16 @@ func validateConfigBounds(cfg *Config) error {
 	for _, c := range []durCheck{
 		{"WithMaxInactivity", cfg.maxInactivity},
 		{"WithMaxRecoveryExecution", cfg.maxRecoveryExecution},
+		{"WithSnapshotCompleteDeadline", cfg.snapshotCompleteDeadline},
 		{"WithHTTPClientTimeout", cfg.httpClientTimeout},
 		{"WithShutdownTimeout", cfg.shutdownTimeout},
 	} {
 		if c.d <= 0 {
 			return fmt.Errorf("%w: %s must be > 0, got %v", ErrInvalidConfig, c.name, c.d)
 		}
+	}
+	if cfg.snapshotCompleteDeadline > cfg.maxRecoveryExecution {
+		return fmt.Errorf("%w: WithSnapshotCompleteDeadline (%v) must not exceed WithMaxRecoveryExecution (%v)", ErrInvalidConfig, cfg.snapshotCompleteDeadline, cfg.maxRecoveryExecution)
 	}
 	if cfg.initialSnapshotTime < 0 {
 		return fmt.Errorf("%w: WithInitialSnapshotTime must be >= 0, got %v", ErrInvalidConfig, cfg.initialSnapshotTime)

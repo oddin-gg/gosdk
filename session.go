@@ -123,6 +123,11 @@ type recoveryMessageProcessor interface {
 	// for good; it needs no queue and must not hold recoveries back.
 	OnFeedSessionGone(session uuid.UUID)
 	OnMessageProcessingStarted(sessionID uuid.UUID, producerID int, timestamp time.Time)
+	// OnRecoveryMessageReceived reports a message that carries a recovery
+	// request id (the replay of a snapshot or event recovery): the
+	// recovery it belongs to is alive, which renews its snapshot-complete
+	// deadline. Direct, never blocks.
+	OnRecoveryMessageReceived(producerID int, requestID int)
 	OnMessageProcessingEnded(sessionID uuid.UUID, producerID int, timestamp time.Time)
 	OnAliveReceived(producerID int, timestamp types.MessageTimestamp, isSubscribed bool, messageInterest types.MessageInterest)
 	// OnSnapshotCompleteReceived admits a snapshot-complete to the
@@ -408,6 +413,9 @@ func (o *oddsFeedSessionImpl) processMessage(ctx context.Context, env feed.Queue
 func (o *oddsFeedSessionImpl) processFeedMessage(ctx context.Context, feedMessage *types.FeedMessage, messageInterest types.MessageInterest, ack func(), emitRaw bool, rawMsg *types.RawFeedMessage) {
 	producerID := feedMessage.Message.Product()
 	o.recoveryMessageProcessor.OnMessageProcessingStarted(o.sessionID, producerID, time.Now())
+	if requestID, ok := recoveryRequestID(feedMessage.Message); ok {
+		o.recoveryMessageProcessor.OnRecoveryMessageReceived(producerID, requestID)
+	}
 
 	// Pair every OnMessageProcessingStarted with exactly one
 	// OnMessageProcessingEnded. Pre-v2.24 the BuildMessage failure
@@ -548,6 +556,32 @@ func (o *oddsFeedSessionImpl) processFeedMessage(ctx context.Context, feedMessag
 	if admitted {
 		endProcessing(feedMessage.Timestamp.Created)
 	}
+}
+
+// recoveryRequestID returns the recovery request id a feed message
+// carries: only the replay of a recovery sets it (live messages have none).
+func recoveryRequestID(msg types.BasicMessage) (int, bool) {
+	var id *int
+	switch m := msg.(type) {
+	case *feedXML.OddsChange:
+		id = m.RequestID
+	case *feedXML.BetSettlement:
+		id = m.RequestID
+	case *feedXML.FixtureChange:
+		id = m.RequestID
+	case *feedXML.BetStop:
+		id = m.RequestID
+	case *feedXML.BetCancel:
+		id = m.RequestID
+	case *feedXML.RollbackBetSettlement:
+		id = m.RequestID
+	case *feedXML.RollbackBetCancel:
+		id = m.RequestID
+	}
+	if id == nil {
+		return 0, false
+	}
+	return *id, true
 }
 
 // send pushes a sessionEnvelope to the output channel under ctx-bounded

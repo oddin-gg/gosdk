@@ -627,6 +627,18 @@ func (m *Manager) OnMessageProcessingStarted(sessionID uuid.UUID, producerID int
 	}
 }
 
+// OnRecoveryMessageReceived records that a feed message carrying a
+// recovery request id arrived for the producer: the recovery is alive, so
+// its snapshot-complete deadline restarts. Direct thread-safe call, no
+// inbox (a full inbox must not make a live recovery look silent); a no-op
+// when the manager is closed. Called for every message with a request id,
+// before the message is built, so a slow build cannot delay the signal.
+func (m *Manager) OnRecoveryMessageReceived(producerID int, requestID int) {
+	if a := m.findOrSpawn(producerID); a != nil {
+		a.noteRecoveryMessage(requestID, time.Now())
+	}
+}
+
 // OnMessageProcessingEnded warns on >1s processing and dispatches the
 // gen timestamp to the actor.
 func (m *Manager) OnMessageProcessingEnded(sessionID uuid.UUID, producerID int, timestamp time.Time) {

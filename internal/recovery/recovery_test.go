@@ -313,9 +313,10 @@ type fakeCfgWithRecoveryWindow struct {
 	mins int
 }
 
-func (f *fakeCfgWithRecoveryWindow) AccessToken() *string         { s := ""; return &s }
-func (f *fakeCfgWithRecoveryWindow) DefaultLocale() types.Locale  { return types.EnLocale }
-func (f *fakeCfgWithRecoveryWindow) MaxInactivity() time.Duration { return 20 * time.Second }
+func (f *fakeCfgWithRecoveryWindow) AccessToken() *string                    { s := ""; return &s }
+func (f *fakeCfgWithRecoveryWindow) DefaultLocale() types.Locale             { return types.EnLocale }
+func (f *fakeCfgWithRecoveryWindow) MaxInactivity() time.Duration            { return 20 * time.Second }
+func (f *fakeCfgWithRecoveryWindow) SnapshotCompleteDeadline() time.Duration { return 5 * time.Minute }
 func (f *fakeCfgWithRecoveryWindow) MaxRecoveryExecution() time.Duration {
 	return time.Duration(f.mins) * time.Minute
 }
