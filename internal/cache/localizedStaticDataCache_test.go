@@ -298,3 +298,43 @@ func TestLocalizedStaticDataCache_EmptyRefreshKeepsCachedDescriptions(t *testing
 		t.Fatal("id 2 was removed upstream by a non-empty refresh and must be pruned")
 	}
 }
+
+// TestLocalizedStaticDataCache_RowsWithoutDescriptionsKeepCachedDescriptions
+// covers the other shape of an empty refresh: the answer has rows, but none
+// of them carries an optional description, so the fresh description set is
+// empty. Such an answer has no more removal authority than one with zero
+// rows, so the cached descriptions must stay available.
+func TestLocalizedStaticDataCache_RowsWithoutDescriptionsKeepCachedDescriptions(t *testing.T) {
+	var answer atomic.Pointer[[]types.StaticData]
+	set := func(rows ...types.StaticData) { answer.Store(&rows) }
+	set(
+		types.StaticData{ID: 1, Description: types.Some("one")},
+		types.StaticData{ID: 2, Description: types.Some("two")},
+	)
+	c := refreshTestCache(func(context.Context, types.Locale) ([]types.StaticData, error) {
+		return *answer.Load(), nil
+	})
+	defer c.Close()
+	var logged bytes.Buffer
+	c.logger = log.New(slog.New(slog.NewTextHandler(&logged, nil)))
+
+	locales := []types.Locale{types.EnLocale}
+	if _, err := c.LocalizedItem(t.Context(), 1, locales); err != nil {
+		t.Fatalf("initial load: %v", err)
+	}
+
+	set(types.StaticData{ID: 1}, types.StaticData{ID: 2}) // rows, but no descriptions
+	c.timerTick(t.Context())
+	for id, want := range map[int]string{1: "one", 2: "two"} {
+		item, err := c.LocalizedItem(t.Context(), id, locales)
+		if err != nil {
+			t.Fatalf("id %d after a refresh without descriptions: %v", id, err)
+		}
+		if got, _ := item.LocalizedDescription(types.EnLocale).Get(); got != want {
+			t.Fatalf("id %d description = %q after a refresh without descriptions, want %q", id, got, want)
+		}
+	}
+	if !strings.Contains(logged.String(), "empty static data response") {
+		t.Fatalf("the skipped refresh must be logged, got %q", logged.String())
+	}
+}
