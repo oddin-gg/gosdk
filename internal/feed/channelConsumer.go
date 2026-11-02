@@ -1320,7 +1320,9 @@ func (c *ChannelConsumer) parseRoute(route string) (*types.RoutingKeyInfo, error
 	if sportID != emptyPosition {
 		sportURN, err = types.ParseURN(c.sportIDPrefix + sportID)
 		if err != nil {
-			return nil, err
+			// ParseURN's error embeds the raw value, and this error is
+			// logged: name the route by its bounded preview instead.
+			return nil, fmt.Errorf("incorrect route %s: unparseable sport id", utils.RoutePreview(route))
 		}
 	}
 
@@ -1328,7 +1330,7 @@ func (c *ChannelConsumer) parseRoute(route string) (*types.RoutingKeyInfo, error
 	if eventType != emptyPosition && eventID != emptyPosition {
 		eventURN, err = types.ParseURN(eventType + ":" + eventID)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("incorrect route %s: unparseable event id", utils.RoutePreview(route))
 		}
 	}
 

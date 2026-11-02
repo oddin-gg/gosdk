@@ -173,4 +173,31 @@ func TestParseRoute_WrongPartCountDoesNotEchoRawRoute(t *testing.T) {
 	if strings.Contains(err.Error(), route) {
 		t.Fatalf("error echoes the raw route: %q", err.Error())
 	}
+	if len(err.Error()) > 200 || !strings.Contains(err.Error(), "…") {
+		t.Fatalf("error is not the bounded, truncated preview (len=%d): %q", len(err.Error()), err.Error())
+	}
+}
+
+// TestParseRoute_UnparseableIDDoesNotEchoRawValue covers the eight-part
+// keys: a sport or event id the URN parser rejects must not reach the
+// logged error raw either (the parser's own error embeds the value).
+func TestParseRoute_UnparseableIDDoesNotEchoRawValue(t *testing.T) {
+	c := &ChannelConsumer{sportIDPrefix: "od:sport:"}
+
+	bad := "x\r\nforged" + strings.Repeat("y", 300)
+	for _, route := range []string{
+		"hi.pre.live.odds_change." + bad + ".match.1.-",
+		"hi.pre.live.odds_change.1.match." + bad + ".-",
+	} {
+		_, err := c.parseRoute(route)
+		if err == nil {
+			t.Fatalf("expected an error for %q", route)
+		}
+		if strings.ContainsAny(err.Error(), "\r\n") || strings.Contains(err.Error(), bad) {
+			t.Fatalf("error echoes the raw id: %q", err.Error())
+		}
+		if len(err.Error()) > 250 {
+			t.Fatalf("error is not bounded (len=%d): %q", len(err.Error()), err.Error())
+		}
+	}
 }
