@@ -260,6 +260,27 @@ if res.Status == types.RecoveryStatusCompleted { ... }
 The handle is reliable — even if the lossy `RecoveryEvents()` channel
 drops the event, `Done()` unblocks correctly.
 
+### Memory bound
+
+The per-entity caches are size-capped LRUs with a 12 h TTL; none of the
+caps is configurable. At most this many entries are held:
+
+| Cache | Entries (cap) |
+|---|---|
+| matches, fixtures, competitors, tournaments (one cache each) | 5 000 per cache |
+| match status | 5 000 |
+| players (one entry per player and locale) | 10 000 |
+| dynamic market variants | 5 000 |
+
+An entry is dropped when the cap pushes it out, when it is read after its
+TTL, and — so that an idle but growing cache does not sit at its cap with
+entries nobody reads any more — by a small sweep on every insert that
+removes up to four expired entries from the least recently used end. The
+catalogs (sports, static market descriptions, void reasons, match-status
+descriptions) are small and kept whole. Memory therefore grows with the
+number of distinct entities seen within the last 12 hours, never beyond the
+caps above.
+
 ### Observability
 
 Three lossy event channels plus polling counterparts:

@@ -491,7 +491,7 @@ The loaded-locale mark itself also expires (`marketCatalogTTL`, 12h). It was per
 
 - **Public methods** on `Client`: `ClearMatch`, `ClearTournament`, `ClearCompetitor`, `ClearPlayer`, `ClearMarketDescription`, `ClearMarketVoidReasons`. Parity with .NET/Java.
 - **Auto-invalidation** on `FixtureChange` feed message: clears the affected match cache entry. Existing behavior, kept.
-- **TTL eviction**: per-cache TTL handled by `expirable.LRU`.
+- **TTL eviction**: per-cache TTL (`lru.TTL`, no background goroutine): an expired entry is never returned, is evicted when read, and every insert also sheds up to four expired entries from the least recently used end, so entries nobody reads again do not sit at the size cap.
 - **LRU eviction**: per-cache size cap.
 
 ## 7. Localization
