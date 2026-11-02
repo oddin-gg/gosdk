@@ -964,6 +964,17 @@ func (a *recoveryActor) expireSnapshotCompleteDeadline(now time.Time) {
 	if a.mgr.rebindPending(a.producerID) {
 		return
 	}
+	// The deadline is measured on MESSAGES the actor has seen of this request;
+	// with a consumer backlog the replay sits unprocessed behind it, and the
+	// recovery looks silent for as long as the backlog stands. A re-issue
+	// then only adds a second replay to the queue it is stuck in (and the
+	// next one, every deadline). While processing lags, or its state cannot
+	// be read, the silence is no evidence: the mark moves forward, so the
+	// deadline counts again once processing is current.
+	if fresh, err := a.timingFresh(now); err != nil || !fresh {
+		a.currentRecovery.renewedAt = now
+		return
+	}
 	old := a.currentRecovery
 	wasInterrupted := a.recoveryState == types.InterruptedRecoveryState
 	a.logger.

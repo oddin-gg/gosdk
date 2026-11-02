@@ -2,9 +2,11 @@ package recovery
 
 import (
 	"crypto/tls"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -109,6 +111,58 @@ func TestActor_SnapshotCompleteDeadline_ReissuesWithANewRequestID(t *testing.T) 
 	if a.recoveryState != types.CompletedRecoveryState || a.isFlaggedDown() {
 		t.Fatalf("snapshot_complete of the new id: state=%v down=%v", a.recoveryState, a.isFlaggedDown())
 	}
+	waitDetachedDone(t, a, 3*time.Second)
+}
+
+// TestActor_SnapshotCompleteDeadline_WaitsWhileProcessingLags: with a
+// consumer backlog longer than the deadline the replay sits unprocessed and
+// the recovery looks silent, so it used to be re-issued every deadline,
+// adding a replay to the queue it was stuck in. While processing lags (or
+// cannot be read) no re-issue happens; the deadline counts again from the
+// moment processing is current.
+func TestActor_SnapshotCompleteDeadline_WaitsWhileProcessingLags(t *testing.T) {
+	fake := newFakeManagerOps()
+	srv, hits := fixtureSrv(t)
+	defer srv.Close()
+	a := newWiredActor(t, srv, fake)
+
+	from := time.Now().Add(-10 * time.Minute).Truncate(time.Millisecond)
+	oldID := startRecovery(t, a, hits, from, 1)
+	started := a.currentRecovery.recoveryStartedAt
+	p := holdProcessing(a)
+
+	// A backlog that outlasts two deadlines: no re-issue.
+	for _, after := range []time.Duration{6 * time.Minute, 12 * time.Minute} {
+		p.set(started.Add(after).Add(-time.Minute))
+		a.onTick(started.Add(after), false)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if a.currentRecovery.recoveryID != oldID || hits.recover.Load() != 1 {
+		t.Fatalf("re-issued while processing lagged: id=%d (was %d) posts=%d", a.currentRecovery.recoveryID, oldID, hits.recover.Load())
+	}
+
+	// A lookup that fails is no evidence of silence either.
+	lookup := a.lastProcessedFn
+	a.lastProcessedFn = func() (time.Time, error) { return time.Time{}, errors.New("lookup failed") }
+	a.onTick(started.Add(18*time.Minute), false)
+	a.lastProcessedFn = lookup
+	if a.currentRecovery.recoveryID != oldID || hits.recover.Load() != 1 {
+		t.Fatalf("re-issued on a failed lookup: id=%d posts=%d", a.currentRecovery.recoveryID, hits.recover.Load())
+	}
+
+	// Processing is current again, the replay still has not shown up: the
+	// deadline counts from here.
+	p.set(started.Add(19 * time.Minute))
+	a.onTick(started.Add(19*time.Minute), false)
+	if a.currentRecovery.recoveryID != oldID {
+		t.Fatal("re-issued right after the backlog drained, before a full deadline of silence")
+	}
+	p.set(started.Add(25 * time.Minute))
+	a.onTick(started.Add(25*time.Minute), false)
+	if a.currentRecovery.recoveryID == oldID {
+		t.Fatal("silent for the deadline with processing current, but not re-issued")
+	}
+	waitRecoverHits(t, hits, 2)
 	waitDetachedDone(t, a, 3*time.Second)
 }
 
@@ -486,4 +540,20 @@ func TestActor_SnapshotCompleteDeadline_ReissueKeepsAnInterruptedRecoveryInterru
 		t.Fatal("producer reported up before the fresh recovery completed")
 	}
 	waitDetachedDone(t, a, 3*time.Second)
+}
+
+// procClock replaces the producer manager's last processed timestamp (the
+// lookup seam of the actor) with one a test sets, so that "processing lags"
+// and "processing is current" do not depend on the monotonic cursor of the
+// manager or on the wall clock a completion reads.
+type procClock struct{ v atomic.Int64 }
+
+func (p *procClock) set(t time.Time) { p.v.Store(t.UnixNano()) }
+
+// holdProcessing installs a procClock on the actor, behind by a minute.
+func holdProcessing(a *recoveryActor) *procClock {
+	p := &procClock{}
+	p.set(time.Now().Add(-time.Minute))
+	a.lastProcessedFn = func() (time.Time, error) { return time.Unix(0, p.v.Load()), nil }
+	return p
 }
