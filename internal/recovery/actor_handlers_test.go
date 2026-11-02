@@ -980,10 +980,22 @@ func TestActor_MakeSnapshotRecovery_ReplacementStopsTheSupersededRetry(t *testin
 
 	a := newWiredActor(t, srv, newFakeManagerOps())
 	got503 := make(chan struct{})
+	// The callback runs on the first request's goroutine before the client
+	// backs off, so holding it here keeps the retry from being sent until
+	// the replacement has cancelled the request. Without the hold a delayed
+	// test goroutine could let the backoff expire first and the retry would
+	// be POSTed before the cancellation.
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseFirst := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseFirst() // never leave the callback blocked if the test fails early
 	var once sync.Once
 	a.api.SetEventCapture(api.EventCapture{Emit: func(ev api.APIEvent) {
 		if ev.Status == http.StatusServiceUnavailable && strings.Contains(ev.URL, "/recovery/initiate_request") {
-			once.Do(func() { close(got503) })
+			once.Do(func() {
+				close(got503)
+				<-release
+			})
 		}
 	}})
 
@@ -1001,6 +1013,7 @@ func TestActor_MakeSnapshotRecovery_ReplacementStopsTheSupersededRetry(t *testin
 		t.Fatalf("replacement makeSnapshotRecovery: %v", err)
 	}
 	secondID := a.currentRecovery.recoveryID
+	releaseFirst() // the first request is cancelled now; let its client carry on
 
 	// The retry loop is bounded by the client's three attempts (about 1.3 s
 	// of backoff at most before the last), so by the time both goroutines
