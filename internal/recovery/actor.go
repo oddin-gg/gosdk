@@ -1411,10 +1411,19 @@ func (a *recoveryActor) makeSnapshotRecovery(timestamp time.Time) error {
 			err:          apiErr,
 			producerName: producerName,
 		}); err != nil {
-			a.logger.WithError(err).
+			l := a.logger.WithError(err).
 				WithField("producer_id", a.producerID).
-				WithField("request_id", requestID).
-				Warn("recovery: snapshot recovery API result lost (actor shutdown raced API completion)")
+				WithField("request_id", requestID)
+			const lostMsg = "recovery: snapshot recovery API result lost (actor shutdown raced API completion)"
+			// An actor that is shutting down (a.ctx cancelled, or
+			// sendCtx's ErrManagerClosed) is an ordinary close during
+			// a recovery: nothing for an operator to act on. Any other
+			// delivery failure keeps the warn.
+			if errors.Is(err, ErrManagerClosed) || a.ctx.Err() != nil {
+				l.Debug(lostMsg)
+			} else {
+				l.Warn(lostMsg)
+			}
 		}
 	}()
 	return nil

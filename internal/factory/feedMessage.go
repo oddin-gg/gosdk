@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/oddin-gg/gosdk/internal/config"
@@ -37,6 +38,41 @@ type FeedMessageFactory struct {
 	producerManager       *producer.Manager
 	oddsFeedConfiguration config.Config
 	logger                *log.Logger
+
+	// buildFailThrottles holds one log throttle per kind of message-path
+	// build failure ("match", "tournament"), created on first use so the
+	// zero-value factory still works. Keyed per kind, not per event id:
+	// an API outage fails the build for every event, and one line per
+	// message is what made the log unreadable.
+	buildFailThrottles sync.Map // string -> *log.Throttle
+	// throttleNow is the throttles' clock; nil means time.Now (tests).
+	throttleNow func() time.Time
+}
+
+// buildFailWarnInterval bounds each build-failure warn kind to one line
+// per interval; the line carries the number of warns held back.
+const buildFailWarnInterval = time.Minute
+
+// warnBuildFailed logs a failed message-path build at WARN, throttled per
+// kind: the first failure goes out at once, later ones at most once per
+// buildFailWarnInterval with a suppressed count.
+func (f *FeedMessageFactory) warnBuildFailed(kind string, err error, eventID types.URN, routingKey string) {
+	if f.logger == nil {
+		return
+	}
+	th, ok := f.buildFailThrottles.Load(kind)
+	if !ok {
+		th, _ = f.buildFailThrottles.LoadOrStore(kind, log.NewThrottle(buildFailWarnInterval, f.throttleNow))
+	}
+	suppressed, emit := th.(*log.Throttle).Allow()
+	if !emit {
+		return
+	}
+	l := f.logger.WithError(err)
+	if suppressed > 0 {
+		l = l.WithField("suppressed", suppressed)
+	}
+	l.Warnf("feed message: build %s %s failed for route %q", kind, eventID.ToString(), routingKey)
 }
 
 // buildLocales returns the locale set message events are built with:
@@ -93,22 +129,22 @@ func (f *FeedMessageFactory) BuildMessage(ctx context.Context, feedMessage *type
 		}
 		t, err := f.entityFactory.BuildTournament(ctx, *rk.EventID, *rk.SportID, f.buildLocales())
 		switch {
-		case err != nil && f.logger != nil:
+		case err != nil:
 			// Transient cache/API failures during AMQP decode used to
 			// be silently dropped — consumers saw a non-nil message
 			// with event==nil and no log entry, indistinguishable
 			// from "unsupported event type". Log so the failure is
 			// observable; behaviour (dispatch with event==nil)
 			// preserved for parity with Java/.NET.
-			f.logger.WithError(err).Warnf("feed message: build tournament %s failed for route %q", rk.EventID.ToString(), rk.FullRoutingKey)
+			f.warnBuildFailed("tournament", err, *rk.EventID, rk.FullRoutingKey)
 		case t != nil:
 			event = *t
 		}
 	case types.MatchEventType:
 		match, err := f.entityFactory.BuildMatch(ctx, *rk.EventID, f.buildLocales(), rk.SportID)
 		switch {
-		case err != nil && f.logger != nil:
-			f.logger.WithError(err).Warnf("feed message: build match %s failed for route %q", rk.EventID.ToString(), rk.FullRoutingKey)
+		case err != nil:
+			f.warnBuildFailed("match", err, *rk.EventID, rk.FullRoutingKey)
 		case match != nil:
 			event = *match
 		}

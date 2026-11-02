@@ -159,6 +159,11 @@ type Manager struct {
 	tickDropWarnMu     sync.Mutex
 	tickDropLastWarnAt map[int]time.Time
 
+	// slowProcessingThrottle bounds the "processing message took more
+	// than 1s" warn: a stalled consumer or a slow dependency makes every
+	// message slow, which used to mean one line per message.
+	slowProcessingThrottle *log.Throttle
+
 	// inboxDrops counts residual lossy inbox drops. NOTE the correctness
 	// inputs no longer flow through the lossy path at all:
 	// snapshot_complete uses reliable ctx-bounded admission (sendCtx),
@@ -187,6 +192,10 @@ type Manager struct {
 // while still surfacing sustained backpressure within a minute.
 const tickDropWarnInterval = 60 * time.Second
 
+// slowProcessingWarnInterval bounds the slow-message-processing warn to
+// one line per interval; the line carries the number of warns held back.
+const slowProcessingWarnInterval = time.Minute
+
 // NewManager constructs the recovery manager. Open(ctx) must be called
 // before any actors are spawned. initialSnapshotTime is the lookback
 // window for cursor-less first snapshot recoveries (zero disables).
@@ -202,6 +211,8 @@ func NewManager(cfg config.Config, producerManager *producer.Manager, apiClient 
 		handles:             make(map[int]*Handle),
 		processingTimes:     make(map[uuid.UUID]time.Time),
 		tickDropLastWarnAt:  make(map[int]time.Time),
+
+		slowProcessingThrottle: log.NewThrottle(slowProcessingWarnInterval, nil),
 	}
 }
 
@@ -635,7 +646,13 @@ func (m *Manager) OnMessageProcessingEnded(sessionID uuid.UUID, producerID int, 
 	case !ok || start.IsZero():
 		m.logger.Warn("message processing ended, but was not started")
 	case time.Since(start).Milliseconds() > 1000:
-		m.logger.Warnf("processing message took more than 1s - %d ms", time.Since(start).Milliseconds())
+		if suppressed, ok := m.slowProcessingThrottle.Allow(); ok {
+			l := m.logger
+			if suppressed > 0 {
+				l = l.WithField("suppressed", suppressed)
+			}
+			l.Warnf("processing message took more than 1s - %d ms", time.Since(start).Milliseconds())
+		}
 	}
 }
 
