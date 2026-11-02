@@ -430,6 +430,76 @@ func TestActor_NoteRecoveryMessage_PausedCallerOfAnOldRequestCannotTouchTheNewMa
 	waitDetachedDone(t, a, 3*time.Second)
 }
 
+// A re-issue while the full-history floor stands asks for the full history,
+// whatever the original request's point was: the floor is the strongest one
+// and a timestamp cannot express it.
+func TestActor_SnapshotCompleteDeadline_ReissueUnderTheFullHistoryFloorHasNoAfter(t *testing.T) {
+	srv, hits := fixtureSrv(t)
+	defer srv.Close()
+	a := newWiredActor(t, srv, newFakeManagerOps())
+
+	from := time.Now().Add(-10 * time.Minute).Truncate(time.Millisecond)
+	oldID := startRecovery(t, a, hits, from, 1)
+	if got := hits.lastAfterMillis.Load(); got != from.UnixMilli() {
+		t.Fatalf("setup: first request after=%d, want %d", got, from.UnixMilli())
+	}
+	started := a.currentRecovery.recoveryStartedAt
+
+	a.recoveryFloorFull = true // e.g. left by an interrupted full-history recovery
+	a.onTick(started.Add(6*time.Minute), false)
+	if a.currentRecovery.recoveryID == oldID {
+		t.Fatal("setup: no re-issue")
+	}
+	waitRecoverHits(t, hits, 2)
+	if got := hits.lastAfterMillis.Load(); got != 0 {
+		t.Fatalf("re-issue after=%d (%v), want none (the full history)", got, time.UnixMilli(got))
+	}
+	if !a.currentRecovery.recoverFrom.IsZero() {
+		t.Fatalf("re-issued recoverFrom = %v, want zero", a.currentRecovery.recoverFrom)
+	}
+	waitDetachedDone(t, a, 3*time.Second)
+}
+
+// A re-issue that fails to go out leaves the old recovery as it was (its id,
+// its chain start, its state) and the next tick tries again.
+func TestActor_SnapshotCompleteDeadline_FailedReissueLeavesTheOldRecoveryAndRetries(t *testing.T) {
+	srv, hits := fixtureSrv(t)
+	defer srv.Close()
+	a := newWiredActor(t, srv, newFakeManagerOps())
+
+	from := time.Now().Add(-10 * time.Minute).Truncate(time.Millisecond)
+	oldID := startRecovery(t, a, hits, from, 1)
+	old := a.currentRecovery
+	started := old.recoveryStartedAt
+	chain := old.chainStartedAt
+
+	// The request cannot be made: the producer's name is unknown.
+	a.lastProcessedFn = func() (time.Time, error) { return time.Time{}, nil }
+	realID := a.producerID
+	a.producerID = 9999
+	a.onTick(started.Add(6*time.Minute), false)
+	if a.currentRecovery != old || a.currentRecovery.recoveryID != oldID || !a.currentRecovery.chainStartedAt.Equal(chain) ||
+		a.recoveryState != types.StartedRecoveryState {
+		t.Fatalf("a failed re-issue changed the recovery: same=%v id=%d chain=%v state=%v",
+			a.currentRecovery == old, a.currentRecovery.recoveryID, a.currentRecovery.chainStartedAt, a.recoveryState)
+	}
+	if hits.recover.Load() != 1 {
+		t.Fatalf("recovery POSTs = %d, want 1", hits.recover.Load())
+	}
+
+	// The next tick retries, and the replacement keeps the chain start.
+	a.producerID = realID
+	a.onTick(started.Add(6*time.Minute+10*time.Second), false)
+	if a.currentRecovery.recoveryID == oldID {
+		t.Fatal("the next tick did not retry the re-issue")
+	}
+	if !a.currentRecovery.chainStartedAt.Equal(chain) {
+		t.Fatalf("chain start = %v, want the original %v", a.currentRecovery.chainStartedAt, chain)
+	}
+	waitRecoverHits(t, hits, 2)
+	waitDetachedDone(t, a, 3*time.Second)
+}
+
 // waitUntilOlderThan blocks until ts is more than d in the past by the real
 // clock. The lookback limit moves with the clock, so these tests have to let
 // real time pass; waiting for the condition itself (instead of sleeping a
