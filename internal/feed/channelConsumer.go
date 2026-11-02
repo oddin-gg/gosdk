@@ -635,8 +635,13 @@ func (c *ChannelConsumer) run(ctx context.Context, deliveries <-chan amqp.Delive
 		default:
 		}
 		if ctx.Err() != nil {
+			// Terminal: no channel is reopened after this, so go through
+			// the same ackMu/chClosed discipline as the graceful path. A
+			// delivery ack still in flight on another goroutine must not
+			// run d.Ack concurrently with Close on the same
+			// non-thread-safe channel.
 			if ch != nil {
-				_ = ch.Close()
+				c.closeGracefulChannel(ch)
 			}
 			return
 		}
@@ -655,6 +660,11 @@ func (c *ChannelConsumer) run(ctx context.Context, deliveries <-chan amqp.Delive
 		}
 		stopWatch()
 		watch = nil // stopped; the deferred stopWatch must not close it again
+		// A plain Close, deliberately outside the ackMu/chClosed
+		// discipline: the delivery channel closed, so amqp091 has already
+		// shut this channel down and Close sends nothing that could race
+		// an ack. chClosed is consumer-wide, so setting it here would make
+		// the acks of the channel reopened below skip d.Ack.
 		if ch != nil {
 			_ = ch.Close()
 		}
