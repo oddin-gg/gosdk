@@ -30,6 +30,8 @@ func TestReportNameFailure_Classification(t *testing.T) {
 		{"context canceled, wrapped", fmt.Errorf("lookup: %w", context.Canceled), false},
 		{"client closed", sdkerr.ErrClosed, false},
 		{"request skipped", apipolicy.ErrSkipped, false},
+		{"budget spent before sending, wrapped", fmt.Errorf("fetch: %w: %w", apipolicy.ErrBudgetSpent, context.DeadlineExceeded), false},
+		{"timed out after sending", fmt.Errorf("fetch: %w", context.DeadlineExceeded), true},
 		{"entity not found in cache", cache.ErrItemNotFoundInCache, false},
 	}
 	for _, tc := range cases {

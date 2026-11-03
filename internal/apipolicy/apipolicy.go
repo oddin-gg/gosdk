@@ -44,6 +44,13 @@ const MessageTimeout = 2 * time.Second
 // ErrSkipped is returned for a call made under MessageSkip.
 var ErrSkipped = errors.New("api: request skipped, the API recently failed for this event")
 
+// ErrBudgetSpent is returned for a call made under a message mode whose
+// shared budget (MessageTimeout) was already spent when the call began, so
+// nothing was sent. It also satisfies errors.Is(err, context.DeadlineExceeded).
+// A request that was sent and then ran out of time is a real failure and
+// does not carry it.
+var ErrBudgetSpent = errors.New("api: message-path budget spent before the request was sent")
+
 type ctxKey struct{}
 
 // policy is what a context carries: the mode and, for the message modes,

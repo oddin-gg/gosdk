@@ -268,14 +268,15 @@ func (nf *nameFailures) first() error {
 
 // reportNameFailure records err in ctx's sink when it says something about
 // the API being unavailable: not a skipped request (the event is already in
-// the failure window), not the caller's cancellation or a closed client
+// the failure window), not one refused for a spent budget (it was never
+// sent), not the caller's cancellation or a closed client
 // (shutdown), and not an entity the API reports as absent.
 func reportNameFailure(ctx context.Context, err error) {
 	nf, ok := ctx.Value(nameFailureKey{}).(*nameFailures)
 	if !ok || err == nil {
 		return
 	}
-	if errors.Is(err, apipolicy.ErrSkipped) || errors.Is(err, sdkerr.ErrClosed) ||
+	if errors.Is(err, apipolicy.ErrSkipped) || errors.Is(err, apipolicy.ErrBudgetSpent) || errors.Is(err, sdkerr.ErrClosed) ||
 		errors.Is(err, context.Canceled) || errors.Is(err, cache.ErrItemNotFoundInCache) {
 		return
 	}

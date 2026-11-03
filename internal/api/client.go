@@ -1012,10 +1012,11 @@ func (c *Client) do(ctx context.Context, method, path string, locale *types.Loca
 	var remaining time.Duration
 	if policy == apipolicy.Message {
 		// The build shares one budget across all its requests; a request
-		// that starts after it is spent never goes out.
+		// that starts after it is spent never goes out (ErrBudgetSpent, so
+		// callers can tell it from a request that was sent and timed out).
 		remaining, _ = apipolicy.Remaining(ctx)
 		if remaining <= 0 {
-			return nil, nil, fmt.Errorf("api: %s %s: message-path budget spent: %w", method, path, context.DeadlineExceeded)
+			return nil, nil, fmt.Errorf("api: %s %s: %w: %w", method, path, apipolicy.ErrBudgetSpent, context.DeadlineExceeded)
 		}
 	}
 	// Reject new requests after Close, and register this one as in-flight

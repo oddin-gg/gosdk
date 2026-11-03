@@ -517,6 +517,40 @@ func TestMarketDescriptionCache_SkippedRefreshDoesNotHoldBackTheGetters(t *testi
 	}
 }
 
+// TestMarketDescriptionCache_SpentBudgetRefreshDoesNotHoldBackTheGetters: a
+// message-path build that has used up its shared budget refuses the next
+// request before sending it. Like a skipped one, that says nothing about the
+// API and must not start the getters' backoff.
+func TestMarketDescriptionCache_SpentBudgetRefreshDoesNotHoldBackTheGetters(t *testing.T) {
+	srv := newMarketSrv(t, bulkCatalogWithStaticVariants)
+	mc, ctx := newMarketCacheForTest(t, srv)
+	mc.catalogTTL = 50 * time.Millisecond
+	mc.refreshBackoff = time.Hour
+	locales := []types.Locale{types.EnLocale}
+
+	if _, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), locales); err != nil {
+		t.Fatalf("seed lookup: %v", err)
+	}
+	msgCtx := apipolicy.With(ctx, apipolicy.Message)
+	time.Sleep(apipolicy.MessageTimeout + 50*time.Millisecond) // the catalog mark lapses, the budget is spent
+
+	// The refresh attempt is refused unsent; the stale entry serves.
+	if _, err := mc.MarketDescriptionByID(msgCtx, 9, types.None[string](), locales); err != nil {
+		t.Fatalf("lookup with a spent budget: %v (the stale entry must be served)", err)
+	}
+	if got := srv.bulkHits.Load(); got != 1 {
+		t.Fatalf("bulk hits = %d, want 1: a refused call must not reach the API", got)
+	}
+
+	// A public by-id read refreshes at once: nothing failed.
+	if _, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), locales); err != nil {
+		t.Fatalf("public lookup: %v", err)
+	}
+	if got := srv.bulkHits.Load(); got != 2 {
+		t.Fatalf("bulk hits = %d, want 2: the refused attempt must not suppress the getters' refresh", got)
+	}
+}
+
 // TestMarketDescriptionCache_ByIDMissRefetchesAfterCatalogTTL pins the
 // expiring mark as an INDEPENDENT safety net for the production defect:
 // even if an entry goes missing from a store for some other reason, the

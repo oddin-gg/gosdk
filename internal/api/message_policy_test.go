@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -88,6 +89,29 @@ func TestDo_MessageSkipPolicy_NoRequest(t *testing.T) {
 	_, err := c.FetchSports(ctx, types.EnLocale)
 	if !errors.Is(err, apipolicy.ErrSkipped) {
 		t.Fatalf("err = %v, want apipolicy.ErrSkipped", err)
+	}
+	if hits.Load() != 0 {
+		t.Fatalf("requests = %d, want none", hits.Load())
+	}
+}
+
+// A request that starts after the shared budget is spent is never sent and
+// says so: ErrBudgetSpent (still a deadline error for callers that test for
+// one), unlike a request that was sent and timed out.
+func TestDo_MessagePolicy_SpentBudgetIsRefusedWithoutSending(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		_, _ = io.WriteString(w, policySportsXML)
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+
+	ctx := apipolicy.With(t.Context(), apipolicy.Message)
+	time.Sleep(apipolicy.MessageTimeout + 50*time.Millisecond)
+	_, err := c.FetchSports(ctx, types.EnLocale)
+	if !errors.Is(err, apipolicy.ErrBudgetSpent) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want ErrBudgetSpent and a deadline error", err)
 	}
 	if hits.Load() != 0 {
 		t.Fatalf("requests = %d, want none", hits.Load())

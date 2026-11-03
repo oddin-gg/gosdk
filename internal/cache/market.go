@@ -655,10 +655,12 @@ func (m *MarketDescriptionCache) loadOne(ctx context.Context, marketID *int, var
 				}
 				if err != nil {
 					// A request that was never sent (the message path skips
-					// calls to an API that just failed) says nothing about
-					// the API: recording it would hold back the refresh of
-					// every public by-id read for the whole backoff window.
-					if !isDynamicVariant && !errors.Is(err, apipolicy.ErrSkipped) {
+					// calls to an API that just failed, or finds its shared
+					// budget already spent by earlier requests of the build)
+					// says nothing about the API: recording it would hold
+					// back the refresh of every public by-id read for the
+					// whole backoff window.
+					if !isDynamicVariant && !errors.Is(err, apipolicy.ErrSkipped) && !errors.Is(err, apipolicy.ErrBudgetSpent) {
 						// Feed the warm-path retry backoff (see
 						// refreshFailedAt); cleared again on the next
 						// successful commit below.
