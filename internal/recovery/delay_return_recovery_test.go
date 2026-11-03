@@ -2,6 +2,9 @@ package recovery
 
 import (
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -947,4 +950,143 @@ func TestActor_DelayRepeat_NeverStartsLaterThanTheRecoveryItRepeats(t *testing.T
 		t.Fatalf("repeat after=%d, want the original %d (moved forward by %v)", got, resolved.UnixMilli(), time.UnixMilli(got).Sub(resolved))
 	}
 	waitDetachedDone(t, a, 3*time.Second)
+}
+
+// waitingRepeat brings an actor to a delay repeat that waits: R1 completed
+// while processing lagged. Processing is made current afterwards, so only
+// the guard under test can hold the repeat back.
+func waitingRepeat(t *testing.T, fake *fakeManagerOps) (*recoveryActor, *recoveryHits, time.Time) {
+	t.Helper()
+	a, hits, r1, _ := genuineDelayDuringRecovery(t, fake)
+	p := holdProcessing(a)
+	if err := a.snapshotRecoveryFinished(r1); err != nil {
+		t.Fatal(err)
+	}
+	if !a.delayRepeatWaiting {
+		t.Fatal("setup: no repeat waiting")
+	}
+	at := time.Now()
+	p.set(at)
+	return a, hits, at
+}
+
+// A lost session has no queue until it re-binds: a repeat issued then would
+// be requested for a queue that is not there. The repeat waits for the
+// re-bind and goes out on the next tick.
+func TestActor_DelayRepeat_WaitsForALostSessionToRebind(t *testing.T) {
+	fake := newFakeManagerOps()
+	a, hits, at := waitingRepeat(t, fake)
+
+	fake.pendingRebind.Store(true)
+	tickAt(a, at)
+	time.Sleep(50 * time.Millisecond)
+	if hits.recover.Load() != 2 || !a.delayRepeatWaiting || a.recoveryState != types.CompletedRecoveryState {
+		t.Fatalf("before the re-bind: POSTs=%d waiting=%v state=%v, want 2, waiting, Completed",
+			hits.recover.Load(), a.delayRepeatWaiting, a.recoveryState)
+	}
+
+	fake.pendingRebind.Store(false)
+	tickAt(a, at.Add(time.Second))
+	waitRecoverHits(t, hits, 3)
+	if a.delayRepeatWaiting {
+		t.Fatal("the repeat still waits after the re-bind")
+	}
+	waitDetachedDone(t, a, 3*time.Second)
+}
+
+// A producer that is disabled has no recovery to run: the repeat is not
+// issued for it, and it stays waiting for the producer to be enabled again.
+func TestActor_DelayRepeat_NotIssuedForADisabledProducer(t *testing.T) {
+	fake := newFakeManagerOps()
+	a, hits, at := waitingRepeat(t, fake)
+
+	if err := a.pm.SetProducerState(t.Context(), a.producerID, false); err != nil {
+		t.Fatal(err)
+	}
+	a.serviceDelayRepeat(at)
+	time.Sleep(50 * time.Millisecond)
+	if hits.recover.Load() != 2 || !a.delayRepeatWaiting {
+		t.Fatalf("disabled: POSTs=%d waiting=%v, want 2 and the repeat still waiting", hits.recover.Load(), a.delayRepeatWaiting)
+	}
+
+	if err := a.pm.SetProducerState(t.Context(), a.producerID, true); err != nil {
+		t.Fatal(err)
+	}
+	a.serviceDelayRepeat(at.Add(time.Second))
+	waitRecoverHits(t, hits, 3)
+	waitDetachedDone(t, a, 3*time.Second)
+}
+
+// A repeat that cannot be requested changes nothing (the request fails
+// before it touches state): the repeat stays waiting with the chain's start
+// and the next tick retries.
+func TestActor_DelayRepeat_FailedIssueLeavesTheStateAndRetries(t *testing.T) {
+	fake := newFakeManagerOps()
+	a, hits, at := waitingRepeat(t, fake)
+	done := a.currentRecovery
+	chain := done.chainStartedAt
+	from := a.delayRepeatFrom
+
+	// The request cannot be made: the producer is enabled, but the catalog
+	// cannot describe it (an unknown scope), so its name is not available.
+	badSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = io.WriteString(w, `<?xml version="1.0"?><producers response_code="OK">`+
+			`<producer id="1" name="live" description="Live" active="true" api_url="https://x" scope="bogus" stateful_recovery_window_in_minutes="60"/></producers>`)
+	}))
+	defer badSrv.Close()
+	realPM := a.pm
+	a.pm = newProducerManagerFor(t, badSrv)
+	a.serviceDelayRepeat(at)
+	if a.currentRecovery != done || !a.currentRecovery.chainStartedAt.Equal(chain) || !a.delayRepeatWaiting ||
+		a.delayRepeats != 0 || !a.delayRepeatFrom.Equal(from) || a.recoveryState != types.CompletedRecoveryState {
+		t.Fatalf("a failed repeat changed the state: same=%v waiting=%v repeats=%d from=%v state=%v",
+			a.currentRecovery == done, a.delayRepeatWaiting, a.delayRepeats, a.delayRepeatFrom, a.recoveryState)
+	}
+	if hits.recover.Load() != 2 {
+		t.Fatalf("recovery POSTs = %d, want 2", hits.recover.Load())
+	}
+
+	// The next tick retries, and the repeat keeps the chain start.
+	a.pm = realPM
+	a.serviceDelayRepeat(at.Add(time.Second))
+	waitRecoverHits(t, hits, 3)
+	if a.delayRepeatWaiting || a.delayRepeats != 1 || !a.currentRecovery.chainStartedAt.Equal(chain) {
+		t.Fatalf("after the retry: waiting=%v repeats=%d chain=%v, want issued, 1, %v",
+			a.delayRepeatWaiting, a.delayRepeats, a.currentRecovery.chainStartedAt, chain)
+	}
+	waitDetachedDone(t, a, 3*time.Second)
+}
+
+// A repeat belongs to its chain: MaxRecoveryExecution caps the whole chain,
+// measured from the FIRST request, not from the repeat. A repeat that
+// outlives it expires like any other stuck recovery, without a further one.
+func TestActor_DelayRepeat_ChainExpiresMeasuredFromTheFirstRequest(t *testing.T) {
+	fake := newFakeManagerOps()
+	a, hits, at := waitingRepeat(t, fake)
+	maxAge := a.cfg.MaxRecoveryExecution()
+
+	// The chain began just short of the cap.
+	chain := time.Now().Add(-maxAge + 10*time.Minute)
+	a.currentRecovery.chainStartedAt = chain
+	a.serviceDelayRepeat(at)
+	waitRecoverHits(t, hits, 3)
+	if !a.currentRecovery.chainStartedAt.Equal(chain) || a.recoveryState != types.StartedRecoveryState {
+		t.Fatalf("repeat: chain=%v state=%v, want the first request's start %v and Started", a.currentRecovery.chainStartedAt, a.recoveryState, chain)
+	}
+	waitDetachedDone(t, a, 3*time.Second)
+
+	// Past the cap from the first request, but well within it from the repeat.
+	p := &procClock{}
+	late := time.Now().Add(11 * time.Minute)
+	p.set(late)
+	a.lastProcessedFn = func() (time.Time, error) { return time.Unix(0, p.v.Load()), nil }
+	tickAt(a, late)
+	time.Sleep(50 * time.Millisecond)
+	if a.recoveryState != types.ErrorRecoveryState || a.currentRecovery != nil {
+		t.Fatalf("past the cap: state=%v current=%v, want the chain expired (Error)", a.recoveryState, a.currentRecovery)
+	}
+	if hits.recover.Load() != 3 || a.delayRepeatWaiting {
+		t.Fatalf("past the cap: POSTs=%d waiting=%v, want 3 and no repeat", hits.recover.Load(), a.delayRepeatWaiting)
+	}
 }
