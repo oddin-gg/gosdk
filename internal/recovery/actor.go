@@ -44,6 +44,12 @@ type recoveryActor struct {
 	// last processed message timestamp. Tests only.
 	lastProcessedFn func() (time.Time, error)
 
+	// processingStarted is set once the first message has begun processing.
+	// The producer's last-message timestamp cannot tell this: system alives
+	// advance it too. Written from the session goroutines that call
+	// OnMessageProcessingStarted directly, so atomic.
+	processingStarted atomic.Bool
+
 	// Inbox + lifecycle.
 	inbox    chan actorEvent
 	shutdown chan struct{}
@@ -796,6 +802,7 @@ func (a *recoveryActor) onMessageProcessingStarted(t time.Time) {
 		a.logger.WithField("producer_id", a.producerID).Warn("recovery: processing started with zero timestamp")
 		return
 	}
+	a.processingStarted.Store(true)
 	if err := a.pm.SetProducerLastMessageTimestamp(a.producerID, t); err != nil {
 		a.logger.WithError(err).WithField("producer_id", a.producerID).Error("recovery: set producer last message timestamp")
 	}
@@ -1003,6 +1010,18 @@ func (a *recoveryActor) expireSnapshotCompleteDeadline(now time.Time) {
 	// be read, the silence is no evidence: the mark moves forward, so the
 	// deadline counts again once processing is current.
 	if fresh, err := a.timingFresh(now); err != nil || !fresh {
+		a.currentRecovery.renewedAt = now
+		return
+	}
+	// timingFresh counts a missing last-processed timestamp as fresh (a
+	// baseline that does not exist yet must not flag a producer down). On a
+	// first recovery the first message can stay in processing longer than
+	// the deadline, a stalled client callback for one: no message has ended,
+	// so there is no baseline, yet the replay is queued behind the stalled
+	// one just like behind a backlog. Processing has not completed a single
+	// message, so the silence is no evidence either.
+	if lastProcessed, err := a.lastProcessedMessageGenTimestamp(); err != nil ||
+		(lastProcessed.IsZero() && a.processingStarted.Load()) {
 		a.currentRecovery.renewedAt = now
 		return
 	}

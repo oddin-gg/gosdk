@@ -166,6 +166,56 @@ func TestActor_SnapshotCompleteDeadline_WaitsWhileProcessingLags(t *testing.T) {
 	waitDetachedDone(t, a, 3*time.Second)
 }
 
+// TestActor_SnapshotCompleteDeadline_WaitsForAFirstMessageStillInProcessing:
+// on a first recovery nothing has been processed yet, so there is no
+// last-processed timestamp and the timing counts as fresh. The first message
+// can stay in a stalled client callback longer than the deadline; the replay
+// then sits behind it, and every deadline used to queue another snapshot
+// onto the same stalled consumer. Until a message has ended the silence is
+// no evidence; once one has, and the silence goes on, it is re-issued.
+func TestActor_SnapshotCompleteDeadline_WaitsForAFirstMessageStillInProcessing(t *testing.T) {
+	srv, hits := fixtureSrv(t)
+	defer srv.Close()
+	a := newWiredActor(t, srv, newFakeManagerOps())
+
+	oldID := startRecovery(t, a, hits, time.Now().Add(-10*time.Minute).Truncate(time.Millisecond), 1)
+	started := a.currentRecovery.recoveryStartedAt
+
+	// A message starts processing and never ends; the baseline stays zero.
+	a.onMessageProcessingStarted(started.Add(time.Second))
+	if ts, _ := a.lastProcessedMessageGenTimestamp(); !ts.IsZero() {
+		t.Fatalf("test setup: last processed = %v, want zero", ts)
+	}
+	for _, after := range []time.Duration{6 * time.Minute, 12 * time.Minute, 18 * time.Minute} {
+		a.onTick(started.Add(after), false)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if a.currentRecovery.recoveryID != oldID || hits.recover.Load() != 1 {
+		t.Fatalf("re-issued while the first message was still in processing: id=%d (was %d) posts=%d",
+			a.currentRecovery.recoveryID, oldID, hits.recover.Load())
+	}
+
+	// The message ends; the deadline counts from the next tick, then the
+	// silence is evidence as before.
+	// (The producer manager rejects timestamps this far ahead of the wall
+	// clock, so the processing state is held through the test seam.)
+	p := holdProcessing(a)
+	end := started.Add(19 * time.Minute)
+	p.set(end)
+	a.onTick(end, false)
+	if a.currentRecovery.recoveryID != oldID {
+		t.Fatal("re-issued right after the message ended, before a full deadline of silence")
+	}
+	// Processing is current (messages keep ending), the replay is still silent.
+	p.set(end.Add(6 * time.Minute))
+	a.onTick(end.Add(6*time.Minute), false)
+	if a.currentRecovery.recoveryID == oldID {
+		t.Fatal("silent for the deadline with processing current, but not re-issued")
+	}
+	waitRecoverHits(t, hits, 2)
+	waitDetachedDone(t, a, 3*time.Second)
+}
+
 // TestActor_SnapshotCompleteDeadline_RecoveryMessagesRenewIt: a recovery
 // that keeps replaying messages (they carry its request id) is alive and
 // must not be re-requested, however long it runs; the deadline counts from
