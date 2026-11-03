@@ -552,6 +552,54 @@ func TestActor_DelayRepeat_AnotherDownReasonTakesOver(t *testing.T) {
 	waitDetachedDone(t, a, 3*time.Second)
 }
 
+// The repeat of a FULL-HISTORY recovery (nothing to remember as a timestamp)
+// that another down reason takes over keeps the full-history floor: the
+// recovery the alive path starts asks for everything, not for the window
+// from the then-current cursor, and the delay chain is reset.
+func TestActor_DelayRepeat_AnotherDownReasonTakesOver_FullHistoryKeepsTheFullFloor(t *testing.T) {
+	fake := newFakeManagerOps()
+	a, hits, r1, _ := genuineDelayDuringRecovery(t, fake)
+	p := holdProcessing(a)
+	if err := a.snapshotRecoveryFinished(r1); err != nil {
+		t.Fatal(err)
+	}
+	if !a.delayRepeatWaiting {
+		t.Fatal("setup: no repeat waiting")
+	}
+	// The waiting repeat is one of a full-history recovery: no timestamp.
+	a.delayRepeatFrom = time.Time{}
+	a.recoveryFloor = time.Time{}
+	a.delayRepeats = 2
+	if a.recoveryFloorFull {
+		t.Fatal("setup: the full floor is already set")
+	}
+
+	old := time.Now().Add(-time.Hour)
+	a.lastSystemAlive = &old
+	a.onTick(time.Now().Add(31*time.Second), true)
+	if a.downReason != types.AliveInternalViolationProducerDownReason || a.delayRepeatWaiting {
+		t.Fatalf("down reason %v waiting=%v, want the alive violation and no repeat waiting", a.downReason, a.delayRepeatWaiting)
+	}
+	if !a.recoveryFloorFull {
+		t.Fatal("the full-history floor was lost when another down reason took the repeat over")
+	}
+	if a.delayDownRequestID != 0 || a.delayRepeats != 0 || !a.delayCursor.IsZero() || !a.delayRepeatFrom.IsZero() {
+		t.Fatalf("chain not reset: request=%d repeats=%d cursor=%v from=%v",
+			a.delayDownRequestID, a.delayRepeats, a.delayCursor, a.delayRepeatFrom)
+	}
+
+	now := time.Now().Add(32 * time.Second)
+	p.set(now)
+	if err := a.systemAliveReceived(aliveAt(now), true); err != nil {
+		t.Fatal(err)
+	}
+	waitRecoverHits(t, hits, 3)
+	if got := hits.lastAfterMillis.Load(); got != 0 {
+		t.Fatalf("recovery after=%d (%v), want the full history (no after)", got, time.UnixMilli(got))
+	}
+	waitDetachedDone(t, a, 3*time.Second)
+}
+
 // The deadline re-issue of the request that was in flight when the delay
 // began keeps the mark: the replacement's completion repeats it.
 func TestActor_DelayDownDuringRecovery_RepeatSurvivesADeadlineReissue(t *testing.T) {
