@@ -42,6 +42,17 @@ type LocalizedEntry[L comparable] interface {
 	Locales() []L
 }
 
+// CachedEntry is what EventCache stores: a LocalizedEntry that can also be
+// compared with ==. The admission merge compares the entry a load was based
+// on with the one the cache holds now; requiring comparable makes that a
+// compile-time guarantee instead of a runtime panic for a future value type
+// that is a non-comparable struct. Pointers (what the caches use) compare by
+// identity, which is the intent.
+type CachedEntry[L comparable] interface {
+	comparable
+	LocalizedEntry[L]
+}
+
 // Loader fetches data for a single key in the requested locales. The returned
 // entry is merged into any existing cache entry for the same key — the cache
 // passes the existing entry (or the zero value of T if none) for the loader
@@ -56,8 +67,8 @@ type Loader[K comparable, L comparable, T any] func(
 ) (T, error)
 
 // EventCache is a per-event LRU cache with TTL eviction and singleflight
-// dedup of loader calls. Type T must implement LocalizedEntry[L].
-type EventCache[K comparable, L comparable, T LocalizedEntry[L]] struct {
+// dedup of loader calls. Type T must satisfy CachedEntry[L].
+type EventCache[K comparable, L comparable, T CachedEntry[L]] struct {
 	lru    *TTL[K, T]
 	sf     singleflight.Group
 	loader Loader[K, L, T]
@@ -159,7 +170,7 @@ var ErrEntryNotPopulated = errors.New("cache entry missing requested locale afte
 
 // NewEventCache constructs a bounded, expiring, singleflight-protected
 // per-event cache.
-func NewEventCache[K comparable, L comparable, T LocalizedEntry[L]](
+func NewEventCache[K comparable, L comparable, T CachedEntry[L]](
 	cfg Config,
 	loader Loader[K, L, T],
 ) *EventCache[K, L, T] {
@@ -332,7 +343,7 @@ func (c *EventCache[K, L, T]) get(ctx context.Context, key K, locales []L, clear
 			// the first loaded. If the cache no longer holds the entry
 			// this load was based on, merge on top of what it holds now
 			// (the other flight may already cover everything needed).
-			if cur, curOK := c.lru.Peek(key); merges < maxAdmissionMerges && (curOK != hadExisting || (curOK && any(cur) != any(existing))) {
+			if cur, curOK := c.lru.Peek(key); merges < maxAdmissionMerges && (curOK != hadExisting || (curOK && cur != existing)) {
 				c.clearMu.Unlock()
 				existing, hadExisting = cur, curOK
 				if hadExisting && coversAll(existing.Locales(), locales) {
@@ -498,7 +509,7 @@ func (c *EventCache[K, L, T]) Len() int {
 
 // internal helpers
 
-func existingLocales[L comparable, T LocalizedEntry[L]](v T, has bool) []L {
+func existingLocales[L comparable, T CachedEntry[L]](v T, has bool) []L {
 	if !has {
 		return nil
 	}

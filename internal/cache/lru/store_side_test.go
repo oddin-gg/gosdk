@@ -13,7 +13,7 @@ import (
 
 type sideEntry struct{ locales []string }
 
-func (e sideEntry) Locales() []string { return e.locales }
+func (e *sideEntry) Locales() []string { return e.locales }
 
 // TestStoreSide_SuppressedByLaterClear pins the seventh-pass P2 fence:
 // a side-map store whose snapshot predates a Clear must be suppressed —
@@ -22,14 +22,14 @@ func (e sideEntry) Locales() []string { return e.locales }
 func TestStoreSide_SuppressedByLaterClear(t *testing.T) {
 	side := map[string]string{}
 	var sideMu sync.Mutex
-	c := NewEventCache[string, string, sideEntry](Config{
+	c := NewEventCache[string, string, *sideEntry](Config{
 		OnEvict: func(key any, _ any) {
 			sideMu.Lock()
 			delete(side, key.(string))
 			sideMu.Unlock()
 		},
-	}, func(_ context.Context, _ string, locales []string, _ sideEntry, _ bool) (sideEntry, error) {
-		return sideEntry{locales: locales}, nil
+	}, func(_ context.Context, _ string, locales []string, _ *sideEntry, _ bool) (*sideEntry, error) {
+		return &sideEntry{locales: locales}, nil
 	})
 
 	// Snapshot taken BEFORE the clear: the store must be suppressed.
@@ -72,9 +72,9 @@ func TestStoreSide_AtomicWithClear(t *testing.T) {
 	for round := 0; round < 200; round++ {
 		side := map[string]string{}
 		var sideMu sync.Mutex
-		c := NewEventCache[string, string, sideEntry](Config{},
-			func(_ context.Context, _ string, locales []string, _ sideEntry, _ bool) (sideEntry, error) {
-				return sideEntry{locales: locales}, nil
+		c := NewEventCache[string, string, *sideEntry](Config{},
+			func(_ context.Context, _ string, locales []string, _ *sideEntry, _ bool) (*sideEntry, error) {
+				return &sideEntry{locales: locales}, nil
 			})
 
 		snapshot := time.Now() // both racers use a pre-clear snapshot
@@ -163,8 +163,8 @@ func TestEventCacheGet_LifetimeCancelAbortsDetachedLoad(t *testing.T) {
 	loadCtxErr := make(chan error, 1)
 	started := make(chan struct{})
 
-	c := NewEventCache[string, string, sideEntry](Config{Lifetime: lifetime},
-		func(ctx context.Context, _ string, locales []string, _ sideEntry, _ bool) (sideEntry, error) {
+	c := NewEventCache[string, string, *sideEntry](Config{Lifetime: lifetime},
+		func(ctx context.Context, _ string, locales []string, _ *sideEntry, _ bool) (*sideEntry, error) {
 			close(started)
 			select {
 			case <-ctx.Done():
@@ -172,7 +172,7 @@ func TestEventCacheGet_LifetimeCancelAbortsDetachedLoad(t *testing.T) {
 			case <-time.After(5 * time.Second):
 				loadCtxErr <- nil
 			}
-			return sideEntry{locales: locales}, nil
+			return &sideEntry{locales: locales}, nil
 		})
 
 	go func() {
@@ -209,7 +209,7 @@ func TestPurge_NotUndoneByInFlightLoad(t *testing.T) {
 	started := make(chan struct{})
 	var calls atomic.Int32
 
-	c := NewEventCache[string, string, sideEntry](Config{
+	c := NewEventCache[string, string, *sideEntry](Config{
 		OnEvict: func(key any, _ any) {
 			sideMu.Lock()
 			delete(side, key.(string))
@@ -220,13 +220,13 @@ func TestPurge_NotUndoneByInFlightLoad(t *testing.T) {
 			side[key.(string)] = "icon"
 			sideMu.Unlock()
 		},
-	}, func(_ context.Context, _ string, locales []string, _ sideEntry, _ bool) (sideEntry, error) {
+	}, func(_ context.Context, _ string, locales []string, _ *sideEntry, _ bool) (*sideEntry, error) {
 		if calls.Add(1) == 1 {
 			close(started)
 			<-gate
-			return sideEntry{locales: locales}, nil
+			return &sideEntry{locales: locales}, nil
 		}
-		return sideEntry{}, errors.New("post-purge fetch fails")
+		return &sideEntry{}, errors.New("post-purge fetch fails")
 	})
 
 	done := make(chan error, 1)
@@ -272,12 +272,12 @@ func TestClear_DoesNotForgetNewerPostPurgeFlight(t *testing.T) {
 	entered := make(chan struct{}, 8)
 	gate := make(chan struct{})
 
-	c := NewEventCache[string, string, sideEntry](Config{},
-		func(_ context.Context, _ string, locales []string, _ sideEntry, _ bool) (sideEntry, error) {
+	c := NewEventCache[string, string, *sideEntry](Config{},
+		func(_ context.Context, _ string, locales []string, _ *sideEntry, _ bool) (*sideEntry, error) {
 			loaderCalls.Add(1)
 			entered <- struct{}{}
 			<-gate
-			return sideEntry{locales: locales}, nil
+			return &sideEntry{locales: locales}, nil
 		})
 
 	var bDone sync.WaitGroup
