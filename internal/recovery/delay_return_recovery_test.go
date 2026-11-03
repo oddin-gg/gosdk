@@ -915,3 +915,36 @@ func TestActor_DelayDownBeforeAnythingWasProcessed_WithAResumePointFloorsAtIt(t 
 	}
 	waitDetachedDone(t, a, 3*time.Second)
 }
+
+// The repeat starts at the recovery's own start, never later: the lookback
+// clamp moves with the clock, and the repeat waits for processing to catch
+// up, so a recovery that started near the limit would otherwise be repeated
+// from a later point and could not refill the head of its own replay.
+func TestActor_DelayRepeat_NeverStartsLaterThanTheRecoveryItRepeats(t *testing.T) {
+	a, hits, resolved, started, id := lookbackActor(t)
+	p := holdProcessing(a)
+
+	// The recovery completed while processing lagged: the repeat waits.
+	a.recoveryState = types.CompletedRecoveryState
+	a.delayRepeatWaiting = true
+	a.delayRepeatFrom = resolved
+	a.serviceDelayRepeat(started.Add(time.Second))
+	time.Sleep(50 * time.Millisecond)
+	if hits.recover.Load() != 1 || !a.delayRepeatWaiting {
+		t.Fatalf("POSTs=%d waiting=%v, want 1 and the repeat waiting while processing lags", hits.recover.Load(), a.delayRepeatWaiting)
+	}
+
+	// Real time moves on until a fresh clamp WOULD move the same point,
+	// then processing is current.
+	waitUntilOlderThan(t, resolved, 2*time.Second)
+	p.set(time.Now())
+	a.serviceDelayRepeat(started.Add(1500 * time.Millisecond))
+	if a.currentRecovery.recoveryID == id {
+		t.Fatal("setup: no repeat was issued")
+	}
+	waitRecoverHits(t, hits, 2)
+	if got := hits.lastAfterMillis.Load(); got != resolved.UnixMilli() {
+		t.Fatalf("repeat after=%d, want the original %d (moved forward by %v)", got, resolved.UnixMilli(), time.UnixMilli(got).Sub(resolved))
+	}
+	waitDetachedDone(t, a, 3*time.Second)
+}

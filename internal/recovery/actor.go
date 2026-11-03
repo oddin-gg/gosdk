@@ -2103,6 +2103,15 @@ func (a *recoveryActor) serviceDelayRepeat(now time.Time) {
 	}
 	chainStartedAt := a.currentRecovery.chainStartedAt
 	from := a.resolveRecoverFrom(time.Now(), a.delayRepeatFrom, false)
+	// The lookback clamp is relative to now, and the repeat waited for
+	// processing to catch up: a recovery that started near the limit would
+	// otherwise be repeated from a later point and could not refill the
+	// head of its own replay, which is what the repeat is for. As for a
+	// deadline re-issue, it never starts later than the request it repeats.
+	// A zero (full history) stays zero.
+	if own := a.currentRecovery.recoverFrom; !from.IsZero() && !own.IsZero() && from.After(own) {
+		from = own
+	}
 	if err := a.issueSnapshotRecovery(time.Now(), from); err != nil {
 		// Nothing was replaced (the request fails before it touches state),
 		// so the next tick retries.
