@@ -147,6 +147,107 @@ func TestClient_SuccessGeneration(t *testing.T) {
 	}
 }
 
+// A 2xx counts as a success only once its body has been read in full (and
+// decoded): headers followed by a truncated, invalid or stalled body leave the
+// counter alone, while a complete valid answer advances it. Otherwise an API
+// that degrades into bad bodies would keep voiding what the message path
+// remembers about its failures.
+func TestClient_SuccessGeneration_CountsOnlyAfterTheBodyWasRead(t *testing.T) {
+	const (
+		complete  = "complete"
+		truncated = "truncated"
+		invalid   = "invalid"
+		stalled   = "stalled"
+		trailing  = "trailing"
+	)
+	var mode atomic.Value
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		switch mode.Load() {
+		case truncated:
+			w.Header().Set("Content-Length", "4096")
+			_, _ = io.WriteString(w, `<?xml version="1.0"?><sports generated_at="2026-01-01T00:00:00"><sport id="od:sp`)
+		case invalid:
+			_, _ = io.WriteString(w, `<sports><sport></sports>`)
+		case trailing:
+			_, _ = io.WriteString(w, policySportsXML+policySportsXML)
+		case stalled:
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `<?xml version="1.0"?><sports generated_at="2026-01-01T00:00:00"><sport id="od:sp`)
+			w.(http.Flusher).Flush()
+			select {
+			case <-release:
+			case <-r.Context().Done():
+			}
+		default:
+			_, _ = io.WriteString(w, policySportsXML)
+		}
+	}))
+	defer srv.Close()
+	defer close(release)
+	c := newTestClient(t, srv)
+	c.httpClient.Timeout = 30 * time.Second
+	ctx := apipolicy.With(t.Context(), apipolicy.Message)
+
+	for _, m := range []string{truncated, invalid, trailing, stalled} {
+		mode.Store(m)
+		before := c.SuccessGeneration()
+		if _, err := c.FetchSports(ctx, types.EnLocale); err == nil {
+			t.Fatalf("%s body: expected an error", m)
+		}
+		if got := c.SuccessGeneration(); got != before {
+			t.Fatalf("%s body: the success counter advanced from %d to %d", m, before, got)
+		}
+		// The stalled call spent the shared budget; use a fresh context.
+		ctx = apipolicy.With(t.Context(), apipolicy.Message)
+	}
+
+	mode.Store(complete)
+	before := c.SuccessGeneration()
+	if _, err := c.FetchSports(ctx, types.EnLocale); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.SuccessGeneration(); got != before+1 {
+		t.Fatalf("complete body: counter %d -> %d, want one more", before, got)
+	}
+}
+
+// The same holds for a call that does not decode an entity: a POST whose 2xx
+// body cannot be read or verified is not a success.
+func TestClient_SuccessGeneration_CountsAMutationOnlyOnceItsBodyWasVerified(t *testing.T) {
+	var truncated atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		if truncated.Load() {
+			w.Header().Set("Content-Length", "4096")
+			_, _ = io.WriteString(w, `<?xml version="1.0"?><response response_code="O`)
+			return
+		}
+		_, _ = io.WriteString(w, `<?xml version="1.0"?><response response_code="OK"/>`)
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+	ctx := apipolicy.With(t.Context(), apipolicy.Message)
+
+	truncated.Store(true)
+	before := c.SuccessGeneration()
+	if ok, err := c.postEmpty(ctx, "/x", true); err == nil || ok {
+		t.Fatalf("truncated body: ok=%v err=%v, want a failure", ok, err)
+	}
+	if got := c.SuccessGeneration(); got != before {
+		t.Fatalf("truncated body: the success counter advanced from %d to %d", before, got)
+	}
+
+	truncated.Store(false)
+	if ok, err := c.postEmpty(ctx, "/x", true); err != nil || !ok {
+		t.Fatalf("complete body: ok=%v err=%v", ok, err)
+	}
+	if got := c.SuccessGeneration(); got != before+1 {
+		t.Fatalf("complete body: counter %d -> %d, want one more", before, got)
+	}
+}
+
 // The 2 s budget covers reading the body too: a server that sends headers
 // and part of the XML and then holds the rest must not keep the message path
 // waiting (the response body is decoded after do() returns, under the same

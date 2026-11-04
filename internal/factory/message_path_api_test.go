@@ -33,6 +33,9 @@ type apiCtl struct {
 	// delay, in nanoseconds, is how long every request is held before it
 	// is answered (a slow, not failing, API).
 	delay atomic.Int64
+	// truncating answers every request with 2xx headers and a body that
+	// ends early (a degraded API).
+	truncating atomic.Bool
 	// failDescriptions fails only the market description endpoints.
 	failDescriptions atomic.Bool
 	descriptions     atomic.Int32 // GET .../descriptions/...
@@ -76,6 +79,12 @@ func newMessagePathRig(t *testing.T) *messagePathRig {
 		}
 		if strings.HasSuffix(r.URL.Path, "/summary") {
 			ctl.summaries.Add(1)
+		}
+		if ctl.truncating.Load() {
+			w.Header().Set("Content-Type", "application/xml")
+			w.Header().Set("Content-Length", "4096")
+			_, _ = io.WriteString(w, `<?xml version="1.0"?><match_summary><sport_event id="`)
+			return
 		}
 		isDescription := strings.Contains(r.URL.Path, "/descriptions/")
 		if isDescription {
@@ -221,6 +230,44 @@ func TestMessagePath_WindowExpires(t *testing.T) {
 	r.buildEvent(t, 99)
 	if got := r.ctl.summaries.Load(); got != 2 {
 		t.Fatalf("summary requests = %d, want 2 after the window expired", got)
+	}
+}
+
+// An API that degrades into truncated bodies still answers 2xx headers. Those
+// are not successes: they must not end the window, or every message would
+// pay its attempt again while the API stays degraded.
+func TestMessagePath_AnswerWithATruncatedBodyDoesNotClearTheWindow(t *testing.T) {
+	r := newMessagePathRig(t)
+	r.ctl.failing.Store(true)
+	r.buildEvent(t, 99)
+	if got := r.ctl.summaries.Load(); got != 1 {
+		t.Fatalf("summary requests = %d, want 1", got)
+	}
+
+	r.ctl.failing.Store(false)
+	r.ctl.truncating.Store(true)
+	if ev := r.buildEvent(t, 100); ev != nil {
+		t.Fatalf("event = %v, want nil: the body is truncated", ev)
+	}
+	if got := r.ctl.summaries.Load(); got != 2 {
+		t.Fatalf("summary requests = %d, want 2 (event 100 made one attempt)", got)
+	}
+	// The truncated answer did not clear the window: both events stay
+	// refused without a request.
+	r.buildEvent(t, 99)
+	r.buildEvent(t, 100)
+	if got := r.ctl.summaries.Load(); got != 2 {
+		t.Fatalf("summary requests = %d, want 2: the window must hold across an answer with a truncated body", got)
+	}
+
+	// A complete answer does clear it.
+	r.ctl.truncating.Store(false)
+	if _, err := r.api.FetchSports(t.Context(), types.EnLocale); err != nil {
+		t.Fatalf("FetchSports: %v", err)
+	}
+	r.buildEvent(t, 99)
+	if got := r.ctl.summaries.Load(); got != 3 {
+		t.Fatalf("summary requests = %d, want 3 once the API has answered completely", got)
 	}
 }
 
