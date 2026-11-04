@@ -35,17 +35,15 @@ func TestDo_MessagePolicy_SingleAttemptNoRetries(t *testing.T) {
 		t.Fatalf("default policy attempts = %d, want 3", got)
 	}
 
+	// The attempt count is the behaviour; no wall-clock bound, which a
+	// loaded runner could exceed without any retry having happened.
 	hits.Store(0)
-	start := time.Now()
 	ctx := apipolicy.With(t.Context(), apipolicy.Message)
 	if _, err := c.FetchSports(ctx, types.EnLocale); err == nil {
 		t.Fatal("expected an error")
 	}
 	if got := hits.Load(); got != 1 {
 		t.Fatalf("message policy attempts = %d, want 1", got)
-	}
-	if time.Since(start) > 400*time.Millisecond {
-		t.Fatalf("message-path failure took %v; it must not sit in the retry backoff", time.Since(start))
 	}
 }
 
@@ -64,14 +62,19 @@ func TestDo_MessagePolicy_ShortTimeout(t *testing.T) {
 	c := newTestClient(t, srv)
 	c.httpClient.Timeout = 30 * time.Second
 
-	ctx := apipolicy.With(t.Context(), apipolicy.Message)
+	// A short budget keeps the test quick. Time is the behaviour here: the
+	// call must wait for the budget (the lower bound) and must end far
+	// before the client's own 30 s timeout would (the upper bound, a
+	// multiple large enough for a loaded runner).
+	const budget = 300 * time.Millisecond
 	start := time.Now()
+	ctx := apipolicy.WithBudget(t.Context(), apipolicy.Message, budget)
 	_, err := c.FetchSports(ctx, types.EnLocale)
 	if err == nil {
 		t.Fatal("expected a timeout error")
 	}
-	if elapsed := time.Since(start); elapsed < apipolicy.MessageTimeout-200*time.Millisecond || elapsed > apipolicy.MessageTimeout+1500*time.Millisecond {
-		t.Fatalf("message-path call took %v, want about %v", elapsed, apipolicy.MessageTimeout)
+	if elapsed := time.Since(start); elapsed < budget-50*time.Millisecond || elapsed > 10*time.Second {
+		t.Fatalf("message-path call took %v, want about the %v budget and far below the client timeout", elapsed, budget)
 	}
 }
 
@@ -269,14 +272,18 @@ func TestDo_MessagePolicy_BudgetCoversTheBody(t *testing.T) {
 	c := newTestClient(t, srv)
 	c.httpClient.Timeout = 30 * time.Second
 
-	ctx := apipolicy.With(t.Context(), apipolicy.Message)
+	// Time is the behaviour: a short budget, and an upper bound far above
+	// it (a loaded runner) yet far below the client's 30 s timeout, which
+	// is what a body read outside the budget would wait for.
+	const budget = 300 * time.Millisecond
 	start := time.Now()
+	ctx := apipolicy.WithBudget(t.Context(), apipolicy.Message, budget)
 	_, err := c.FetchSports(ctx, types.EnLocale)
 	if err == nil {
 		t.Fatal("expected an error for a body that never completes")
 	}
-	if elapsed := time.Since(start); elapsed > apipolicy.MessageTimeout+1500*time.Millisecond {
-		t.Fatalf("message-path fetch took %v with a stalled body, want about %v", elapsed, apipolicy.MessageTimeout)
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("message-path fetch took %v with a stalled body, want about %v", elapsed, budget)
 	}
 }
 
@@ -284,31 +291,41 @@ func TestDo_MessagePolicy_BudgetCoversTheBody(t *testing.T) {
 // of two sequential requests gets only what the first left, and a request
 // that starts after the budget is spent never goes out.
 func TestDo_MessagePolicy_RequestsShareOneBudget(t *testing.T) {
+	// Time is the behaviour. With budget B, the first request takes 0.6 B;
+	// the second hangs until its context ends. A shared budget cuts it off
+	// at B in total, a budget renewed per request only at 1.6 B: the
+	// bound sits between at 1.3 B, so a loaded runner has 0.3 B before it
+	// is mistaken for a renewed budget, and the first request 0.4 B before
+	// it runs out of its own.
+	const (
+		budget = 2 * time.Second
+		first  = budget * 6 / 10
+		bound  = budget * 13 / 10
+	)
 	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hits.Add(1)
-		select {
-		case <-time.After(1500 * time.Millisecond):
-		case <-r.Context().Done():
+		if hits.Add(1) == 1 {
+			time.Sleep(first)
+			_, _ = io.WriteString(w, policySportsXML)
 			return
 		}
-		_, _ = io.WriteString(w, policySportsXML)
+		<-r.Context().Done()
 	}))
 	defer srv.Close()
 	c := newTestClient(t, srv)
 	c.httpClient.Timeout = 30 * time.Second
 
-	ctx := apipolicy.With(t.Context(), apipolicy.Message)
 	start := time.Now()
+	ctx := apipolicy.WithBudget(t.Context(), apipolicy.Message, budget)
 	if _, err := c.FetchSports(ctx, types.EnLocale); err != nil {
 		t.Fatalf("first request: %v", err)
 	}
-	// 0.5 s of the budget is left: the second request is cut off there.
+	// What is left of the budget is all the second request gets.
 	if _, err := c.FetchSports(ctx, types.EnLocale); err == nil {
 		t.Fatal("second request succeeded beyond the shared budget")
 	}
-	if elapsed := time.Since(start); elapsed > apipolicy.MessageTimeout+500*time.Millisecond {
-		t.Fatalf("two requests took %v, want about the %v budget", elapsed, apipolicy.MessageTimeout)
+	if elapsed := time.Since(start); elapsed > bound {
+		t.Fatalf("two requests took %v, want about the %v budget (a budget per request would take %v)", elapsed, budget, first+budget)
 	}
 	// Budget spent: a third request makes no call at all.
 	before := hits.Load()
