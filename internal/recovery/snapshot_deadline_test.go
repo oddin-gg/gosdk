@@ -1101,7 +1101,9 @@ type scopeOps struct {
 
 func (s scopeOps) clientSessionInScope(id int) bool { return s.m.clientSessionInScope(id) }
 
-func (s scopeOps) clientProcessing() bool { return s.m.clientProcessing() }
+func (s scopeOps) clientProcessingStalled(now time.Time, after time.Duration) bool {
+	return s.m.clientProcessingStalled(now, after)
+}
 
 // clientScopeOps makes the actor's manager report the given open client
 // sessions, as the session registry of a real Manager would. The producer
@@ -1269,6 +1271,34 @@ func TestActor_SnapshotCompleteDeadline_HeldWhileAnyClientMessageIsInProcessing(
 	}
 	if !reissuedAt(a, started, 19*time.Minute) {
 		t.Fatal("not re-issued after the message ended and a further deadline passed")
+	}
+	waitRecoverHits(t, hits, 2)
+	waitDetachedDone(t, a, 3*time.Second)
+}
+
+// A busy client always has some message in processing; only one that has
+// stayed in processing longer than MaxInactivity says the queue is stuck.
+// A client whose messages each start and end within moments must not hold
+// the deadline, or a lost snapshot_complete would wait for
+// MaxRecoveryExecution on every busy client.
+func TestActor_SnapshotCompleteDeadline_NotHeldByABusyClient(t *testing.T) {
+	srv, hits := fixtureSrv(t)
+	defer srv.Close()
+	a := newWiredActor(t, srv, newFakeManagerOps()) // producer 1
+	startRecovery(t, a, hits, time.Now().Add(-10*time.Minute).Truncate(time.Millisecond), 1)
+	ops := clientScopeOps(a, types.LiveOnlyMessageInterest).(scopeOps)
+	ops.m.processingTimes = map[uuid.UUID]time.Time{}
+	ops.m.logger = newDiscardLogger()
+	a.mgr = ops
+	started := a.currentRecovery.recoveryStartedAt
+	a.lastProcessedFn = holdProcessingTS(time.Now().Add(-time.Hour))
+
+	// At the tick a message of producer 2 is in processing, taken up a
+	// second before: the client is busy, not stuck.
+	const other = 2
+	ops.m.OnMessageProcessingStarted(uuid.New(), other, started.Add(6*time.Minute-time.Second))
+	if !reissuedAt(a, started, 6*time.Minute) {
+		t.Fatal("not re-issued past the deadline although the message in processing had just started")
 	}
 	waitRecoverHits(t, hits, 2)
 	waitDetachedDone(t, a, 3*time.Second)

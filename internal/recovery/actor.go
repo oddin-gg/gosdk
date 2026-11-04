@@ -218,9 +218,10 @@ type actorManagerOps interface {
 	// SDK's own alive-only one) can receive the producer's replay; see
 	// Manager.clientSessionInScope.
 	clientSessionInScope(producerID int) bool
-	// clientProcessing reports whether any client session has a message
-	// in processing right now; see Manager.clientProcessing.
-	clientProcessing() bool
+	// clientProcessingStalled reports whether a client session has had a
+	// message in processing for longer than stalledAfter; see
+	// Manager.clientProcessingStalled.
+	clientProcessingStalled(now time.Time, stalledAfter time.Duration) bool
 }
 
 // maxPendingEventRecoveries bounds concurrent pending event recoveries
@@ -1064,10 +1065,13 @@ func (a *recoveryActor) expireSnapshotCompleteDeadline(now time.Time) {
 		return
 	}
 	// A session queue is shared by all producers and drained one message at
-	// a time: while any client message is in processing, this producer's
-	// replay may sit behind it whatever the per-producer guards below see,
-	// and a re-issue would queue a second replay there.
-	if a.mgr.clientProcessing() {
+	// a time: while a client message of any producer is stuck in processing
+	// (longer than MaxInactivity, the feed's own tolerance for silence),
+	// this producer's replay may sit behind it whatever the per-producer
+	// guards below see, and a re-issue would queue a second replay there.
+	// A message in processing for a short time is no evidence: a busy
+	// client always has one, and holding on it would disable the deadline.
+	if a.mgr.clientProcessingStalled(now, a.cfg.MaxInactivity()) {
 		a.currentRecovery.renewedAt = now
 		return
 	}

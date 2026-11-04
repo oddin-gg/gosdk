@@ -810,12 +810,20 @@ func (m *Manager) sessionQueueSettled(session uuid.UUID) {
 	}
 }
 
-// clientProcessing reports whether any client session has a message in
-// processing right now (the SDK's alive-only session reports none).
-func (m *Manager) clientProcessing() bool {
+// clientProcessingStalled reports whether a client session has had one
+// message in processing for longer than stalledAfter at now (the SDK's
+// alive-only session reports none). A busy client always has some message
+// in processing; only one that has stayed there that long says the
+// session's queue is stuck behind it.
+func (m *Manager) clientProcessingStalled(now time.Time, stalledAfter time.Duration) bool {
 	m.processingMu.Lock()
 	defer m.processingMu.Unlock()
-	return len(m.processingTimes) > 0
+	for _, started := range m.processingTimes {
+		if !started.IsZero() && now.Sub(started) > stalledAfter {
+			return true
+		}
+	}
+	return false
 }
 
 // rebindPending reports whether any lost session whose interest covers
