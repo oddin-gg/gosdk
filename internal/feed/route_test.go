@@ -155,3 +155,49 @@ func TestParseRoute_BadURNComponents(t *testing.T) {
 		})
 	}
 }
+
+// TestParseRoute_WrongPartCountDoesNotEchoRawRoute verifies that the error
+// for a malformed routing key, which is logged, carries only the bounded
+// preview and never the raw broker-supplied string.
+func TestParseRoute_WrongPartCountDoesNotEchoRawRoute(t *testing.T) {
+	c := &ChannelConsumer{sportIDPrefix: "od:sport:"}
+
+	route := "bad\r\nroute" + strings.Repeat("x", 500)
+	_, err := c.parseRoute(route)
+	if err == nil {
+		t.Fatal("expected an error for a route with the wrong number of parts")
+	}
+	if strings.ContainsAny(err.Error(), "\r\n") {
+		t.Fatalf("error contains raw CR/LF from the route: %q", err.Error())
+	}
+	if strings.Contains(err.Error(), route) {
+		t.Fatalf("error echoes the raw route: %q", err.Error())
+	}
+	if len(err.Error()) > 200 || !strings.Contains(err.Error(), "…") {
+		t.Fatalf("error is not the bounded, truncated preview (len=%d): %q", len(err.Error()), err.Error())
+	}
+}
+
+// TestParseRoute_UnparseableIDDoesNotEchoRawValue covers the eight-part
+// keys: a sport or event id the URN parser rejects must not reach the
+// logged error raw either (the parser's own error embeds the value).
+func TestParseRoute_UnparseableIDDoesNotEchoRawValue(t *testing.T) {
+	c := &ChannelConsumer{sportIDPrefix: "od:sport:"}
+
+	bad := "x\r\nforged" + strings.Repeat("y", 300)
+	for _, route := range []string{
+		"hi.pre.live.odds_change." + bad + ".match.1.-",
+		"hi.pre.live.odds_change.1.match." + bad + ".-",
+	} {
+		_, err := c.parseRoute(route)
+		if err == nil {
+			t.Fatalf("expected an error for %q", route)
+		}
+		if strings.ContainsAny(err.Error(), "\r\n") || strings.Contains(err.Error(), bad) {
+			t.Fatalf("error echoes the raw id: %q", err.Error())
+		}
+		if len(err.Error()) > 250 {
+			t.Fatalf("error is not bounded (len=%d): %q", len(err.Error()), err.Error())
+		}
+	}
+}

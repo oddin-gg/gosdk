@@ -18,6 +18,46 @@ import (
 	"github.com/oddin-gg/gosdk/types"
 )
 
+// TestRun_CtxCancelClosesChannelAfterInFlightAck pins the terminal
+// context-cancel path of run: the live channel must be closed through the
+// same ackMu discipline as the graceful path, so an ack still executing
+// d.Ack never runs concurrently with Close on the same channel.
+func TestRun_CtxCancelClosesChannelAfterInFlightAck(t *testing.T) {
+	c := newDrainTestConsumer()
+	c.ackMu.Lock() // stand in for an ack mid-d.Ack
+
+	ch := &fakeAMQPChannel{}
+	deliveries := make(chan amqp.Delivery)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		c.run(ctx, deliveries, ch)
+	}()
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("run did not exit after the context was cancelled")
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	if ch.closed.Load() != 0 {
+		t.Fatalf("channel closed while an ack was in flight (concurrent Close+Ack): closed=%d", ch.closed.Load())
+	}
+
+	c.ackMu.Unlock() // ack completes -> the close may now run
+	deadline := time.Now().Add(2 * time.Second)
+	for ch.closed.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("channel not closed after the in-flight ack completed")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 // fakeChannelOpener is a test double for the feed Client's CreateChannel,
 // so the consumer's synchronous first-channel handshake can be exercised
 // without a live broker.

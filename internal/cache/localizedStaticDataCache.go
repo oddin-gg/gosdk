@@ -305,6 +305,25 @@ func (l *LocalizedStaticDataCache) timerTick(ctx context.Context) {
 				}
 			}
 			l.mux.Lock()
+			// An EMPTY answer carries no removal authority — an OK reply
+			// with zero rows decodes successfully, and a description set
+			// with nothing in it is indistinguishable from a broken
+			// response. Sweeping on it would drop every description of
+			// this locale (the locale stays marked loaded, so nothing
+			// refetches until the next tick); refusing costs at most one
+			// refresh interval of staleness. Mirrors the sport catalog's
+			// reconcileCatalog guard.
+			if len(fresh) == 0 {
+				for _, localCache := range l.internalCache {
+					if _, ok := localCache[loc]; ok {
+						l.logger.WithField("locale", string(loc)).
+							Warn("cache: empty static data response; keeping cached descriptions (refresh skipped)")
+						break
+					}
+				}
+				l.mux.Unlock()
+				return nil, nil
+			}
 			for id, d := range fresh {
 				localCache, ok := l.internalCache[id]
 				if !ok {

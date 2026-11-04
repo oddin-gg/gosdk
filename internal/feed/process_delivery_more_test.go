@@ -1,9 +1,12 @@
 package feed
 
 import (
+	"errors"
 	"io"
 	"log/slog"
+	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -427,6 +430,105 @@ func TestValidateRouteIdentity_LeadingZeroURN(t *testing.T) {
 	if err := validateRouteIdentity(rk, &feedXML.OddsChange{EventID: "od:match:8"}); err == nil {
 		t.Fatal("genuine event-id mismatch was accepted")
 	}
+}
+
+// futureKind is an event-addressed message kind validateDecodedMessage has
+// no case for, so it takes the fallback path.
+type futureKind struct{ eventID string }
+
+func (futureKind) Product() int         { return 1 }
+func (futureKind) Timestamp() time.Time { return time.UnixMilli(1_700_000_000_000) }
+func (f futureKind) GetEventID() string { return f.eventID }
+
+// TestValidate_HugeEventIDErrorsAreBounded: the payload event id is
+// publisher-controlled (up to the feed message size limit) and the
+// validation error is logged per delivery, so no validation error may carry
+// it whole — a short escaped prefix and the length instead.
+func TestValidate_HugeEventIDErrorsAreBounded(t *testing.T) {
+	const huge = 1 << 20
+	rk := &types.RoutingKeyInfo{FullRoutingKey: "r", EventID: &types.URN{Prefix: "od", Type: "match", ID: 1}}
+	ts := feedXML.MessageWithTimestamp{Timestamp: utils.Timestamp(time.UnixMilli(1_700_000_000_000))}
+	oversized := "od:match:" + strings.Repeat("9", huge) // parses as a URN shape, never equals the route
+	// Not a URN at all, and its leading bytes are the ones a forged log line
+	// would use: CR/LF, a terminal escape, a NUL.
+	garbage := "x\r\n2026-10-28 INFO forged\x1b[31m\x00" + strings.Repeat("y", huge)
+	odds := func(id string) *feedXML.OddsChange {
+		return &feedXML.OddsChange{MessageWithTimestamp: ts, EventID: id, ProductID: 1}
+	}
+
+	cases := []struct {
+		name string
+		err  error
+		want string // part of the message that must survive
+	}{
+		{"mismatch", validateRouteIdentity(rk, odds(oversized)), "does not match route event id"},
+		{"mismatch garbage", validateRouteIdentity(rk, odds(garbage)), "does not match route event id"},
+		{"unparseable known kind", validateDecodedMessage(rk, odds(garbage)), "unparseable event_id"},
+		{"unparseable fallback kind", validateDecodedMessage(rk, futureKind{garbage}), "unparseable event_id"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.err == nil {
+				t.Fatal("a huge mismatched event id was accepted")
+			}
+			msg := tc.err.Error()
+			if len(msg) > 512 {
+				t.Fatalf("error is %d bytes, want it bounded (the payload value was %d)", len(msg), huge)
+			}
+			if !strings.Contains(msg, tc.want) {
+				t.Fatalf("error %q lost %q", msg, tc.want)
+			}
+			if !strings.Contains(msg, "len=") {
+				t.Fatalf("error %q must carry the value's length", msg)
+			}
+			for _, raw := range []string{"\r", "\n", "\x1b", "\x00"} {
+				if strings.Contains(msg, raw) {
+					t.Fatalf("error %q carries the raw control byte %q", msg, raw)
+				}
+			}
+		})
+	}
+}
+
+// TestValidate_HugeEventIDIsNotParsed: beyond keeping the logged error
+// small, a huge payload event id must be rejected before the URN parser
+// sees it, since the parser's own error copies the whole value; a flood of
+// such messages would otherwise allocate the size of each id per delivery.
+func TestValidate_HugeEventIDIsNotParsed(t *testing.T) {
+	const huge = 4 << 20
+	rk := &types.RoutingKeyInfo{FullRoutingKey: "r", EventID: &types.URN{Prefix: "od", Type: "match", ID: 1}}
+	ts := feedXML.MessageWithTimestamp{Timestamp: utils.Timestamp(time.UnixMilli(1_700_000_000_000))}
+	odds := &feedXML.OddsChange{MessageWithTimestamp: ts, EventID: "x" + strings.Repeat("y", huge), ProductID: 1}
+
+	// The errors are not printed: unguarded, they carry the whole id.
+	if _, err := parseEventID(odds.EventID); !errors.Is(err, errEventIDTooLong) {
+		t.Fatalf("parseEventID(huge) did not reject the id before parsing (error of %d bytes)", errLen(err))
+	}
+	if _, err := parseEventID("od:match:" + strings.Repeat("1", maxEventIDBytes)); !errors.Is(err, errEventIDTooLong) {
+		t.Fatalf("an id one past the bound was parsed (error of %d bytes)", errLen(err))
+	}
+	if u, err := parseEventID("od:match:42"); err != nil || u.ID != 42 {
+		t.Fatalf("parseEventID(od:match:42) = %v, %v", u, err)
+	}
+
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	for i := 0; i < 4; i++ {
+		_ = validateRouteIdentity(rk, odds)
+		_ = validateDecodedMessage(rk, odds)
+	}
+	runtime.ReadMemStats(&after)
+	if got := after.TotalAlloc - before.TotalAlloc; got > huge/2 {
+		t.Fatalf("validating a %d-byte event id 8 times allocated %d bytes: the id was copied", huge, got)
+	}
+}
+
+func errLen(err error) int {
+	if err == nil {
+		return 0
+	}
+	return len(err.Error())
 }
 
 // TestProcessDelivery_MissingSubscribed_AdmitsUnparsable pins the

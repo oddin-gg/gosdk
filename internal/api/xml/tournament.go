@@ -89,7 +89,14 @@ func (t Tournament) GetStartDate() *time.Time {
 		return nil
 	}
 
-	return (*time.Time)(&t.TournamentLength[0].StartDate)
+	// Both attributes are optional on the wire; an absent one decodes to
+	// the zero time and must not surface as a year-one date.
+	d := (time.Time)(t.TournamentLength[0].StartDate)
+	if d.IsZero() {
+		return nil
+	}
+
+	return &d
 }
 
 // GetEndDate ...
@@ -98,7 +105,14 @@ func (t Tournament) GetEndDate() *time.Time {
 		return nil
 	}
 
-	return (*time.Time)(&t.TournamentLength[0].EndDate)
+	// Both attributes are optional on the wire; an absent one decodes to
+	// the zero time and must not surface as a year-one date.
+	d := (time.Time)(t.TournamentLength[0].EndDate)
+	if d.IsZero() {
+		return nil
+	}
+
+	return &d
 }
 
 func (t Tournament) GetRiskTier() int {

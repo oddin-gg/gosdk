@@ -583,6 +583,27 @@ func (c *ChannelConsumer) closeGracefulChannel(gch amqpChannel) {
 	}()
 }
 
+// closeLostChannel closes a channel whose delivery stream ended while the
+// consumer keeps running (a broker cancel or a connection loss), serialized
+// against an in-flight delivery Ack on ackMu as closeGracefulChannel does.
+// It deliberately leaves chClosed alone: that flag is consumer-wide, and the
+// loop goes on to reopen a channel whose acks must still run. A late ack on
+// this channel then reaches a closed channel and fails, which is harmless:
+// its exclusive queue is gone with it. When an ack is mid-flight the close
+// is left to a goroutine, so a wedged ack cannot hold up the reopen.
+func (c *ChannelConsumer) closeLostChannel(ch amqpChannel) {
+	if c.ackMu.TryLock() {
+		_ = ch.Close()
+		c.ackMu.Unlock()
+		return
+	}
+	go func() {
+		c.ackMu.Lock()
+		_ = ch.Close()
+		c.ackMu.Unlock()
+	}()
+}
+
 // run is the single consumer goroutine. It consumes the initial channel
 // (created synchronously in Open), and on delivery-channel close
 // (connection drop) reopens a fresh channel — retrying transient errors —
@@ -635,8 +656,13 @@ func (c *ChannelConsumer) run(ctx context.Context, deliveries <-chan amqp.Delive
 		default:
 		}
 		if ctx.Err() != nil {
+			// Terminal: no channel is reopened after this, so go through
+			// the same ackMu/chClosed discipline as the graceful path. A
+			// delivery ack still in flight on another goroutine must not
+			// run d.Ack concurrently with Close on the same
+			// non-thread-safe channel.
 			if ch != nil {
-				_ = ch.Close()
+				c.closeGracefulChannel(ch)
 			}
 			return
 		}
@@ -655,8 +681,13 @@ func (c *ChannelConsumer) run(ctx context.Context, deliveries <-chan amqp.Delive
 		}
 		stopWatch()
 		watch = nil // stopped; the deferred stopWatch must not close it again
+		// Serialized against an in-flight ack like the other closes: the
+		// delivery channel also closes on a broker consumer cancel, which
+		// leaves the AMQP channel itself open, so Close is a real RPC that
+		// must not run while d.Ack runs on the same channel. Unlike them it
+		// does not set chClosed (see closeLostChannel).
 		if ch != nil {
-			_ = ch.Close()
+			c.closeLostChannel(ch)
 		}
 
 		// A channel that died within its dwell is being cancelled as fast
@@ -1106,9 +1137,9 @@ func validateRouteIdentity(rk *types.RoutingKeyInfo, msg types.BasicMessage) err
 			// non-canonically. A payload id that does not parse cannot match
 			// the parsed route id and is a genuine mismatch (validateDecoded-
 			// Message rejects unparseable event ids on their own merits too).
-			gotURN, perr := types.ParseURN(got)
+			gotURN, perr := parseEventID(got)
 			if perr != nil || gotURN.ToString() != rk.EventID.ToString() {
-				return fmt.Errorf("payload event id %q does not match route event id %q", got, rk.EventID.ToString())
+				return fmt.Errorf("payload event id %s does not match route event id %q", utils.IdentifierPreview(got), rk.EventID.ToString())
 			}
 		}
 	}
@@ -1207,12 +1238,30 @@ func validateDecodedMessage(rk *types.RoutingKeyInfo, msg types.BasicMessage) er
 			if got == "" {
 				return fmt.Errorf("%T: missing required event_id", msg)
 			}
-			if _, err := types.ParseURN(got); err != nil {
-				return fmt.Errorf("%T: unparseable event_id %q: %w", msg, got, err)
+			if _, err := parseEventID(got); err != nil {
+				return fmt.Errorf("%T: unparseable event_id %s", msg, utils.IdentifierPreview(got))
 			}
 		}
 	}
 	return nil
+}
+
+// maxEventIDBytes bounds a payload event id before it is parsed. A genuine
+// URN is a few dozen bytes, but the payload value is publisher-controlled and
+// may be up to the feed message size limit, and ParseURN formats the whole
+// value into its error: a longer id is rejected without parsing, so a flood
+// of such messages costs no allocation the size of each id.
+const maxEventIDBytes = 128
+
+var errEventIDTooLong = errors.New("event id too long")
+
+// parseEventID parses a payload event id, rejecting one longer than
+// maxEventIDBytes before ParseURN sees it.
+func parseEventID(id string) (*types.URN, error) {
+	if len(id) > maxEventIDBytes {
+		return nil, errEventIDTooLong
+	}
+	return types.ParseURN(id)
 }
 
 // eventBasicMessage is the shared surface of every event-addressed feed
@@ -1233,8 +1282,11 @@ func validateEventID(rk *types.RoutingKeyInfo, msg eventBasicMessage) error {
 		if got == "" {
 			return fmt.Errorf("%T: missing required event_id", msg)
 		}
-		if _, err := types.ParseURN(got); err != nil {
-			return fmt.Errorf("%T: unparseable event_id %q: %w", msg, got, err)
+		// The id is publisher-controlled and up to the message size limit,
+		// and processDelivery logs this error per delivery: neither the
+		// value nor ParseURN's own error (which embeds it) may be echoed whole.
+		if _, err := parseEventID(got); err != nil {
+			return fmt.Errorf("%T: unparseable event_id %s", msg, utils.IdentifierPreview(got))
 		}
 	}
 	return nil
@@ -1265,7 +1317,7 @@ func validateOutcomeMarkets(kind string, markets []*feedXML.MarketWithOutcome) e
 func (c *ChannelConsumer) parseRoute(route string) (*types.RoutingKeyInfo, error) {
 	parts := strings.Split(route, ".")
 	if len(parts) != 8 {
-		return nil, fmt.Errorf("incorrect route %s", route)
+		return nil, fmt.Errorf("incorrect route %s", utils.RoutePreview(route))
 	}
 
 	sportID := parts[4]
@@ -1286,7 +1338,9 @@ func (c *ChannelConsumer) parseRoute(route string) (*types.RoutingKeyInfo, error
 	if sportID != emptyPosition {
 		sportURN, err = types.ParseURN(c.sportIDPrefix + sportID)
 		if err != nil {
-			return nil, err
+			// ParseURN's error embeds the raw value, and this error is
+			// logged: name the route by its bounded preview instead.
+			return nil, fmt.Errorf("incorrect route %s: unparseable sport id", utils.RoutePreview(route))
 		}
 	}
 
@@ -1294,7 +1348,7 @@ func (c *ChannelConsumer) parseRoute(route string) (*types.RoutingKeyInfo, error
 	if eventType != emptyPosition && eventID != emptyPosition {
 		eventURN, err = types.ParseURN(eventType + ":" + eventID)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("incorrect route %s: unparseable event id", utils.RoutePreview(route))
 		}
 	}
 

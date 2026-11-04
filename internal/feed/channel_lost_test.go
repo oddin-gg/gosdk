@@ -1,7 +1,10 @@
 package feed
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -10,6 +13,7 @@ import (
 	amqp "github.com/rabbitmq/amqp091-go"
 
 	"github.com/oddin-gg/gosdk/internal/factory"
+	log "github.com/oddin-gg/gosdk/internal/log"
 	"github.com/oddin-gg/gosdk/types"
 )
 
@@ -347,6 +351,48 @@ func TestChannelConsumer_ChannelLost_SecondLossReportsAgain(t *testing.T) {
 	}
 }
 
+// TestChannelConsumer_ReportChannelLost_AfterGoneIsSilent: a loss
+// reported once the consumer is gone would re-enter the manager's ledger
+// with nothing left to settle it and defer every later recovery for the
+// producers the session served. The report must reach neither the hook
+// nor the (throttled) log. The same consumer reports normally while it is
+// still alive, so the silence is the guard's doing.
+func TestChannelConsumer_ReportChannelLost_AfterGoneIsSilent(t *testing.T) {
+	var logged bytes.Buffer
+	logger := log.New(slog.New(slog.NewTextHandler(&logged, nil)))
+	c := NewChannelConsumer(newSequencedOpener(1, false), &factory.FeedMessageFactory{}, logger, "ex", "od:sport:", 0)
+	var hookCalls atomic.Int32
+	c.SetChannelLostHook(func(types.MessageInterest, time.Time) { hookCalls.Add(1) })
+
+	c.ReportChannelLost(time.Now())
+	if got := hookCalls.Load(); got != 1 {
+		t.Fatalf("hook calls = %d for a loss on a live consumer, want 1", got)
+	}
+	if !strings.Contains(logged.String(), "consumer channel lost") {
+		t.Fatalf("a loss on a live consumer must be logged, got %q", logged.String())
+	}
+
+	logged.Reset()
+	c.lossMu.Lock()
+	c.lastLossWarnAt, c.suppressedLosses = time.Time{}, 0 // un-throttle: a log line is due again
+	c.lossMu.Unlock()
+	c.gone.Store(true)
+
+	c.ReportChannelLost(time.Now())
+	if got := hookCalls.Load(); got != 1 {
+		t.Fatalf("hook calls = %d after the consumer was gone, want still 1", got)
+	}
+	if logged.Len() != 0 {
+		t.Fatalf("a loss reported after the consumer was gone was logged: %q", logged.String())
+	}
+	c.lossMu.Lock()
+	warnedAt, suppressed := c.lastLossWarnAt, c.suppressedLosses
+	c.lossMu.Unlock()
+	if !warnedAt.IsZero() || suppressed != 0 {
+		t.Fatalf("throttle state touched after gone: lastLossWarnAt=%v suppressed=%d", warnedAt, suppressed)
+	}
+}
+
 // TestChannelConsumer_LongLivedChannelReopensImmediately: the backoff is
 // for flapping channels only; an ordinary reconnect after a long-lived
 // channel must not pay it.
@@ -643,5 +689,47 @@ func TestChannelConsumer_GoneIsOrderedAfterAnInFlightLoss(t *testing.T) {
 	l, g := lossDone.Load(), goneAt.Load()
 	if l == 0 || g == 0 || g < l {
 		t.Fatalf("ordering loss(%d) < gone(%d) violated", l, g)
+	}
+}
+
+// TestChannelConsumer_ChannelLost_CloseWaitsForInFlightAck: a broker
+// consumer cancel ends the delivery stream but leaves the AMQP channel
+// open, so the loss path's Close is a real RPC. It must not run while an
+// ack holds ackMu on another goroutine, must not hold up the reopen, and
+// must not set the consumer-wide chClosed (the reopened channel's acks
+// still have to run).
+func TestChannelConsumer_ChannelLost_CloseWaitsForInFlightAck(t *testing.T) {
+	shortDwell(t)
+	opener := newSequencedOpener(2, false)
+	c := NewChannelConsumer(opener, &factory.FeedMessageFactory{}, discardConsumerLogger(), "ex", "od:sport:", 0)
+	closeConsumer(t, c)
+
+	mi := types.LiveOnlyMessageInterest
+	if _, err := c.Open(context.Background(), []string{"k"}, &mi); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	c.ackMu.Lock() // stand in for an ack mid-d.Ack on the old channel
+	close(opener.chans[0])
+	opener.waitCalls(t, 2) // the reopen is not held up by the ack
+
+	time.Sleep(50 * time.Millisecond)
+	if got := opener.channels[0].closedAt.Load(); got != 0 {
+		t.Fatalf("lost channel closed (ordinal %d) while an ack was in flight", got)
+	}
+	c.ackMu.Unlock()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for opener.channels[0].closedAt.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("lost channel not closed after the in-flight ack completed")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	c.ackMu.Lock()
+	closed := c.chClosed
+	c.ackMu.Unlock()
+	if closed {
+		t.Fatal("the loss path set chClosed: the reopened channel's acks would be skipped")
 	}
 }
