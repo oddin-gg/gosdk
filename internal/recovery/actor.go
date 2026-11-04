@@ -355,14 +355,25 @@ func (a *recoveryActor) notePendingLoss(lostAt time.Time) {
 // subscribed=false path reaches it directly when the producer is
 // already flagged down, bypassing producerDown.
 func (a *recoveryActor) interruptRecovery() {
-	if a.currentRecovery != nil {
-		if a.currentRecovery.recoverFrom.IsZero() {
-			a.recoveryFloorFull = true
-		} else {
-			a.lowerRecoveryFloor(a.currentRecovery.recoverFrom)
-		}
-	}
+	a.keepRecoveryRangeAsFloor(a.currentRecovery)
 	a.recoveryState = types.InterruptedRecoveryState
+}
+
+// keepRecoveryRangeAsFloor folds the range of a snapshot recovery that is
+// about to be dropped into the floor, so the recovery that replaces it
+// reaches back as far: its recover-from point may come from the lookback
+// clamp or the initial snapshot window, which a later request would clamp
+// against a later "now". A zero point means the request covered the
+// producer's full history. Actor goroutine only.
+func (a *recoveryActor) keepRecoveryRangeAsFloor(rec *recoveryData) {
+	if rec == nil {
+		return
+	}
+	if rec.recoverFrom.IsZero() {
+		a.recoveryFloorFull = true
+		return
+	}
+	a.lowerRecoveryFloor(rec.recoverFrom)
 }
 
 // lowerRecoveryFloor moves the recovery floor to t if t is earlier (or
@@ -1116,6 +1127,7 @@ func (a *recoveryActor) expireStuckSnapshotRecovery(now time.Time) {
 		WithField("request_id", a.currentRecovery.recoveryID).
 		WithField("started_at", started).
 		Error("recovery: snapshot recovery exceeded MaxRecoveryExecution; transitioning to Error")
+	a.keepRecoveryRangeAsFloor(a.currentRecovery)
 	a.currentRecovery = nil
 	a.recoveryState = types.ErrorRecoveryState
 }
@@ -1349,6 +1361,7 @@ func (a *recoveryActor) systemAliveReceived(timestamp types.MessageTimestamp, su
 		maxInterval := a.cfg.MaxRecoveryExecution()
 		if a.isPerformingRecovery() && recoveryTiming > maxInterval {
 			a.recoveryState = types.ErrorRecoveryState
+			a.keepRecoveryRangeAsFloor(a.currentRecovery)
 			a.currentRecovery = nil
 			if err := a.startSnapshotRecovery(recoveryTimestamp); err != nil {
 				return err
@@ -1812,6 +1825,7 @@ func (a *recoveryActor) onSnapshotRecoveryAPICompleted(e evSnapshotRecoveryAPICo
 			WithField("producer_id", a.producerID).
 			WithField("request_id", e.requestID).
 			Error("recovery: PostRecovery API failed; transitioning to Error")
+		a.keepRecoveryRangeAsFloor(a.currentRecovery)
 		a.currentRecovery = nil
 		a.recoveryState = types.ErrorRecoveryState
 		return

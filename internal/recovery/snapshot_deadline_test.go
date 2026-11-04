@@ -1021,3 +1021,67 @@ func TestActor_SnapshotCompleteDeadline_LateSnapshotCompleteOfTheOldIDRenewsNoth
 	waitRecoverHits(t, hits, 3)
 	waitDetachedDone(t, a, 3*time.Second)
 }
+
+// failedReissue starts a recovery from `from`, lets the deadline re-issue it
+// and then delivers the error of the re-issue's detached POST, as the actor
+// loop would when the request fails after its retries. Returns the actor and
+// the hit counter of the fixture server.
+func failedReissue(t *testing.T, from time.Time) (*recoveryActor, *recoveryHits) {
+	t.Helper()
+	srv, hits := fixtureSrv(t)
+	t.Cleanup(srv.Close)
+	a := newWiredActor(t, srv, newFakeManagerOps())
+
+	oldID := startRecovery(t, a, hits, from, 1)
+	a.onTick(a.currentRecovery.recoveryStartedAt.Add(6*time.Minute), false)
+	newID := a.currentRecovery.recoveryID
+	if newID == oldID {
+		t.Fatal("setup: the request was not re-issued")
+	}
+	waitRecoverHits(t, hits, 2)
+	waitDetachedDone(t, a, 3*time.Second)
+
+	a.onSnapshotRecoveryAPICompleted(evSnapshotRecoveryAPICompleted{
+		requestID: newID,
+		err:       errors.New("recovery API unavailable"),
+	})
+	if a.currentRecovery != nil || a.recoveryState != types.ErrorRecoveryState {
+		t.Fatalf("setup: failed POST left recovery=%v state=%v", a.currentRecovery, a.recoveryState)
+	}
+	return a, hits
+}
+
+// A re-issue whose POST fails later than the re-issue itself clears the
+// recovery; the next alive's request must still start at the point the
+// chain began with, not at a cursor clamped against a later "now". Here the
+// cursor of the next alive is newer than the original point.
+func TestActor_SnapshotCompleteDeadline_FailedReissuePostKeepsTheOriginalPoint(t *testing.T) {
+	from := time.Now().Add(-10 * time.Minute).Truncate(time.Millisecond)
+	a, hits := failedReissue(t, from)
+
+	if err := a.makeSnapshotRecovery(time.Now().Add(-time.Minute).Truncate(time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	waitRecoverHits(t, hits, 3)
+	if got := hits.lastAfterMillis.Load(); got != from.UnixMilli() {
+		t.Fatalf("recovery after the failed re-issue: after=%d (%v), want the original %v",
+			got, time.UnixMilli(got), from)
+	}
+	waitDetachedDone(t, a, 3*time.Second)
+}
+
+// The same for a request that covered the full history: no timestamp
+// expresses it, so the next request is the full history again.
+func TestActor_SnapshotCompleteDeadline_FailedReissuePostKeepsTheFullHistory(t *testing.T) {
+	a, hits := failedReissue(t, time.Time{})
+
+	if err := a.makeSnapshotRecovery(time.Now().Add(-time.Minute).Truncate(time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	waitRecoverHits(t, hits, 3)
+	if got := hits.lastAfterMillis.Load(); got != 0 {
+		t.Fatalf("recovery after the failed re-issue: after=%d (%v), want none (the full history)",
+			got, time.UnixMilli(got))
+	}
+	waitDetachedDone(t, a, 3*time.Second)
+}
