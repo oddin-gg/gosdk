@@ -64,9 +64,15 @@ type policy struct {
 // (MessageTimeout) starts now and covers everything done under the returned
 // context.
 func With(ctx context.Context, m Mode) context.Context {
+	return WithBudget(ctx, m, MessageTimeout)
+}
+
+// WithBudget is With for a budget other than MessageTimeout (tests that need
+// a short or an already spent one). The Default mode carries none.
+func WithBudget(ctx context.Context, m Mode, budget time.Duration) context.Context {
 	p := policy{mode: m}
 	if m != Default {
-		p.deadline = time.Now().Add(MessageTimeout)
+		p.deadline = time.Now().Add(budget)
 	}
 	return context.WithValue(ctx, ctxKey{}, p)
 }

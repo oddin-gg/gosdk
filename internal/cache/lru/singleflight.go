@@ -2,6 +2,8 @@ package lru
 
 import (
 	"context"
+	"errors"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sync/singleflight"
@@ -68,21 +70,51 @@ func LoadCoalesced[T any](
 	}
 	// The call policy of the caller rides along (see apipolicy): flights of
 	// different policies are separate, and the load keeps its caller's.
-	ch := sf.DoChan(sfKey+apipolicy.Suffix(ctx), func() (any, error) {
-		loadCtx, cancel := context.WithTimeout(base, LoadTimeout)
-		defer cancel()
-		return fn(apipolicy.Carry(loadCtx, ctx))
-	})
-	select {
-	case r := <-ch:
-		if r.Err != nil {
-			return zero, r.Err
+	//
+	// A flight runs on its STARTER's budget, and the key only tells the
+	// mode, so a caller that joined a flight can get the starter's budget
+	// running out (a deadline error) while its own budget is untouched. It
+	// then asks again once, under its own budget: it starts a new flight or
+	// joins a newer one. Only the message modes retry (a public getter's
+	// load has no per-message budget), and only a joiner: the starter's
+	// error is its own.
+	for attempt := 0; ; attempt++ {
+		var started atomic.Bool
+		ch := sf.DoChan(sfKey+apipolicy.Suffix(ctx), func() (any, error) {
+			started.Store(true)
+			loadCtx, cancel := context.WithTimeout(base, LoadTimeout)
+			defer cancel()
+			return fn(apipolicy.Carry(loadCtx, ctx))
+		})
+		select {
+		case r := <-ch:
+			if r.Err != nil {
+				if attempt == 0 && !started.Load() && joinerMayRetry(ctx, r.Err) {
+					continue
+				}
+				return zero, r.Err
+			}
+			if r.Val == nil {
+				return zero, nil
+			}
+			return r.Val.(T), nil
+		case <-ctx.Done():
+			return zero, ctx.Err()
 		}
-		if r.Val == nil {
-			return zero, nil
-		}
-		return r.Val.(T), nil
-	case <-ctx.Done():
-		return zero, ctx.Err()
 	}
+}
+
+// joinerMayRetry reports whether a caller that joined a flight should ask
+// again: the flight ended on a deadline (the starter's budget), while this
+// caller's own context is alive and, under a message mode, its own budget is
+// not spent.
+func joinerMayRetry(ctx context.Context, err error) bool {
+	if !errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
+		return false
+	}
+	if apipolicy.ModeOf(ctx) == apipolicy.Default {
+		return false
+	}
+	remaining, ok := apipolicy.Remaining(ctx)
+	return ok && remaining > 0
 }
