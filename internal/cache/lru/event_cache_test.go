@@ -892,6 +892,7 @@ func TestEventCache_AdmissionRedoesALoadWhoseBaseWasEvicted(t *testing.T) {
 // budget left gets that flight's deadline error without having used its own
 // budget: it asks once more under its own. The starter keeps its own error.
 func TestEventCache_Get_JoinerRetriesOnceWhenTheStartersBudgetRanOut(t *testing.T) {
+	regs := trackRegistrations(t)
 	var calls atomic.Int32
 	entered := make(chan struct{})
 	gate := make(chan struct{})
@@ -920,7 +921,7 @@ func TestEventCache_Get_JoinerRetriesOnceWhenTheStartersBudgetRanOut(t *testing.
 		_, _, err := c.Get(joinerCtx, "k", []string{"en"})
 		joiner <- err
 	}()
-	waitJoined()
+	regs.wait(t, 2)
 	close(gate)
 
 	if err := <-joiner; err != nil {
@@ -936,6 +937,7 @@ func TestEventCache_Get_JoinerRetriesOnceWhenTheStartersBudgetRanOut(t *testing.
 
 // At most one retry per call: a second deadline error is returned.
 func TestEventCache_Get_JoinerRetriesAtMostOnce(t *testing.T) {
+	regs := trackRegistrations(t)
 	var calls atomic.Int32
 	entered := make(chan struct{})
 	gate := make(chan struct{})
@@ -954,12 +956,76 @@ func TestEventCache_Get_JoinerRetriesAtMostOnce(t *testing.T) {
 		_, _, err := c.Get(apipolicy.With(t.Context(), apipolicy.Message), "k", []string{"en"})
 		joiner <- err
 	}()
-	waitJoined()
+	regs.wait(t, 2)
 	close(gate)
 	if err := <-joiner; !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err = %v, want the deadline error after the one retry", err)
 	}
 	if got := calls.Load(); got != 2 {
 		t.Fatalf("loads = %d, want 2", got)
+	}
+}
+
+// The starter of an EventCache flight keeps its own deadline error even with
+// budget left: it must not ask again.
+func TestEventCache_Get_StarterWithBudgetLeftDoesNotRetryItsOwnDeadline(t *testing.T) {
+	var calls atomic.Int32
+	loader := func(context.Context, string, []string, *localizedFoo, bool) (*localizedFoo, error) {
+		calls.Add(1)
+		return nil, context.DeadlineExceeded
+	}
+	c := NewEventCache[string, string, *localizedFoo](Config{}, loader)
+	_, _, err := c.Get(apipolicy.With(t.Context(), apipolicy.Message), "k", []string{"en"})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want the starter's own deadline error", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("loads = %d, want 1", got)
+	}
+}
+
+// A joiner on the default policy, or one whose own budget is spent, has
+// nothing to retry with and gets the flight's deadline error.
+func TestEventCache_Get_JoinerWithoutBudgetOrOnTheDefaultPolicyDoesNotRetry(t *testing.T) {
+	cases := []struct {
+		name string
+		ctx  func(context.Context) context.Context
+	}{
+		{"own budget spent", func(c context.Context) context.Context {
+			return apipolicy.WithBudget(c, apipolicy.Message, -time.Second)
+		}},
+		{"default policy", func(c context.Context) context.Context { return c }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			regs := trackRegistrations(t)
+			var calls atomic.Int32
+			entered := make(chan struct{})
+			gate := make(chan struct{})
+			loader := func(context.Context, string, []string, *localizedFoo, bool) (*localizedFoo, error) {
+				if calls.Add(1) == 1 {
+					close(entered)
+					<-gate
+				}
+				return nil, context.DeadlineExceeded
+			}
+			c := NewEventCache[string, string, *localizedFoo](Config{}, loader)
+			// The starter shares the joiner's flight key (same mode).
+			go func() { _, _, _ = c.Get(tc.ctx(t.Context()), "k", []string{"en"}) }()
+			<-entered
+			joiner := make(chan error, 1)
+			go func() {
+				_, _, err := c.Get(tc.ctx(t.Context()), "k", []string{"en"})
+				joiner <- err
+			}()
+			regs.wait(t, 2)
+			close(gate)
+			if err := <-joiner; !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("joiner err = %v, want the flight's deadline error", err)
+			}
+			if got := calls.Load(); got != 1 {
+				t.Fatalf("loads = %d, want 1 (no retry)", got)
+			}
+		})
 	}
 }

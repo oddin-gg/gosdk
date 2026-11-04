@@ -374,6 +374,7 @@ func (c *EventCache[K, L, T]) get(ctx context.Context, key K, locales []L, clear
 	retried := false
 	owner := new(atomic.Bool)
 	ch := flight(owner)
+	FlightRegistered()
 	for {
 		select {
 		case r := <-ch:
@@ -381,6 +382,7 @@ func (c *EventCache[K, L, T]) get(ctx context.Context, key K, locales []L, clear
 				retried = true
 				owner = new(atomic.Bool)
 				ch = flight(owner)
+				FlightRegistered()
 				continue
 			}
 			if errors.Is(r.Err, errClearedDuringLoad) {

@@ -218,6 +218,7 @@ func (l *LocalizedStaticDataCache) loadLocales(ctx context.Context, locales []ty
 		retried := false
 		owner := new(atomic.Bool)
 		ch := flight(owner)
+		lru.FlightRegistered()
 	wait:
 		for {
 			select {
@@ -227,6 +228,7 @@ func (l *LocalizedStaticDataCache) loadLocales(ctx context.Context, locales []ty
 						retried = true
 						owner = new(atomic.Bool)
 						ch = flight(owner)
+						lru.FlightRegistered()
 						continue
 					}
 					return r.Err

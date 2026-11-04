@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/oddin-gg/gosdk/internal/apipolicy"
+	"github.com/oddin-gg/gosdk/internal/cache/lru"
 	log "github.com/oddin-gg/gosdk/internal/log"
 	"github.com/oddin-gg/gosdk/types"
 )
@@ -408,6 +409,7 @@ func TestLocalizedStaticDataCache_MessagePolicyLoadIsIndependentOfAGettersLoad(t
 // budget left gets that flight's deadline error without having used its own
 // budget: it asks once more under its own. The starter keeps its own error.
 func TestLocalizedStaticDataCache_JoinerRetriesOnceWhenTheStartersBudgetRanOut(t *testing.T) {
+	regs := trackRegistrations(t)
 	var calls atomic.Int32
 	entered := make(chan struct{})
 	gate := make(chan struct{})
@@ -429,7 +431,7 @@ func TestLocalizedStaticDataCache_JoinerRetriesOnceWhenTheStartersBudgetRanOut(t
 	<-entered
 	joiner := make(chan error, 1)
 	go func() { joiner <- c.loadLocales(joinerCtx, locales) }()
-	time.Sleep(50 * time.Millisecond) // the joiner parks on the flight
+	regs.wait(t, 2)
 	close(gate)
 
 	if err := <-joiner; err != nil {
@@ -445,6 +447,7 @@ func TestLocalizedStaticDataCache_JoinerRetriesOnceWhenTheStartersBudgetRanOut(t
 
 // At most one retry per call: a second deadline error is returned.
 func TestLocalizedStaticDataCache_JoinerRetriesAtMostOnce(t *testing.T) {
+	regs := trackRegistrations(t)
 	var calls atomic.Int32
 	entered := make(chan struct{})
 	gate := make(chan struct{})
@@ -461,12 +464,97 @@ func TestLocalizedStaticDataCache_JoinerRetriesAtMostOnce(t *testing.T) {
 	<-entered
 	joiner := make(chan error, 1)
 	go func() { joiner <- c.loadLocales(apipolicy.With(t.Context(), apipolicy.Message), locales) }()
-	time.Sleep(50 * time.Millisecond)
+	regs.wait(t, 2)
 	close(gate)
 	if err := <-joiner; !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err = %v, want the deadline error after the one retry", err)
 	}
 	if got := calls.Load(); got != 2 {
 		t.Fatalf("fetches = %d, want 2", got)
+	}
+}
+
+// The starter of a flight keeps its own deadline error even with budget
+// left: it must not ask again.
+func TestLocalizedStaticDataCache_StarterWithBudgetLeftDoesNotRetryItsOwnDeadline(t *testing.T) {
+	var calls atomic.Int32
+	c := refreshTestCache(func(context.Context, types.Locale) ([]types.StaticData, error) {
+		calls.Add(1)
+		return nil, context.DeadlineExceeded
+	})
+	t.Cleanup(c.Close)
+	err := c.loadLocales(apipolicy.With(t.Context(), apipolicy.Message), []types.Locale{types.EnLocale})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want the starter's own deadline error", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("fetches = %d, want 1", got)
+	}
+}
+
+// A joiner on the default policy, or one whose own budget is spent, gets the
+// flight's deadline error without a retry.
+func TestLocalizedStaticDataCache_JoinerWithoutBudgetOrOnTheDefaultPolicyDoesNotRetry(t *testing.T) {
+	cases := []struct {
+		name string
+		ctx  func(context.Context) context.Context
+	}{
+		{"own budget spent", func(c context.Context) context.Context {
+			return apipolicy.WithBudget(c, apipolicy.Message, -time.Second)
+		}},
+		{"default policy", func(c context.Context) context.Context { return c }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			regs := trackRegistrations(t)
+			var calls atomic.Int32
+			entered := make(chan struct{})
+			gate := make(chan struct{})
+			c := refreshTestCache(func(context.Context, types.Locale) ([]types.StaticData, error) {
+				if calls.Add(1) == 1 {
+					close(entered)
+					<-gate
+				}
+				return nil, context.DeadlineExceeded
+			})
+			t.Cleanup(c.Close)
+			locales := []types.Locale{types.EnLocale}
+			go func() { _ = c.loadLocales(tc.ctx(t.Context()), locales) }()
+			<-entered
+			joiner := make(chan error, 1)
+			go func() { joiner <- c.loadLocales(tc.ctx(t.Context()), locales) }()
+			regs.wait(t, 2)
+			close(gate)
+			if err := <-joiner; !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("joiner err = %v, want the flight's deadline error", err)
+			}
+			if got := calls.Load(); got != 1 {
+				t.Fatalf("fetches = %d, want 1 (no retry)", got)
+			}
+		})
+	}
+}
+
+// registrations counts the loaders that registered on a flight (starters and
+// joiners alike), so a test can release a gated flight once its joiner is
+// certainly parked on it instead of sleeping and hoping it got there.
+type registrations struct{ n atomic.Int32 }
+
+func trackRegistrations(t *testing.T) *registrations {
+	t.Helper()
+	r := &registrations{}
+	t.Cleanup(lru.SetFlightRegisteredHook(func() { r.n.Add(1) }))
+	return r
+}
+
+// wait blocks until want loaders have registered.
+func (r *registrations) wait(t *testing.T, want int32) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for r.n.Load() < want {
+		if time.Now().After(deadline) {
+			t.Fatalf("only %d loaders registered on the flight, want %d", r.n.Load(), want)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }

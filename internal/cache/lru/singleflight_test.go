@@ -3,6 +3,7 @@ package lru
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -237,14 +238,36 @@ type loadResult struct {
 	err error
 }
 
-// waitJoined lets a joiner park on the flight before it is released.
-func waitJoined() { time.Sleep(50 * time.Millisecond) }
+// registrations counts the loaders that registered on a flight (starters and
+// joiners alike), so a test can release a gated flight once its joiner is
+// certainly parked on it instead of sleeping and hoping it got there.
+type registrations struct{ n atomic.Int32 }
+
+func trackRegistrations(t *testing.T) *registrations {
+	t.Helper()
+	r := &registrations{}
+	t.Cleanup(SetFlightRegisteredHook(func() { r.n.Add(1) }))
+	return r
+}
+
+// wait blocks until want loaders have registered.
+func (r *registrations) wait(t *testing.T, want int32) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for r.n.Load() < want {
+		if time.Now().After(deadline) {
+			t.Fatalf("only %d loaders registered on the flight, want %d", r.n.Load(), want)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
 
 // A message-path caller that joined a flight started by a message with
 // little budget left gets that flight's deadline error without having used
 // its own budget: it asks once more under its own. The starter keeps its own
 // error and does not retry.
 func TestLoadCoalesced_JoinerRetriesOnceWhenTheStartersBudgetRanOut(t *testing.T) {
+	regs := trackRegistrations(t)
 	var sf singleflight.Group
 	g := newGatedLoader()
 	starterCtx := apipolicy.WithBudget(t.Context(), apipolicy.Message, time.Millisecond)
@@ -261,7 +284,7 @@ func TestLoadCoalesced_JoinerRetriesOnceWhenTheStartersBudgetRanOut(t *testing.T
 		v, err := LoadCoalesced(joinerCtx, nil, &sf, "k", g.fn)
 		joiner <- loadResult{v, err}
 	}()
-	waitJoined()
+	regs.wait(t, 2)
 	close(g.gate)
 
 	if r := <-joiner; r.err != nil || r.v != 7 {
@@ -289,6 +312,7 @@ func TestLoadCoalesced_JoinerWithoutBudgetOrOnTheDefaultPolicyDoesNotRetry(t *te
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			regs := trackRegistrations(t)
 			var sf singleflight.Group
 			g := newGatedLoader()
 			// The starter shares the joiner's flight key (same mode).
@@ -304,7 +328,7 @@ func TestLoadCoalesced_JoinerWithoutBudgetOrOnTheDefaultPolicyDoesNotRetry(t *te
 				v, err := LoadCoalesced(tc.ctx(t.Context()), nil, &sf, "k", g.fn)
 				joiner <- loadResult{v, err}
 			}()
-			waitJoined()
+			regs.wait(t, 2)
 			close(g.gate)
 
 			if r := <-joiner; !errors.Is(r.err, context.DeadlineExceeded) {
@@ -320,6 +344,7 @@ func TestLoadCoalesced_JoinerWithoutBudgetOrOnTheDefaultPolicyDoesNotRetry(t *te
 
 // At most one retry per call: a second deadline error is returned.
 func TestLoadCoalesced_JoinerRetriesAtMostOnce(t *testing.T) {
+	regs := trackRegistrations(t)
 	var sf singleflight.Group
 	var calls atomic.Int32
 	entered := make(chan struct{})
@@ -338,12 +363,59 @@ func TestLoadCoalesced_JoinerRetriesAtMostOnce(t *testing.T) {
 		_, err := LoadCoalesced(apipolicy.With(t.Context(), apipolicy.Message), nil, &sf, "k", fn)
 		joiner <- err
 	}()
-	waitJoined()
+	regs.wait(t, 2)
 	close(gate)
 	if err := <-joiner; !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err = %v, want the deadline error after the one retry", err)
 	}
 	if got := calls.Load(); got != 2 {
 		t.Fatalf("loads = %d, want 2", got)
+	}
+}
+
+func TestJoinerMayRetry(t *testing.T) {
+	cancelled, cancel := context.WithCancel(apipolicy.With(context.Background(), apipolicy.Message))
+	cancel()
+	cases := []struct {
+		name string
+		ctx  context.Context
+		err  error
+		want bool
+	}{
+		{"retry case", apipolicy.With(context.Background(), apipolicy.Message), context.DeadlineExceeded, true},
+		{"wrapped deadline error", apipolicy.With(context.Background(), apipolicy.Message), fmt.Errorf("fetch: %w", context.DeadlineExceeded), true},
+		{"skip mode with budget", apipolicy.With(context.Background(), apipolicy.MessageSkip), context.DeadlineExceeded, true},
+		{"not a deadline error", apipolicy.With(context.Background(), apipolicy.Message), errors.New("boom"), false},
+		{"cancelled error", apipolicy.With(context.Background(), apipolicy.Message), context.Canceled, false},
+		{"own context cancelled", cancelled, context.DeadlineExceeded, false},
+		{"default mode", context.Background(), context.DeadlineExceeded, false},
+		{"own budget spent", apipolicy.WithBudget(context.Background(), apipolicy.Message, -time.Second), context.DeadlineExceeded, false},
+		{"no error", apipolicy.With(context.Background(), apipolicy.Message), nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := JoinerMayRetry(tc.ctx, tc.err); got != tc.want {
+				t.Fatalf("JoinerMayRetry = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// The starter of a flight owns its error: with budget left and a flight that
+// ends in a deadline error (a slow API, not a short budget) it must not ask
+// again, or one slow load would be sent twice.
+func TestLoadCoalesced_StarterWithBudgetLeftDoesNotRetryItsOwnDeadline(t *testing.T) {
+	var sf singleflight.Group
+	var calls atomic.Int32
+	_, err := LoadCoalesced(apipolicy.With(t.Context(), apipolicy.Message), nil, &sf, "k",
+		func(context.Context) (int, error) {
+			calls.Add(1)
+			return 0, context.DeadlineExceeded
+		})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want the starter's own deadline error", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("loads = %d, want 1", got)
 	}
 }

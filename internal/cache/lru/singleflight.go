@@ -86,6 +86,7 @@ func LoadCoalesced[T any](
 			defer cancel()
 			return fn(apipolicy.Carry(loadCtx, ctx))
 		})
+		FlightRegistered()
 		select {
 		case r := <-ch:
 			if r.Err != nil {
@@ -118,4 +119,25 @@ func JoinerMayRetry(ctx context.Context, err error) bool {
 	}
 	remaining, ok := apipolicy.Remaining(ctx)
 	return ok && remaining > 0
+}
+
+// flightHook is a test-only seam: see SetFlightRegisteredHook.
+var flightHook atomic.Pointer[func()]
+
+// FlightRegistered is called by every coalescing loader right after it
+// registered on a flight (as its starter or as a joiner), before it waits.
+// It does nothing in production.
+func FlightRegistered() {
+	if h := flightHook.Load(); h != nil {
+		(*h)()
+	}
+}
+
+// SetFlightRegisteredHook installs fn to be called by FlightRegistered and
+// returns the function that removes it. Tests use it to release a gated
+// flight only once a joiner is certainly parked on it, instead of sleeping
+// and hoping it got there.
+func SetFlightRegisteredHook(fn func()) (restore func()) {
+	flightHook.Store(&fn)
+	return func() { flightHook.Store(nil) }
 }
