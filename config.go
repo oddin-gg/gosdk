@@ -314,10 +314,12 @@ func WithMaxRecoveryExecution(d time.Duration) Option {
 // WithMaxRecoveryExecution is lowered below the default, the default
 // follows it. Enforcement is periodic (the recovery manager's ~10s tick).
 //
-// The deadline applies only to a producer some open client session can
-// receive (a LiveOnly or PrematchOnly client never receives the replay of
-// the other scope, a client that did not subscribe receives none); such a
-// producer's recovery waits for WithMaxRecoveryExecution instead. A
+// The deadline applies only to a producer whose recovery the open client
+// sessions can complete: a LiveOnly or PrematchOnly client never receives
+// the replay of the other scope, a client that did not subscribe receives
+// none, and a producer of both scopes needs a snapshot_complete of each, so
+// a LiveOnly client alone cannot finish it. The recovery of such a producer
+// waits for WithMaxRecoveryExecution instead. A
 // WithSpecificEvents client receives little of the replay, so only the
 // snapshot_complete renews its deadline: a snapshot that takes longer than d
 // is requested again.

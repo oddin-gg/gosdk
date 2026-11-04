@@ -14,6 +14,7 @@ import (
 
 	"github.com/oddin-gg/gosdk/internal/api"
 	"github.com/oddin-gg/gosdk/internal/config"
+	"github.com/oddin-gg/gosdk/internal/producer"
 	"github.com/oddin-gg/gosdk/types"
 )
 
@@ -1099,7 +1100,7 @@ type scopeOps struct {
 	m *Manager
 }
 
-func (s scopeOps) clientSessionInScope(id int) bool { return s.m.clientSessionInScope(id) }
+func (s scopeOps) clientSessionsCanComplete(id int) bool { return s.m.clientSessionsCanComplete(id) }
 
 func (s scopeOps) clientProcessingStalled(now time.Time, after time.Duration) bool {
 	return s.m.clientProcessingStalled(now, after)
@@ -1172,6 +1173,54 @@ func TestActor_SnapshotCompleteDeadline_NoReissueWithoutAnyClientSession(t *test
 	}
 }
 
+// A mixed live|prematch producer completes only with a snapshot_complete of
+// each scope, so a LiveOnly session alone never finishes it: its replay
+// arrives, the prematch half is dropped, and a re-request changes nothing.
+func TestActor_SnapshotCompleteDeadline_NoReissueForAMixedProducerWithOnlyOneScopeOpen(t *testing.T) {
+	for _, only := range []types.MessageInterest{types.LiveOnlyMessageInterest, types.PrematchOnlyMessageInterest} {
+		srv, hits := fixtureSrv(t)
+		a := newWiredActorForProducer(t, srv, newFakeManagerOps(), 3) // live|prematch
+		oldID := startRecovery(t, a, hits, time.Now().Add(-10*time.Minute).Truncate(time.Millisecond), 1)
+		a.mgr = clientScopeOps(a, only)
+		started := a.currentRecovery.recoveryStartedAt
+
+		for _, at := range []time.Duration{6 * time.Minute, 12 * time.Minute} {
+			if reissuedAt(a, started, at) {
+				t.Fatalf("%s only: re-issued at +%v for a recovery no open session can complete", only, at)
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+		if hits.recover.Load() != 1 || a.currentRecovery.recoveryID != oldID {
+			t.Fatalf("%s only: recovery POSTs = %d, want 1", only, hits.recover.Load())
+		}
+		srv.Close()
+	}
+}
+
+// The mixed producer is completable, and its deadline counts, once the
+// sessions cover both scopes or one session takes every message.
+func TestActor_SnapshotCompleteDeadline_ReissuesForAMixedProducerTheSessionsCanComplete(t *testing.T) {
+	cases := map[string][]types.MessageInterest{
+		"live and prematch": {types.LiveOnlyMessageInterest, types.PrematchOnlyMessageInterest},
+		"all":               {types.AllMessageInterest},
+		"live and hi":       {types.LiveOnlyMessageInterest, types.HiPriorityOnlyMessageInterest},
+	}
+	for name, interests := range cases {
+		srv, hits := fixtureSrv(t)
+		a := newWiredActorForProducer(t, srv, newFakeManagerOps(), 3)
+		startRecovery(t, a, hits, time.Now().Add(-10*time.Minute).Truncate(time.Millisecond), 1)
+		a.mgr = clientScopeOps(a, interests...)
+		started := a.currentRecovery.recoveryStartedAt
+
+		if !reissuedAt(a, started, 6*time.Minute) {
+			t.Fatalf("%s: not re-issued although the sessions can complete the recovery", name)
+		}
+		waitRecoverHits(t, hits, 2)
+		waitDetachedDone(t, a, 3*time.Second)
+		srv.Close()
+	}
+}
+
 // A session that covers the producer's scope keeps the deadline as before:
 // a LiveOnly session and a live producer, then a mixed producer.
 func TestActor_SnapshotCompleteDeadline_ReissuesForAProducerInAClientScope(t *testing.T) {
@@ -1197,32 +1246,53 @@ func TestActor_SnapshotCompleteDeadline_ReissuesForAProducerInAClientScope(t *te
 // scope.
 func TestManager_ClientSessionInScope_TracksOpenSessions(t *testing.T) {
 	m, _ := openedManagerWithActors(t, 1, 2, 3)
-	if m.clientSessionInScope(1) {
+	if m.clientSessionsCanComplete(1) {
 		t.Fatal("no client session is open, nothing is in scope")
 	}
 	m.OnClientSessionOpened(uuid.New(), types.SystemAliveOnly)
-	if m.clientSessionInScope(1) {
+	if m.clientSessionsCanComplete(1) {
 		t.Fatal("the SDK's alive-only session must not count as a client session")
 	}
 	live := uuid.New()
 	m.OnClientSessionOpened(live, types.LiveOnlyMessageInterest)
-	if !m.clientSessionInScope(1) || !m.clientSessionInScope(3) || m.clientSessionInScope(2) {
-		t.Fatalf("LiveOnly session: in scope 1=%v 2=%v 3=%v, want true/false/true",
-			m.clientSessionInScope(1), m.clientSessionInScope(2), m.clientSessionInScope(3))
+	if !m.clientSessionsCanComplete(1) || m.clientSessionsCanComplete(3) || m.clientSessionsCanComplete(2) {
+		t.Fatalf("LiveOnly session: completable 1=%v 2=%v 3=%v, want true/false/false (3 needs both scopes)",
+			m.clientSessionsCanComplete(1), m.clientSessionsCanComplete(2), m.clientSessionsCanComplete(3))
 	}
-	if !m.clientSessionInScope(4242) {
-		t.Fatal("a producer the catalog cannot describe must count as in scope")
+	if m.clientSessionsCanComplete(4242) {
+		t.Fatal("an uncatalogued producer is described by the placeholder of both scopes: LiveOnly alone cannot complete it")
 	}
 	both := uuid.New()
 	m.OnClientSessionOpened(both, types.PrematchOnlyMessageInterest)
-	if !m.clientSessionInScope(2) {
+	if !m.clientSessionsCanComplete(2) {
 		t.Fatal("a prematch session must bring the prematch producer into scope")
+	}
+	if !m.clientSessionsCanComplete(3) {
+		t.Fatal("LiveOnly and PrematchOnly sessions together must complete the mixed producer")
+	}
+	if !m.clientSessionsCanComplete(4242) {
+		t.Fatal("both scopes open complete the placeholder producer too")
 	}
 	m.OnFeedSessionGone(uuid.New()) // unknown session: no effect
 	m.OnFeedSessionGone(live)
 	m.OnFeedSessionGone(both)
-	if m.clientSessionInScope(1) || m.clientSessionInScope(2) {
+	if m.clientSessionsCanComplete(1) || m.clientSessionsCanComplete(2) {
 		t.Fatal("sessions that are gone must leave the registry")
+	}
+}
+
+// A catalog that cannot be read at all (not opened) cannot say what a
+// producer needs: the deadline stays on, the conservative answer.
+func TestManager_ClientSessionsCanComplete_UnreadableCatalogCounts(t *testing.T) {
+	cfg := &minimalCfg{apiURL: "127.0.0.1:1", token: "tok"}
+	pm := producer.NewManager(cfg, api.New(cfg), newDiscardLogger())
+	m := &Manager{producerManager: pm}
+	if m.clientSessionsCanComplete(1) {
+		t.Fatal("no session is open")
+	}
+	m.OnClientSessionOpened(uuid.New(), types.LiveOnlyMessageInterest)
+	if !m.clientSessionsCanComplete(1) {
+		t.Fatal("a catalog that cannot be read must count as completable")
 	}
 }
 

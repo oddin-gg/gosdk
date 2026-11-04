@@ -214,10 +214,10 @@ type actorManagerOps interface {
 	// rebindPending reports whether a lost session in the producer's
 	// scope still has no queue; see Manager.rebindPending.
 	rebindPending(producerID int) bool
-	// clientSessionInScope reports whether an open client session (not the
-	// SDK's own alive-only one) can receive the producer's replay; see
-	// Manager.clientSessionInScope.
-	clientSessionInScope(producerID int) bool
+	// clientSessionsCanComplete reports whether the open client sessions
+	// (not the SDK's own alive-only one) can complete the producer's
+	// snapshot recovery; see Manager.clientSessionsCanComplete.
+	clientSessionsCanComplete(producerID int) bool
 	// clientProcessingStalled reports whether a client session has had a
 	// message in processing for longer than stalledAfter; see
 	// Manager.clientProcessingStalled.
@@ -755,8 +755,27 @@ func (a *recoveryActor) isKnownRecovery(requestID int) bool {
 }
 
 func (a *recoveryActor) snapshotValidationNeeded(interest types.MessageInterest) bool {
+	return snapshotValidationNeeded(interest)
+}
+
+// snapshotValidationNeeded reports whether a snapshot_complete received
+// through the interest completes the recovery only together with the
+// other scopes of the producer; any other interest completes it at once.
+func snapshotValidationNeeded(interest types.MessageInterest) bool {
 	return interest == types.LiveOnlyMessageInterest ||
 		interest == types.PrematchOnlyMessageInterest
+}
+
+// scopeSnapshotInterest is the interest whose snapshot_complete finishes
+// the given producer scope.
+func scopeSnapshotInterest(scope types.ProducerScope) (types.MessageInterest, bool) {
+	switch scope {
+	case types.LiveProducerScope:
+		return types.LiveOnlyMessageInterest, true
+	case types.PrematchProducerScope:
+		return types.PrematchOnlyMessageInterest, true
+	}
+	return "", false
 }
 
 // validateSnapshotComplete checks whether a SnapshotComplete with this
@@ -814,13 +833,8 @@ func (a *recoveryActor) validateProducerSnapshotCompletes(received []types.Messa
 	scopes := prod.ProducerScopes()
 	finished := make([]bool, len(scopes))
 	for i, scope := range scopes {
-		var want types.MessageInterest
-		switch scope {
-		case types.LiveProducerScope:
-			want = types.LiveOnlyMessageInterest
-		case types.PrematchProducerScope:
-			want = types.PrematchOnlyMessageInterest
-		default:
+		want, ok := scopeSnapshotInterest(scope)
+		if !ok {
 			return false, errors.New("unknown producer scope")
 		}
 		finished[i] = slices.Contains(received, want)
@@ -1054,14 +1068,16 @@ func (a *recoveryActor) expireSnapshotCompleteDeadline(now time.Time) {
 	if a.mgr.rebindPending(a.producerID) {
 		return
 	}
-	// The replay of a producer no open client session has in scope reaches
-	// nobody: a LiveOnly or PrematchOnly client drops the other scope's
+	// A replay the open client sessions cannot complete reaches nobody
+	// useful: a LiveOnly or PrematchOnly client drops the other scope's
 	// messages, snapshot_complete included, and a client that never
-	// subscribed has only the SDK's own alive-only session. No
-	// snapshot_complete can come, so every deadline would be a request to
-	// the recovery API for nothing; such a recovery keeps waiting for
-	// MaxRecoveryExecution.
-	if !a.mgr.clientSessionInScope(a.producerID) {
+	// subscribed has only the SDK's own alive-only session. A mixed
+	// live|prematch producer needs a snapshot_complete of each scope, so
+	// with only a LiveOnly session open it cannot finish either. No
+	// completing snapshot_complete can come, so every deadline would be a
+	// request to the recovery API for nothing; such a recovery keeps
+	// waiting for MaxRecoveryExecution.
+	if !a.mgr.clientSessionsCanComplete(a.producerID) {
 		return
 	}
 	// A session queue is shared by all producers and drained one message at

@@ -1036,9 +1036,11 @@ and messages are being taken up, the processed cursor cannot be read, the first
 message is still in processing, a client message of any producer has been stuck
 in processing longer than `MaxInactivity` (the session queue is shared), or a
 lost session in scope has not re-bound its queue. It does not apply to a
-producer that no open client session has in scope (a LiveOnly or PrematchOnly
-client's other producer, a client that never subscribed): no replay can reach
-the client, so that recovery waits for `MaxRecoveryExecution` as before. When
+producer whose recovery the open client sessions cannot complete (a LiveOnly or
+PrematchOnly client's other producer, a client that never subscribed, a producer
+of both scopes with only a LiveOnly or only a PrematchOnly session open, since
+it needs a `snapshot_complete` of each scope): that recovery waits for
+`MaxRecoveryExecution` as before. When
 the deadline passes, the actor logs once at WARN and re-issues the snapshot
 from the **same recover-from point** under a NEW request id; the producer stays down, a `snapshot_complete` of the abandoned
 request id is ignored, and the existing request rate limiting and the

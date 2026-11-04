@@ -769,23 +769,65 @@ func (m *Manager) OnClientSessionOpened(session uuid.UUID, messageInterest types
 	m.clientMu.Unlock()
 }
 
-// clientSessionInScope reports whether any open client session has the
-// producer in scope, i.e. whether its snapshot replay can reach the
-// client at all. A producer the catalog cannot describe counts as in
-// scope (the conservative answer: keep re-requesting rather than give up).
-func (m *Manager) clientSessionInScope(producerID int) bool {
-	m.clientMu.Lock()
-	defer m.clientMu.Unlock()
-	if len(m.clientSessions) == 0 {
+// clientSessionsCanComplete reports whether the open client sessions can
+// complete the recovery of the producer: whether its snapshot_complete
+// can reach the client in a form the recovery accepts. That is so when a
+// session with the producer in scope needs no per-scope validation (any
+// interest but LiveOnly and PrematchOnly: one snapshot_complete ends the
+// recovery), or when the LiveOnly and PrematchOnly sessions in scope
+// together cover every scope of the producer, since such a recovery ends
+// only once each of its scopes has had its own snapshot_complete. A
+// mixed live|prematch producer with only a LiveOnly session open is
+// therefore not completable: its replay arrives, the prematch half is
+// dropped, and a re-request would change nothing. A producer the catalog
+// cannot describe counts as completable when any session is open (the
+// conservative answer: keep re-requesting rather than give up).
+func (m *Manager) clientSessionsCanComplete(producerID int) bool {
+	interests := m.clientInterests()
+	if len(interests) == 0 {
 		return false
 	}
 	prod, err := m.producerManager.GetProducerCached(producerID)
-	for _, mi := range m.clientSessions {
-		if err != nil || mi.IsProducerInScope(prod) {
+	if err != nil {
+		return true
+	}
+	covered := make(map[types.MessageInterest]bool, 2)
+	inScope := false
+	for _, mi := range interests {
+		if !mi.IsProducerInScope(prod) {
+			continue
+		}
+		inScope = true
+		if !snapshotValidationNeeded(mi) {
 			return true
 		}
+		covered[mi] = true
 	}
-	return false
+	if !inScope {
+		return false
+	}
+	for _, scope := range prod.ProducerScopes() {
+		want, ok := scopeSnapshotInterest(scope)
+		if !ok {
+			return true
+		}
+		if !covered[want] {
+			return false
+		}
+	}
+	return true
+}
+
+// clientInterests copies the interests of the open client sessions, so
+// the producer catalog is asked without the registry locked.
+func (m *Manager) clientInterests() []types.MessageInterest {
+	m.clientMu.Lock()
+	defer m.clientMu.Unlock()
+	out := make([]types.MessageInterest, 0, len(m.clientSessions))
+	for _, mi := range m.clientSessions {
+		out = append(out, mi)
+	}
+	return out
 }
 
 func (m *Manager) sessionQueueSettled(session uuid.UUID) {
