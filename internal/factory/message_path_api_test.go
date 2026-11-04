@@ -785,3 +785,26 @@ func TestMessagePath_NoteBuildFailureClassification(t *testing.T) {
 		})
 	}
 }
+
+// A caller's snapshot of the success counter can be older than an entry: it
+// read N, an unrelated success moved the counter to N+1, and another session
+// recorded a failure at N+1. The older snapshot must not drop that newer
+// entry; only a caller that has seen a success after it was recorded does.
+func TestAPIFailureWindow_AStaleCountDoesNotDropANewerFailure(t *testing.T) {
+	var w apiFailureWindow
+	id := types.URN{Prefix: "od", Type: "match", ID: 1}
+	w.record(id, 8)
+
+	if !w.blocked(id, 7) {
+		t.Fatal("a caller's stale count (7) dropped the entry recorded at 8")
+	}
+	if !w.blocked(id, 8) {
+		t.Fatal("entry lost after the stale caller")
+	}
+	if w.blocked(id, 9) {
+		t.Fatal("entry still blocked after a success past its count")
+	}
+	if w.blocked(id, 8) {
+		t.Fatal("entry survived a caller that saw a later success")
+	}
+}

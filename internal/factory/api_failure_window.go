@@ -48,7 +48,12 @@ func (w *apiFailureWindow) clock() time.Time {
 }
 
 // blocked reports whether id failed recently and the API has not answered
-// successfully since (count is the current success counter).
+// successfully since (count is the success counter as the caller read it).
+// The counter only grows, so an entry recorded at a count above the
+// caller's was recorded after a success the caller has not seen yet: the
+// caller's snapshot is stale, the entry is current, and it is kept. Only a
+// caller that has seen a success after the entry was recorded (count above
+// the entry's) clears it.
 func (w *apiFailureWindow) blocked(id types.URN, count uint64) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -56,7 +61,7 @@ func (w *apiFailureWindow) blocked(id types.URN, count uint64) bool {
 	if !ok {
 		return false
 	}
-	if e.count != count || !w.clock().Before(e.until) {
+	if count > e.count || !w.clock().Before(e.until) {
 		delete(w.entries, id)
 		return false
 	}
