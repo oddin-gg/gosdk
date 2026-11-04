@@ -130,7 +130,10 @@ type recoveryActor struct {
 	// the completed recovery cannot be trusted. The producer is then not
 	// reported up; the recovery is repeated once processing is current again
 	// (snapshotRecoveryFinished, serviceDelayRepeat) until one completes
-	// without a delay, at most maxDelayRepeats times. Actor goroutine only.
+	// without a delay, at most maxDelayRepeats times. A chain that runs out
+	// (endExhaustedDelayChain) reports the producer up when processing is
+	// current, and otherwise leaves it down with the range kept as the
+	// recovery floor for the return path. Actor goroutine only.
 	delayDownRequestID int
 	// delayCursor is the last processed message at the moment that delay
 	// began: where processing stood when it fell behind (zero when nothing
@@ -260,7 +263,10 @@ const maxPendingEventRecoveries = 128
 // tail for as long as MaxRecoveryExecution allows, and the recovery API
 // rate-limits requests. Three repeats give a transient backlog several
 // chances to drain between attempts; a consumer that still lags every time
-// is slower than the feed, which more recoveries do not fix.
+// is slower than the feed, which more recoveries do not fix. When the bound
+// is reached the chain ends (endExhaustedDelayChain): with the producer up
+// if processing is current, and otherwise down for the delay until it is,
+// when the return path recovers the range once more.
 const maxDelayRepeats = 3
 
 // ErrTooManyPendingEventRecoveries is returned by RecoverEventOdds /
@@ -2025,16 +2031,18 @@ func (a *recoveryActor) snapshotRecoveryFinished(requestID int) error {
 	// from the point it started at (the replay can be what was dropped),
 	// or from where processing stood when it fell behind if that is
 	// earlier. A recovery of the full history stays a full-history one.
-	// The bound (maxDelayRepeats) ends the chain with the producer up.
+	// The bound (maxDelayRepeats) ends the chain (endExhaustedDelayChain):
+	// the producer is reported up when processing is current by then, and
+	// stays down for the delay when it still lags.
 	if a.delayDownRequestID == requestID {
 		// This recovery has done its part for the floor: discharge it first,
 		// so the repeat is not pulled back over ground it just covered.
 		a.dischargeRecoveryFloor()
+		from := a.currentRecovery.recoverFrom
+		if !from.IsZero() && !a.delayCursor.IsZero() && a.delayCursor.Before(from) {
+			from = a.delayCursor
+		}
 		if a.delayRepeats < maxDelayRepeats {
-			from := a.currentRecovery.recoverFrom
-			if !from.IsZero() && !a.delayCursor.IsZero() && a.delayCursor.Before(from) {
-				from = a.delayCursor
-			}
 			a.delayDownRequestID = 0
 			a.delayCursor = time.Time{}
 			a.delayRepeatWaiting = true
@@ -2048,9 +2056,37 @@ func (a *recoveryActor) snapshotRecoveryFinished(requestID int) error {
 			a.serviceDelayRepeat(finished)
 			return nil
 		}
-		a.logger.WithField("producer_id", a.producerID).WithField("attempts", a.delayRepeats+1).
-			Warn("recovery: processing fell behind during every recovery attempt; messages the broker dropped meanwhile may be missing")
+		return a.endExhaustedDelayChain(requestID, started, finished, from)
 	}
+	return a.finishRecoveryChain(requestID, started)
+}
+
+// endExhaustedDelayChain ends a chain of delay repeats that cannot go on:
+// the bound is reached, or waiting for current processing took longer than
+// MaxRecoveryExecution. from is what the next repeat was to cover.
+//
+// When processing is current at that moment the producer is reported up with
+// a warning, as the messages the broker dropped during the last attempt may
+// be missing and more attempts have not helped. When it still lags (or its
+// timing cannot be read) reporting the producer up would only be undone by
+// the timing check of the same tick, a contradictory pair of transitions:
+// instead the chain ends with what it was to cover kept as the recovery
+// floor, and the producer stays down for the delay. Once processing is
+// current the return path (isBackFromInactivity) recovers from that floor
+// and reports the producer up when it completes. Actor goroutine only.
+func (a *recoveryActor) endExhaustedDelayChain(requestID int, started, now, from time.Time) error {
+	log := a.logger.WithField("producer_id", a.producerID).WithField("attempts", a.delayRepeats+1)
+	if fresh, err := a.timingFresh(now); err != nil || !fresh {
+		log.Warn("recovery: processing fell behind during every recovery attempt and still lags; the producer stays down until processing is current, then the range is recovered again")
+		// The completed recovery stays as currentRecovery, nothing is in
+		// flight, and no repeat waits: the return path takes it from here.
+		a.delayRepeatWaiting = true
+		a.delayRepeatFrom = from
+		a.recoveryState = types.CompletedRecoveryState
+		a.abandonDelayRepeat()
+		return nil
+	}
+	log.Warn("recovery: processing fell behind during every recovery attempt; messages the broker dropped meanwhile may be missing")
 	return a.finishRecoveryChain(requestID, started)
 }
 
@@ -2101,18 +2137,17 @@ func (a *recoveryActor) abandonDelayRepeat() {
 // behind during, once processing is current: the replay of a repeat issued
 // onto a backlog would queue behind it and could trip the delay by itself.
 // A timing lookup error counts as "not yet". Waiting is bounded by the
-// chain's MaxRecoveryExecution, after which the producer is reported up
-// anyway, as when the repeats run out. Called on every tick and when the
+// chain's MaxRecoveryExecution, after which the chain ends as when the
+// repeats run out (endExhaustedDelayChain): the producer is reported up if
+// processing is current by then, and otherwise stays down with the range
+// kept as the recovery floor. Called on every tick and when the
 // recovery that fell behind completes. Actor goroutine only.
 func (a *recoveryActor) serviceDelayRepeat(now time.Time) {
 	if !a.delayRepeatWaiting || a.currentRecovery == nil || a.isDisabled() {
 		return
 	}
 	if maxAge := a.cfg.MaxRecoveryExecution(); maxAge > 0 && now.Sub(a.currentRecovery.chainStartedAt) > maxAge {
-		a.logger.WithField("producer_id", a.producerID).WithField("attempts", a.delayRepeats+1).
-			WithField("waited_for", now.Sub(a.currentRecovery.chainStartedAt).Round(time.Second)).
-			Warn("recovery: processing fell behind during every recovery attempt; messages the broker dropped meanwhile may be missing")
-		if err := a.finishRecoveryChain(a.currentRecovery.recoveryID, a.currentRecovery.recoveryStartedAt); err != nil {
+		if err := a.endExhaustedDelayChain(a.currentRecovery.recoveryID, a.currentRecovery.recoveryStartedAt, now, a.delayRepeatFrom); err != nil {
 			a.logger.WithError(err).WithField("producer_id", a.producerID).
 				Error("recovery: report the producer up after waiting for processing to catch up")
 		}

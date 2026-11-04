@@ -354,7 +354,9 @@ func TestActor_DelayDownDuringEveryAttempt_BoundedThenUpWithAWarn(t *testing.T) 
 		lag(a, p, at) // the repeat lags too
 		at = at.Add(time.Second)
 	}
-	// The last repeat falls behind as well: no further repeat.
+	// The last repeat falls behind as well: no further repeat. Processing
+	// is current when it completes, so the producer is reported up.
+	p.set(time.Now())
 	if err := a.snapshotRecoveryFinished(id); err != nil {
 		t.Fatal(err)
 	}
@@ -1194,4 +1196,136 @@ func TestActor_DelayDownWithAnUnreadableCursor_KeepsTheResumePointAsFloor(t *tes
 			got, time.UnixMilli(got), resume.UnixMilli(), resume, back)
 	}
 	waitDetachedDone(t, a, 3*time.Second)
+}
+
+// downEventCounts returns how many producer-status events are down and how
+// many are up.
+func downEventCounts(fake *fakeManagerOps) (down, up int) {
+	for _, e := range producerStatusEvents(fake) {
+		if e.IsDown() {
+			down++
+		} else {
+			up++
+		}
+	}
+	return down, up
+}
+
+// requireDownForDelayWithFloor checks the state of a chain that ran out
+// while processing still lagged: the producer stays down for the delay with
+// no up reported, nothing waits or runs, and the range is kept as the floor.
+func requireDownForDelayWithFloor(t *testing.T, a *recoveryActor, fake *fakeManagerOps, upBefore int, want time.Time) {
+	t.Helper()
+	if _, up := downEventCounts(fake); up != upBefore {
+		t.Fatalf("producer-up events went from %d to %d, want none while processing still lags", upBefore, up)
+	}
+	if evs := producerStatusEvents(fake); !evs[len(evs)-1].IsDown() {
+		t.Fatal("last status is up")
+	}
+	if !a.isFlaggedDown() || a.downReason != types.ProcessingQueueDelayViolationProducerDownReason ||
+		a.delayRepeatWaiting || a.recoveryState != types.CompletedRecoveryState || a.delayRepeats != 0 {
+		t.Fatalf("down=%v reason=%v waiting=%v state=%v repeats=%d, want down for the delay, nothing waiting, Completed, chain reset",
+			a.isFlaggedDown(), a.downReason, a.delayRepeatWaiting, a.recoveryState, a.delayRepeats)
+	}
+	if want.IsZero() || !a.recoveryFloor.Equal(want) {
+		t.Fatalf("floor = %v, want the range the chain was to cover %v", a.recoveryFloor, want)
+	}
+}
+
+// requireReturnRecoversFrom lets processing catch up and an alive arrive:
+// the return path recovers from the floor, and its completion reports the
+// producer up.
+func requireReturnRecoversFrom(t *testing.T, a *recoveryActor, hits *recoveryHits, p *procClock, posts int32, want time.Time) {
+	t.Helper()
+	back := time.Now()
+	p.set(back)
+	if err := a.systemAliveReceived(aliveAt(back), true); err != nil {
+		t.Fatal(err)
+	}
+	waitRecoverHits(t, hits, posts)
+	if got := hits.lastAfterMillis.Load(); got != want.UnixMilli() {
+		t.Fatalf("return recovery after=%d (%v), want the floor %d (%v)", got, time.UnixMilli(got), want.UnixMilli(), want)
+	}
+	if err := a.snapshotRecoveryFinished(a.currentRecovery.recoveryID); err != nil {
+		t.Fatal(err)
+	}
+	if a.isFlaggedDown() || !a.recoveryFloor.IsZero() || a.recoveryFloorFull {
+		t.Fatalf("after the return recovery: down=%v floor=%v full=%v, want up and discharged", a.isFlaggedDown(), a.recoveryFloor, a.recoveryFloorFull)
+	}
+	waitDetachedDone(t, a, 3*time.Second)
+}
+
+// The wait for a repeat runs past MaxRecoveryExecution while processing
+// still lags: reporting the producer up would be undone by the timing check
+// of the same tick. It stays down for the delay, with what the repeat was to
+// cover kept as the floor, and the way back recovers from there.
+func TestActor_DelayRepeat_WaitExpiresWhileStillLagging_StaysDownAndKeepsTheFloor(t *testing.T) {
+	fake := newFakeManagerOps()
+	a, hits, r1, _ := genuineDelayDuringRecovery(t, fake)
+	p := holdProcessing(a)
+	sink := &lockedBuffer{}
+	a.logger = debugLogger(sink)
+	if err := a.snapshotRecoveryFinished(r1); err != nil {
+		t.Fatal(err)
+	}
+	want := a.delayRepeatFrom
+	_, upBefore := downEventCounts(fake)
+
+	lag(a, p, a.currentRecovery.chainStartedAt.Add(a.cfg.MaxRecoveryExecution()+time.Minute))
+	requireDownForDelayWithFloor(t, a, fake, upBefore, want)
+	if n := strings.Count(sink.String(), "processing fell behind during every recovery attempt"); n != 1 {
+		t.Fatalf("warn logged %d times, want 1:\n%s", n, sink.String())
+	}
+	// Further stale ticks neither warn again nor report up.
+	lag(a, p, time.Now().Add(time.Hour))
+	requireDownForDelayWithFloor(t, a, fake, upBefore, want)
+	if n := strings.Count(sink.String(), "processing fell behind during every recovery attempt"); n != 1 {
+		t.Fatalf("warn logged %d times after more ticks, want 1", n)
+	}
+	if hits.recover.Load() != 2 {
+		t.Fatalf("recovery POSTs = %d, want 2: no repeat was requested", hits.recover.Load())
+	}
+	requireReturnRecoversFrom(t, a, hits, p, 3, want)
+}
+
+// The same when the repeats run out: the last repeat completes while
+// processing still lags.
+func TestActor_DelayDownDuringEveryAttempt_StillLaggingStaysDownAndKeepsTheFloor(t *testing.T) {
+	fake := newFakeManagerOps()
+	a, hits, r1, _ := genuineDelayDuringRecovery(t, fake)
+	p := holdProcessing(a)
+	sink := &lockedBuffer{}
+	a.logger = debugLogger(sink)
+
+	id := r1
+	at := time.Now()
+	for i := 1; i <= maxDelayRepeats; i++ {
+		if err := a.snapshotRecoveryFinished(id); err != nil {
+			t.Fatal(err)
+		}
+		catchUp(a, p, at)
+		waitRecoverHits(t, hits, int32(2+i))
+		id = a.currentRecovery.recoveryID
+		at = at.Add(time.Second)
+		lag(a, p, at)
+		at = at.Add(time.Second)
+	}
+	want := a.currentRecovery.recoverFrom
+	if !a.delayCursor.IsZero() && a.delayCursor.Before(want) {
+		want = a.delayCursor
+	}
+	_, upBefore := downEventCounts(fake)
+
+	// The last repeat completes with processing still behind.
+	if err := a.snapshotRecoveryFinished(id); err != nil {
+		t.Fatal(err)
+	}
+	requireDownForDelayWithFloor(t, a, fake, upBefore, want)
+	if n := strings.Count(sink.String(), "processing fell behind during every recovery attempt"); n != 1 {
+		t.Fatalf("warn logged %d times, want 1:\n%s", n, sink.String())
+	}
+	// A tick that finds processing still behind keeps it that way.
+	lag(a, p, time.Now().Add(time.Hour))
+	requireDownForDelayWithFloor(t, a, fake, upBefore, want)
+	requireReturnRecoversFrom(t, a, hits, p, int32(3+maxDelayRepeats), want)
 }
