@@ -211,6 +211,16 @@ type MarketDescriptionCache struct {
 	// once per window. First loads and bulk reads are NOT gated: they
 	// have no stale data to serve, so they must attempt and report.
 	refreshFailedAt map[types.Locale]time.Time
+	// msgRefreshFailedAt is the message path's own backoff (guarded by
+	// mu, window refreshBackoff). A refresh of the message path that
+	// failed, or ran out of its short budget, sets it; only message-mode
+	// reads honour it. Without it, once the catalog expired and the API
+	// is slow, every message's name resolution would wait its whole
+	// budget for the same refresh and then serve the stale entry, so each
+	// message would hold its session for the full budget. The budget
+	// running out does NOT set refreshFailedAt: it says the budget was
+	// short, not that the longer timeouts of a public getter fail.
+	msgRefreshFailedAt map[types.Locale]time.Time
 	// refreshBackoff is defaultRefreshBackoff, a field for tests.
 	refreshBackoff time.Duration
 
@@ -374,7 +384,7 @@ func (m *MarketDescriptionCache) MarketDescriptionByID(
 			// and the refreshed catalog re-marks the locale. Dynamic
 			// variants are excluded: their store already expires per entry
 			// and their reload path is the per-variant endpoint.
-			missing = m.expiredLocales(locales)
+			missing = m.expiredLocales(ctx, locales)
 			staleOnly = len(missing) > 0
 		}
 	}
@@ -544,8 +554,11 @@ func (m *MarketDescriptionCache) localeDataFreshLocked(locale types.Locale) bool
 // upstream outage the warm path keeps serving the stale-but-complete
 // entry and retries the refresh at most once per refreshBackoff. Used
 // by the warm by-id path so a bulk-provenance hit re-loads once its
-// locale's catalog window lapses (see MarketDescriptionByID).
-func (m *MarketDescriptionCache) expiredLocales(requested []types.Locale) []types.Locale {
+// locale's catalog window lapses (see MarketDescriptionByID). A caller
+// under a message mode also skips the locales inside the message path's
+// own backoff (msgRefreshFailedAt).
+func (m *MarketDescriptionCache) expiredLocales(ctx context.Context, requested []types.Locale) []types.Locale {
+	msg := apipolicy.ModeOf(ctx) != apipolicy.Default
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	var expired []types.Locale
@@ -554,6 +567,10 @@ func (m *MarketDescriptionCache) expiredLocales(requested []types.Locale) []type
 			continue
 		}
 		if failedAt, ok := m.refreshFailedAt[l]; ok &&
+			m.refreshBackoff > 0 && time.Since(failedAt) < m.refreshBackoff {
+			continue
+		}
+		if failedAt, ok := m.msgRefreshFailedAt[l]; ok && msg &&
 			m.refreshBackoff > 0 && time.Since(failedAt) < m.refreshBackoff {
 			continue
 		}
@@ -663,8 +680,18 @@ func (m *MarketDescriptionCache) loadOne(ctx context.Context, marketID *int, var
 					// was sent and ran out of the message path's short budget:
 					// that says the budget was short, not that the API fails
 					// the longer timeouts of a public getter.
-					budgetRanOut := apipolicy.ModeOf(loadCtx) != apipolicy.Default && errors.Is(err, context.DeadlineExceeded)
-					if !isDynamicVariant && !budgetRanOut && !errors.Is(err, apipolicy.ErrSkipped) && !errors.Is(err, apipolicy.ErrBudgetSpent) {
+					viaMessage := apipolicy.ModeOf(loadCtx) != apipolicy.Default
+					budgetRanOut := viaMessage && errors.Is(err, context.DeadlineExceeded)
+					notSent := errors.Is(err, apipolicy.ErrSkipped) || errors.Is(err, apipolicy.ErrBudgetSpent)
+					if !isDynamicVariant && viaMessage && !notSent {
+						// The message path's own backoff (see
+						// msgRefreshFailedAt) also covers its budget
+						// running out.
+						m.mu.Lock()
+						m.msgRefreshFailedAt[loc] = time.Now()
+						m.mu.Unlock()
+					}
+					if !isDynamicVariant && !budgetRanOut && !notSent {
 						// Feed the warm-path retry backoff (see
 						// refreshFailedAt); cleared again on the next
 						// successful commit below.
@@ -757,6 +784,7 @@ func (m *MarketDescriptionCache) loadOne(ctx context.Context, marketID *int, var
 						// regress the newer flight's.
 						m.loadedLocales[loc] = loadStarted
 						delete(m.refreshFailedAt, loc)
+						delete(m.msgRefreshFailedAt, loc)
 					}
 					// A flight superseded MID-commit must not report
 					// success either — its remaining stores were rejected
@@ -1030,18 +1058,19 @@ func splitGroups(raw string) []string {
 
 func newMarketDescriptionCache(lifeCtx context.Context, client *api.Client, logger *log.Logger) *MarketDescriptionCache {
 	return &MarketDescriptionCache{
-		apiClient:       client,
-		logger:          logger,
-		lifetime:        lifeCtx,
-		loadedLocales:   make(map[types.Locale]time.Time),
-		loadingLocales:  make(map[types.Locale]int),
-		fetchCursor:     make(map[types.Locale]time.Time),
-		refreshFailedAt: make(map[types.Locale]time.Time),
-		refreshBackoff:  defaultRefreshBackoff,
-		catalogTTL:      defaultCatalogTTL,
-		base:            make(map[CompositeKey]*LocalizedMarketDescription),
-		clearedAt:       make(map[CompositeKey]time.Time),
-		malformed:       make(map[CompositeKey]map[types.Locale]error),
+		apiClient:          client,
+		logger:             logger,
+		lifetime:           lifeCtx,
+		loadedLocales:      make(map[types.Locale]time.Time),
+		loadingLocales:     make(map[types.Locale]int),
+		fetchCursor:        make(map[types.Locale]time.Time),
+		refreshFailedAt:    make(map[types.Locale]time.Time),
+		msgRefreshFailedAt: make(map[types.Locale]time.Time),
+		refreshBackoff:     defaultRefreshBackoff,
+		catalogTTL:         defaultCatalogTTL,
+		base:               make(map[CompositeKey]*LocalizedMarketDescription),
+		clearedAt:          make(map[CompositeKey]time.Time),
+		malformed:          make(map[CompositeKey]map[types.Locale]error),
 		variants: lru.NewTTL[CompositeKey, *LocalizedMarketDescription](
 			variantCacheSize, nil, lru.DefaultEventCacheTTL),
 	}

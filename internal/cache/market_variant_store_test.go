@@ -657,3 +657,113 @@ func TestMarketDescriptionCache_ByIDMissRefetchesAfterCatalogTTL(t *testing.T) {
 		t.Fatalf("bulk hits = %d, want 2", got)
 	}
 }
+
+// slowCatalogServer serves the catalog, or hangs until the request is given
+// up while hang is set.
+func slowCatalogServer(t *testing.T, hits *atomic.Int64, hang *atomic.Bool) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		if hang.Load() {
+			<-r.Context().Done()
+			return
+		}
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = io.WriteString(w, bulkCatalogWithStaticVariants)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestMarketDescriptionCache_MessagePathBackoffAfterBudgetTimeout: once a
+// message-path refresh ran out of its budget, the next message-path reads
+// serve the stale entry at once instead of each waiting for the same refresh,
+// while a public getter still refreshes.
+func TestMarketDescriptionCache_MessagePathBackoffAfterBudgetTimeout(t *testing.T) {
+	var hits atomic.Int64
+	var hang atomic.Bool
+	srv := slowCatalogServer(t, &hits, &hang)
+	mc := newMarketDescriptionCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	t.Cleanup(cancel)
+	mc.catalogTTL = 50 * time.Millisecond
+	mc.refreshBackoff = time.Hour
+	locales := []types.Locale{types.EnLocale}
+
+	if _, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), locales); err != nil {
+		t.Fatalf("seed lookup: %v", err)
+	}
+	time.Sleep(80 * time.Millisecond) // the catalog mark lapses
+	hang.Store(true)
+
+	msg := func() context.Context {
+		return apipolicy.WithBudget(ctx, apipolicy.Message, 100*time.Millisecond)
+	}
+	if _, err := mc.MarketDescriptionByID(msg(), 9, types.None[string](), locales); err != nil {
+		t.Fatalf("first message-path read: %v (the stale entry must be served)", err)
+	}
+	if got := hits.Load(); got != 2 {
+		t.Fatalf("hits = %d, want 2: the first message-path refresh must be sent", got)
+	}
+
+	start := time.Now()
+	if _, err := mc.MarketDescriptionByID(msg(), 9, types.None[string](), locales); err != nil {
+		t.Fatalf("second message-path read: %v", err)
+	}
+	if took := time.Since(start); took > 50*time.Millisecond {
+		t.Fatalf("second message-path read took %v, want an immediate stale answer", took)
+	}
+	if got := hits.Load(); got != 2 {
+		t.Fatalf("hits = %d, want 2: no refresh within the message-path backoff", got)
+	}
+
+	// A public getter is not held back by the message path's backoff.
+	hang.Store(false)
+	if _, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), locales); err != nil {
+		t.Fatalf("public read: %v", err)
+	}
+	if got := hits.Load(); got != 3 {
+		t.Fatalf("hits = %d, want 3: the getter must refresh", got)
+	}
+}
+
+// TestMarketDescriptionCache_SuccessfulRefreshClearsTheMessagePathBackoff: a
+// refresh that succeeds ends the message path's backoff.
+func TestMarketDescriptionCache_SuccessfulRefreshClearsTheMessagePathBackoff(t *testing.T) {
+	var hits atomic.Int64
+	var hang atomic.Bool
+	srv := slowCatalogServer(t, &hits, &hang)
+	mc := newMarketDescriptionCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	t.Cleanup(cancel)
+	mc.catalogTTL = 50 * time.Millisecond
+	mc.refreshBackoff = time.Hour
+	locales := []types.Locale{types.EnLocale}
+
+	if _, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), locales); err != nil {
+		t.Fatalf("seed lookup: %v", err)
+	}
+	time.Sleep(80 * time.Millisecond)
+	hang.Store(true)
+	msgCtx := apipolicy.WithBudget(ctx, apipolicy.Message, 100*time.Millisecond)
+	if _, err := mc.MarketDescriptionByID(msgCtx, 9, types.None[string](), locales); err != nil {
+		t.Fatalf("message-path read: %v", err)
+	}
+	mc.mu.RLock()
+	_, set := mc.msgRefreshFailedAt[types.EnLocale]
+	mc.mu.RUnlock()
+	if !set {
+		t.Fatal("the message-path backoff must be set after its budget ran out")
+	}
+
+	hang.Store(false)
+	if _, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), locales); err != nil {
+		t.Fatalf("public read: %v", err)
+	}
+	mc.mu.RLock()
+	_, set = mc.msgRefreshFailedAt[types.EnLocale]
+	mc.mu.RUnlock()
+	if set {
+		t.Fatal("a successful refresh must clear the message-path backoff")
+	}
+}
