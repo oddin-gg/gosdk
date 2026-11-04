@@ -13,7 +13,6 @@ import (
 	feedXML "github.com/oddin-gg/gosdk/internal/feed/xml"
 	log "github.com/oddin-gg/gosdk/internal/log"
 	"github.com/oddin-gg/gosdk/internal/producer"
-	"github.com/oddin-gg/gosdk/internal/sdkerr"
 	"github.com/oddin-gg/gosdk/types"
 )
 
@@ -108,8 +107,11 @@ func (f *FeedMessageFactory) buildTournament(pctx context.Context, skip bool, id
 }
 
 // noteBuildFailure opens the window for id, unless the failure says nothing
-// about the API: the caller's own cancellation or a closed client
-// (shutdown).
+// about the API: the caller's own cancellation, a closed client (shutdown), a
+// request refused because the shared budget was already spent (nothing was
+// sent; an earlier request of the same build that timed out is recorded on
+// its own), or an answer of a healthy API such as a 404 for an event that is
+// not in REST yet (see saysAPIUnavailable).
 //
 // The entry is bound to the success counter as read NOW, after the failed
 // attempt, not before the build: one build makes several calls, and an
@@ -118,7 +120,7 @@ func (f *FeedMessageFactory) buildTournament(pctx context.Context, skip bool, id
 // void the entry at once and the window would never open in a partial
 // outage. Any success from here on still clears it.
 func (f *FeedMessageFactory) noteBuildFailure(ctx context.Context, id types.URN, err error) {
-	if ctx.Err() != nil || errors.Is(err, sdkerr.ErrClosed) {
+	if ctx.Err() != nil || !saysAPIUnavailable(err) {
 		return
 	}
 	f.apiFailures.record(id, f.apiSuccessCount())

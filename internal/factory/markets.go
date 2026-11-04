@@ -266,24 +266,34 @@ func (nf *nameFailures) first() error {
 	return nf.err
 }
 
-// reportNameFailure records err in ctx's sink when it says something about
-// the API being unavailable: not a skipped request (the event is already in
-// the failure window), not one refused for a spent budget (it was never
-// sent), not the caller's cancellation or a closed client
-// (shutdown), and not an entity the API reports as absent.
-func reportNameFailure(ctx context.Context, err error) {
-	nf, ok := ctx.Value(nameFailureKey{}).(*nameFailures)
-	if !ok || err == nil {
-		return
+// saysAPIUnavailable reports whether err says something about the API being
+// unavailable: not a skipped request (the event is already in the failure
+// window), not one refused for a spent budget (it was never sent), not the
+// caller's cancellation or a closed client (shutdown), not an entity the API
+// reports as absent, and not an answer of a healthy API (a 404 for an event
+// that is not in REST yet, say). 429 is the exception — the server is
+// shedding load. One classification for the lookups of names and for the
+// build of an event, so the two open the failure window on the same errors.
+func saysAPIUnavailable(err error) bool {
+	if err == nil {
+		return false
 	}
 	if errors.Is(err, apipolicy.ErrSkipped) || errors.Is(err, apipolicy.ErrBudgetSpent) || errors.Is(err, sdkerr.ErrClosed) ||
 		errors.Is(err, context.Canceled) || errors.Is(err, cache.ErrItemNotFoundInCache) {
-		return
+		return false
 	}
-	// The API answered with a client error (404 for an unknown market, say):
-	// it is up. 429 is the exception — the server is shedding load.
 	var apiErr *api.Error
 	if errors.As(err, &apiErr) && apiErr.Status >= 400 && apiErr.Status < 500 && apiErr.Status != http.StatusTooManyRequests {
+		return false
+	}
+	return true
+}
+
+// reportNameFailure records err in ctx's sink when it says something about
+// the API being unavailable (see saysAPIUnavailable).
+func reportNameFailure(ctx context.Context, err error) {
+	nf, ok := ctx.Value(nameFailureKey{}).(*nameFailures)
+	if !ok || !saysAPIUnavailable(err) {
 		return
 	}
 	nf.mu.Lock()

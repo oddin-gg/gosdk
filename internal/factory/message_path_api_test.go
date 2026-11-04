@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,7 @@ import (
 	feedXML "github.com/oddin-gg/gosdk/internal/feed/xml"
 	log "github.com/oddin-gg/gosdk/internal/log"
 	"github.com/oddin-gg/gosdk/internal/producer"
+	"github.com/oddin-gg/gosdk/internal/sdkerr"
 	"github.com/oddin-gg/gosdk/types"
 )
 
@@ -30,6 +32,9 @@ const producersXML = `<?xml version="1.0"?>
 // requests that reach it.
 type apiCtl struct {
 	failing atomic.Bool
+	// notFoundSummaries answers the match summary with 404 (an event that is
+	// not in REST yet) while the rest of the API is healthy.
+	notFoundSummaries atomic.Bool
 	// delay, in nanoseconds, is how long every request is held before it
 	// is answered (a slow, not failing, API).
 	delay atomic.Int64
@@ -79,6 +84,10 @@ func newMessagePathRig(t *testing.T) *messagePathRig {
 		}
 		if strings.HasSuffix(r.URL.Path, "/summary") {
 			ctl.summaries.Add(1)
+			if ctl.notFoundSummaries.Load() {
+				http.Error(w, "<error/>", http.StatusNotFound)
+				return
+			}
 		}
 		if ctl.truncating.Load() {
 			w.Header().Set("Content-Type", "application/xml")
@@ -725,6 +734,53 @@ func TestMessagePath_AllMarketMessageTypes_UseTheMessagePolicy(t *testing.T) {
 			build()
 			if again := r.ctl.descriptions.Load() - before; again != got {
 				t.Fatalf("a second message made %d more description request(s) inside the window", again-got)
+			}
+		})
+	}
+}
+
+// A 404 for an event that is not in REST yet is an answer of a healthy API:
+// it must not open the window, so the next message of the event tries the API
+// again.
+func TestMessagePath_NotFoundEventDoesNotOpenTheWindow(t *testing.T) {
+	r := newMessagePathRig(t)
+	r.ctl.notFoundSummaries.Store(true)
+	for range 3 {
+		if ev := r.buildEvent(t, 99); ev != nil {
+			t.Fatalf("event = %v, want nil for an event the API does not know", ev)
+		}
+	}
+	if r.factory.apiFailures.len() != 0 {
+		t.Fatalf("window holds %d events after a 404", r.factory.apiFailures.len())
+	}
+	if got := r.ctl.summaries.Load(); got != 3 {
+		t.Fatalf("match summary requests = %d, want 3 (every message tries the API)", got)
+	}
+}
+
+// Which build errors open the window: a refused request (budget spent,
+// nothing was sent) and a 4xx other than 429 do not; a server failure, a
+// rate limit and a transport failure do.
+func TestMessagePath_NoteBuildFailureClassification(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		open bool
+	}{
+		{"budget spent before sending", fmt.Errorf("api: GET /x: %w: %w", apipolicy.ErrBudgetSpent, context.DeadlineExceeded), false},
+		{"404", &api.Error{Status: 404}, false},
+		{"client closed", sdkerr.ErrClosed, false},
+		{"500", &api.Error{Status: 500}, true},
+		{"429", &api.Error{Status: 429}, true},
+		{"transport failure", errors.New("connection refused"), true},
+		{"timed out after sending", fmt.Errorf("fetch: %w", context.DeadlineExceeded), true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newMessagePathRig(t)
+			r.factory.noteBuildFailure(t.Context(), types.URN{Prefix: "od", Type: "match", ID: 99}, tc.err)
+			if got := r.factory.apiFailures.len() == 1; got != tc.open {
+				t.Fatalf("window opened = %v, want %v", got, tc.open)
 			}
 		})
 	}
