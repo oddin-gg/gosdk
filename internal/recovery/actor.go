@@ -2125,7 +2125,15 @@ func (a *recoveryActor) snapshotRecoveryFinished(requestID int) error {
 // and reports the producer up when it completes. Actor goroutine only.
 func (a *recoveryActor) endExhaustedDelayChain(requestID int, started, now, from time.Time) error {
 	log := a.logger.WithField("producer_id", a.producerID).WithField("attempts", a.delayRepeats+1)
-	if fresh, err := a.timingFresh(now); err != nil || !fresh {
+	fresh, err := a.timingFresh(now)
+	if err == nil && fresh && a.firstMessageStillInProcessing() {
+		// timingFresh counts a missing last-processed timestamp as fresh;
+		// with another session's first message still in a callback the
+		// queue may be backed up behind it all the same, so processing is
+		// not known to be current.
+		fresh = false
+	}
+	if err != nil || !fresh {
 		if err != nil {
 			// An unreadable timing counts as still lagging; the cause is
 			// part of the one warning below.
@@ -2187,6 +2195,15 @@ func (a *recoveryActor) abandonDelayRepeat() {
 	a.resetDelayChain()
 }
 
+// firstMessageStillInProcessing reports that no message has ended yet (the
+// last-processed cursor is zero) while one is in a callback, or that the
+// cursor cannot be read: there is no baseline, and what is queued behind
+// the message in processing cannot be told from a backlog.
+func (a *recoveryActor) firstMessageStillInProcessing() bool {
+	lastProcessed, err := a.lastProcessedMessageGenTimestamp()
+	return err != nil || (lastProcessed.IsZero() && a.inProcessing.Load() > 0)
+}
+
 // serviceDelayRepeat issues the repeat of a recovery that processing fell
 // behind during, once processing is current: the replay of a repeat issued
 // onto a backlog would queue behind it and could trip the delay by itself.
@@ -2215,8 +2232,7 @@ func (a *recoveryActor) serviceDelayRepeat(now time.Time) {
 	// ends processing with a zero timestamp, and alives may not have ended
 	// yet) nothing has set a baseline, yet the repeat would queue behind that
 	// message exactly as behind a backlog: it waits for the message to end.
-	if lastProcessed, err := a.lastProcessedMessageGenTimestamp(); err != nil ||
-		(lastProcessed.IsZero() && a.inProcessing.Load() > 0) {
+	if a.firstMessageStillInProcessing() {
 		return
 	}
 	if a.mgr.rebindPending(a.producerID) {

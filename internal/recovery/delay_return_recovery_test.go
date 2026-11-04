@@ -1676,3 +1676,30 @@ func TestActor_DelayDownDuringRecovery_InterruptedThenReplacedByAnAlive_KeepsThe
 	}
 	waitDetachedDone(t, a, 3*time.Second)
 }
+
+// The wait for a repeat runs past MaxRecoveryExecution while another
+// session's first message is still in processing: with no last-processed
+// cursor the timing looks fresh, but the queue may be backed up behind that
+// message, so the producer is not reported up.
+func TestActor_DelayRepeat_WaitExpiresWhileTheFirstMessageIsInProcessing_StaysDownAndKeepsTheFloor(t *testing.T) {
+	fake := newFakeManagerOps()
+	a, hits, at := waitingRepeat(t, fake)
+	a.lastProcessedFn = func() (time.Time, error) { return time.Time{}, nil }
+	sink := &lockedBuffer{}
+	a.logger = debugLogger(sink)
+	want := a.delayRepeatFrom
+	_, upBefore := downEventCounts(fake)
+
+	a.onMessageProcessingStarted(at)
+	expired := a.currentRecovery.chainStartedAt.Add(a.cfg.MaxRecoveryExecution() + time.Minute)
+	tickAt(a, expired)
+	requireDownForDelayWithFloor(t, a, fake, upBefore, want)
+	tickAt(a, expired.Add(time.Hour))
+	requireDownForDelayWithFloor(t, a, fake, upBefore, want)
+	if n := strings.Count(sink.String(), "processing fell behind during every recovery attempt"); n != 1 {
+		t.Fatalf("warn logged %d times, want 1:\n%s", n, sink.String())
+	}
+	if hits.recover.Load() != 2 {
+		t.Fatalf("recovery POSTs = %d, want 2: no repeat was requested", hits.recover.Load())
+	}
+}
