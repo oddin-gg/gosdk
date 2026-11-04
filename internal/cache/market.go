@@ -659,8 +659,12 @@ func (m *MarketDescriptionCache) loadOne(ctx context.Context, marketID *int, var
 					// budget already spent by earlier requests of the build)
 					// says nothing about the API: recording it would hold
 					// back the refresh of every public by-id read for the
-					// whole backoff window.
-					if !isDynamicVariant && !errors.Is(err, apipolicy.ErrSkipped) && !errors.Is(err, apipolicy.ErrBudgetSpent) {
+					// whole backoff window. The same holds for a request that
+					// was sent and ran out of the message path's short budget:
+					// that says the budget was short, not that the API fails
+					// the longer timeouts of a public getter.
+					budgetRanOut := apipolicy.ModeOf(loadCtx) != apipolicy.Default && errors.Is(err, context.DeadlineExceeded)
+					if !isDynamicVariant && !budgetRanOut && !errors.Is(err, apipolicy.ErrSkipped) && !errors.Is(err, apipolicy.ErrBudgetSpent) {
 						// Feed the warm-path retry backoff (see
 						// refreshFailedAt); cleared again on the next
 						// successful commit below.

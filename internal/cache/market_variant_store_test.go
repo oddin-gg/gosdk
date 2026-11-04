@@ -551,6 +551,85 @@ func TestMarketDescriptionCache_SpentBudgetRefreshDoesNotHoldBackTheGetters(t *t
 	}
 }
 
+// TestMarketDescriptionCache_BudgetExhaustedRefreshDoesNotHoldBackTheGetters:
+// a message-path refresh that was sent and ran out of the message budget
+// (about 2 s) says nothing about the longer timeouts of a public getter, so it
+// must not start the backoff; a genuine failure of the same refresh does.
+func TestMarketDescriptionCache_BudgetExhaustedRefreshDoesNotHoldBackTheGetters(t *testing.T) {
+	var hits atomic.Int64
+	var hang atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		if hang.Load() {
+			<-r.Context().Done()
+			return
+		}
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = io.WriteString(w, bulkCatalogWithStaticVariants)
+	}))
+	t.Cleanup(srv.Close)
+	mc := newMarketDescriptionCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	t.Cleanup(cancel)
+	mc.catalogTTL = 50 * time.Millisecond
+	mc.refreshBackoff = time.Hour
+	locales := []types.Locale{types.EnLocale}
+
+	if _, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), locales); err != nil {
+		t.Fatalf("seed lookup: %v", err)
+	}
+	time.Sleep(80 * time.Millisecond) // the catalog mark lapses
+
+	// The message path's refresh is sent and runs out of its budget.
+	hang.Store(true)
+	msgCtx := apipolicy.With(ctx, apipolicy.Message)
+	if _, err := mc.MarketDescriptionByID(msgCtx, 9, types.None[string](), locales); err != nil {
+		t.Fatalf("lookup under the message policy: %v (the stale entry must be served)", err)
+	}
+	if got := hits.Load(); got != 2 {
+		t.Fatalf("hits = %d, want 2: the message-path refresh must have been sent", got)
+	}
+
+	// A public getter refreshes at once: the budget running out is no backoff.
+	hang.Store(false)
+	if _, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), locales); err != nil {
+		t.Fatalf("public lookup: %v", err)
+	}
+	if got := hits.Load(); got != 3 {
+		t.Fatalf("hits = %d, want 3: the exhausted budget must not suppress the getters' refresh", got)
+	}
+}
+
+// The control of the test above: a refresh that fails for real under the
+// message policy still starts the backoff.
+func TestMarketDescriptionCache_FailedMessagePathRefreshStillStartsTheBackoff(t *testing.T) {
+	srv := newMarketSrv(t, bulkCatalogWithStaticVariants)
+	mc, ctx := newMarketCacheForTest(t, srv)
+	mc.catalogTTL = 50 * time.Millisecond
+	mc.refreshBackoff = time.Hour
+	locales := []types.Locale{types.EnLocale}
+
+	if _, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), locales); err != nil {
+		t.Fatalf("seed lookup: %v", err)
+	}
+	srv.serve(`upstream exploded`)
+	time.Sleep(80 * time.Millisecond)
+
+	msgCtx := apipolicy.With(ctx, apipolicy.Message)
+	if _, err := mc.MarketDescriptionByID(msgCtx, 9, types.None[string](), locales); err != nil {
+		t.Fatalf("lookup under the message policy: %v (the stale entry must be served)", err)
+	}
+	if got := srv.bulkHits.Load(); got != 2 {
+		t.Fatalf("bulk hits = %d, want 2", got)
+	}
+	if _, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), locales); err != nil {
+		t.Fatalf("public lookup: %v", err)
+	}
+	if got := srv.bulkHits.Load(); got != 2 {
+		t.Fatalf("bulk hits = %d, want 2: a real failure must hold back the getters' refresh", got)
+	}
+}
+
 // TestMarketDescriptionCache_ByIDMissRefetchesAfterCatalogTTL pins the
 // expiring mark as an INDEPENDENT safety net for the production defect:
 // even if an entry goes missing from a store for some other reason, the
