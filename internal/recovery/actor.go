@@ -59,6 +59,14 @@ type recoveryActor struct {
 	// goroutines that call the processing callbacks directly, so atomic.
 	inProcessing atomic.Int64
 
+	// lastProcessingStartNanos is the wall-clock time (Unix nanoseconds) of
+	// the latest processing start, zero before the first. Together with
+	// inProcessing it tells whether the consumer is busy with messages at
+	// all: a stale last-processed timestamp is evidence of a backlog only
+	// while messages are being taken up. Written from the session
+	// goroutines, so atomic.
+	lastProcessingStartNanos atomic.Int64
+
 	// Inbox + lifecycle.
 	inbox    chan actorEvent
 	shutdown chan struct{}
@@ -810,6 +818,7 @@ func (a *recoveryActor) onMessageProcessingStarted(t time.Time) {
 	// Counted before the zero check: the session ends every start, so the
 	// count must see every start too.
 	a.inProcessing.Add(1)
+	a.lastProcessingStartNanos.Store(time.Now().UnixNano())
 	if t.IsZero() {
 		a.logger.WithField("producer_id", a.producerID).Warn("recovery: processing started with zero timestamp")
 		return
@@ -1023,10 +1032,14 @@ func (a *recoveryActor) expireSnapshotCompleteDeadline(now time.Time) {
 	// with a consumer backlog the replay sits unprocessed behind it, and the
 	// recovery looks silent for as long as the backlog stands. A re-issue
 	// then only adds a second replay to the queue it is stuck in (and the
-	// next one, every deadline). While processing lags, or its state cannot
-	// be read, the silence is no evidence: the mark moves forward, so the
-	// deadline counts again once processing is current.
-	if fresh, err := a.timingFresh(now); err != nil || !fresh {
+	// next one, every deadline). While processing lags and messages are
+	// being taken up, or its state cannot be read, the silence is no
+	// evidence: the mark moves forward, so the deadline counts again once
+	// processing is current. A stale last-processed timestamp alone is not
+	// a backlog: when nothing is processed at all, a lost request would
+	// otherwise wait for MaxRecoveryExecution.
+	fresh, err := a.timingFresh(now)
+	if err != nil || (!fresh && a.processingActive(now)) {
 		a.currentRecovery.renewedAt = now
 		return
 	}
@@ -1397,6 +1410,20 @@ func (a *recoveryActor) calculateTiming(now time.Time) bool {
 		return false
 	}
 	return fresh
+}
+
+// processingActive reports whether the consumer is busy with this
+// producer's messages: one is in processing now, or one started within
+// MaxInactivity. MaxInactivity is the feed's own tolerance for silence
+// (the same bound timingFresh applies to the alives), so a consumer that
+// took up no message for that long is idle, not backed up.
+func (a *recoveryActor) processingActive(now time.Time) bool {
+	if a.inProcessing.Load() > 0 {
+		return true
+	}
+	started := a.lastProcessingStartNanos.Load()
+	return started != 0 &&
+		now.Sub(time.Unix(0, started)).Abs() <= a.cfg.MaxInactivity()
 }
 
 // timingFresh is calculateTiming without the error folding: it reports

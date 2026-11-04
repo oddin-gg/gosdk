@@ -132,6 +132,8 @@ func TestActor_SnapshotCompleteDeadline_WaitsWhileProcessingLags(t *testing.T) {
 	oldID := startRecovery(t, a, hits, from, 1)
 	started := a.currentRecovery.recoveryStartedAt
 	p := holdProcessing(a)
+	// The backlog: a message is taken up and stays in processing.
+	a.onMessageProcessingStarted(time.Time{})
 
 	// A backlog that outlasts two deadlines: no re-issue.
 	for _, after := range []time.Duration{6 * time.Minute, 12 * time.Minute} {
@@ -760,6 +762,58 @@ func TestActor_SnapshotCompleteDeadline_AFirstMessageThatEndedWithoutATimestampI
 	a.onTick(started.Add(12*time.Minute), false)
 	if a.currentRecovery.recoveryID == oldID {
 		t.Fatal("the first message ended without a timestamp and the silence went on, but the request was not re-issued")
+	}
+	waitRecoverHits(t, hits, 2)
+	waitDetachedDone(t, a, 3*time.Second)
+}
+
+// TestActor_SnapshotCompleteDeadline_AStaleCursorWithoutProcessingIsNoBacklog:
+// an old last-processed timestamp alone is not evidence of a backlog. With
+// nothing in processing and no message started recently, a lost request is
+// re-issued at the deadline instead of waiting for MaxRecoveryExecution.
+func TestActor_SnapshotCompleteDeadline_AStaleCursorWithoutProcessingIsNoBacklog(t *testing.T) {
+	srv, hits := fixtureSrv(t)
+	defer srv.Close()
+	a := newWiredActor(t, srv, newFakeManagerOps())
+
+	oldID := startRecovery(t, a, hits, time.Now().Add(-10*time.Minute).Truncate(time.Millisecond), 1)
+	holdProcessing(a) // the cursor stays a minute behind: stale
+	a.onTick(a.currentRecovery.recoveryStartedAt.Add(6*time.Minute), false)
+	if a.currentRecovery.recoveryID == oldID {
+		t.Fatal("stale cursor but no processing activity, silent past the deadline: not re-issued")
+	}
+	waitRecoverHits(t, hits, 2)
+	waitDetachedDone(t, a, 3*time.Second)
+}
+
+// TestActor_SnapshotCompleteDeadline_AStaleCursorWithMessagesStartingIsABacklog:
+// the same stale cursor while messages keep starting (each one ends at once,
+// so none is in processing at the tick) is a backlog being worked off: no
+// re-issue. Once the starts stop for longer than MaxInactivity the silence
+// counts again.
+func TestActor_SnapshotCompleteDeadline_AStaleCursorWithMessagesStartingIsABacklog(t *testing.T) {
+	srv, hits := fixtureSrv(t)
+	defer srv.Close()
+	a := newWiredActor(t, srv, newFakeManagerOps())
+
+	oldID := startRecovery(t, a, hits, time.Now().Add(-10*time.Minute).Truncate(time.Millisecond), 1)
+	holdProcessing(a)
+	// The recovery has been silent for longer than the deadline.
+	a.currentRecovery.recoveryStartedAt = time.Now().Add(-6 * time.Minute)
+
+	a.onMessageProcessingStarted(time.Time{})
+	a.onMessageProcessingEnded(time.Time{})
+	tick := time.Now()
+	a.onTick(tick, false)
+	time.Sleep(50 * time.Millisecond)
+	if a.currentRecovery.recoveryID != oldID || hits.recover.Load() != 1 {
+		t.Fatalf("re-issued while messages were starting: id=%d (was %d) posts=%d", a.currentRecovery.recoveryID, oldID, hits.recover.Load())
+	}
+
+	// The starts stopped; a full deadline later the silence is evidence.
+	a.onTick(tick.Add(6*time.Minute), false)
+	if a.currentRecovery.recoveryID == oldID {
+		t.Fatal("no message started for a deadline, but not re-issued")
 	}
 	waitRecoverHits(t, hits, 2)
 	waitDetachedDone(t, a, 3*time.Second)
