@@ -23,9 +23,10 @@ const (
 // paying the full retry cycle on the session goroutine.
 //
 // The whole window ends the moment the API answers successfully again, from
-// any call: entries carry the API's success counter as read before the
-// failed attempt, and an entry is only honoured while the counter still has
-// that value. Nothing stays refused once the API is back.
+// any call: entries carry the API's success counter as read after the
+// failed attempt (see FeedMessageFactory.noteBuildFailure), and an entry is
+// only honoured while the counter still has that value, so only a later
+// success voids it. Nothing stays refused once the API is back.
 //
 // The zero value is ready to use.
 type apiFailureWindow struct {
@@ -68,9 +69,10 @@ func (w *apiFailureWindow) blocked(id types.URN, count uint64) bool {
 	return true
 }
 
-// record remembers that building id failed; count is the success counter
-// read BEFORE the failed attempt, so a success that landed while it was in
-// flight already voids the entry.
+// record remembers that building id failed; count is the success counter as
+// read AFTER the failed attempt (see FeedMessageFactory.noteBuildFailure: an
+// earlier successful call of the same build already advanced it), so only a
+// success that lands from here on voids the entry.
 func (w *apiFailureWindow) record(id types.URN, count uint64) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
