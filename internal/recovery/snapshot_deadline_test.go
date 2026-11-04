@@ -316,6 +316,44 @@ func TestActor_SnapshotCompleteDeadline_MaxRecoveryExecutionStillCapsTheTotal(t 
 	waitDetachedDone(t, a, 3*time.Second)
 }
 
+// The alive path caps the chain by the same original start as the tick path:
+// a recovery re-issued by the deadline keeps the clock of its first request.
+// A chain past MaxRecoveryExecution is abandoned (a new recovery under a new
+// request id replaces it) although the last request is still young.
+func TestActor_SnapshotCompleteDeadline_MaxRecoveryExecutionCapsTheTotalOnTheAlivePath(t *testing.T) {
+	srv, hits := fixtureSrv(t)
+	defer srv.Close()
+	a := newWiredActorWithCfg(t, srv, newFakeManagerOps(), 1, func(m *minimalCfg) config.Config {
+		return &deadlineCfg{minimalCfg: m, maxRecovery: 12 * time.Minute, deadline: 5 * time.Minute}
+	})
+
+	id1 := startRecovery(t, a, hits, time.Time{}, 1)
+	start := a.currentRecovery.recoveryStartedAt
+	a.onTick(start.Add(5*time.Minute+time.Second), false) // re-issue by the deadline
+	id2 := a.currentRecovery.recoveryID
+	if id1 == id2 {
+		t.Fatal("expected a re-issue")
+	}
+	waitRecoverHits(t, hits, 2)
+
+	// The first request is 13 minutes old, the last one 1 minute.
+	now := time.Now()
+	a.currentRecovery.chainStartedAt = now.Add(-13 * time.Minute)
+	a.currentRecovery.recoveryStartedAt = now.Add(-time.Minute)
+
+	ts := types.MessageTimestamp{Created: now, Received: now}
+	if err := a.systemAliveReceived(ts, true); err != nil {
+		t.Fatal(err)
+	}
+	if a.currentRecovery == nil || a.currentRecovery.recoveryID == id2 {
+		t.Fatalf("the alive path did not abandon the chain past MaxRecoveryExecution (id %d)", id2)
+	}
+	waitRecoverHits(t, hits, 3)
+	if age := time.Since(a.currentRecovery.chainStartedAt); age > time.Minute {
+		t.Fatalf("the replacement recovery carries the old chain start (%v ago)", age)
+	}
+}
+
 // A re-issue held back by a lost session that has not re-bound its queue
 // waits (the replay would go nowhere); it happens once the rebind lands.
 func TestActor_SnapshotCompleteDeadline_WaitsForPendingRebind(t *testing.T) {
