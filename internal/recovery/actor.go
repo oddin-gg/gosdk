@@ -218,10 +218,10 @@ type actorManagerOps interface {
 	// (not the SDK's own alive-only one) can complete the producer's
 	// snapshot recovery; see Manager.clientSessionsCanComplete.
 	clientSessionsCanComplete(producerID int) bool
-	// clientProcessingStalled reports whether a client session has had a
-	// message in processing for longer than stalledAfter; see
-	// Manager.clientProcessingStalled.
-	clientProcessingStalled(now time.Time, stalledAfter time.Duration) bool
+	// clientProcessingStalled reports whether a client session that can
+	// receive the producer's replay has had a message in processing for
+	// longer than stalledAfter; see Manager.clientProcessingStalled.
+	clientProcessingStalled(producerID int, now time.Time, stalledAfter time.Duration) bool
 }
 
 // maxPendingEventRecoveries bounds concurrent pending event recoveries
@@ -1080,14 +1080,15 @@ func (a *recoveryActor) expireSnapshotCompleteDeadline(now time.Time) {
 	if !a.mgr.clientSessionsCanComplete(a.producerID) {
 		return
 	}
-	// A session queue is shared by all producers and drained one message at
-	// a time: while a client message of any producer is stuck in processing
-	// (longer than MaxInactivity, the feed's own tolerance for silence),
-	// this producer's replay may sit behind it whatever the per-producer
+	// A session queue is shared by all producers of its interest and
+	// drained one message at a time: while a client message of any
+	// producer is stuck in processing in a session that can receive this
+	// producer (longer than MaxInactivity, the feed's own tolerance for
+	// silence), this producer's replay may sit behind it whatever the per-producer
 	// guards below see, and a re-issue would queue a second replay there.
 	// A message in processing for a short time is no evidence: a busy
 	// client always has one, and holding on it would disable the deadline.
-	if a.mgr.clientProcessingStalled(now, a.cfg.MaxInactivity()) {
+	if a.mgr.clientProcessingStalled(a.producerID, now, a.cfg.MaxInactivity()) {
 		a.currentRecovery.renewedAt = now
 		return
 	}

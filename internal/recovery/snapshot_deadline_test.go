@@ -1102,8 +1102,8 @@ type scopeOps struct {
 
 func (s scopeOps) clientSessionsCanComplete(id int) bool { return s.m.clientSessionsCanComplete(id) }
 
-func (s scopeOps) clientProcessingStalled(now time.Time, after time.Duration) bool {
-	return s.m.clientProcessingStalled(now, after)
+func (s scopeOps) clientProcessingStalled(id int, now time.Time, after time.Duration) bool {
+	return s.m.clientProcessingStalled(id, now, after)
 }
 
 // clientScopeOps makes the actor's manager report the given open client
@@ -1372,6 +1372,72 @@ func TestActor_SnapshotCompleteDeadline_NotHeldByABusyClient(t *testing.T) {
 	}
 	waitRecoverHits(t, hits, 2)
 	waitDetachedDone(t, a, 3*time.Second)
+}
+
+// sessionScopeOps registers a LiveOnly and a PrematchOnly client session
+// under known ids, so a test can leave a message of either in processing.
+func sessionScopeOps(a *recoveryActor) (ops scopeOps, live, prematch uuid.UUID) {
+	live, prematch = uuid.New(), uuid.New()
+	ops = clientScopeOps(a).(scopeOps)
+	ops.m.processingTimes = map[uuid.UUID]time.Time{}
+	ops.m.logger = newDiscardLogger()
+	ops.m.OnClientSessionOpened(live, types.LiveOnlyMessageInterest)
+	ops.m.OnClientSessionOpened(prematch, types.PrematchOnlyMessageInterest)
+	a.mgr = ops
+	a.lastProcessedFn = holdProcessingTS(time.Now().Add(-time.Hour))
+	return ops, live, prematch
+}
+
+// The queue of a session is its own: a LiveOnly session stuck on a live
+// message does not hold back the replay of a prematch producer, which goes
+// to the healthy PrematchOnly session. Holding on it would delay the
+// re-request for as long as the unrelated session stays stuck.
+func TestActor_SnapshotCompleteDeadline_NotHeldByAStalledSessionOutOfTheProducersScope(t *testing.T) {
+	srv, hits := fixtureSrv(t)
+	defer srv.Close()
+	a := newWiredActorForProducer(t, srv, newFakeManagerOps(), 2) // prematch
+	startRecovery(t, a, hits, time.Now().Add(-10*time.Minute).Truncate(time.Millisecond), 1)
+	ops, live, _ := sessionScopeOps(a)
+	started := a.currentRecovery.recoveryStartedAt
+
+	ops.m.OnMessageProcessingStarted(live, 1, started)
+	if !reissuedAt(a, started, 6*time.Minute) {
+		t.Fatal("held by a stalled LiveOnly session although the producer is prematch only")
+	}
+	waitRecoverHits(t, hits, 2)
+	waitDetachedDone(t, a, 3*time.Second)
+}
+
+// A stalled session that can receive the producer still holds the deadline:
+// the replay sits behind its stuck message.
+func TestActor_SnapshotCompleteDeadline_HeldByAStalledSessionInTheProducersScope(t *testing.T) {
+	srv, hits := fixtureSrv(t)
+	defer srv.Close()
+	a := newWiredActorForProducer(t, srv, newFakeManagerOps(), 2) // prematch
+	oldID := startRecovery(t, a, hits, time.Now().Add(-10*time.Minute).Truncate(time.Millisecond), 1)
+	ops, _, prematch := sessionScopeOps(a)
+	started := a.currentRecovery.recoveryStartedAt
+
+	ops.m.OnMessageProcessingStarted(prematch, 2, started)
+	if reissuedAt(a, started, 6*time.Minute) {
+		t.Fatal("re-issued while a session that receives the producer was stalled")
+	}
+	time.Sleep(50 * time.Millisecond)
+	if hits.recover.Load() != 1 || a.currentRecovery.recoveryID != oldID {
+		t.Fatalf("recovery POSTs = %d, want 1", hits.recover.Load())
+	}
+}
+
+// A stalled session the registry does not know has no interest to compare:
+// it counts, rather than let a re-issue pile onto a queue that may be it.
+func TestManager_ClientProcessingStalled_UnregisteredSessionCounts(t *testing.T) {
+	m, _ := openedManagerWithActors(t, 1, 2)
+	now := time.Now()
+	m.OnClientSessionOpened(uuid.New(), types.LiveOnlyMessageInterest)
+	m.OnMessageProcessingStarted(uuid.New(), 1, now.Add(-time.Hour))
+	if !m.clientProcessingStalled(2, now, time.Minute) {
+		t.Fatal("a stalled session missing from the registry must count")
+	}
 }
 
 func holdProcessingTS(ts time.Time) func() (time.Time, error) {

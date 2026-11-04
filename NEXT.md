@@ -1034,7 +1034,8 @@ does any `snapshot_complete` of it. The deadline is held, not passed, while the
 replay may only be slow to be handled: processing of the producer lags behind
 and messages are being taken up, the processed cursor cannot be read, the first
 message is still in processing, a client message of any producer has been stuck
-in processing longer than `MaxInactivity` (the session queue is shared), or a
+in processing longer than `MaxInactivity` in a session that can receive this
+producer (the session queue is shared by the producers of its interest), or a
 lost session in scope has not re-bound its queue. It does not apply to a
 producer whose recovery the open client sessions cannot complete (a LiveOnly or
 PrematchOnly client's other producer, a client that never subscribed, a producer

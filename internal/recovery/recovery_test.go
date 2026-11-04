@@ -183,7 +183,7 @@ func (f *fakeManagerOps) rebindPending(int) bool { return f.pendingRebind.Load()
 
 func (f *fakeManagerOps) clientSessionsCanComplete(int) bool { return !f.noClientScope.Load() }
 
-func (f *fakeManagerOps) clientProcessingStalled(time.Time, time.Duration) bool {
+func (f *fakeManagerOps) clientProcessingStalled(int, time.Time, time.Duration) bool {
 	return f.clientBusy.Load()
 }
 

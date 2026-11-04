@@ -852,16 +852,52 @@ func (m *Manager) sessionQueueSettled(session uuid.UUID) {
 	}
 }
 
-// clientProcessingStalled reports whether a client session has had one
-// message in processing for longer than stalledAfter at now (the SDK's
-// alive-only session reports none). A busy client always has some message
-// in processing; only one that has stayed there that long says the
-// session's queue is stuck behind it.
-func (m *Manager) clientProcessingStalled(now time.Time, stalledAfter time.Duration) bool {
+// clientProcessingStalled reports whether a client session that can
+// receive the producer's replay has had one message in processing for
+// longer than stalledAfter at now (the SDK's alive-only session reports
+// none). A busy client always has some message in processing; only one
+// that has stayed there that long says the session's queue is stuck
+// behind it. A session whose interest has not the producer in scope
+// drains its own queue, whatever the stuck one holds, so it does not
+// count: a LiveOnly session stuck on a live message must not hold the
+// deadline of a prematch producer replaying to a healthy session. A
+// session missing from the registry, or a producer the catalog cannot
+// describe, counts (the conservative answer: hold the deadline).
+//
+// The two registries have their own mutexes and are never locked
+// together, nor while the producer catalog is asked: the stalled
+// sessions are copied out of one, then looked up in the other.
+func (m *Manager) clientProcessingStalled(producerID int, now time.Time, stalledAfter time.Duration) bool {
 	m.processingMu.Lock()
-	defer m.processingMu.Unlock()
-	for _, started := range m.processingTimes {
+	var stalled []uuid.UUID
+	for session, started := range m.processingTimes {
 		if !started.IsZero() && now.Sub(started) > stalledAfter {
+			stalled = append(stalled, session)
+		}
+	}
+	m.processingMu.Unlock()
+	if len(stalled) == 0 {
+		return false
+	}
+
+	interests := make([]types.MessageInterest, 0, len(stalled))
+	m.clientMu.Lock()
+	for _, session := range stalled {
+		mi, ok := m.clientSessions[session]
+		if !ok {
+			m.clientMu.Unlock()
+			return true
+		}
+		interests = append(interests, mi)
+	}
+	m.clientMu.Unlock()
+
+	prod, err := m.producerManager.GetProducerCached(producerID)
+	if err != nil {
+		return true
+	}
+	for _, mi := range interests {
+		if mi.IsProducerInScope(prod) {
 			return true
 		}
 	}
