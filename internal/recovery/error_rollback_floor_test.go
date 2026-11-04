@@ -150,3 +150,47 @@ func TestActor_ExpireStuckSnapshotRecovery_KeepsTheExpiredRecoverysRange(t *test
 	}
 	waitDetachedDone(t, a, 3*time.Second)
 }
+
+// The POST of a recovery already marked for a processing delay fails. The
+// replacement the next alive starts takes the mark over: completing while
+// processing still lags, it does not report the producer up; a repeat
+// follows and the producer comes up when that completes.
+func TestActor_FailedPOSTOfAMarkedRecovery_ReplacementStillRepeats(t *testing.T) {
+	fake := newFakeManagerOps()
+	a, hits, r1, _ := genuineDelayDuringRecovery(t, fake)
+	p := holdProcessing(a)
+	if a.delayDownRequestID != r1 {
+		t.Fatalf("setup: delay mark = %d, want R1 %d", a.delayDownRequestID, r1)
+	}
+	failRepeatPOST(t, a)
+	_, upBefore := downEventCounts(fake)
+
+	if err := a.systemAliveReceived(aliveAt(time.Now()), true); err != nil {
+		t.Fatal(err)
+	}
+	waitRecoverHits(t, hits, 3)
+	r2 := a.currentRecovery.recoveryID
+	if r2 == r1 || a.delayDownRequestID != r2 {
+		t.Fatalf("replacement id=%d (R1 %d) mark=%d, want the mark on the replacement", r2, r1, a.delayDownRequestID)
+	}
+
+	if err := a.snapshotRecoveryFinished(r2); err != nil {
+		t.Fatal(err)
+	}
+	if _, up := downEventCounts(fake); up != upBefore {
+		t.Fatalf("producer-up events went from %d to %d, want none while processing lags", upBefore, up)
+	}
+	if !a.isFlaggedDown() || !a.delayRepeatWaiting {
+		t.Fatalf("down=%v waiting=%v, want down with a repeat waiting", a.isFlaggedDown(), a.delayRepeatWaiting)
+	}
+
+	catchUp(a, p, time.Now())
+	waitRecoverHits(t, hits, 4)
+	if err := a.snapshotRecoveryFinished(a.currentRecovery.recoveryID); err != nil {
+		t.Fatal(err)
+	}
+	if a.isFlaggedDown() {
+		t.Fatal("producer still down after the repeat completed")
+	}
+	waitDetachedDone(t, a, 3*time.Second)
+}
