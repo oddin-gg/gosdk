@@ -127,6 +127,9 @@ func TestEventRecovery_CarriesEventID(t *testing.T) {
 // observe what the actor emitted.
 type fakeManagerOps struct {
 	pendingRebind atomic.Bool
+	// noClientScope makes the fake report that no client session has any
+	// producer in scope (by default every producer is).
+	noClientScope atomic.Bool
 	mu            sync.Mutex
 	registered    []*Handle
 	completed     []completedHandle
@@ -175,6 +178,8 @@ func (f *fakeManagerOps) LookupHandle(id int) (*Handle, bool) {
 }
 
 func (f *fakeManagerOps) rebindPending(int) bool { return f.pendingRebind.Load() }
+
+func (f *fakeManagerOps) clientSessionInScope(int) bool { return !f.noClientScope.Load() }
 
 func (f *fakeManagerOps) emitRecoveryMessage(msg types.RecoveryMessage) {
 	f.mu.Lock()

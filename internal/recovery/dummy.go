@@ -38,3 +38,5 @@ func (d DummyManager) OnFeedChannelLost(uuid.UUID, types.MessageInterest, time.T
 func (d DummyManager) OnFeedChannelRestored(uuid.UUID) {}
 
 func (d DummyManager) OnFeedSessionGone(uuid.UUID) {}
+
+func (d DummyManager) OnClientSessionOpened(uuid.UUID, types.MessageInterest) {}

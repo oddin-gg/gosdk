@@ -122,6 +122,10 @@ type recoveryMessageProcessor interface {
 	// OnFeedSessionGone reports that the session's consumer has exited
 	// for good; it needs no queue and must not hold recoveries back.
 	OnFeedSessionGone(session uuid.UUID)
+	// OnClientSessionOpened reports a session of the client about to
+	// consume with the given interest; OnFeedSessionGone ends it. The
+	// recovery manager needs the scopes a snapshot replay can reach.
+	OnClientSessionOpened(session uuid.UUID, messageInterest types.MessageInterest)
 	// OnMessageProcessingStarted / OnMessageProcessingEnded bracket the
 	// processing of ONE message of a session of the client, strictly
 	// paired. The SDK's own alive-only session does not report them.
@@ -204,8 +208,17 @@ func (o *oddsFeedSessionImpl) Open(
 		return errors.New("gosdk: session: open called twice")
 	}
 
+	// Registered before the consumer starts, so its exit cannot come first
+	// and leave a closed session registered. Replay sessions (no hooks)
+	// are not part of the live feed.
+	if !o.isReplay {
+		o.recoveryMessageProcessor.OnClientSessionOpened(o.sessionID, *messageInterest)
+	}
 	ch, err := o.channelConsumer.Open(ctx, routingKeys, messageInterest)
 	if err != nil {
+		if !o.isReplay {
+			o.recoveryMessageProcessor.OnFeedSessionGone(o.sessionID)
+		}
 		return fmt.Errorf("gosdk: session: channel consumer open (interest=%s, keys=%d): %w", *messageInterest, len(routingKeys), err)
 	}
 

@@ -32,11 +32,12 @@ func (p *lossRecordingProcessor) OnFeedChannelLost(session uuid.UUID, mi types.M
 		lostAt   time.Time
 	}{mi, lostAt})
 }
-func (*lossRecordingProcessor) OnFeedChannelRestored(uuid.UUID)                      {}
-func (*lossRecordingProcessor) OnFeedSessionGone(uuid.UUID)                          {}
-func (*lossRecordingProcessor) OnRecoveryMessageReceived(int, int)                   {}
-func (*lossRecordingProcessor) OnMessageProcessingStarted(uuid.UUID, int, time.Time) {}
-func (*lossRecordingProcessor) OnMessageProcessingEnded(uuid.UUID, int, time.Time)   {}
+func (*lossRecordingProcessor) OnFeedChannelRestored(uuid.UUID)                        {}
+func (*lossRecordingProcessor) OnFeedSessionGone(uuid.UUID)                            {}
+func (*lossRecordingProcessor) OnClientSessionOpened(uuid.UUID, types.MessageInterest) {}
+func (*lossRecordingProcessor) OnRecoveryMessageReceived(int, int)                     {}
+func (*lossRecordingProcessor) OnMessageProcessingStarted(uuid.UUID, int, time.Time)   {}
+func (*lossRecordingProcessor) OnMessageProcessingEnded(uuid.UUID, int, time.Time)     {}
 func (*lossRecordingProcessor) OnAliveReceived(int, types.MessageTimestamp, bool, types.MessageInterest) {
 }
 func (*lossRecordingProcessor) OnSnapshotCompleteReceived(context.Context, int, int, types.MessageInterest) error {

@@ -313,6 +313,14 @@ func WithMaxRecoveryExecution(d time.Duration) Option {
 // must not exceed WithMaxRecoveryExecution; when only
 // WithMaxRecoveryExecution is lowered below the default, the default
 // follows it. Enforcement is periodic (the recovery manager's ~10s tick).
+//
+// The deadline applies only to a producer some open client session can
+// receive (a LiveOnly or PrematchOnly client never receives the replay of
+// the other scope, a client that did not subscribe receives none); such a
+// producer's recovery waits for WithMaxRecoveryExecution instead. A
+// WithSpecificEvents client receives little of the replay, so only the
+// snapshot_complete renews its deadline: a snapshot that takes longer than d
+// is requested again.
 func WithSnapshotCompleteDeadline(d time.Duration) Option {
 	return func(c *Config) {
 		c.snapshotCompleteDeadline = d

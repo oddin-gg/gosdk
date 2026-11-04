@@ -214,6 +214,10 @@ type actorManagerOps interface {
 	// rebindPending reports whether a lost session in the producer's
 	// scope still has no queue; see Manager.rebindPending.
 	rebindPending(producerID int) bool
+	// clientSessionInScope reports whether an open client session (not the
+	// SDK's own alive-only one) can receive the producer's replay; see
+	// Manager.clientSessionInScope.
+	clientSessionInScope(producerID int) bool
 }
 
 // maxPendingEventRecoveries bounds concurrent pending event recoveries
@@ -1044,6 +1048,16 @@ func (a *recoveryActor) expireSnapshotCompleteDeadline(now time.Time) {
 		return
 	}
 	if a.mgr.rebindPending(a.producerID) {
+		return
+	}
+	// The replay of a producer no open client session has in scope reaches
+	// nobody: a LiveOnly or PrematchOnly client drops the other scope's
+	// messages, snapshot_complete included, and a client that never
+	// subscribed has only the SDK's own alive-only session. No
+	// snapshot_complete can come, so every deadline would be a request to
+	// the recovery API for nothing; such a recovery keeps waiting for
+	// MaxRecoveryExecution.
+	if !a.mgr.clientSessionInScope(a.producerID) {
 		return
 	}
 	// The deadline is measured on MESSAGES the actor has seen of this request;

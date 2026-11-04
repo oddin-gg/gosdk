@@ -965,6 +965,9 @@ func TestActor_SnapshotCompleteDeadline_OnlySystemAlivesIsNoClientProcessing(t *
 	srv, hits := fixtureSrv(t)
 	defer srv.Close()
 	a := newWiredActor(t, srv, newFakeManagerOps())
+	// An open client session that has this producer in scope but has not
+	// processed anything: the replay can reach it, so the deadline applies.
+	a.mgr = clientScopeOps(a, types.LiveOnlyMessageInterest)
 
 	oldID := startRecovery(t, a, hits, time.Now().Add(-10*time.Minute).Truncate(time.Millisecond), 1)
 	started := a.currentRecovery.recoveryStartedAt
@@ -1084,4 +1087,134 @@ func TestActor_SnapshotCompleteDeadline_FailedReissuePostKeepsTheFullHistory(t *
 			got, time.UnixMilli(got))
 	}
 	waitDetachedDone(t, a, 3*time.Second)
+}
+
+// scopeOps answers the client-session scope question from a real Manager
+// registry, the rest from the fake.
+type scopeOps struct {
+	*fakeManagerOps
+	m *Manager
+}
+
+func (s scopeOps) clientSessionInScope(id int) bool { return s.m.clientSessionInScope(id) }
+
+// clientScopeOps makes the actor's manager report the given open client
+// sessions, as the session registry of a real Manager would. The producer
+// catalog is the actor's own, loaded by its first request.
+func clientScopeOps(a *recoveryActor, interests ...types.MessageInterest) actorManagerOps {
+	m := &Manager{producerManager: a.pm}
+	for _, mi := range interests {
+		m.OnClientSessionOpened(uuid.New(), mi)
+	}
+	// The actor's own fake keeps the request ids counting on.
+	return scopeOps{fakeManagerOps: a.mgr.(*fakeManagerOps), m: m}
+}
+
+// reissuedAt ticks the actor at started+at and reports whether the request
+// was replaced.
+func reissuedAt(a *recoveryActor, started time.Time, at time.Duration) bool {
+	id := a.currentRecovery.recoveryID
+	a.onTick(started.Add(at), false)
+	return a.currentRecovery.recoveryID != id
+}
+
+// A LiveOnly client drops a prematch producer's messages, snapshot_complete
+// included, so its replay can never renew or complete the recovery. The
+// deadline must not ask the recovery API again for it, deadline after
+// deadline: such a recovery waits for MaxRecoveryExecution as it always did.
+func TestActor_SnapshotCompleteDeadline_NoReissueForAProducerOutOfEveryClientScope(t *testing.T) {
+	srv, hits := fixtureSrv(t)
+	defer srv.Close()
+	a := newWiredActorForProducer(t, srv, newFakeManagerOps(), 2) // prematch
+	oldID := startRecovery(t, a, hits, time.Now().Add(-10*time.Minute).Truncate(time.Millisecond), 1)
+	a.mgr = clientScopeOps(a, types.LiveOnlyMessageInterest)
+	started := a.currentRecovery.recoveryStartedAt
+
+	for _, at := range []time.Duration{6 * time.Minute, 12 * time.Minute, 18 * time.Minute} {
+		if reissuedAt(a, started, at) {
+			t.Fatalf("re-issued at +%v for a producer no client session has in scope", at)
+		}
+	}
+	time.Sleep(50 * time.Millisecond)
+	if a.currentRecovery.recoveryID != oldID || hits.recover.Load() != 1 {
+		t.Fatalf("recovery POSTs = %d, id %d (was %d); want one request, untouched", hits.recover.Load(), a.currentRecovery.recoveryID, oldID)
+	}
+	if a.recoveryState != types.StartedRecoveryState {
+		t.Fatalf("state = %v, want Started", a.recoveryState)
+	}
+}
+
+// A client that connected and never subscribed has only the SDK's own
+// alive-only session; no snapshot_complete reaches it either.
+func TestActor_SnapshotCompleteDeadline_NoReissueWithoutAnyClientSession(t *testing.T) {
+	srv, hits := fixtureSrv(t)
+	defer srv.Close()
+	a := newWiredActor(t, srv, newFakeManagerOps())
+	startRecovery(t, a, hits, time.Now().Add(-10*time.Minute).Truncate(time.Millisecond), 1)
+	a.mgr = clientScopeOps(a) // no client session
+	started := a.currentRecovery.recoveryStartedAt
+
+	for _, at := range []time.Duration{6 * time.Minute, 12 * time.Minute} {
+		if reissuedAt(a, started, at) {
+			t.Fatalf("re-issued at +%v with no client session open", at)
+		}
+	}
+	time.Sleep(50 * time.Millisecond)
+	if hits.recover.Load() != 1 {
+		t.Fatalf("recovery POSTs = %d, want 1", hits.recover.Load())
+	}
+}
+
+// A session that covers the producer's scope keeps the deadline as before:
+// a LiveOnly session and a live producer, then a mixed producer.
+func TestActor_SnapshotCompleteDeadline_ReissuesForAProducerInAClientScope(t *testing.T) {
+	for _, id := range []int{1, 3} {
+		srv, hits := fixtureSrv(t)
+		a := newWiredActorForProducer(t, srv, newFakeManagerOps(), id)
+		startRecovery(t, a, hits, time.Now().Add(-10*time.Minute).Truncate(time.Millisecond), 1)
+		a.mgr = clientScopeOps(a, types.PrematchOnlyMessageInterest, types.LiveOnlyMessageInterest)
+		started := a.currentRecovery.recoveryStartedAt
+
+		if !reissuedAt(a, started, 6*time.Minute) {
+			t.Fatalf("producer %d: not re-issued although a session has it in scope", id)
+		}
+		waitRecoverHits(t, hits, 2)
+		waitDetachedDone(t, a, 3*time.Second)
+		srv.Close()
+	}
+}
+
+// The registry the deadline reads: sessions are added when they open and
+// removed when their consumer is gone; the SDK's own alive-only session is
+// never one of them; a producer the catalog cannot describe counts as in
+// scope.
+func TestManager_ClientSessionInScope_TracksOpenSessions(t *testing.T) {
+	m, _ := openedManagerWithActors(t, 1, 2, 3)
+	if m.clientSessionInScope(1) {
+		t.Fatal("no client session is open, nothing is in scope")
+	}
+	m.OnClientSessionOpened(uuid.New(), types.SystemAliveOnly)
+	if m.clientSessionInScope(1) {
+		t.Fatal("the SDK's alive-only session must not count as a client session")
+	}
+	live := uuid.New()
+	m.OnClientSessionOpened(live, types.LiveOnlyMessageInterest)
+	if !m.clientSessionInScope(1) || !m.clientSessionInScope(3) || m.clientSessionInScope(2) {
+		t.Fatalf("LiveOnly session: in scope 1=%v 2=%v 3=%v, want true/false/true",
+			m.clientSessionInScope(1), m.clientSessionInScope(2), m.clientSessionInScope(3))
+	}
+	if !m.clientSessionInScope(4242) {
+		t.Fatal("a producer the catalog cannot describe must count as in scope")
+	}
+	both := uuid.New()
+	m.OnClientSessionOpened(both, types.PrematchOnlyMessageInterest)
+	if !m.clientSessionInScope(2) {
+		t.Fatal("a prematch session must bring the prematch producer into scope")
+	}
+	m.OnFeedSessionGone(uuid.New()) // unknown session: no effect
+	m.OnFeedSessionGone(live)
+	m.OnFeedSessionGone(both)
+	if m.clientSessionInScope(1) || m.clientSessionInScope(2) {
+		t.Fatal("sessions that are gone must leave the registry")
+	}
 }

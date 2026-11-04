@@ -184,6 +184,13 @@ type Manager struct {
 	// a recovery whose head was lost and discharge the floor.
 	lostMu       sync.Mutex
 	lostSessions map[uuid.UUID]types.MessageInterest
+
+	// clientSessions holds the open sessions of the client with their
+	// interest (the SDK's own alive-only session is not one of them): the
+	// only places a snapshot replay can be delivered to. Added when a
+	// session opens, removed when its consumer is gone.
+	clientMu       sync.Mutex
+	clientSessions map[uuid.UUID]types.MessageInterest
 }
 
 // tickDropWarnInterval bounds how often per-producer tick-drop warns are
@@ -740,7 +747,46 @@ func (m *Manager) OnFeedChannelRestored(session uuid.UUID) { m.sessionQueueSettl
 
 // OnFeedSessionGone reports that a session's consumer exited for good.
 // It needs no queue, so it must not hold recoveries back.
-func (m *Manager) OnFeedSessionGone(session uuid.UUID) { m.sessionQueueSettled(session) }
+func (m *Manager) OnFeedSessionGone(session uuid.UUID) {
+	m.clientMu.Lock()
+	delete(m.clientSessions, session)
+	m.clientMu.Unlock()
+	m.sessionQueueSettled(session)
+}
+
+// OnClientSessionOpened registers a session of the client and its
+// interest: from now on its scope counts as one a replay can reach. The
+// SDK's own alive-only session is never registered, it receives no replay.
+func (m *Manager) OnClientSessionOpened(session uuid.UUID, messageInterest types.MessageInterest) {
+	if messageInterest == types.SystemAliveOnly {
+		return
+	}
+	m.clientMu.Lock()
+	if m.clientSessions == nil {
+		m.clientSessions = make(map[uuid.UUID]types.MessageInterest)
+	}
+	m.clientSessions[session] = messageInterest
+	m.clientMu.Unlock()
+}
+
+// clientSessionInScope reports whether any open client session has the
+// producer in scope, i.e. whether its snapshot replay can reach the
+// client at all. A producer the catalog cannot describe counts as in
+// scope (the conservative answer: keep re-requesting rather than give up).
+func (m *Manager) clientSessionInScope(producerID int) bool {
+	m.clientMu.Lock()
+	defer m.clientMu.Unlock()
+	if len(m.clientSessions) == 0 {
+		return false
+	}
+	prod, err := m.producerManager.GetProducerCached(producerID)
+	for _, mi := range m.clientSessions {
+		if err != nil || mi.IsProducerInScope(prod) {
+			return true
+		}
+	}
+	return false
+}
 
 func (m *Manager) sessionQueueSettled(session uuid.UUID) {
 	m.lostMu.Lock()
