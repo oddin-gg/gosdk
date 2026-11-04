@@ -2,7 +2,9 @@ package gosdk
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -68,5 +70,62 @@ func TestSession_ProcessFeedMessage_ReportsRecoveryRequestIDs(t *testing.T) {
 				t.Fatalf("a live message (no request id) reported %+v", got)
 			}
 		})
+	}
+}
+
+// processingRecorder counts the processing hooks the session drives and
+// remembers the timestamp each end carried.
+type processingRecorder struct {
+	noopRecoveryProcessor
+	started, ended atomic.Int32
+	endedTS        atomic.Pointer[time.Time]
+}
+
+func (p *processingRecorder) OnMessageProcessingStarted(uuid.UUID, int, time.Time) {
+	p.started.Add(1)
+}
+
+func (p *processingRecorder) OnMessageProcessingEnded(_ uuid.UUID, _ int, ts time.Time) {
+	p.ended.Add(1)
+	p.endedTS.Store(&ts)
+}
+
+// TestSession_ProcessFeedMessage_SystemAliveSessionIsNotClientProcessing: the
+// alive-only session is the SDK's own. Its alives must not count as the
+// client's processing (no processed-cursor advance, no in-processing count,
+// no processing-start time), while the alive of a session of the client does
+// and is paired start/end with the alive's creation time.
+func TestSession_ProcessFeedMessage_SystemAliveSessionIsNotClientProcessing(t *testing.T) {
+	created := time.Unix(1_700_000_000, 0)
+	run := func(interest types.MessageInterest) *processingRecorder {
+		rec := &processingRecorder{}
+		o := &oddsFeedSessionImpl{
+			cacheManager:             &spyCacheNotifier{},
+			feedMessageFactory:       &fakeMessageBuilder{builtMessage: oddsChangeStub{}},
+			recoveryMessageProcessor: rec,
+			logger:                   discardLogger(),
+			msgCh:                    make(chan sessionEnvelope, 1),
+			sessionID:                uuid.New(),
+		}
+		subscribed := 1
+		fm := &types.FeedMessage{
+			BasicFeedMessage: types.BasicFeedMessage{Timestamp: types.MessageTimestamp{Created: created}},
+			Message:          &feedXML.Alive{ProductID: 1, Subscribed: &subscribed},
+		}
+		o.processFeedMessage(context.Background(), fm, interest, nil, false, nil)
+		return rec
+	}
+
+	sys := run(types.SystemAliveOnly)
+	if sys.started.Load() != 0 || sys.ended.Load() != 0 {
+		t.Fatalf("system session alive reported processing: started=%d ended=%d", sys.started.Load(), sys.ended.Load())
+	}
+
+	user := run(types.AllMessageInterest)
+	if user.started.Load() != 1 || user.ended.Load() != 1 {
+		t.Fatalf("user session alive: started=%d ended=%d, want 1/1", user.started.Load(), user.ended.Load())
+	}
+	if ts := user.endedTS.Load(); ts == nil || !ts.Equal(created) {
+		t.Fatalf("user session alive ended with %v, want %v", ts, created)
 	}
 }

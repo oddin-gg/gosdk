@@ -953,3 +953,39 @@ func TestActor_SnapshotCompleteDeadline_InProcessingCountsAcrossSessions(t *test
 		t.Fatalf("in processing = %d after a start following an extra end, want 1", got)
 	}
 }
+
+// TestActor_SnapshotCompleteDeadline_OnlySystemAlivesIsNoClientProcessing: all
+// sessions of the client are closed (or never took a message) while the
+// SDK's own alive-only session keeps receiving alives. The user-session
+// alive is stale, but nothing is processed, so the silence of a lost request
+// is evidence and the request is re-issued at the deadline. The system
+// session reports no processing (see session.processFeedMessage), so the
+// actor sees no start and its guard stays idle.
+func TestActor_SnapshotCompleteDeadline_OnlySystemAlivesIsNoClientProcessing(t *testing.T) {
+	srv, hits := fixtureSrv(t)
+	defer srv.Close()
+	a := newWiredActor(t, srv, newFakeManagerOps())
+
+	oldID := startRecovery(t, a, hits, time.Now().Add(-10*time.Minute).Truncate(time.Millisecond), 1)
+	started := a.currentRecovery.recoveryStartedAt
+	// The last user-session alive is a minute old; the processed cursor too.
+	a.lastUserSessionAlive = started.Add(-time.Minute)
+	holdProcessing(a)
+
+	// System alives keep arriving; they are not processing.
+	a.onAlive(evAlive{
+		timestamp:       types.MessageTimestamp{Created: started.Add(5 * time.Minute), Received: started.Add(5 * time.Minute)},
+		isSubscribed:    true,
+		messageInterest: types.SystemAliveOnly,
+	})
+	if a.inProcessing.Load() != 0 || a.processingActive(started.Add(6*time.Minute)) {
+		t.Fatal("system alives made the client look busy")
+	}
+
+	a.onTick(started.Add(6*time.Minute), false)
+	if a.currentRecovery.recoveryID == oldID {
+		t.Fatal("no client processing and the user alive stale, silent past the deadline: not re-issued")
+	}
+	waitRecoverHits(t, hits, 2)
+	waitDetachedDone(t, a, 3*time.Second)
+}

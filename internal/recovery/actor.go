@@ -45,7 +45,8 @@ type recoveryActor struct {
 	lastProcessedFn func() (time.Time, error)
 
 	// inProcessing counts the messages of this producer that are in
-	// processing right now: every start adds one, every end takes one, a
+	// processing right now in the sessions of the client (the SDK's own
+	// alive-only session reports none, see session.processFeedMessage): every start adds one, every end takes one, a
 	// zero-timestamp end included (the session ends a message whose build
 	// or downstream send failed with a zero timestamp, and the message is
 	// out of processing all the same). The producer's last-message
@@ -1417,8 +1418,10 @@ func (a *recoveryActor) calculateTiming(now time.Time) bool {
 	return fresh
 }
 
-// processingActive reports whether the consumer is busy with this
-// producer's messages: one is in processing now, or one started within
+// processingActive reports whether the client is busy with this
+// producer's messages (the SDK's own alive-only session does not report
+// processing, so its alives never make the client look busy): one is in
+// processing now, or one started within
 // MaxInactivity. MaxInactivity is the feed's own tolerance for silence
 // (the same bound timingFresh applies to the alives), so a consumer that
 // took up no message for that long is idle, not backed up.

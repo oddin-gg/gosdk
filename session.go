@@ -122,6 +122,9 @@ type recoveryMessageProcessor interface {
 	// OnFeedSessionGone reports that the session's consumer has exited
 	// for good; it needs no queue and must not hold recoveries back.
 	OnFeedSessionGone(session uuid.UUID)
+	// OnMessageProcessingStarted / OnMessageProcessingEnded bracket the
+	// processing of ONE message of a session of the client, strictly
+	// paired. The SDK's own alive-only session does not report them.
 	OnMessageProcessingStarted(sessionID uuid.UUID, producerID int, timestamp time.Time)
 	// OnRecoveryMessageReceived reports a message that carries a recovery
 	// request id (the replay of a snapshot or event recovery): the
@@ -412,7 +415,17 @@ func (o *oddsFeedSessionImpl) processMessage(ctx context.Context, env feed.Queue
 
 func (o *oddsFeedSessionImpl) processFeedMessage(ctx context.Context, feedMessage *types.FeedMessage, messageInterest types.MessageInterest, ack func(), emitRaw bool, rawMsg *types.RawFeedMessage) {
 	producerID := feedMessage.Message.Product()
-	o.recoveryMessageProcessor.OnMessageProcessingStarted(o.sessionID, producerID, time.Now())
+	// The alive-only session is the SDK's own (it feeds the recovery state
+	// machine, nothing reaches the client through it), so its messages are
+	// not the client's processing: reporting them would advance the
+	// processed cursor and keep the processing guard "busy" with every
+	// alive, whatever the client's own sessions are doing. The sessions of
+	// the client bind the alive key as well, so a healthy client still
+	// advances the cursor with the alives it processes.
+	reportsProcessing := messageInterest != types.SystemAliveOnly
+	if reportsProcessing {
+		o.recoveryMessageProcessor.OnMessageProcessingStarted(o.sessionID, producerID, time.Now())
+	}
 	if requestID, ok := recoveryRequestID(feedMessage.Message); ok {
 		o.recoveryMessageProcessor.OnRecoveryMessageReceived(producerID, requestID)
 	}
@@ -428,7 +441,7 @@ func (o *oddsFeedSessionImpl) processFeedMessage(ctx context.Context, feedMessag
 	// fallback fires only when none of the success branches did,
 	// using time.Time{} (no cursor advance — same convention the
 	// SnapshotComplete branch uses).
-	processingEnded := false
+	processingEnded := !reportsProcessing
 	endProcessing := func(messageGenTs time.Time) {
 		if processingEnded {
 			return

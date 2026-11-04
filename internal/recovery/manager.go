@@ -611,7 +611,10 @@ func (m *Manager) findOrSpawn(producerID int) *recoveryActor {
 // --- Inbound feed events (called from session.go on the AMQP path) ---
 
 // OnMessageProcessingStarted records the per-session start time and
-// dispatches to the actor. No-op when the manager has been Closed
+// dispatches to the actor. Called for the sessions of the client only: the
+// SDK's own alive-only session is not the client's processing and reports
+// nothing (the processed cursor and the in-processing count mean "how far
+// the client got"). No-op when the manager has been Closed
 // (callbacks may fire from sessions racing with shutdown).
 func (m *Manager) OnMessageProcessingStarted(sessionID uuid.UUID, producerID int, timestamp time.Time) {
 	m.processingMu.Lock()
