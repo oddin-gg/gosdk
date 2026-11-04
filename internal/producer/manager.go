@@ -346,6 +346,26 @@ func (m *Manager) LossAnchor(id int) (time.Time, error) {
 	return d.recoveryFromTimestamp, nil
 }
 
+// ConfiguredRecoveryPoint returns the recovery point the caller gave the
+// producer (an explicit rewind, or the one set before connecting), without
+// the alive cursor TimestampForRecovery prefers. Zero means none was given.
+//
+// An alive cursor is the generation time of the newest system alive the
+// SDK has seen, which can be newer than messages that still wait in the
+// consumer queue; a caller that needs a point known to precede such
+// messages must not use it.
+//
+// Cached read, no I/O; safe from any goroutine.
+func (m *Manager) ConfiguredRecoveryPoint(id int) (time.Time, error) {
+	d, err := m.producerCached(id)
+	if err != nil {
+		return time.Time{}, err
+	}
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.recoveryFromTimestamp, nil
+}
+
 // SetProducerRecoveryInfo records the summary of a snapshot recovery. It
 // also CONSUMES the one-shot explicit recovery-cursor override (see
 // recoveryFromExplicit): a recovery has now been recorded, so subsequent

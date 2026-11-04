@@ -919,7 +919,7 @@ func TestActor_DelayDownBeforeAnythingWasProcessed_RecoversFromTheFullHistory(t 
 func TestActor_DelayDownBeforeAnythingWasProcessed_WithAResumePointFloorsAtIt(t *testing.T) {
 	fake := newFakeManagerOps()
 	now := time.Now().Truncate(time.Millisecond)
-	a, hits := steadyActor(t, fake, now.Add(-10*time.Second))
+	a, hits := freshActor(t, fake)
 	resume := now.Add(-5 * time.Minute)
 	if err := a.pm.SetProducerRecoveryFromTimestamp(t.Context(), a.producerID, resume); err != nil {
 		t.Fatal(err)
@@ -929,7 +929,7 @@ func TestActor_DelayDownBeforeAnythingWasProcessed_WithAResumePointFloorsAtIt(t 
 	}
 
 	a.lastUserSessionAlive = now.Add(-time.Hour)
-	a.onTick(now, true)
+	tickAt(a, now)
 	if a.downReason != types.ProcessingQueueDelayViolationProducerDownReason {
 		t.Fatalf("setup: down reason = %v, want the processing delay", a.downReason)
 	}
@@ -946,7 +946,7 @@ func TestActor_DelayDownBeforeAnythingWasProcessed_WithAResumePointFloorsAtIt(t 
 	if err := a.systemAliveReceived(aliveAt(now.Add(time.Second)), true); err != nil {
 		t.Fatal(err)
 	}
-	waitRecoverHits(t, hits, 2)
+	waitRecoverHits(t, hits, 1)
 	if got := hits.lastAfterMillis.Load(); got != resume.UnixMilli() {
 		t.Fatalf("recovery after=%d, want the resume point %d", got, resume.UnixMilli())
 	}
@@ -962,7 +962,7 @@ func TestActor_DelayDownBeforeAnythingWasProcessed_WithAResumePointFloorsAtIt(t 
 	if err := a.systemAliveReceived(aliveAt(now.Add(2*time.Second)), false); err != nil {
 		t.Fatal(err)
 	}
-	waitRecoverHits(t, hits, 3)
+	waitRecoverHits(t, hits, 2)
 	if got := hits.lastAfterMillis.Load(); got == 0 {
 		t.Fatal("a later unrelated recovery asked for the full history")
 	}
@@ -1141,20 +1141,51 @@ func TestActor_DelayRepeat_ChainExpiresMeasuredFromTheFirstRequest(t *testing.T)
 	}
 }
 
-// A processing delay whose cursor cannot be read on the tick that flags it
-// still keeps a floor: the resume point, the place a recovery would start
-// from. Without it the recovery on the way back started from the cursor of
-// the drained backlog, past the messages the broker dropped meanwhile.
-func TestActor_DelayDownWithAnUnreadableCursor_KeepsTheResumePointAsFloor(t *testing.T) {
-	fake := newFakeManagerOps()
-	now := time.Now().Truncate(time.Millisecond)
+// freshActor is an actor no recovery has been issued on yet: the state of a
+// producer right after the SDK opened, before its first alive.
+func freshActor(t *testing.T, fake *fakeManagerOps) (*recoveryActor, *recoveryHits) {
+	t.Helper()
+	srv, hits := fixtureSrv(t)
+	t.Cleanup(srv.Close)
+	return newWiredActor(t, srv, fake), hits
+}
+
+// recoveryAfterAlive brings a producer to a recovery that started at
+// `start` (a steady producer, processing current) while the freshest system
+// alive it has seen is well past that start: the situation in which the
+// alive cursor is newer than messages still waiting in the consumer queue.
+func recoveryAfterAlive(t *testing.T, fake *fakeManagerOps, now time.Time) (*recoveryActor, *recoveryHits, time.Time) {
+	t.Helper()
 	a, hits := steadyActor(t, fake, now.Add(-10*time.Second))
-	if err := a.systemAliveReceived(aliveAt(now.Add(-4*time.Second)), true); err != nil {
+	start := now.Add(-3 * time.Minute)
+	startRecovery(t, a, hits, start, 2)
+	if err := a.snapshotRecoveryFinished(a.currentRecovery.recoveryID); err != nil {
 		t.Fatal(err)
 	}
-	resume, err := a.timestampForRecovery()
-	if err != nil || resume.IsZero() {
-		t.Fatalf("setup: resume point %v (%v), want one", resume, err)
+	alive := now.Add(-4 * time.Second)
+	if err := a.pm.SetLastAliveReceivedGenTimestamp(a.producerID, alive); err != nil {
+		t.Fatal(err)
+	}
+	if cursor, err := a.timestampForRecovery(); err != nil || !cursor.After(start) {
+		t.Fatalf("setup: alive cursor %v (%v), want one newer than the recovery start %v", cursor, err, start)
+	}
+	if !a.currentRecovery.recoverFrom.IsZero() {
+		t.Fatalf("setup: the completed placeholder carries a start %v", a.currentRecovery.recoverFrom)
+	}
+	return a, hits, a.lastIssuedRecoverFrom
+}
+
+// A processing delay whose cursor cannot be read on the tick that flags it
+// still keeps a floor: the start of the recovery last issued, a point that
+// precedes every message still in the queue. NOT the alive cursor, which is
+// newer than messages still waiting: once the backlog drained, the return
+// recovery would have begun after them.
+func TestActor_DelayDownWithAnUnreadableCursor_FloorIsTheLastRecoveryStartNotTheAliveCursor(t *testing.T) {
+	fake := newFakeManagerOps()
+	now := time.Now().Truncate(time.Millisecond)
+	a, hits, start := recoveryAfterAlive(t, fake, now)
+	if start.IsZero() {
+		t.Fatal("setup: the last recovery has no start")
 	}
 
 	p := holdProcessing(a)
@@ -1175,25 +1206,92 @@ func TestActor_DelayDownWithAnUnreadableCursor_KeepsTheResumePointAsFloor(t *tes
 	if a.downReason != types.ProcessingQueueDelayViolationProducerDownReason {
 		t.Fatalf("setup: down reason = %v, want the processing delay", a.downReason)
 	}
-	if !a.recoveryFloor.Equal(resume) || a.recoveryFloorFull {
-		t.Fatalf("floor = %v (full=%v), want the resume point %v", a.recoveryFloor, a.recoveryFloorFull, resume)
+	if !a.recoveryFloor.Equal(start) || a.recoveryFloorFull {
+		t.Fatalf("floor = %v (full=%v), want the start of the last recovery %v", a.recoveryFloor, a.recoveryFloorFull, start)
 	}
 	if !strings.Contains(sink.String(), "last processed message unknown") {
 		t.Fatalf("the failed lookup was not logged:\n%s", sink.String())
 	}
 
 	// The lookup works again and the backlog has drained: the return
-	// recovery reaches back to the resume point, not the new cursor.
+	// recovery reaches back to that start, not the alive cursor.
 	failing = false
 	back := time.Now()
 	p.set(back)
 	if err := a.systemAliveReceived(aliveAt(back), true); err != nil {
 		t.Fatal(err)
 	}
-	waitRecoverHits(t, hits, 2)
-	if got := hits.lastAfterMillis.Load(); got != resume.UnixMilli() {
-		t.Fatalf("return recovery after=%d (%v), want the resume point %d (%v), not the new cursor %v",
-			got, time.UnixMilli(got), resume.UnixMilli(), resume, back)
+	waitRecoverHits(t, hits, 3)
+	if got := hits.lastAfterMillis.Load(); got != start.UnixMilli() {
+		t.Fatalf("return recovery after=%d (%v), want the recovery start %d (%v)",
+			got, time.UnixMilli(got), start.UnixMilli(), start)
+	}
+	waitDetachedDone(t, a, 3*time.Second)
+}
+
+// The same for a cursor that reads as zero (nothing processed yet) while a
+// recovery is still in flight: the floor is that recovery's start.
+func TestActor_DelayDownWithAZeroCursor_FloorIsTheRecoveryInFlightNotTheAliveCursor(t *testing.T) {
+	fake := newFakeManagerOps()
+	now := time.Now().Truncate(time.Millisecond)
+	a, hits := steadyActor(t, fake, now.Add(-10*time.Second))
+	start := now.Add(-3 * time.Minute)
+	startRecovery(t, a, hits, start, 2)
+	if err := a.pm.SetLastAliveReceivedGenTimestamp(a.producerID, now.Add(-4*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	a.lastProcessedFn = func() (time.Time, error) { return time.Time{}, nil }
+
+	a.lastUserSessionAlive = now.Add(-time.Hour)
+	a.onTick(now, true)
+	if a.downReason != types.ProcessingQueueDelayViolationProducerDownReason {
+		t.Fatalf("setup: down reason = %v, want the processing delay", a.downReason)
+	}
+	if a.recoveryFloorFull || !a.recoveryFloor.Equal(a.currentRecovery.recoverFrom) || !a.recoveryFloor.Equal(start) {
+		t.Fatalf("floor = %v (full=%v), want the start of the recovery in flight %v", a.recoveryFloor, a.recoveryFloorFull, start)
+	}
+	waitDetachedDone(t, a, 3*time.Second)
+}
+
+// With no recovery issued and no resume point given, only the full history
+// is a safe floor; the alive cursor that exists is not one.
+func TestActor_DelayDownWithAnUnreadableCursor_NoRecoveryNoResumePoint_RecoversFromTheFullHistory(t *testing.T) {
+	fake := newFakeManagerOps()
+	now := time.Now().Truncate(time.Millisecond)
+	a, hits := freshActor(t, fake)
+	if err := a.pm.SetLastAliveReceivedGenTimestamp(a.producerID, now.Add(-4*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if cursor, err := a.timestampForRecovery(); err != nil || cursor.IsZero() {
+		t.Fatalf("setup: alive cursor %v (%v), want one", cursor, err)
+	}
+	p := holdProcessing(a)
+	lookup := a.lastProcessedFn
+	failing := true
+	a.lastProcessedFn = func() (time.Time, error) {
+		if failing {
+			return time.Time{}, errors.New("lookup failed")
+		}
+		return lookup()
+	}
+
+	tickAt(a, now)
+	if a.downReason != types.ProcessingQueueDelayViolationProducerDownReason {
+		t.Fatalf("setup: down reason = %v, want the processing delay", a.downReason)
+	}
+	if !a.recoveryFloorFull || !a.recoveryFloor.IsZero() {
+		t.Fatalf("floor = %v (full=%v), want the full-history floor", a.recoveryFloor, a.recoveryFloorFull)
+	}
+
+	failing = false
+	back := time.Now()
+	p.set(back)
+	if err := a.systemAliveReceived(aliveAt(back), true); err != nil {
+		t.Fatal(err)
+	}
+	waitRecoverHits(t, hits, 1)
+	if got := hits.lastAfterMillis.Load(); got != 0 {
+		t.Fatalf("return recovery after=%d (%v), want the full history (no after)", got, time.UnixMilli(got))
 	}
 	waitDetachedDone(t, a, 3*time.Second)
 }

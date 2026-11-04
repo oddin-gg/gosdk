@@ -121,6 +121,14 @@ type recoveryActor struct {
 	// too. Discharged only by a completed full recovery.
 	recoveryFloorFull bool
 
+	// recoveryIssued and lastIssuedRecoverFrom record the start point of the
+	// snapshot recovery in flight or last issued (zero is the full
+	// history), which stays known after the recovery completes and its
+	// data is replaced. The floor of a processing delay with no processed
+	// cursor is taken from it. Actor goroutine only.
+	recoveryIssued        bool
+	lastIssuedRecoverFrom time.Time
+
 	// delayDownRequestID is the snapshot request that was in flight when
 	// processing fell behind (a ProcessingQueueDelayViolation down while it
 	// ran; 0 = none). Such a delay does not interrupt the recovery (its own
@@ -1567,29 +1575,12 @@ func (a *recoveryActor) producerDown(reason types.ProducerDownReason) error {
 			// cannot be read right now. A failed lookup must not leave
 			// the delay without a floor: once processing catches up the
 			// recovery on the way back would start from the new
-			// cursor, past the messages dropped meanwhile. Either way
-			// the point to remember is the one a recovery would start
-			// from: the resume point (timestampForRecovery: an explicit
-			// override, else the alive cursor, else the pre-connect
-			// recovery-from). Only when there is no cursor at all is
-			// the full-history floor used (recoveryFloorFull, the
-			// one an interrupted full-history recovery leaves): the
-			// first recovery is then full-history anyway and
-			// discharges it. A full floor with a resume point would
-			// linger, since a recovery from that point does not
-			// discharge it. A later tick that can read the cursor
-			// lowers the floor further when it lies earlier.
+			// cursor, past the messages dropped meanwhile.
 			if tsErr != nil {
 				a.logger.WithError(tsErr).WithField("producer_id", a.producerID).
-					Warn("recovery: last processed message unknown while processing fell behind; the recovery on the way back reaches back to the resume point")
+					Warn("recovery: last processed message unknown while processing fell behind; the recovery on the way back reaches back to the start of the last recovery or the configured resume point")
 			}
-			if rt, rtErr := a.timestampForRecovery(); rtErr != nil || rt.IsZero() {
-				// Without any known point (also when the resume point
-				// cannot be read) only the full history is safe.
-				a.recoveryFloorFull = true
-			} else {
-				a.lowerRecoveryFloor(rt)
-			}
+			a.lowerFloorWithoutProcessedCursor()
 		} else {
 			a.lowerRecoveryFloor(ts)
 		}
@@ -1625,6 +1616,45 @@ func (a *recoveryActor) producerDown(reason types.ProducerDownReason) error {
 	}
 
 	return a.notifyProducerChangedState(reason.ToProducerStatusReason())
+}
+
+// lowerFloorWithoutProcessedCursor sets the floor of a processing delay
+// whose last-processed cursor is zero or unreadable, from a point known to
+// precede every message still waiting in the consumer queue:
+//
+//  1. the start of the recovery in flight or last issued (zero there is the
+//     full history), as that recovery's replay covers everything after it;
+//  2. else the resume point the caller configured (an explicit rewind or the
+//     one set before connecting), which no recovery has superseded yet;
+//  3. else the full history (recoveryFloorFull, the one an interrupted
+//     full-history recovery leaves). The first recovery is full-history
+//     anyway and discharges it. A full floor next to a timestamp point would
+//     linger, since a recovery from that point does not discharge it.
+//
+// The alive cursor (what timestampForRecovery prefers) is deliberately not
+// used: it advances when a system alive is received, so with a backlog it
+// can be newer than messages that still wait in the consumer queue. If the backlog drains
+// before a later tick records a real processed cursor, a recovery starting
+// at the alive cursor would begin after them and the messages the broker
+// dropped meanwhile would never be requested. A later tick that can read
+// the cursor lowers the floor further when it lies earlier. Actor
+// goroutine only.
+func (a *recoveryActor) lowerFloorWithoutProcessedCursor() {
+	if a.recoveryIssued {
+		if a.lastIssuedRecoverFrom.IsZero() {
+			a.recoveryFloorFull = true
+		} else {
+			a.lowerRecoveryFloor(a.lastIssuedRecoverFrom)
+		}
+		return
+	}
+	if point, err := a.pm.ConfiguredRecoveryPoint(a.producerID); err == nil && !point.IsZero() {
+		a.lowerRecoveryFloor(point)
+		return
+	}
+	// Without any known point (also when it cannot be read) only the full
+	// history is safe.
+	a.recoveryFloorFull = true
 }
 
 // failAllEventRecoveries fails every in-flight event-recovery handle and
@@ -1867,6 +1897,8 @@ func (a *recoveryActor) issueSnapshotRecovery(now, recoverFrom time.Time) error 
 	a.currentRecovery = newRecoveryData(requestID, now)
 	a.publishSnapshotRequest(requestID)
 	a.currentRecovery.recoverFrom = recoverFrom
+	a.recoveryIssued = true
+	a.lastIssuedRecoverFrom = recoverFrom
 	a.currentRecovery.cancelAPI = cancelAPI
 	a.recoveryState = types.StartedRecoveryState
 
