@@ -148,16 +148,16 @@ type Client struct {
 	// a consumer's memory of the failure on every request that then fails
 	// on its body; nor does a 200 whose envelope says the service is
 	// unavailable. An envelope about the resource (not found, forbidden)
-	// does count: the API answered. A consumer that remembers a failure together with the
-	// value read before the attempt can tell that the API has answered
-	// since: see SuccessCount.
+	// does count: the API answered. A consumer that remembers a failure
+	// together with the value read before the attempt can tell that the
+	// API has answered since: see SuccessCount.
 	successCount atomic.Uint64
 }
 
-// SuccessCount returns a counter that advances on every healthy
-// response of any endpoint (see successCount). The feed message path uses it to drop
-// everything it remembers about a failing API as soon as the API answers
-// again, whichever call that was.
+// SuccessCount returns a counter that advances on every healthy response
+// of any endpoint (see successCount). The feed message path uses it to
+// drop everything it remembers about a failing API as soon as the API
+// answers again, whichever call that was.
 func (c *Client) SuccessCount() uint64 { return c.successCount.Load() }
 
 // ErrClosed is returned by request methods invoked after Close. It

@@ -273,8 +273,9 @@ func (nf *nameFailures) first() error {
 // reports as absent, and not an answer of a healthy API (a 404 for an event
 // that is not in REST yet, say, or a 200 whose envelope says NOT_FOUND).
 // 429 and a 2xx envelope saying the service is unavailable are the
-// exceptions — the server is shedding load or cannot serve. One classification for the lookups of names and for the
-// build of an event, so the two open the failure window on the same errors.
+// exceptions — the server is shedding load or cannot serve. One
+// classification for the lookups of names and for the build of an event,
+// so the two open the failure window on the same errors.
 func saysAPIUnavailable(err error) bool {
 	if err == nil {
 		return false
