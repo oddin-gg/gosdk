@@ -825,3 +825,32 @@ func TestAPIFailureWindow_AStaleCountDoesNotDropANewerFailure(t *testing.T) {
 		t.Fatal("entry survived a caller that saw a later success")
 	}
 }
+
+// A full window must not be emptied by a caller whose success-count snapshot
+// is stale: the entries above its count are current. Making room costs at
+// most the one arbitrary entry.
+func TestAPIFailureWindow_FullWindowKeepsEntriesNewerThanTheCaller(t *testing.T) {
+	var w apiFailureWindow
+	const n = 7
+	for i := range apiFailureWindowMax {
+		w.record(types.URN{Prefix: "od", Type: "match", ID: i}, n+1)
+	}
+	fresh := types.URN{Prefix: "od", Type: "match", ID: 1 << 20}
+	w.record(fresh, n) // the caller read the counter before the success at n+1
+
+	if got := w.len(); got > apiFailureWindowMax {
+		t.Fatalf("window holds %d entries, cap is %d", got, apiFailureWindowMax)
+	}
+	if !w.blocked(fresh, n) {
+		t.Fatal("the entry just recorded is not blocked")
+	}
+	kept := 0
+	for i := range apiFailureWindowMax {
+		if w.blocked(types.URN{Prefix: "od", Type: "match", ID: i}, n) {
+			kept++
+		}
+	}
+	if kept < apiFailureWindowMax-1 {
+		t.Fatalf("%d of %d current entries survived a stale caller, want all but the one evicted", kept, apiFailureWindowMax)
+	}
+}

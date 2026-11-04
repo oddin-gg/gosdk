@@ -79,11 +79,13 @@ func (w *apiFailureWindow) record(id types.URN, count uint64) {
 	}
 	now := w.clock()
 	if _, exists := w.entries[id]; !exists && len(w.entries) >= apiFailureWindowMax {
-		// Full: drop what is no longer honoured; if that frees nothing,
-		// make room by dropping one arbitrary entry (the set is a
-		// best-effort shield, not a ledger).
+		// Full: drop what is no longer honoured (voided by a success this
+		// caller has seen, or expired; an entry above the caller's count is
+		// current, see blocked); if that frees nothing, make room by
+		// dropping one arbitrary entry (the set is a best-effort shield,
+		// not a ledger).
 		for k, e := range w.entries {
-			if e.count != count || !now.Before(e.until) {
+			if count > e.count || !now.Before(e.until) {
 				delete(w.entries, k)
 			}
 		}
