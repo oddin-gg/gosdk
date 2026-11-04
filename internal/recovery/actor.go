@@ -2131,6 +2131,9 @@ func (a *recoveryActor) snapshotRecoveryFinished(requestID int) error {
 	// The bound (maxDelayRepeats) ends the chain (endExhaustedDelayChain):
 	// the producer is reported up when processing is current by then, and
 	// stays down for the delay when it still lags.
+	if a.delayDownRequestID != requestID {
+		a.markDelayIfLagging(requestID, finished)
+	}
 	if a.delayDownRequestID == requestID {
 		// This recovery has done its part for the floor: discharge it first,
 		// so the repeat is not pulled back over ground it just covered.
@@ -2156,6 +2159,26 @@ func (a *recoveryActor) snapshotRecoveryFinished(requestID int) error {
 		return a.endExhaustedDelayChain(requestID, started, finished, from)
 	}
 	return a.finishRecoveryChain(requestID, started)
+}
+
+// markDelayIfLagging marks the completing request for a processing delay
+// the tick has not flagged yet. snapshot_complete can be handled after the
+// broker dropped queued replay messages but before the next tick sees the
+// backlog; reporting the producer up on that completion would leave the gap
+// for good. Processing that lags (unreadable timing counts as lagging, and
+// so does a first message still in a callback) is handled as if the tick
+// had marked the request: the floor is lowered from the observed cursor and
+// the repeat decision follows. Current processing changes nothing.
+func (a *recoveryActor) markDelayIfLagging(requestID int, now time.Time) {
+	fresh, obs := a.observeTiming(now)
+	if fresh && !a.firstMessageStillInProcessingFor(obs) {
+		return
+	}
+	a.logger.WithField("producer_id", a.producerID).WithField("request_id", requestID).
+		Info("recovery: processing lags as the snapshot recovery completes")
+	ts := a.lowerDelayFloor(obs)
+	a.delayDownRequestID = requestID
+	a.delayCursor = ts
 }
 
 // endExhaustedDelayChain ends a chain of delay repeats that cannot go on:
@@ -2249,7 +2272,13 @@ func (a *recoveryActor) abandonDelayRepeat() {
 // the message in processing cannot be told from a backlog.
 func (a *recoveryActor) firstMessageStillInProcessing() bool {
 	lastProcessed, err := a.lastProcessedMessageGenTimestamp()
-	return err != nil || (lastProcessed.IsZero() && a.inProcessing.Load() > 0)
+	return a.firstMessageStillInProcessingFor(cursorObservation{at: lastProcessed, err: err})
+}
+
+// firstMessageStillInProcessingFor is firstMessageStillInProcessing for a
+// cursor the caller has already read.
+func (a *recoveryActor) firstMessageStillInProcessingFor(obs cursorObservation) bool {
+	return obs.err != nil || (obs.at.IsZero() && a.inProcessing.Load() > 0)
 }
 
 // serviceDelayRepeat issues the repeat of a recovery that processing fell

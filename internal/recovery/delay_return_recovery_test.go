@@ -681,6 +681,7 @@ func TestActor_DelayDownDuringRecovery_RepeatSurvivesADeadlineReissue(t *testing
 		t.Fatalf("repeat after=%d, want %d", got, from1.UnixMilli())
 	}
 	r3 := a.currentRecovery.recoveryID
+	p.set(time.Now()) // the repeat completes with processing current
 	if err := a.snapshotRecoveryFinished(r3); err != nil {
 		t.Fatal(err)
 	}
@@ -1955,6 +1956,85 @@ func TestActor_DelayDownDuringAnInterruptedRecovery_ReplacementIsRepeated(t *tes
 	}
 	if a.isFlaggedDown() {
 		t.Fatal("producer still down after the repeat completed")
+	}
+	waitDetachedDone(t, a, 3*time.Second)
+}
+
+// snapshot_complete can be handled after the broker dropped queued replay
+// messages and before the next tick sees processing behind. The completion
+// itself judges the timing: it does not report the producer up, and the
+// repeat reaches back to the cursor it saw (earlier than the recovery's own
+// start), which is also the floor.
+func TestActor_RecoveryCompletingWhileProcessingLags_IsRepeatedWithoutATick(t *testing.T) {
+	fake := newFakeManagerOps()
+	now := time.Now().Truncate(time.Millisecond)
+	a, hits := steadyActor(t, fake, now.Add(-10*time.Second))
+	if err := a.systemAliveReceived(aliveAt(now.Add(-8*time.Second)), true); err != nil {
+		t.Fatal(err)
+	}
+	a.onMessageProcessingEnded(now.Add(-5 * time.Second))
+	if err := a.systemAliveReceived(aliveAt(now), false); err != nil {
+		t.Fatal(err)
+	}
+	waitRecoverHits(t, hits, 2)
+	r1 := a.currentRecovery.recoveryID
+	p := holdProcessing(a) // behind by a minute; no tick has seen it
+	stale := time.Unix(0, p.v.Load())
+	if a.delayDownRequestID != 0 {
+		t.Fatalf("setup: delay mark = %d, want none", a.delayDownRequestID)
+	}
+	_, upBefore := downEventCounts(fake)
+
+	if err := a.snapshotRecoveryFinished(r1); err != nil {
+		t.Fatal(err)
+	}
+	if _, up := downEventCounts(fake); up != upBefore {
+		t.Fatalf("producer-up events went from %d to %d, want none while processing lags", upBefore, up)
+	}
+	if !a.isFlaggedDown() || !a.delayRepeatWaiting || a.recoveryState != types.CompletedRecoveryState {
+		t.Fatalf("down=%v waiting=%v state=%v, want down with a repeat waiting", a.isFlaggedDown(), a.delayRepeatWaiting, a.recoveryState)
+	}
+	if !a.recoveryFloor.Equal(stale) {
+		t.Fatalf("floor = %v, want the cursor the completion saw %v", a.recoveryFloor, stale)
+	}
+
+	catchUp(a, p, time.Now())
+	waitRecoverHits(t, hits, 3)
+	if got := hits.lastAfterMillis.Load(); got != stale.UnixMilli() {
+		t.Fatalf("repeat after=%d, want the cursor the completion saw %d", got, stale.UnixMilli())
+	}
+	p.set(time.Now())
+	if err := a.snapshotRecoveryFinished(a.currentRecovery.recoveryID); err != nil {
+		t.Fatal(err)
+	}
+	if a.isFlaggedDown() || hits.recover.Load() != 3 {
+		t.Fatalf("down=%v POSTs=%d, want up after one repeat", a.isFlaggedDown(), hits.recover.Load())
+	}
+	waitDetachedDone(t, a, 3*time.Second)
+}
+
+// A completion with current processing is untouched: up at once, no repeat,
+// no floor, no further request.
+func TestActor_RecoveryCompletingWithFreshTiming_ReportsUpWithoutARepeat(t *testing.T) {
+	fake := newFakeManagerOps()
+	now := time.Now().Truncate(time.Millisecond)
+	a, hits := steadyActor(t, fake, now.Add(-10*time.Second))
+	if err := a.systemAliveReceived(aliveAt(now), false); err != nil {
+		t.Fatal(err)
+	}
+	waitRecoverHits(t, hits, 2)
+	p := holdProcessing(a)
+	p.set(time.Now())
+	if err := a.snapshotRecoveryFinished(a.currentRecovery.recoveryID); err != nil {
+		t.Fatal(err)
+	}
+	if a.isFlaggedDown() || a.delayRepeatWaiting || a.delayDownRequestID != 0 || !a.recoveryFloor.IsZero() {
+		t.Fatalf("down=%v waiting=%v mark=%d floor=%v, want up and untouched",
+			a.isFlaggedDown(), a.delayRepeatWaiting, a.delayDownRequestID, a.recoveryFloor)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if hits.recover.Load() != 2 {
+		t.Fatalf("recovery POSTs = %d, want 2", hits.recover.Load())
 	}
 	waitDetachedDone(t, a, 3*time.Second)
 }

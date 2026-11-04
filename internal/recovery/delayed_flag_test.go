@@ -2,6 +2,7 @@ package recovery
 
 import (
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -40,9 +41,7 @@ func TestActor_DelayedFlagClearsOnTickAndIsEmitted(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitRecoverHits(t, hits, 1)
-	if err := a.snapshotRecoveryFinished(a.currentRecovery.recoveryID); err != nil {
-		t.Fatal(err)
-	}
+	completeWhileProcessingFallsBehind(t, a)
 
 	evs := producerStatusEvents(fake)
 	if len(evs) == 0 {
@@ -129,9 +128,7 @@ func delayedOpenActor(t *testing.T, fake *fakeManagerOps) (*recoveryActor, time.
 		t.Fatal(err)
 	}
 	waitRecoverHits(t, hits, 1)
-	if err := a.snapshotRecoveryFinished(a.currentRecovery.recoveryID); err != nil {
-		t.Fatal(err)
-	}
+	completeWhileProcessingFallsBehind(t, a)
 	evs := producerStatusEvents(fake)
 	if len(evs) == 0 || !evs[len(evs)-1].IsDelayed() {
 		t.Fatal("setup: expected a delayed status after the open")
@@ -191,5 +188,29 @@ func TestActor_DelayedFlagRefresh_FailingTimingLookupPublishesNothing(t *testing
 	a.refreshDelayedFlag(now.Add(10 * time.Minute)) // processing now stands 10 minutes behind
 	if got := len(producerStatusEvents(fake)); got != before+1 || !a.currentStatus().IsDelayed() {
 		t.Fatalf("after the lookup recovered: events %d (want %d), delayed=%v", got, before+1, a.currentStatus().IsDelayed())
+	}
+}
+
+// completeWhileProcessingFallsBehind completes the recovery in flight as the
+// feed is current when the completion is judged (a completion that finds
+// processing behind is not reported up) and falls behind a moment later, as
+// the status of the producer coming up is built: the producer comes up
+// flagged delayed.
+func completeWhileProcessingFallsBehind(t *testing.T, a *recoveryActor) {
+	t.Helper()
+	stale, err := a.lastProcessedMessageGenTimestamp()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reads atomic.Int32
+	a.lastProcessedFn = func() (time.Time, error) {
+		if reads.Add(1) == 1 {
+			return time.Now(), nil
+		}
+		return stale, nil
+	}
+	defer func() { a.lastProcessedFn = nil }()
+	if err := a.snapshotRecoveryFinished(a.currentRecovery.recoveryID); err != nil {
+		t.Fatal(err)
 	}
 }
