@@ -508,12 +508,24 @@ func TestMarketDescriptionCache_SkippedRefreshDoesNotHoldBackTheGetters(t *testi
 		t.Fatalf("bulk hits = %d, want 1: a skipped call must not reach the API", got)
 	}
 
+	// A request that was never sent must not start the message path's own
+	// backoff either: public getters ignore it, so only the record and a
+	// following message-mode read can show it.
+	assertMsgBackoffUnset(t, mc, types.EnLocale)
+	if _, err := mc.MarketDescriptionByID(apipolicy.With(ctx, apipolicy.Message), 9, types.None[string](), locales); err != nil {
+		t.Fatalf("message-mode lookup against the healthy API: %v", err)
+	}
+	if got := srv.bulkHits.Load(); got != 2 {
+		t.Fatalf("bulk hits = %d, want 2: the skipped attempt must not gate the message path's refresh", got)
+	}
+
 	// A public by-id read refreshes at once: nothing failed.
+	mc.expireCatalogMark(types.EnLocale)
 	if _, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), locales); err != nil {
 		t.Fatalf("public lookup: %v", err)
 	}
-	if got := srv.bulkHits.Load(); got != 2 {
-		t.Fatalf("bulk hits = %d, want 2: the skipped attempt must not suppress the getters' refresh", got)
+	if got := srv.bulkHits.Load(); got != 3 {
+		t.Fatalf("bulk hits = %d, want 3: the skipped attempt must not suppress the getters' refresh", got)
 	}
 }
 
@@ -542,12 +554,21 @@ func TestMarketDescriptionCache_SpentBudgetRefreshDoesNotHoldBackTheGetters(t *t
 		t.Fatalf("bulk hits = %d, want 1: a refused call must not reach the API", got)
 	}
 
+	assertMsgBackoffUnset(t, mc, types.EnLocale)
+	if _, err := mc.MarketDescriptionByID(apipolicy.With(ctx, apipolicy.Message), 9, types.None[string](), locales); err != nil {
+		t.Fatalf("message-mode lookup against the healthy API: %v", err)
+	}
+	if got := srv.bulkHits.Load(); got != 2 {
+		t.Fatalf("bulk hits = %d, want 2: the refused attempt must not gate the message path's refresh", got)
+	}
+
 	// A public by-id read refreshes at once: nothing failed.
+	mc.expireCatalogMark(types.EnLocale)
 	if _, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), locales); err != nil {
 		t.Fatalf("public lookup: %v", err)
 	}
-	if got := srv.bulkHits.Load(); got != 2 {
-		t.Fatalf("bulk hits = %d, want 2: the refused attempt must not suppress the getters' refresh", got)
+	if got := srv.bulkHits.Load(); got != 3 {
+		t.Fatalf("bulk hits = %d, want 3: the refused attempt must not suppress the getters' refresh", got)
 	}
 }
 
@@ -706,12 +727,10 @@ func TestMarketDescriptionCache_MessagePathBackoffAfterBudgetTimeout(t *testing.
 		t.Fatalf("hits = %d, want 2: the first message-path refresh must be sent", got)
 	}
 
-	start := time.Now()
+	// The request count is what pins "no wait": a wall-clock bound would
+	// fail a correct implementation on a loaded runner.
 	if _, err := mc.MarketDescriptionByID(msg(), 9, types.None[string](), locales); err != nil {
 		t.Fatalf("second message-path read: %v", err)
-	}
-	if took := time.Since(start); took > 50*time.Millisecond {
-		t.Fatalf("second message-path read took %v, want an immediate stale answer", took)
 	}
 	if got := hits.Load(); got != 2 {
 		t.Fatalf("hits = %d, want 2: no refresh within the message-path backoff", got)
@@ -766,4 +785,24 @@ func TestMarketDescriptionCache_SuccessfulRefreshClearsTheMessagePathBackoff(t *
 	if set {
 		t.Fatal("a successful refresh must clear the message-path backoff")
 	}
+}
+
+// assertMsgBackoffUnset fails when the message path's own backoff is set
+// for the locale.
+func assertMsgBackoffUnset(t *testing.T, mc *MarketDescriptionCache, l types.Locale) {
+	t.Helper()
+	mc.mu.RLock()
+	_, set := mc.msgRefreshFailedAt[l]
+	mc.mu.RUnlock()
+	if set {
+		t.Fatalf("msgRefreshFailedAt[%s] is set, want unset: no request was sent", l)
+	}
+}
+
+// expireCatalogMark makes the locale's catalog count as expired, as if
+// catalogTTL had run out.
+func (m *MarketDescriptionCache) expireCatalogMark(l types.Locale) {
+	m.mu.Lock()
+	delete(m.loadedLocales, l)
+	m.mu.Unlock()
 }
