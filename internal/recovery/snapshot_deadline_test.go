@@ -1098,6 +1098,8 @@ type scopeOps struct {
 
 func (s scopeOps) clientSessionInScope(id int) bool { return s.m.clientSessionInScope(id) }
 
+func (s scopeOps) clientProcessing() bool { return s.m.clientProcessing() }
+
 // clientScopeOps makes the actor's manager report the given open client
 // sessions, as the session registry of a real Manager would. The producer
 // catalog is the actor's own, loaded by its first request.
@@ -1217,4 +1219,58 @@ func TestManager_ClientSessionInScope_TracksOpenSessions(t *testing.T) {
 	if m.clientSessionInScope(1) || m.clientSessionInScope(2) {
 		t.Fatal("sessions that are gone must leave the registry")
 	}
+}
+
+// The guards of the deadline are per producer, but a session queue is shared:
+// with the client handler stuck on a message of producer 2, producer 1's
+// replay sits behind it although nothing of producer 1 is in processing.
+// Re-issuing then only queues a second replay there, so the deadline is held
+// while any client message is in processing and counts again once it ended.
+// Driven through the manager's callbacks, the way the sessions call them.
+func TestActor_SnapshotCompleteDeadline_HeldWhileAnyClientMessageIsInProcessing(t *testing.T) {
+	srv, hits := fixtureSrv(t)
+	defer srv.Close()
+	a := newWiredActor(t, srv, newFakeManagerOps()) // producer 1
+	oldID := startRecovery(t, a, hits, time.Now().Add(-10*time.Minute).Truncate(time.Millisecond), 1)
+	ops := clientScopeOps(a, types.LiveOnlyMessageInterest).(scopeOps)
+	ops.m.processingTimes = map[uuid.UUID]time.Time{}
+	ops.m.logger = newDiscardLogger()
+	a.mgr = ops
+	started := a.currentRecovery.recoveryStartedAt
+
+	// Producer 2's message is stuck in the client's handler. Nothing of
+	// producer 1 is in processing, and a processed cursor exists.
+	session := uuid.New()
+	const other = 2
+	ops.m.OnMessageProcessingStarted(session, other, time.Now())
+	a.lastProcessedFn = holdProcessingTS(time.Now().Add(-time.Hour))
+	if a.inProcessing.Load() != 0 {
+		t.Fatal("setup: producer 1 has a message in processing")
+	}
+
+	if reissuedAt(a, started, 6*time.Minute) {
+		t.Fatalf("re-issued while a client message of producer %d was in processing", other)
+	}
+	if reissuedAt(a, started, 12*time.Minute) {
+		t.Fatal("re-issued at a later tick while the message was still in processing")
+	}
+	time.Sleep(50 * time.Millisecond)
+	if hits.recover.Load() != 1 || a.currentRecovery.recoveryID != oldID {
+		t.Fatalf("recovery POSTs = %d, want 1", hits.recover.Load())
+	}
+
+	// The message ends; the deadline counts from the last tick that held it.
+	ops.m.OnMessageProcessingEnded(session, other, time.Time{})
+	if reissuedAt(a, started, 13*time.Minute) {
+		t.Fatal("re-issued right after the message ended, before a full deadline of silence")
+	}
+	if !reissuedAt(a, started, 19*time.Minute) {
+		t.Fatal("not re-issued after the message ended and a further deadline passed")
+	}
+	waitRecoverHits(t, hits, 2)
+	waitDetachedDone(t, a, 3*time.Second)
+}
+
+func holdProcessingTS(ts time.Time) func() (time.Time, error) {
+	return func() (time.Time, error) { return ts, nil }
 }

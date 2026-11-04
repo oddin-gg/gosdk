@@ -810,6 +810,14 @@ func (m *Manager) sessionQueueSettled(session uuid.UUID) {
 	}
 }
 
+// clientProcessing reports whether any client session has a message in
+// processing right now (the SDK's alive-only session reports none).
+func (m *Manager) clientProcessing() bool {
+	m.processingMu.Lock()
+	defer m.processingMu.Unlock()
+	return len(m.processingTimes) > 0
+}
+
 // rebindPending reports whether any lost session whose interest covers
 // producerID has not re-bound its queue yet. A producer the catalog
 // cannot describe is treated as covered (the conservative answer: hold

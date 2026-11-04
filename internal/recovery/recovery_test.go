@@ -130,11 +130,13 @@ type fakeManagerOps struct {
 	// noClientScope makes the fake report that no client session has any
 	// producer in scope (by default every producer is).
 	noClientScope atomic.Bool
-	mu            sync.Mutex
-	registered    []*Handle
-	completed     []completedHandle
-	nextID        atomic.Uint32
-	emittedMsgs   []types.RecoveryMessage
+	// clientBusy makes the fake report a client message in processing.
+	clientBusy  atomic.Bool
+	mu          sync.Mutex
+	registered  []*Handle
+	completed   []completedHandle
+	nextID      atomic.Uint32
+	emittedMsgs []types.RecoveryMessage
 }
 
 type completedHandle struct {
@@ -180,6 +182,8 @@ func (f *fakeManagerOps) LookupHandle(id int) (*Handle, bool) {
 func (f *fakeManagerOps) rebindPending(int) bool { return f.pendingRebind.Load() }
 
 func (f *fakeManagerOps) clientSessionInScope(int) bool { return !f.noClientScope.Load() }
+
+func (f *fakeManagerOps) clientProcessing() bool { return f.clientBusy.Load() }
 
 func (f *fakeManagerOps) emitRecoveryMessage(msg types.RecoveryMessage) {
 	f.mu.Lock()
