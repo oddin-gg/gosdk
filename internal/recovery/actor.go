@@ -1554,31 +1554,38 @@ func (a *recoveryActor) producerDown(reason types.ProducerDownReason) error {
 		// stood when it fell behind, so the recovery on the way back
 		// reaches that far (the floor keeps the earliest such point).
 		ts, tsErr := a.lastProcessedMessageGenTimestamp()
-		if tsErr == nil {
-			if ts.IsZero() {
-				// Nothing has been processed in this run yet (a stale
-				// user-session alive can flag the delay first, e.g.
-				// during the first recovery after an open). The point to
-				// remember is then the one a recovery would start from:
-				// the resume point (timestampForRecovery: an explicit
-				// override, else the alive cursor, else the pre-connect
-				// recovery-from). Only when there is no cursor at all is
-				// the full-history floor used (recoveryFloorFull, the
-				// one an interrupted full-history recovery leaves): the
-				// first recovery is then full-history anyway and
-				// discharges it. A full floor with a resume point would
-				// linger, since a recovery from that point does not
-				// discharge it.
-				if rt, rtErr := a.timestampForRecovery(); rtErr == nil {
-					if rt.IsZero() {
-						a.recoveryFloorFull = true
-					} else {
-						a.lowerRecoveryFloor(rt)
-					}
-				}
-			} else {
-				a.lowerRecoveryFloor(ts)
+		if tsErr != nil || ts.IsZero() {
+			// Nothing has been processed in this run yet (a stale
+			// user-session alive can flag the delay first, e.g.
+			// during the first recovery after an open), or the cursor
+			// cannot be read right now. A failed lookup must not leave
+			// the delay without a floor: once processing catches up the
+			// recovery on the way back would start from the new
+			// cursor, past the messages dropped meanwhile. Either way
+			// the point to remember is the one a recovery would start
+			// from: the resume point (timestampForRecovery: an explicit
+			// override, else the alive cursor, else the pre-connect
+			// recovery-from). Only when there is no cursor at all is
+			// the full-history floor used (recoveryFloorFull, the
+			// one an interrupted full-history recovery leaves): the
+			// first recovery is then full-history anyway and
+			// discharges it. A full floor with a resume point would
+			// linger, since a recovery from that point does not
+			// discharge it. A later tick that can read the cursor
+			// lowers the floor further when it lies earlier.
+			if tsErr != nil {
+				a.logger.WithError(tsErr).WithField("producer_id", a.producerID).
+					Warn("recovery: last processed message unknown while processing fell behind; the recovery on the way back reaches back to the resume point")
 			}
+			if rt, rtErr := a.timestampForRecovery(); rtErr != nil || rt.IsZero() {
+				// Without any known point (also when the resume point
+				// cannot be read) only the full history is safe.
+				a.recoveryFloorFull = true
+			} else {
+				a.lowerRecoveryFloor(rt)
+			}
+		} else {
+			a.lowerRecoveryFloor(ts)
 		}
 		if a.recoveryState == types.StartedRecoveryState && a.currentRecovery != nil &&
 			a.delayDownRequestID != a.currentRecovery.recoveryID {

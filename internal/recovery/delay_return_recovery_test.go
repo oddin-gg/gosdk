@@ -1138,3 +1138,60 @@ func TestActor_DelayRepeat_ChainExpiresMeasuredFromTheFirstRequest(t *testing.T)
 		t.Fatalf("past the cap: POSTs=%d waiting=%v, want 3 and no repeat", hits.recover.Load(), a.delayRepeatWaiting)
 	}
 }
+
+// A processing delay whose cursor cannot be read on the tick that flags it
+// still keeps a floor: the resume point, the place a recovery would start
+// from. Without it the recovery on the way back started from the cursor of
+// the drained backlog, past the messages the broker dropped meanwhile.
+func TestActor_DelayDownWithAnUnreadableCursor_KeepsTheResumePointAsFloor(t *testing.T) {
+	fake := newFakeManagerOps()
+	now := time.Now().Truncate(time.Millisecond)
+	a, hits := steadyActor(t, fake, now.Add(-10*time.Second))
+	if err := a.systemAliveReceived(aliveAt(now.Add(-4*time.Second)), true); err != nil {
+		t.Fatal(err)
+	}
+	resume, err := a.timestampForRecovery()
+	if err != nil || resume.IsZero() {
+		t.Fatalf("setup: resume point %v (%v), want one", resume, err)
+	}
+
+	p := holdProcessing(a)
+	lookup := a.lastProcessedFn
+	failing := true
+	a.lastProcessedFn = func() (time.Time, error) {
+		if failing {
+			return time.Time{}, errors.New("lookup failed")
+		}
+		return lookup()
+	}
+	sink := &lockedBuffer{}
+	a.logger = debugLogger(sink)
+
+	// The lookup fails on the tick that flags the delay (a failed lookup
+	// counts as stale timing).
+	tickAt(a, now)
+	if a.downReason != types.ProcessingQueueDelayViolationProducerDownReason {
+		t.Fatalf("setup: down reason = %v, want the processing delay", a.downReason)
+	}
+	if !a.recoveryFloor.Equal(resume) || a.recoveryFloorFull {
+		t.Fatalf("floor = %v (full=%v), want the resume point %v", a.recoveryFloor, a.recoveryFloorFull, resume)
+	}
+	if !strings.Contains(sink.String(), "last processed message unknown") {
+		t.Fatalf("the failed lookup was not logged:\n%s", sink.String())
+	}
+
+	// The lookup works again and the backlog has drained: the return
+	// recovery reaches back to the resume point, not the new cursor.
+	failing = false
+	back := time.Now()
+	p.set(back)
+	if err := a.systemAliveReceived(aliveAt(back), true); err != nil {
+		t.Fatal(err)
+	}
+	waitRecoverHits(t, hits, 2)
+	if got := hits.lastAfterMillis.Load(); got != resume.UnixMilli() {
+		t.Fatalf("return recovery after=%d (%v), want the resume point %d (%v), not the new cursor %v",
+			got, time.UnixMilli(got), resume.UnixMilli(), resume, back)
+	}
+	waitDetachedDone(t, a, 3*time.Second)
+}
