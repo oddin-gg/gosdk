@@ -121,6 +121,53 @@ type recoveryActor struct {
 	// too. Discharged only by a completed full recovery.
 	recoveryFloorFull bool
 
+	// recoveryIssued and lastIssuedRecoverFrom record the start point of the
+	// snapshot recovery in flight or last issued (zero is the full
+	// history), which stays known after the recovery completes and its
+	// data is replaced. The floor of a processing delay with no processed
+	// cursor is taken from it. Actor goroutine only.
+	recoveryIssued        bool
+	lastIssuedRecoverFrom time.Time
+
+	// delayDownRequestID is the snapshot request that was in flight when
+	// processing fell behind (a ProcessingQueueDelayViolation down while it
+	// ran; 0 = none). Such a delay does not interrupt the recovery (its own
+	// replay would make that loop), but the broker's queue limit drops the
+	// OLDEST unconsumed messages once a backlog grows: live messages and the
+	// recovery's own replay queued after the request went out may be gone, so
+	// the completed recovery cannot be trusted. The producer is then not
+	// reported up; the recovery is repeated once processing is current again
+	// (snapshotRecoveryFinished, serviceDelayRepeat) until one completes
+	// without a delay, at most maxDelayRepeats times. A chain that runs out
+	// (endExhaustedDelayChain) reports the producer up when processing is
+	// current, and otherwise leaves it down with the range kept as the
+	// recovery floor for the return path. Actor goroutine only.
+	delayDownRequestID int
+	// delayCursor is the last processed message at the moment that delay
+	// began: where processing stood when it fell behind (zero when nothing
+	// had been processed yet). The repeat reaches back to it when it lies
+	// before the recovery's own start.
+	delayCursor time.Time
+	// delayRepeats is how many repeats this chain has issued; the chain ends
+	// when the producer is reported up or a new chain starts.
+	delayRepeats int
+	// delayStayedDown is set when a chain ended with the producer staying
+	// down for the delay: the recoveries that follow (the return path)
+	// continue its repeat count instead of starting at zero, so a consumer
+	// that lags every time cannot cycle through the full bound again and
+	// again. Cleared with the chain when a recovery completes with
+	// processing current (resetDelayChain).
+	delayStayedDown bool
+	// delayRepeatWaiting is set between the completion of a recovery that
+	// fell behind and the issue of its repeat. The producer stays down and
+	// the recovery state is Completed (nothing is in flight; currentRecovery
+	// is the completed recovery, which keeps the chain start and the
+	// recover-from point). The repeat waits for current processing so its
+	// replay does not land on the backlog and trip the delay by itself;
+	// delayRepeatFrom is where it will start (zero = full history).
+	delayRepeatWaiting bool
+	delayRepeatFrom    time.Time
+
 	// deferredRecovery is set when a snapshot recovery was due but a
 	// lost session in this producer's scope had not re-bound its queue
 	// yet; resumeDeferredRecovery starts it once the rebind is reported
@@ -223,6 +270,19 @@ type actorManagerOps interface {
 // MaxRecoveryExecution sweep (~hours). Identical (event, kind) requests
 // coalesce onto one handle and don't consume extra slots.
 const maxPendingEventRecoveries = 128
+
+// maxDelayRepeats bounds how often a recovery is repeated because processing
+// fell behind while it ran. A repeat replays the same window again and so
+// loads the same queue, which can itself trip the delay; without a bound a
+// producer whose consumer cannot keep up with a replay would chase its own
+// tail for as long as MaxRecoveryExecution allows, and the recovery API
+// rate-limits requests. Three repeats give a transient backlog several
+// chances to drain between attempts; a consumer that still lags every time
+// is slower than the feed, which more recoveries do not fix. When the bound
+// is reached the chain ends (endExhaustedDelayChain): with the producer up
+// if processing is current, and otherwise down for the delay until it is,
+// when the return path recovers the range once more.
+const maxDelayRepeats = 3
 
 // ErrTooManyPendingEventRecoveries is returned by RecoverEventOdds /
 // RecoverEventStateful when the producer already has
@@ -355,14 +415,27 @@ func (a *recoveryActor) notePendingLoss(lostAt time.Time) {
 // subscribed=false path reaches it directly when the producer is
 // already flagged down, bypassing producerDown.
 func (a *recoveryActor) interruptRecovery() {
-	if a.currentRecovery != nil {
-		if a.currentRecovery.recoverFrom.IsZero() {
-			a.recoveryFloorFull = true
-		} else {
-			a.lowerRecoveryFloor(a.currentRecovery.recoverFrom)
-		}
-	}
+	a.keepRecoveryRangeAsFloor()
 	a.recoveryState = types.InterruptedRecoveryState
+}
+
+// keepRecoveryRangeAsFloor folds the range the in-flight snapshot recovery
+// was to cover into the floor, so that whatever replaces it cannot reach
+// back less far. It must run before the recovery is given up for good
+// (rolled back to Error): the request's cursor is the only record of the
+// gap, and the next recovery otherwise starts from the last processed
+// message, which can lie past it. A zero cursor means the request covered
+// the producer's full history and is kept as recoveryFloorFull. Actor
+// goroutine only.
+func (a *recoveryActor) keepRecoveryRangeAsFloor() {
+	if a.currentRecovery == nil {
+		return
+	}
+	if a.currentRecovery.recoverFrom.IsZero() {
+		a.recoveryFloorFull = true
+	} else {
+		a.lowerRecoveryFloor(a.currentRecovery.recoverFrom)
+	}
 }
 
 // lowerRecoveryFloor moves the recovery floor to t if t is earlier (or
@@ -897,6 +970,7 @@ func (a *recoveryActor) onTick(now time.Time, inactivityArmed bool) {
 	a.expireStuckEventRecoveries(now)
 	a.expireStuckSnapshotRecovery(now)
 	a.expireSnapshotCompleteDeadline(now)
+	a.serviceDelayRepeat(now)
 
 	// Suppress the producer-down inactivity check until the warm-up window
 	// has elapsed: with no alive baseline yet, aliveInterval would be huge
@@ -919,9 +993,19 @@ func (a *recoveryActor) onTick(now time.Time, inactivityArmed bool) {
 	case aliveInterval > a.cfg.MaxInactivity():
 		downReason = types.AliveInternalViolationProducerDownReason
 		err = a.producerDown(downReason)
-	case !a.calculateTiming(now):
-		downReason = types.ProcessingQueueDelayViolationProducerDownReason
-		err = a.producerDown(downReason)
+	default:
+		fresh, obs := a.observeTiming(now)
+		if obs.err != nil {
+			a.logger.WithError(obs.err).Warn("failed to get last processed message gen timestamp")
+		}
+		if !fresh {
+			downReason = types.ProcessingQueueDelayViolationProducerDownReason
+			// The floor is taken from the cursor this check judged, not
+			// from a second read: a session can finish a newer message
+			// in between, and the floor would land past messages the
+			// broker dropped.
+			err = a.producerDownObserved(downReason, &obs)
+		}
 	}
 	if err != nil {
 		a.logger.WithError(err).
@@ -1085,6 +1169,12 @@ func (a *recoveryActor) expireSnapshotCompleteDeadline(now time.Time) {
 		// the interruption requires before the producer is reported up.
 		a.recoveryState = types.InterruptedRecoveryState
 	}
+	// The need to repeat a recovery that processing fell behind during
+	// belongs to the chain, not to the request id that was in flight when
+	// the delay began.
+	if a.delayDownRequestID == old.recoveryID {
+		a.delayDownRequestID = a.currentRecovery.recoveryID
+	}
 }
 
 // expireStuckEventRecoveries scans active event recoveries for
@@ -1116,6 +1206,7 @@ func (a *recoveryActor) expireStuckSnapshotRecovery(now time.Time) {
 		WithField("request_id", a.currentRecovery.recoveryID).
 		WithField("started_at", started).
 		Error("recovery: snapshot recovery exceeded MaxRecoveryExecution; transitioning to Error")
+	a.keepRecoveryRangeAsFloor()
 	a.currentRecovery = nil
 	a.recoveryState = types.ErrorRecoveryState
 }
@@ -1331,14 +1422,27 @@ func (a *recoveryActor) systemAliveReceived(timestamp types.MessageTimestamp, su
 	isBackFromInactivity := a.isFlaggedDown() &&
 		!a.isPerformingRecovery() &&
 		downReason == types.ProcessingQueueDelayViolationProducerDownReason &&
-		a.calculateTiming(now)
+		!a.delayRepeatWaiting && // the repeat is issued by the tick (serviceDelayRepeat)
+		a.processingCurrentForReturn(now)
 	isInRecovery := state != types.NotStartedRecoveryState &&
 		state != types.ErrorRecoveryState &&
 		state != types.InterruptedRecoveryState
 
 	switch {
 	case isBackFromInactivity:
-		err = a.producerUp(types.ReturnedFromInactivityProducerUpReason)
+		// The producer was flagged down because its processing fell
+		// behind; the broker may have dropped messages meanwhile (its queue
+		// limit drops the oldest unconsumed ones once a backlog gets long),
+		// and nothing else would ever refill them. It comes back up when a
+		// snapshot recovery from its last processed message completes, as
+		// after any other outage. The floor lowered when the producer went
+		// down (producerDown) makes the request reach back to where the
+		// processing stood then, not to where the backlog has drained to.
+		from, lpErr := a.lastProcessedMessageGenTimestamp()
+		if lpErr != nil || from.IsZero() {
+			from = recoveryTimestamp
+		}
+		err = a.startSnapshotRecovery(from)
 	case isInRecovery:
 		if a.isFlaggedDown() && !a.isPerformingRecovery() && a.downReason != types.ProcessingQueueDelayViolationProducerDownReason {
 			if err := a.startSnapshotRecovery(recoveryTimestamp); err != nil {
@@ -1348,6 +1452,7 @@ func (a *recoveryActor) systemAliveReceived(timestamp types.MessageTimestamp, su
 		recoveryTiming := now.Sub(a.recoveryChainStartedAt())
 		maxInterval := a.cfg.MaxRecoveryExecution()
 		if a.isPerformingRecovery() && recoveryTiming > maxInterval {
+			a.keepRecoveryRangeAsFloor()
 			a.recoveryState = types.ErrorRecoveryState
 			a.currentRecovery = nil
 			if err := a.startSnapshotRecovery(recoveryTimestamp); err != nil {
@@ -1373,6 +1478,19 @@ func (a *recoveryActor) systemAliveReceived(timestamp types.MessageTimestamp, su
 		}
 	}
 	return nil
+}
+
+// processingCurrentForReturn is calculateTiming for the return path of a
+// processing delay, which also holds while the first message is still in
+// processing (firstMessageStillInProcessing): a chain that stayed down for
+// that reason is not returned then, as the return recovery would land on the
+// queue the guard protects. Both judge one read of the cursor.
+func (a *recoveryActor) processingCurrentForReturn(now time.Time) bool {
+	fresh, obs := a.observeTiming(now)
+	if obs.err != nil {
+		a.logger.WithError(obs.err).Warn("failed to get last processed message gen timestamp")
+	}
+	return fresh && !a.firstMessageStillInProcessingFor(obs)
 }
 
 // recoveryChainStartedAt is when the current recovery first went out,
@@ -1440,16 +1558,32 @@ func (a *recoveryActor) processingActive(now time.Time) bool {
 // caller that must not act on a transient lookup failure can tell the two
 // apart.
 func (a *recoveryActor) timingFresh(now time.Time) (bool, error) {
+	fresh, obs := a.observeTiming(now)
+	return fresh, obs.err
+}
+
+// cursorObservation is one read of the last processed message: the cursor,
+// or the error that kept it from being read.
+type cursorObservation struct {
+	at  time.Time
+	err error
+}
+
+// observeTiming is timingFresh that also returns the cursor it judged, so
+// a caller that acts on the verdict works from the same observation instead
+// of reading again. An unreadable cursor is not fresh.
+func (a *recoveryActor) observeTiming(now time.Time) (bool, cursorObservation) {
 	maxInactivity := a.cfg.MaxInactivity()
 	lastProcessed, err := a.lastProcessedMessageGenTimestamp()
+	obs := cursorObservation{at: lastProcessed, err: err}
 	if err != nil {
-		return false, err
+		return false, obs
 	}
 	processedFresh := lastProcessed.IsZero() ||
 		now.Sub(lastProcessed).Abs() < maxInactivity
 	userAliveFresh := a.lastUserSessionAlive.IsZero() ||
 		now.Sub(a.lastUserSessionAlive).Abs() < maxInactivity
-	return processedFresh && userAliveFresh, nil
+	return processedFresh && userAliveFresh, obs
 }
 
 // producerDown matches manager.producerDown exactly. Pre-actor:
@@ -1457,10 +1591,16 @@ func (a *recoveryActor) timingFresh(now time.Time) (bool, error) {
 // then notifyProducerChangedState emitted on msgCh. The actor flow is
 // the same — only the actor's own state mutates without locks.
 func (a *recoveryActor) producerDown(reason types.ProducerDownReason) error {
+	return a.producerDownObserved(reason, nil)
+}
+
+// producerDownObserved is producerDown for a caller that already read the
+// last processed message to decide on a processing delay: the floor of the
+// delay is taken from that observation (nil reads it now).
+func (a *recoveryActor) producerDownObserved(reason types.ProducerDownReason, obs *cursorObservation) error {
 	if a.isDisabled() {
 		return nil
 	}
-
 	if a.isFlaggedDown() && a.downReason != reason {
 		name, err := a.producerName()
 		if err != nil {
@@ -1472,6 +1612,39 @@ func (a *recoveryActor) producerDown(reason types.ProducerDownReason) error {
 		}
 		a.downReason = reason
 		a.failAllEventRecoveries(fmt.Errorf("recovery: producer %d down (reason=%d)", a.producerID, reason))
+	}
+
+	if reason == types.ProcessingQueueDelayViolationProducerDownReason {
+		// Messages the broker drops while processing lags are newer than
+		// what has been processed so far but older than what will be
+		// processed once the backlog drains: remember where processing
+		// stood when it fell behind, so the recovery on the way back
+		// reaches that far (the floor keeps the earliest such point).
+		if obs == nil {
+			ts, err := a.lastProcessedMessageGenTimestamp()
+			obs = &cursorObservation{at: ts, err: err}
+		}
+		ts := a.lowerDelayFloor(*obs)
+		if a.isPerformingRecovery() && a.currentRecovery != nil &&
+			a.delayDownRequestID != a.currentRecovery.recoveryID {
+			// Processing fell behind while this snapshot request is in
+			// flight (the first stale evaluation of it; the producer may
+			// already be down for an earlier delay, e.g. during a repeat).
+			// It is not interrupted, so its completion decides whether to
+			// repeat it (snapshotRecoveryFinished). An interrupted recovery
+			// is marked too: its replacement is issued while processing
+			// may still lag, and takes the mark over
+			// (makeSnapshotRecovery). A failed lookup leaves the cursor
+			// zero; the repeat then reaches back to the recovery's own
+			// start.
+			a.delayDownRequestID = a.currentRecovery.recoveryID
+			a.delayCursor = ts
+		}
+	} else if a.delayRepeatWaiting {
+		// The chain of delay repeats ends here: another reason took over,
+		// and its own recovery (started by the next alive) replaces the
+		// repeat. What the repeat was to cover must not be lost with it.
+		a.abandonDelayRepeat()
 	}
 
 	if a.recoveryState == types.StartedRecoveryState && reason != types.ProcessingQueueDelayViolationProducerDownReason {
@@ -1487,6 +1660,69 @@ func (a *recoveryActor) producerDown(reason types.ProducerDownReason) error {
 	}
 
 	return a.notifyProducerChangedState(reason.ToProducerStatusReason())
+}
+
+// lowerDelayFloor lowers the recovery floor of a processing delay to the
+// observed last processed message and returns that cursor (zero when it was
+// zero or unreadable).
+func (a *recoveryActor) lowerDelayFloor(obs cursorObservation) time.Time {
+	ts := obs.at
+	if obs.err != nil || ts.IsZero() {
+		// Nothing has been processed in this run yet (a stale
+		// user-session alive can flag the delay first, e.g.
+		// during the first recovery after an open), or the cursor
+		// cannot be read right now. A failed lookup must not leave
+		// the delay without a floor: once processing catches up the
+		// recovery on the way back would start from the new
+		// cursor, past the messages dropped meanwhile.
+		if obs.err != nil {
+			a.logger.WithError(obs.err).WithField("producer_id", a.producerID).
+				Warn("recovery: last processed message unknown while processing fell behind; the recovery on the way back reaches back to the start of the last recovery or the configured resume point")
+		}
+		a.lowerFloorWithoutProcessedCursor()
+		return time.Time{}
+	}
+	a.lowerRecoveryFloor(ts)
+	return ts
+}
+
+// lowerFloorWithoutProcessedCursor sets the floor of a processing delay
+// whose last-processed cursor is zero or unreadable, from a point known to
+// precede every message still waiting in the consumer queue:
+//
+//  1. the start of the recovery in flight or last issued (zero there is the
+//     full history), as that recovery's replay covers everything after it;
+//  2. else the resume point the caller configured (an explicit rewind or the
+//     one set before connecting), which no recovery has superseded yet;
+//  3. else the full history (recoveryFloorFull, the one an interrupted
+//     full-history recovery leaves). The first recovery is full-history
+//     anyway and discharges it. A full floor next to a timestamp point would
+//     linger, since a recovery from that point does not discharge it.
+//
+// The alive cursor (what timestampForRecovery prefers) is deliberately not
+// used: it advances when a system alive is received, so with a backlog it
+// can be newer than messages that still wait in the consumer queue. If the backlog drains
+// before a later tick records a real processed cursor, a recovery starting
+// at the alive cursor would begin after them and the messages the broker
+// dropped meanwhile would never be requested. A later tick that can read
+// the cursor lowers the floor further when it lies earlier. Actor
+// goroutine only.
+func (a *recoveryActor) lowerFloorWithoutProcessedCursor() {
+	if a.recoveryIssued {
+		if a.lastIssuedRecoverFrom.IsZero() {
+			a.recoveryFloorFull = true
+		} else {
+			a.lowerRecoveryFloor(a.lastIssuedRecoverFrom)
+		}
+		return
+	}
+	if point, err := a.pm.ConfiguredRecoveryPoint(a.producerID); err == nil && !point.IsZero() {
+		a.lowerRecoveryFloor(point)
+		return
+	}
+	// Without any known point (also when it cannot be read) only the full
+	// history is safe.
+	a.recoveryFloorFull = true
 }
 
 // failAllEventRecoveries fails every in-flight event-recovery handle and
@@ -1654,8 +1890,40 @@ func (a *recoveryActor) resumeDeferredRecovery() {
 }
 
 func (a *recoveryActor) makeSnapshotRecovery(timestamp time.Time) error {
-	now := time.Now()
+	// A recovery that processing fell behind during and that something else
+	// replaces before it completed (an interruption, a lost subscription, a
+	// failed request) leaves its mark with the replacement: the replacement
+	// starts while processing may still lag, so its own replay can be
+	// dropped just as well, and clearing the mark here would let it report
+	// the producer up with that gap unfilled. A waiting repeat has no
+	// request to hand the mark to; the recovery that replaces it reaches back
+	// to the repeat's start instead (abandonDelayRepeat).
+	carry := a.delayDownRequestID != 0 && !a.delayRepeatWaiting
+	if !carry {
+		// A recovery that is not a repeat starts a new chain of delay
+		// repeats, except after a chain that stayed down: the repeats
+		// already spent still count.
+		repeats, stayedDown := a.delayRepeats, a.delayStayedDown
+		a.abandonDelayRepeat()
+		if stayedDown {
+			a.keepRepeatsAcrossStayDown(repeats)
+		}
+	}
+	if err := a.issueSnapshotRecovery(time.Now(), a.resolveRecoverFrom(time.Now(), timestamp, true)); err != nil {
+		return err
+	}
+	if carry {
+		a.delayDownRequestID = a.currentRecovery.recoveryID
+	}
+	return nil
+}
 
+// resolveRecoverFrom turns the cursor a recovery would use on its own into
+// the point it requests from: floored, and clamped to the lookback limit.
+// useWindow applies WithInitialSnapshotTime to a zero cursor; a repeat of a
+// recovery that asked for the full history passes false, so it asks for
+// everything again instead of a narrower window.
+func (a *recoveryActor) resolveRecoverFrom(now, timestamp time.Time, useWindow bool) time.Time {
 	// 1. The cursor this request would use on its own. A zero cursor
 	//    means "everything the producer has"; WithInitialSnapshotTime
 	//    (Java/.NET parity) narrows that to a window for a producer with
@@ -1664,7 +1932,7 @@ func (a *recoveryActor) makeSnapshotRecovery(timestamp time.Time) error {
 	//    the floor below is compared against what will actually be
 	//    requested: a loss older than the window must still be covered.
 	recoverFrom := timestamp
-	if recoverFrom.IsZero() && a.initialSnapshotTime > 0 {
+	if useWindow && recoverFrom.IsZero() && a.initialSnapshotTime > 0 {
 		recoverFrom = now.Add(-a.initialSnapshotTime)
 	}
 
@@ -1696,8 +1964,7 @@ func (a *recoveryActor) makeSnapshotRecovery(timestamp time.Time) error {
 			recoverFrom = now
 		}
 	}
-
-	return a.issueSnapshotRecovery(now, recoverFrom)
+	return recoverFrom
 }
 
 // issueSnapshotRecovery sends a snapshot recovery request for exactly
@@ -1721,6 +1988,8 @@ func (a *recoveryActor) issueSnapshotRecovery(now, recoverFrom time.Time) error 
 	a.currentRecovery = newRecoveryData(requestID, now)
 	a.publishSnapshotRequest(requestID)
 	a.currentRecovery.recoverFrom = recoverFrom
+	a.recoveryIssued = true
+	a.lastIssuedRecoverFrom = recoverFrom
 	a.currentRecovery.cancelAPI = cancelAPI
 	a.recoveryState = types.StartedRecoveryState
 
@@ -1812,6 +2081,7 @@ func (a *recoveryActor) onSnapshotRecoveryAPICompleted(e evSnapshotRecoveryAPICo
 			WithField("producer_id", a.producerID).
 			WithField("request_id", e.requestID).
 			Error("recovery: PostRecovery API failed; transitioning to Error")
+		a.keepRecoveryRangeAsFloor()
 		a.currentRecovery = nil
 		a.recoveryState = types.ErrorRecoveryState
 		return
@@ -1822,6 +2092,28 @@ func (a *recoveryActor) onSnapshotRecoveryAPICompleted(e evSnapshotRecoveryAPICo
 			WithField("producer_id", a.producerID).
 			WithField("request_id", e.requestID).
 			Error("recovery: SetProducerRecoveryInfo failed after snapshot recovery API")
+	}
+}
+
+// dischargeRecoveryFloor clears the recovery floor if the recovery now
+// completing reached back to it.
+//
+// The floor is discharged only by a recovery that reached back to it.
+// A zero cursor means "everything the producer has" and covers every
+// floor, full-history included; a timestamp cursor covers only a
+// timestamp floor at or after it. A recovery that started from a
+// later cursor (a loss whose reaction is still pending lowered the
+// floor after this one began) leaves the floor in place for the
+// recovery that follows.
+func (a *recoveryActor) dischargeRecoveryFloor() {
+	if a.currentRecovery != nil {
+		switch {
+		case a.currentRecovery.recoverFrom.IsZero():
+			a.recoveryFloor = time.Time{}
+			a.recoveryFloorFull = false
+		case !a.recoveryFloorFull && !a.recoveryFloor.IsZero() && !a.currentRecovery.recoverFrom.After(a.recoveryFloor):
+			a.recoveryFloor = time.Time{}
+		}
 	}
 }
 
@@ -1854,6 +2146,115 @@ func (a *recoveryActor) snapshotRecoveryFinished(requestID int) error {
 		return a.startSnapshotRecovery(a.lastValidAliveGen)
 	}
 
+	// Processing fell behind while this request was in flight (it was
+	// deliberately not interrupted): live messages and the replay itself,
+	// queued after the request went out, may have been dropped by the
+	// broker, so this recovery is not trustworthy and the producer is not
+	// reported up on it. It is repeated once processing is current again,
+	// from the point it started at (the replay can be what was dropped),
+	// or from where processing stood when it fell behind if that is
+	// earlier. A recovery of the full history stays a full-history one.
+	// The bound (maxDelayRepeats) ends the chain (endExhaustedDelayChain):
+	// the producer is reported up when processing is current by then, and
+	// stays down for the delay when it still lags.
+	if a.delayDownRequestID != requestID {
+		a.markDelayIfLagging(requestID, finished)
+	}
+	if a.delayDownRequestID == requestID {
+		// This recovery has done its part for the floor: discharge it first,
+		// so the repeat is not pulled back over ground it just covered.
+		a.dischargeRecoveryFloor()
+		from := a.currentRecovery.recoverFrom
+		if !from.IsZero() && !a.delayCursor.IsZero() && a.delayCursor.Before(from) {
+			from = a.delayCursor
+		}
+		if a.delayRepeats < maxDelayRepeats {
+			a.delayDownRequestID = 0
+			a.delayCursor = time.Time{}
+			a.delayRepeatWaiting = true
+			a.delayRepeatFrom = from
+			// The completed recovery stays as currentRecovery: it holds the
+			// chain start, and nothing is in flight (state Completed) so no
+			// deadline or sweep acts on it.
+			a.recoveryState = types.CompletedRecoveryState
+			a.logger.WithField("producer_id", a.producerID).WithField("request_id", requestID).
+				Info("recovery: processing fell behind while the snapshot recovery ran; it is repeated once processing is current")
+			a.serviceDelayRepeat(finished)
+			return nil
+		}
+		return a.endExhaustedDelayChain(requestID, started, finished, from)
+	}
+	return a.finishRecoveryChain(requestID, started)
+}
+
+// markDelayIfLagging marks the completing request for a processing delay
+// the tick has not flagged yet. snapshot_complete can be handled after the
+// broker dropped queued replay messages but before the next tick sees the
+// backlog; reporting the producer up on that completion would leave the gap
+// for good. Processing that lags (unreadable timing counts as lagging, and
+// so does a first message still in a callback) is handled as if the tick
+// had marked the request: the floor is lowered from the observed cursor and
+// the repeat decision follows. Current processing changes nothing.
+func (a *recoveryActor) markDelayIfLagging(requestID int, now time.Time) {
+	fresh, obs := a.observeTiming(now)
+	if fresh && !a.firstMessageStillInProcessingFor(obs) {
+		return
+	}
+	a.logger.WithField("producer_id", a.producerID).WithField("request_id", requestID).
+		Info("recovery: processing lags as the snapshot recovery completes")
+	ts := a.lowerDelayFloor(obs)
+	a.delayDownRequestID = requestID
+	a.delayCursor = ts
+}
+
+// endExhaustedDelayChain ends a chain of delay repeats that cannot go on:
+// the bound is reached, or waiting for current processing took longer than
+// MaxRecoveryExecution. from is what the next repeat was to cover.
+//
+// When processing is current at that moment the producer is reported up with
+// a warning, as the messages the broker dropped during the last attempt may
+// be missing and more attempts have not helped. When it still lags (or its
+// timing cannot be read) reporting the producer up would only be undone by
+// the timing check of the same tick, a contradictory pair of transitions:
+// instead the chain ends with what it was to cover kept as the recovery
+// floor, and the producer stays down for the delay. Once processing is
+// current the return path (isBackFromInactivity) recovers from that floor
+// and reports the producer up when it completes. Actor goroutine only.
+func (a *recoveryActor) endExhaustedDelayChain(requestID int, started, now, from time.Time) error {
+	log := a.logger.WithField("producer_id", a.producerID).WithField("attempts", a.delayRepeats+1)
+	repeats := a.delayRepeats
+	fresh, err := a.timingFresh(now)
+	if err == nil && fresh && a.firstMessageStillInProcessing() {
+		// timingFresh counts a missing last-processed timestamp as fresh;
+		// with another session's first message still in a callback the
+		// queue may be backed up behind it all the same, so processing is
+		// not known to be current.
+		fresh = false
+	}
+	if err != nil || !fresh {
+		if err != nil {
+			// An unreadable timing counts as still lagging; the cause is
+			// part of the one warning below.
+			log = log.WithError(err)
+		}
+		log.Warn("recovery: processing fell behind during every recovery attempt and still lags; the producer stays down until processing is current, then the range is recovered again")
+		// The completed recovery stays as currentRecovery, nothing is in
+		// flight, and no repeat waits: the return path takes it from here.
+		a.delayRepeatWaiting = true
+		a.delayRepeatFrom = from
+		a.recoveryState = types.CompletedRecoveryState
+		a.abandonDelayRepeat()
+		a.keepRepeatsAcrossStayDown(repeats)
+		return nil
+	}
+	log.Warn("recovery: processing fell behind during every recovery attempt; messages the broker dropped meanwhile may be missing")
+	return a.finishRecoveryChain(requestID, started)
+}
+
+// finishRecoveryChain ends a recovery chain: the floor is discharged by the
+// recovery now completing, the producer is reported up, and the state of
+// the chain's delay repeats is cleared.
+func (a *recoveryActor) finishRecoveryChain(requestID int, started time.Time) error {
 	var reason types.ProducerUpReason
 	if a.firstRecoveryCompleted {
 		reason = types.ReturnedFromInactivityProducerUpReason
@@ -1862,25 +2263,121 @@ func (a *recoveryActor) snapshotRecoveryFinished(requestID int) error {
 		a.firstRecoveryCompleted = true
 	}
 
-	// The floor is discharged only by a recovery that reached back to it.
-	// A zero cursor means "everything the producer has" and covers every
-	// floor, full-history included; a timestamp cursor covers only a
-	// timestamp floor at or after it. A recovery that started from a
-	// later cursor (a loss whose reaction is still pending lowered the
-	// floor after this one began) leaves the floor in place for the
-	// recovery that follows.
-	if a.currentRecovery != nil {
-		switch {
-		case a.currentRecovery.recoverFrom.IsZero():
-			a.recoveryFloor = time.Time{}
-			a.recoveryFloorFull = false
-		case !a.recoveryFloorFull && !a.recoveryFloor.IsZero() && !a.currentRecovery.recoverFrom.After(a.recoveryFloor):
-			a.recoveryFloor = time.Time{}
-		}
-	}
+	a.dischargeRecoveryFloor()
 	a.currentRecovery = newRecoveryData(requestID, started)
 	a.recoveryState = types.CompletedRecoveryState
+	a.resetDelayChain()
 	return a.producerUp(reason)
+}
+
+// resetDelayChain clears the state of the delay repeats of a chain.
+func (a *recoveryActor) resetDelayChain() {
+	a.delayDownRequestID = 0
+	a.delayCursor = time.Time{}
+	a.delayRepeats = 0
+	a.delayStayedDown = false
+	a.delayRepeatWaiting = false
+	a.delayRepeatFrom = time.Time{}
+}
+
+// keepRepeatsAcrossStayDown restores the repeat count of a chain that ended
+// with the producer staying down, after the chain state was cleared.
+func (a *recoveryActor) keepRepeatsAcrossStayDown(repeats int) {
+	a.delayRepeats = repeats
+	a.delayStayedDown = true
+}
+
+// abandonDelayRepeat drops a repeat that has not been issued because
+// something else is starting its own recovery. What the repeat was to cover
+// is kept as a floor, so that recovery reaches back to it; this is a no-op
+// when nothing is waiting.
+func (a *recoveryActor) abandonDelayRepeat() {
+	if a.delayRepeatWaiting {
+		if a.delayRepeatFrom.IsZero() {
+			a.recoveryFloorFull = true
+		} else {
+			a.lowerRecoveryFloor(a.delayRepeatFrom)
+		}
+	}
+	a.resetDelayChain()
+}
+
+// firstMessageStillInProcessing reports that no message has ended yet (the
+// last-processed cursor is zero) while one is in a callback, or that the
+// cursor cannot be read: there is no baseline, and what is queued behind
+// the message in processing cannot be told from a backlog.
+func (a *recoveryActor) firstMessageStillInProcessing() bool {
+	lastProcessed, err := a.lastProcessedMessageGenTimestamp()
+	return a.firstMessageStillInProcessingFor(cursorObservation{at: lastProcessed, err: err})
+}
+
+// firstMessageStillInProcessingFor is firstMessageStillInProcessing for a
+// cursor the caller has already read.
+func (a *recoveryActor) firstMessageStillInProcessingFor(obs cursorObservation) bool {
+	return obs.err != nil || (obs.at.IsZero() && a.inProcessing.Load() > 0)
+}
+
+// serviceDelayRepeat issues the repeat of a recovery that processing fell
+// behind during, once processing is current: the replay of a repeat issued
+// onto a backlog would queue behind it and could trip the delay by itself.
+// A timing lookup error counts as "not yet". Waiting is bounded by the
+// chain's MaxRecoveryExecution, after which the chain ends as when the
+// repeats run out (endExhaustedDelayChain): the producer is reported up if
+// processing is current by then, and otherwise stays down with the range
+// kept as the recovery floor. Called on every tick and when the
+// recovery that fell behind completes. Actor goroutine only.
+func (a *recoveryActor) serviceDelayRepeat(now time.Time) {
+	if !a.delayRepeatWaiting || a.currentRecovery == nil || a.isDisabled() {
+		return
+	}
+	if maxAge := a.cfg.MaxRecoveryExecution(); maxAge > 0 && now.Sub(a.currentRecovery.chainStartedAt) > maxAge {
+		if err := a.endExhaustedDelayChain(a.currentRecovery.recoveryID, a.currentRecovery.recoveryStartedAt, now, a.delayRepeatFrom); err != nil {
+			a.logger.WithError(err).WithField("producer_id", a.producerID).
+				Error("recovery: report the producer up after waiting for processing to catch up")
+		}
+		return
+	}
+	if fresh, err := a.timingFresh(now); err != nil || !fresh {
+		return
+	}
+	// timingFresh counts a missing last-processed timestamp as fresh. With
+	// another session's first message still in a callback (snapshot_complete
+	// ends processing with a zero timestamp, and alives may not have ended
+	// yet) nothing has set a baseline, yet the repeat would queue behind that
+	// message exactly as behind a backlog: it waits for the message to end.
+	if a.firstMessageStillInProcessing() {
+		return
+	}
+	if a.mgr.rebindPending(a.producerID) {
+		return // a lost session has no queue yet; the next tick retries
+	}
+	chainStartedAt := a.currentRecovery.chainStartedAt
+	from := a.resolveRecoverFrom(time.Now(), a.delayRepeatFrom, false)
+	// The lookback clamp is relative to now, and the repeat waited for
+	// processing to catch up: a recovery that started near the limit would
+	// otherwise be repeated from a later point and could not refill the
+	// head of its own replay, which is what the repeat is for. As for a
+	// deadline re-issue, it never starts later than the request it repeats.
+	// A zero (full history) stays zero.
+	if own := a.currentRecovery.recoverFrom; !from.IsZero() && !own.IsZero() && from.After(own) {
+		from = own
+	}
+	if err := a.issueSnapshotRecovery(time.Now(), from); err != nil {
+		// Nothing was replaced (the request fails before it touches state),
+		// so the next tick retries.
+		a.logger.WithError(err).WithField("producer_id", a.producerID).
+			Error("recovery: issue the repeat of a recovery processing fell behind during")
+		return
+	}
+	// The repeat belongs to the chain: MaxRecoveryExecution still caps the
+	// total, as for a deadline re-issue.
+	a.currentRecovery.chainStartedAt = chainStartedAt
+	a.delayRepeats++
+	a.delayRepeatWaiting = false
+	a.delayRepeatFrom = time.Time{}
+	a.logger.WithField("producer_id", a.producerID).WithField("request_id", a.currentRecovery.recoveryID).
+		WithField("repeat", a.delayRepeats).WithField("recover_from", from).
+		Info("recovery: repeating the snapshot recovery processing fell behind during")
 }
 
 func (a *recoveryActor) eventRecoveryFinished(id int) error {
