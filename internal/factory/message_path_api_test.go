@@ -888,3 +888,27 @@ func TestMessagePath_EventNotFound_NamesStillResolve(t *testing.T) {
 		}
 	})
 }
+
+// Two sessions fail the same event concurrently: A read the counter (N) and
+// paused, a success raised it to N+1, and B recorded at N+1. A's late record
+// must not replace B's entry with the older count, or the next message (at
+// N+1) would void it and hit the failing API again. An equal count only
+// refreshes the expiry.
+func TestAPIFailureWindow_ALateRecordWithAnOlderCountKeepsTheNewerEntry(t *testing.T) {
+	clk := &stepClock{t: time.Unix(1_000_000, 0)}
+	w := apiFailureWindow{now: clk.Now}
+	id := types.URN{Prefix: "od", Type: "match", ID: 1}
+
+	w.record(id, 8) // B
+	w.record(id, 7) // A, late
+	if !w.blocked(id, 8) {
+		t.Fatal("the late record with the older count dropped the newer entry")
+	}
+
+	clk.t = clk.t.Add(6 * time.Second)
+	w.record(id, 8) // equal count: refreshes the expiry
+	clk.t = clk.t.Add(6 * time.Second)
+	if !w.blocked(id, 8) {
+		t.Fatal("a record with an equal count did not refresh the expiry")
+	}
+}

@@ -96,6 +96,14 @@ func (w *apiFailureWindow) record(id types.URN, count uint64) {
 			}
 		}
 	}
+	// Two sessions can fail the same event at once: one read the counter,
+	// paused, a success raised it, and the other recorded at the higher
+	// value. The older count must not replace that entry (the next message
+	// would void it and hit the failing API again); an equal count only
+	// refreshes the expiry.
+	if e, ok := w.entries[id]; ok && e.count > count {
+		return
+	}
 	w.entries[id] = apiFailureEntry{until: now.Add(apiFailureWindowTTL), count: count}
 }
 
