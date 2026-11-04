@@ -1703,3 +1703,91 @@ func TestActor_DelayRepeat_WaitExpiresWhileTheFirstMessageIsInProcessing_StaysDo
 		t.Fatalf("recovery POSTs = %d, want 2: no repeat was requested", hits.recover.Load())
 	}
 }
+
+// The return path of a processing delay recovers from the last processed
+// message and falls back to the recovery floor when that cannot be told: the
+// lookup fails, or reads zero, between the timing check that lets the alive
+// through and the request. The fallback keeps the request reaching back to
+// the delay (the full history when the floor is the full one).
+func TestActor_ReturnFromProcessingDelayDown_CursorLostAtTheAlive_RecoversFromTheFloor(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// unreadable: the lookup fails on the call after the timing check;
+		// otherwise it reads zero from the alive on.
+		unreadable bool
+		full       bool
+	}{
+		{"zero cursor", false, false},
+		{"unreadable cursor", true, false},
+		{"zero cursor, full history floor", false, true},
+		{"unreadable cursor, full history floor", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := newFakeManagerOps()
+			now := time.Now().Truncate(time.Millisecond)
+			var a *recoveryActor
+			var hits *recoveryHits
+			var start time.Time
+			posts := int32(3)
+			if tc.full {
+				a, hits = freshActor(t, fake)
+				if err := a.pm.SetLastAliveReceivedGenTimestamp(a.producerID, now.Add(-4*time.Second)); err != nil {
+					t.Fatal(err)
+				}
+				posts = 1
+			} else {
+				a, hits, start = recoveryAfterAlive(t, fake, now)
+			}
+			p := holdProcessing(a)
+			lookup := a.lastProcessedFn
+			var mode atomic.Int32 // 0 as the clock, 1 zero, 2 fail after one read
+			var reads atomic.Int32
+			a.lastProcessedFn = func() (time.Time, error) {
+				switch mode.Load() {
+				case 1:
+					return time.Time{}, nil
+				case 2:
+					if reads.Add(1) > 1 {
+						return time.Time{}, errors.New("lookup failed")
+					}
+				}
+				return lookup()
+			}
+
+			// The delay is flagged with the lookup failing: the floor comes
+			// from the last recovery's start, or is the full history.
+			failing := failableTiming(a)
+			failing.Store(true)
+			tickAt(a, now)
+			failing.Store(false)
+			if a.downReason != types.ProcessingQueueDelayViolationProducerDownReason {
+				t.Fatalf("setup: down reason = %v, want the processing delay", a.downReason)
+			}
+			wantFloor := start
+			if tc.full != a.recoveryFloorFull || (!tc.full && !a.recoveryFloor.Equal(start)) {
+				t.Fatalf("setup: floor = %v (full=%v), want %v (full=%v)", a.recoveryFloor, a.recoveryFloorFull, wantFloor, tc.full)
+			}
+
+			// Processing is current again, but the cursor reads as zero (or
+			// the lookup fails after the timing check) when the alive comes.
+			p.set(time.Now())
+			if tc.unreadable {
+				mode.Store(2)
+			} else {
+				mode.Store(1)
+			}
+			if err := a.systemAliveReceived(aliveAt(time.Now()), true); err != nil {
+				t.Fatal(err)
+			}
+			waitRecoverHits(t, hits, posts)
+			want := start.UnixMilli()
+			if tc.full {
+				want = 0
+			}
+			if got := hits.lastAfterMillis.Load(); got != want {
+				t.Fatalf("return recovery after=%d (%v), want the floor %d", got, time.UnixMilli(got), want)
+			}
+			waitDetachedDone(t, a, 3*time.Second)
+		})
+	}
+}
