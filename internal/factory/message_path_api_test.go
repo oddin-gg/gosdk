@@ -355,17 +355,34 @@ func TestMessagePath_WindowStillServesCachedEvents(t *testing.T) {
 	}
 }
 
-// A caller's own cancellation says nothing about the API and must not open
-// the window.
+// A caller's own cancellation or expired deadline says nothing about the
+// API and must not open the window. The API itself is healthy here, so a
+// message whose event stayed unbuilt proves the build was attempted and
+// failed on the caller's context, not skipped by the window.
 func TestMessagePath_CancelledContextDoesNotOpenTheWindow(t *testing.T) {
-	r := newMessagePathRig(t)
-	ctx, cancel := context.WithCancel(t.Context())
+	cancelled, cancel := context.WithCancel(t.Context())
 	cancel()
-	if _, err := r.factory.BuildMessage(ctx, oddsChangeFor(99)); err != nil && errors.Is(err, apipolicy.ErrSkipped) {
-		t.Fatal("unexpected skip")
-	}
-	if r.factory.apiFailures.len() != 0 {
-		t.Fatalf("window holds %d events after a cancelled build", r.factory.apiFailures.len())
+	expired, cancelExpired := context.WithDeadline(t.Context(), time.Now().Add(-time.Minute))
+	defer cancelExpired()
+
+	for name, ctx := range map[string]context.Context{"cancelled": cancelled, "expired deadline": expired} {
+		t.Run(name, func(t *testing.T) {
+			r := newMessagePathRig(t)
+			out, err := r.factory.BuildMessage(ctx, oddsChangeFor(99))
+			if err != nil {
+				t.Fatalf("BuildMessage: %v (a failed event build must still dispatch the message)", err)
+			}
+			oc, ok := out.(oddsChangeImpl)
+			if !ok {
+				t.Fatalf("BuildMessage returned %T", out)
+			}
+			if oc.event != nil {
+				t.Fatal("event built on a dead context; the build was not attempted as expected")
+			}
+			if r.factory.apiFailures.len() != 0 {
+				t.Fatalf("window holds %d events after a build on a dead context", r.factory.apiFailures.len())
+			}
+		})
 	}
 }
 
