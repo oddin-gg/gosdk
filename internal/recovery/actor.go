@@ -2193,6 +2193,15 @@ func (a *recoveryActor) serviceDelayRepeat(now time.Time) {
 	if fresh, err := a.timingFresh(now); err != nil || !fresh {
 		return
 	}
+	// timingFresh counts a missing last-processed timestamp as fresh. With
+	// another session's first message still in a callback (snapshot_complete
+	// ends processing with a zero timestamp, and alives may not have ended
+	// yet) nothing has set a baseline, yet the repeat would queue behind that
+	// message exactly as behind a backlog: it waits for the message to end.
+	if lastProcessed, err := a.lastProcessedMessageGenTimestamp(); err != nil ||
+		(lastProcessed.IsZero() && a.inProcessing.Load() > 0) {
+		return
+	}
 	if a.mgr.rebindPending(a.producerID) {
 		return // a lost session has no queue yet; the next tick retries
 	}

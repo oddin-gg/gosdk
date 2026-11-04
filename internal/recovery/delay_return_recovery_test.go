@@ -1044,6 +1044,33 @@ func TestActor_DelayRepeat_WaitsForALostSessionToRebind(t *testing.T) {
 	waitDetachedDone(t, a, 3*time.Second)
 }
 
+// A repeat waits while the first message is still in processing: with no
+// last-processed cursor timing looks fresh, but the repeat would queue behind
+// that message just like behind a backlog.
+func TestActor_DelayRepeat_WaitsWhileTheFirstMessageIsStillInProcessing(t *testing.T) {
+	fake := newFakeManagerOps()
+	a, hits, at := waitingRepeat(t, fake)
+	a.lastProcessedFn = func() (time.Time, error) { return time.Time{}, nil }
+
+	a.onMessageProcessingStarted(at)
+	tickAt(a, at)
+	time.Sleep(50 * time.Millisecond)
+	if hits.recover.Load() != 2 || !a.delayRepeatWaiting || a.recoveryState != types.CompletedRecoveryState {
+		t.Fatalf("message in processing: POSTs=%d waiting=%v state=%v, want 2, waiting, Completed",
+			hits.recover.Load(), a.delayRepeatWaiting, a.recoveryState)
+	}
+
+	// The message ends (with a zero timestamp, as snapshot_complete does):
+	// nothing holds the repeat back any more.
+	a.onMessageProcessingEnded(time.Time{})
+	tickAt(a, at.Add(time.Second))
+	waitRecoverHits(t, hits, 3)
+	if a.delayRepeatWaiting {
+		t.Fatal("the repeat still waits after the message ended")
+	}
+	waitDetachedDone(t, a, 3*time.Second)
+}
+
 // A producer that is disabled has no recovery to run: the repeat is not
 // issued for it, and it stays waiting for the producer to be enabled again.
 func TestActor_DelayRepeat_NotIssuedForADisabledProducer(t *testing.T) {
