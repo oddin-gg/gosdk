@@ -1454,3 +1454,97 @@ func TestActor_DelayDownDuringEveryAttempt_StillLaggingStaysDownAndKeepsTheFloor
 	requireDownForDelayWithFloor(t, a, fake, upBefore, want)
 	requireReturnRecoversFrom(t, a, hits, p, int32(3+maxDelayRepeats), want)
 }
+
+// failableTiming makes the last-processed lookup of the actor fail on demand
+// and returns the switch.
+func failableTiming(a *recoveryActor) *atomic.Bool {
+	failing := &atomic.Bool{}
+	lookup := a.lastProcessedFn
+	a.lastProcessedFn = func() (time.Time, error) {
+		if failing.Load() {
+			return time.Time{}, errors.New("lookup failed")
+		}
+		return lookup()
+	}
+	return failing
+}
+
+// A chain that ends while the timing cannot be read ends like one that ends
+// while processing lags: the producer stays down, no up is reported, the
+// range is kept as the floor, one warning is logged; the floor is recovered
+// from once the lookup works again.
+func TestActor_DelayRepeat_WaitExpiresWithUnreadableTiming_StaysDownAndKeepsTheFloor(t *testing.T) {
+	fake := newFakeManagerOps()
+	a, hits, r1, _ := genuineDelayDuringRecovery(t, fake)
+	p := holdProcessing(a)
+	failing := failableTiming(a)
+	sink := &lockedBuffer{}
+	a.logger = debugLogger(sink)
+	if err := a.snapshotRecoveryFinished(r1); err != nil {
+		t.Fatal(err)
+	}
+	want := a.delayRepeatFrom
+	_, upBefore := downEventCounts(fake)
+
+	failing.Store(true)
+	tickAt(a, a.currentRecovery.chainStartedAt.Add(a.cfg.MaxRecoveryExecution()+time.Minute))
+	requireDownForDelayWithFloor(t, a, fake, upBefore, want)
+	tickAt(a, time.Now().Add(time.Hour))
+	requireDownForDelayWithFloor(t, a, fake, upBefore, want)
+	if n := strings.Count(sink.String(), "processing fell behind during every recovery attempt"); n != 1 {
+		t.Fatalf("warn logged %d times, want 1:\n%s", n, sink.String())
+	}
+	if !strings.Contains(sink.String(), "lookup failed") {
+		t.Fatalf("the cause of the unreadable timing was not logged:\n%s", sink.String())
+	}
+	if hits.recover.Load() != 2 {
+		t.Fatalf("recovery POSTs = %d, want 2: no repeat was requested", hits.recover.Load())
+	}
+
+	failing.Store(false)
+	requireReturnRecoversFrom(t, a, hits, p, 3, want)
+}
+
+// The same when the repeats run out.
+func TestActor_DelayDownDuringEveryAttempt_UnreadableTimingStaysDownAndKeepsTheFloor(t *testing.T) {
+	fake := newFakeManagerOps()
+	a, hits, r1, _ := genuineDelayDuringRecovery(t, fake)
+	p := holdProcessing(a)
+	failing := failableTiming(a)
+	sink := &lockedBuffer{}
+	a.logger = debugLogger(sink)
+
+	id := r1
+	at := time.Now()
+	for i := 1; i <= maxDelayRepeats; i++ {
+		if err := a.snapshotRecoveryFinished(id); err != nil {
+			t.Fatal(err)
+		}
+		catchUp(a, p, at)
+		waitRecoverHits(t, hits, int32(2+i))
+		id = a.currentRecovery.recoveryID
+		at = at.Add(time.Second)
+		lag(a, p, at)
+		at = at.Add(time.Second)
+	}
+	want := a.currentRecovery.recoverFrom
+	if !a.delayCursor.IsZero() && a.delayCursor.Before(want) {
+		want = a.delayCursor
+	}
+	_, upBefore := downEventCounts(fake)
+
+	// The last repeat completes while the timing cannot be read.
+	failing.Store(true)
+	if err := a.snapshotRecoveryFinished(id); err != nil {
+		t.Fatal(err)
+	}
+	requireDownForDelayWithFloor(t, a, fake, upBefore, want)
+	tickAt(a, time.Now().Add(time.Hour))
+	requireDownForDelayWithFloor(t, a, fake, upBefore, want)
+	if n := strings.Count(sink.String(), "processing fell behind during every recovery attempt"); n != 1 {
+		t.Fatalf("warn logged %d times, want 1:\n%s", n, sink.String())
+	}
+
+	failing.Store(false)
+	requireReturnRecoversFrom(t, a, hits, p, int32(3+maxDelayRepeats), want)
+}
