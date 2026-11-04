@@ -554,6 +554,52 @@ func TestActor_DelayRepeat_AnotherDownReasonTakesOver(t *testing.T) {
 	waitDetachedDone(t, a, 3*time.Second)
 }
 
+// A waiting repeat replaced by a subscription loss: the alive that says "not
+// subscribed" starts the replacement recovery directly (the producer is
+// already down, so producerDown is not involved). The replacement must reach
+// back to the repeat's start, not begin at the newer alive cursor, and the
+// waiting state and the delay chain are cleared.
+func TestActor_DelayRepeat_ReplacedByASubscriptionLoss_ReachesBackToTheRepeatsStart(t *testing.T) {
+	fake := newFakeManagerOps()
+	a, hits, r1, _ := genuineDelayDuringRecovery(t, fake)
+	p := holdProcessing(a)
+	from1 := a.currentRecovery.recoverFrom
+	if err := a.snapshotRecoveryFinished(r1); err != nil {
+		t.Fatal(err)
+	}
+	if !a.delayRepeatWaiting || !a.delayRepeatFrom.Equal(from1) {
+		t.Fatalf("setup: waiting=%v from=%v, want a repeat waiting from %v", a.delayRepeatWaiting, a.delayRepeatFrom, from1)
+	}
+	if !a.isFlaggedDown() {
+		t.Fatal("setup: the producer should be down while the repeat waits")
+	}
+	// The alive cursor is newer than where the repeat starts.
+	now := time.Now().Add(20 * time.Second).Truncate(time.Millisecond)
+	p.set(now)
+	if err := a.pm.SetLastAliveReceivedGenTimestamp(a.producerID, now); err != nil {
+		t.Fatal(err)
+	}
+	if cur, err := a.timestampForRecovery(); err != nil || !cur.After(from1) {
+		t.Fatalf("setup: recovery cursor %v (err %v) must be later than the repeat's start %v", cur, err, from1)
+	}
+
+	if err := a.systemAliveReceived(aliveAt(now), false); err != nil {
+		t.Fatal(err)
+	}
+	if a.delayRepeatWaiting || !a.delayRepeatFrom.IsZero() {
+		t.Fatalf("waiting=%v from=%v, want the repeat dropped", a.delayRepeatWaiting, a.delayRepeatFrom)
+	}
+	if a.delayDownRequestID != 0 || a.delayRepeats != 0 || !a.delayCursor.IsZero() {
+		t.Fatalf("chain not reset: request=%d repeats=%d cursor=%v", a.delayDownRequestID, a.delayRepeats, a.delayCursor)
+	}
+	waitRecoverHits(t, hits, 3)
+	if got := hits.lastAfterMillis.Load(); got > from1.UnixMilli() {
+		t.Fatalf("replacement recovery after=%d (%v), want at or before the repeat's start %v",
+			got, time.UnixMilli(got), from1)
+	}
+	waitDetachedDone(t, a, 3*time.Second)
+}
+
 // The repeat of a FULL-HISTORY recovery (nothing to remember as a timestamp)
 // that another down reason takes over keeps the full-history floor: the
 // recovery the alive path starts asks for everything, not for the window
