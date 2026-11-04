@@ -119,7 +119,7 @@ func TestDo_MessagePolicy_SpentBudgetIsRefusedWithoutSending(t *testing.T) {
 }
 
 // Any 2xx advances the success counter; failures do not.
-func TestClient_SuccessGeneration(t *testing.T) {
+func TestClient_SuccessCount(t *testing.T) {
 	var fail atomic.Bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if fail.Load() {
@@ -132,17 +132,17 @@ func TestClient_SuccessGeneration(t *testing.T) {
 	c := newTestClient(t, srv)
 	ctx := apipolicy.With(t.Context(), apipolicy.Message)
 
-	g0 := c.SuccessGeneration()
+	g0 := c.SuccessCount()
 	fail.Store(true)
 	_, _ = c.FetchSports(ctx, types.EnLocale)
-	if c.SuccessGeneration() != g0 {
+	if c.SuccessCount() != g0 {
 		t.Fatal("a failed call advanced the success counter")
 	}
 	fail.Store(false)
 	if _, err := c.FetchSports(ctx, types.EnLocale); err != nil {
 		t.Fatal(err)
 	}
-	if c.SuccessGeneration() == g0 {
+	if c.SuccessCount() == g0 {
 		t.Fatal("a successful call did not advance the success counter")
 	}
 }
@@ -152,7 +152,7 @@ func TestClient_SuccessGeneration(t *testing.T) {
 // counter alone, while a complete valid answer advances it. Otherwise an API
 // that degrades into bad bodies would keep voiding what the message path
 // remembers about its failures.
-func TestClient_SuccessGeneration_CountsOnlyAfterTheBodyWasRead(t *testing.T) {
+func TestClient_SuccessCount_CountsOnlyAfterTheBodyWasRead(t *testing.T) {
 	const (
 		complete  = "complete"
 		truncated = "truncated"
@@ -192,11 +192,11 @@ func TestClient_SuccessGeneration_CountsOnlyAfterTheBodyWasRead(t *testing.T) {
 
 	for _, m := range []string{truncated, invalid, trailing, stalled} {
 		mode.Store(m)
-		before := c.SuccessGeneration()
+		before := c.SuccessCount()
 		if _, err := c.FetchSports(ctx, types.EnLocale); err == nil {
 			t.Fatalf("%s body: expected an error", m)
 		}
-		if got := c.SuccessGeneration(); got != before {
+		if got := c.SuccessCount(); got != before {
 			t.Fatalf("%s body: the success counter advanced from %d to %d", m, before, got)
 		}
 		// The stalled call spent the shared budget; use a fresh context.
@@ -204,18 +204,18 @@ func TestClient_SuccessGeneration_CountsOnlyAfterTheBodyWasRead(t *testing.T) {
 	}
 
 	mode.Store(complete)
-	before := c.SuccessGeneration()
+	before := c.SuccessCount()
 	if _, err := c.FetchSports(ctx, types.EnLocale); err != nil {
 		t.Fatal(err)
 	}
-	if got := c.SuccessGeneration(); got != before+1 {
+	if got := c.SuccessCount(); got != before+1 {
 		t.Fatalf("complete body: counter %d -> %d, want one more", before, got)
 	}
 }
 
 // The same holds for a call that does not decode an entity: a POST whose 2xx
 // body cannot be read or verified is not a success.
-func TestClient_SuccessGeneration_CountsAMutationOnlyOnceItsBodyWasVerified(t *testing.T) {
+func TestClient_SuccessCount_CountsAMutationOnlyOnceItsBodyWasVerified(t *testing.T) {
 	var truncated atomic.Bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/xml")
@@ -231,11 +231,11 @@ func TestClient_SuccessGeneration_CountsAMutationOnlyOnceItsBodyWasVerified(t *t
 	ctx := apipolicy.With(t.Context(), apipolicy.Message)
 
 	truncated.Store(true)
-	before := c.SuccessGeneration()
+	before := c.SuccessCount()
 	if ok, err := c.postEmpty(ctx, "/x", true); err == nil || ok {
 		t.Fatalf("truncated body: ok=%v err=%v, want a failure", ok, err)
 	}
-	if got := c.SuccessGeneration(); got != before {
+	if got := c.SuccessCount(); got != before {
 		t.Fatalf("truncated body: the success counter advanced from %d to %d", before, got)
 	}
 
@@ -243,7 +243,7 @@ func TestClient_SuccessGeneration_CountsAMutationOnlyOnceItsBodyWasVerified(t *t
 	if ok, err := c.postEmpty(ctx, "/x", true); err != nil || !ok {
 		t.Fatalf("complete body: ok=%v err=%v", ok, err)
 	}
-	if got := c.SuccessGeneration(); got != before+1 {
+	if got := c.SuccessCount(); got != before+1 {
 		t.Fatalf("complete body: counter %d -> %d, want one more", before, got)
 	}
 }

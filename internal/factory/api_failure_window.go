@@ -37,7 +37,7 @@ type apiFailureWindow struct {
 
 type apiFailureEntry struct {
 	until time.Time
-	gen   uint64
+	count uint64
 }
 
 func (w *apiFailureWindow) clock() time.Time {
@@ -48,25 +48,25 @@ func (w *apiFailureWindow) clock() time.Time {
 }
 
 // blocked reports whether id failed recently and the API has not answered
-// successfully since (gen is the current success counter).
-func (w *apiFailureWindow) blocked(id types.URN, gen uint64) bool {
+// successfully since (count is the current success counter).
+func (w *apiFailureWindow) blocked(id types.URN, count uint64) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	e, ok := w.entries[id]
 	if !ok {
 		return false
 	}
-	if e.gen != gen || !w.clock().Before(e.until) {
+	if e.count != count || !w.clock().Before(e.until) {
 		delete(w.entries, id)
 		return false
 	}
 	return true
 }
 
-// record remembers that building id failed; gen is the success counter
+// record remembers that building id failed; count is the success counter
 // read BEFORE the failed attempt, so a success that landed while it was in
 // flight already voids the entry.
-func (w *apiFailureWindow) record(id types.URN, gen uint64) {
+func (w *apiFailureWindow) record(id types.URN, count uint64) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.entries == nil {
@@ -78,7 +78,7 @@ func (w *apiFailureWindow) record(id types.URN, gen uint64) {
 		// make room by dropping one arbitrary entry (the set is a
 		// best-effort shield, not a ledger).
 		for k, e := range w.entries {
-			if e.gen != gen || !now.Before(e.until) {
+			if e.count != count || !now.Before(e.until) {
 				delete(w.entries, k)
 			}
 		}
@@ -89,7 +89,7 @@ func (w *apiFailureWindow) record(id types.URN, gen uint64) {
 			}
 		}
 	}
-	w.entries[id] = apiFailureEntry{until: now.Add(apiFailureWindowTTL), gen: gen}
+	w.entries[id] = apiFailureEntry{until: now.Add(apiFailureWindowTTL), count: count}
 }
 
 // len is the number of remembered events (tests).

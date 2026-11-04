@@ -139,22 +139,22 @@ type Client struct {
 	lifeCancel context.CancelFunc
 	inflight   sync.WaitGroup
 
-	// successGen counts successful responses of any endpoint: a 2xx whose
+	// successCount counts successful responses of any endpoint: a 2xx whose
 	// body was then read in full (and, for an entity, decoded). The status
 	// line alone does not count, since an API that degrades into slow or
 	// truncated bodies still answers headers, and counting those would void
 	// a consumer's memory of the failure on every request that then fails
 	// on its body. A consumer that remembers a failure together with the
 	// value read before the attempt can tell that the API has answered
-	// since: see SuccessGeneration.
-	successGen atomic.Uint64
+	// since: see SuccessCount.
+	successCount atomic.Uint64
 }
 
-// SuccessGeneration returns a counter that advances on every successful
+// SuccessCount returns a counter that advances on every successful
 // response of any endpoint (a 2xx whose body was read in full). The feed message path uses it to drop
 // everything it remembers about a failing API as soon as the API answers
 // again, whichever call that was.
-func (c *Client) SuccessGeneration() uint64 { return c.successGen.Load() }
+func (c *Client) SuccessCount() uint64 { return c.successCount.Load() }
 
 // ErrClosed is returned by request methods invoked after Close. It
 // WRAPS the shared closed-client sentinel (sdkerr.ErrClosed ==
@@ -773,8 +773,8 @@ func (c *Client) fetchDataValidated(ctx context.Context, path string, entity int
 	} else {
 		// The whole body arrived and decoded: the API answered coherently,
 		// whatever the envelope says. Counted here, not when the headers
-		// arrive (see successGen).
-		c.successGen.Add(1)
+		// arrive (see successCount).
+		c.successCount.Add(1)
 		if rwc, ok := entity.(ResponseWithCode); ok && rwc.Code() != types.OkResponseCode {
 			callErr = &Error{Method: http.MethodGet, Path: path, Status: resp.StatusCode, Code: rwc.Code()}
 		}
@@ -880,8 +880,8 @@ func (c *Client) doNoBody(ctx context.Context, method, path string, idempotent b
 		return false, fmt.Errorf("api: %s %s: %w", method, path, apiErr)
 	}
 	// The body was read in full and verified: the API accepted the request.
-	// Counted here, not when the headers arrive (see successGen).
-	c.successGen.Add(1)
+	// Counted here, not when the headers arrive (see successCount).
+	c.successCount.Add(1)
 	c.emit(pc, nil)
 	return true, nil
 }
@@ -1173,7 +1173,7 @@ func (c *Client) do(ctx context.Context, method, path string, locale *types.Loca
 			// invoke emit() after consuming the body. Streaming = no full-
 			// body materialization regardless of payload size.
 			//
-			// successGen is NOT advanced here: the status line alone does
+			// successCount is NOT advanced here: the status line alone does
 			// not show that the API works (a degraded one answers headers
 			// and then stalls or truncates the body); the caller counts
 			// the response once it has read the body.

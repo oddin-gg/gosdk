@@ -24,7 +24,7 @@ type Manager struct {
 	MarketVoidReasonsCache     *MarketVoidReasonsCache
 
 	// apiClient is the client every cache loads through; kept for
-	// APISuccessGeneration.
+	// APISuccessCount.
 	apiClient *api.Client
 
 	// lifeCancel tears down the manager-wide lifetime ctx that every
@@ -35,14 +35,14 @@ type Manager struct {
 	lifeCancel context.CancelFunc
 }
 
-// APISuccessGeneration returns a counter that advances on every successful
-// response of the REST API, from any call (see api.Client.SuccessGeneration).
+// APISuccessCount returns a counter that advances on every successful
+// response of the REST API, from any call (see api.Client.SuccessCount).
 // Zero, forever, when the manager has no client.
-func (m Manager) APISuccessGeneration() uint64 {
+func (m Manager) APISuccessCount() uint64 {
 	if m.apiClient == nil {
 		return 0
 	}
-	return m.apiClient.SuccessGeneration()
+	return m.apiClient.SuccessCount()
 }
 
 // OnFeedMessageReceived ...

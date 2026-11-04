@@ -55,10 +55,10 @@ type FeedMessageFactory struct {
 	apiFailures apiFailureWindow
 }
 
-// apiGeneration is the REST API's success counter (0 without an entity
+// apiSuccessCount is the REST API's success counter (0 without an entity
 // factory); see apiFailureWindow.
-func (f *FeedMessageFactory) apiGeneration() uint64 {
-	return f.entityFactory.APISuccessGeneration()
+func (f *FeedMessageFactory) apiSuccessCount() uint64 {
+	return f.entityFactory.APISuccessCount()
 }
 
 // messagePolicy returns the ONE call-policy context of a message build and
@@ -69,7 +69,7 @@ func (f *FeedMessageFactory) apiGeneration() uint64 {
 // few seconds, no API request at all (caches may still answer). Public
 // getters are not affected: they keep their own policy.
 func (f *FeedMessageFactory) messagePolicy(ctx context.Context, eventID *types.URN) (context.Context, bool) {
-	skip := eventID != nil && f.apiFailures.blocked(*eventID, f.apiGeneration())
+	skip := eventID != nil && f.apiFailures.blocked(*eventID, f.apiSuccessCount())
 	if skip {
 		return apipolicy.With(ctx, apipolicy.MessageSkip), true
 	}
@@ -121,7 +121,7 @@ func (f *FeedMessageFactory) noteBuildFailure(ctx context.Context, id types.URN,
 	if ctx.Err() != nil || errors.Is(err, sdkerr.ErrClosed) {
 		return
 	}
-	f.apiFailures.record(id, f.apiGeneration())
+	f.apiFailures.record(id, f.apiSuccessCount())
 }
 
 // buildFailWarnInterval bounds each build-failure warn kind to one line

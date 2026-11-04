@@ -335,7 +335,7 @@ func TestMessagePath_WindowStillServesCachedEvents(t *testing.T) {
 		t.Fatal("setup: event not built from a healthy API")
 	}
 	id := types.URN{Prefix: "od", Type: "match", ID: 99}
-	r.factory.apiFailures.record(id, r.factory.apiGeneration())
+	r.factory.apiFailures.record(id, r.factory.apiSuccessCount())
 	r.ctl.failing.Store(true)
 	before := r.ctl.all.Load()
 	if ev := r.buildEvent(t, 99); ev == nil {
@@ -368,7 +368,7 @@ func TestAPIFailureWindow_Bounded(t *testing.T) {
 	if got := w.len(); got > apiFailureWindowMax {
 		t.Fatalf("window holds %d entries, cap is %d", got, apiFailureWindowMax)
 	}
-	// An entry of an older success generation is not honoured and is dropped.
+	// An entry of an older success count is not honoured and is dropped.
 	id := types.URN{Prefix: "od", Type: "match", ID: 1 << 20}
 	w.record(id, 7)
 	if !w.blocked(id, 7) {
