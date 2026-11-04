@@ -355,6 +355,101 @@ func TestActor_SnapshotCompleteDeadline_MaxRecoveryExecutionCapsTheTotalOnTheAli
 	}
 }
 
+// pastTheCap starts a recovery from `from` and ages its chain beyond
+// MaxRecoveryExecution, as a request that never completed would be.
+func pastTheCap(t *testing.T, from time.Time) (*recoveryActor, *recoveryHits) {
+	t.Helper()
+	srv, hits := fixtureSrv(t)
+	t.Cleanup(srv.Close)
+	a := newWiredActorWithCfg(t, srv, newFakeManagerOps(), 1, func(m *minimalCfg) config.Config {
+		return &deadlineCfg{minimalCfg: m, maxRecovery: 12 * time.Minute, deadline: 5 * time.Minute}
+	})
+	startRecovery(t, a, hits, from, 1)
+	a.currentRecovery.chainStartedAt = time.Now().Add(-13 * time.Minute)
+	return a, hits
+}
+
+// afterTheCap checks the request that follows a recovery dropped at the cap
+// reaches back to `want` (zero: the full history, no `after`).
+func afterTheCap(t *testing.T, hits *recoveryHits, want time.Time) {
+	t.Helper()
+	waitRecoverHits(t, hits, 2)
+	got := hits.lastAfterMillis.Load()
+	if want.IsZero() {
+		if got != 0 {
+			t.Fatalf("next recovery: after=%d (%v), want none (the full history)", got, time.UnixMilli(got))
+		}
+		return
+	}
+	if got != want.UnixMilli() {
+		t.Fatalf("next recovery: after=%d (%v), want the original %v", got, time.UnixMilli(got), want)
+	}
+}
+
+// The tick drops a recovery that has outlived MaxRecoveryExecution; the
+// request after it must still reach back to where it started, not to a
+// cursor clamped against a later "now".
+func TestActor_RecoveryCapOnTickKeepsTheOriginalPoint(t *testing.T) {
+	from := time.Now().Add(-10 * time.Minute).Truncate(time.Millisecond)
+	a, hits := pastTheCap(t, from)
+
+	a.onTick(time.Now(), false)
+	if a.currentRecovery != nil || a.recoveryState != types.ErrorRecoveryState {
+		t.Fatalf("setup: the tick left recovery=%v state=%v", a.currentRecovery, a.recoveryState)
+	}
+	if err := a.makeSnapshotRecovery(time.Now().Add(-time.Minute).Truncate(time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	afterTheCap(t, hits, from)
+	waitDetachedDone(t, a, 3*time.Second)
+}
+
+func TestActor_RecoveryCapOnTickKeepsTheFullHistory(t *testing.T) {
+	a, hits := pastTheCap(t, time.Time{})
+
+	a.onTick(time.Now(), false)
+	if a.currentRecovery != nil || a.recoveryState != types.ErrorRecoveryState {
+		t.Fatalf("setup: the tick left recovery=%v state=%v", a.currentRecovery, a.recoveryState)
+	}
+	if err := a.makeSnapshotRecovery(time.Now().Add(-time.Minute).Truncate(time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	afterTheCap(t, hits, time.Time{})
+	waitDetachedDone(t, a, 3*time.Second)
+}
+
+// The alive path drops the same recovery and starts the next one itself,
+// from the producer's cursor: it too must keep the original point.
+func TestActor_RecoveryCapOnAliveKeepsTheOriginalPoint(t *testing.T) {
+	from := time.Now().Add(-10 * time.Minute).Truncate(time.Millisecond)
+	a, hits := pastTheCap(t, from)
+
+	// The producer's cursor is a later point than the dropped request's.
+	now := time.Now()
+	if err := a.pm.SetProducerRecoveryFromTimestamp(t.Context(), 1, now.Add(-time.Minute).Truncate(time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.systemAliveReceived(types.MessageTimestamp{Created: now, Received: now}, true); err != nil {
+		t.Fatal(err)
+	}
+	afterTheCap(t, hits, from)
+	waitDetachedDone(t, a, 3*time.Second)
+}
+
+func TestActor_RecoveryCapOnAliveKeepsTheFullHistory(t *testing.T) {
+	a, hits := pastTheCap(t, time.Time{})
+
+	now := time.Now()
+	if err := a.pm.SetProducerRecoveryFromTimestamp(t.Context(), 1, now.Add(-time.Minute).Truncate(time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.systemAliveReceived(types.MessageTimestamp{Created: now, Received: now}, true); err != nil {
+		t.Fatal(err)
+	}
+	afterTheCap(t, hits, time.Time{})
+	waitDetachedDone(t, a, 3*time.Second)
+}
+
 // A producer disabled in the middle of a recovery is not asked for its
 // snapshot again when the deadline passes.
 func TestActor_SnapshotCompleteDeadline_DisabledProducerIsNotReissued(t *testing.T) {
