@@ -579,6 +579,27 @@ func (m *MarketDescriptionCache) expiredLocales(ctx context.Context, requested [
 	return expired
 }
 
+// msgBackoffGatesColdLoad reports whether a message-mode read of a locale
+// whose catalog is not loaded must not send the catalog request: the
+// message path's own backoff (msgRefreshFailedAt) is running. Without it
+// the backoff covered only the warm, expired refresh, and a cold read (no
+// WithPreloadLocales, or after a clear) went on sending the request and
+// waiting out its budget for every message that needs names, whenever
+// the download is slower than that budget. Public getters never wait on
+// it: they use the longer timeouts and have no message to hold up.
+func (m *MarketDescriptionCache) msgBackoffGatesColdLoad(ctx context.Context, l types.Locale) bool {
+	if apipolicy.ModeOf(ctx) == apipolicy.Default {
+		return false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.localeLoadedLocked(l) {
+		return false
+	}
+	failedAt, ok := m.msgRefreshFailedAt[l]
+	return ok && m.refreshBackoff > 0 && time.Since(failedAt) < m.refreshBackoff
+}
+
 // marketCommitGateHook is a test-only seam invoked by a bulk flight
 // after it has advanced the fetchCursor (winning the locale) but
 // before any store — the window a superseded flight's callers must
@@ -621,6 +642,9 @@ func (m *MarketDescriptionCache) loadOne(ctx context.Context, marketID *int, var
 		// the next bulk call downloaded the catalog yet again.
 		isDynamicVariant := marketID != nil && variantStr != "" && utils.IsMarketVariantWithDynamicOutcomes(variantStr)
 		loc := locale
+		if !isDynamicVariant && m.msgBackoffGatesColdLoad(ctx, loc) {
+			return fmt.Errorf("market catalog %s: %w (the message path's last catalog load failed)", loc, apipolicy.ErrSkipped)
+		}
 		for {
 			gen := m.flightGen.Load()
 			var sfKey string

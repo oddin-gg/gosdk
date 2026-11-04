@@ -806,3 +806,80 @@ func (m *MarketDescriptionCache) expireCatalogMark(l types.Locale) {
 	delete(m.loadedLocales, l)
 	m.mu.Unlock()
 }
+
+// TestMarketDescriptionCache_MessagePathBackoffGatesTheColdLoad: with no
+// catalog loaded (no preload, or after a clear), a message-mode read that
+// finds the message path's backoff running does not send the catalog
+// request and resolves no names, instead of waiting out its budget for
+// every message. A public getter still fetches, and once the backoff
+// lapses the message path fetches again.
+func TestMarketDescriptionCache_MessagePathBackoffGatesTheColdLoad(t *testing.T) {
+	var hits atomic.Int64
+	var hang atomic.Bool
+	hang.Store(true)
+	srv := slowCatalogServer(t, &hits, &hang)
+	mc := newMarketDescriptionCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	t.Cleanup(cancel)
+	mc.refreshBackoff = time.Hour
+	locales := []types.Locale{types.EnLocale}
+	msg := func() context.Context {
+		return apipolicy.WithBudget(ctx, apipolicy.Message, 100*time.Millisecond)
+	}
+
+	// Cold catalog, hanging API: the first read sends and runs out of budget.
+	if _, err := mc.MarketDescriptionByID(msg(), 9, types.None[string](), locales); err == nil {
+		t.Fatal("first message-mode read: want an error (no names)")
+	}
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("hits = %d, want 1", got)
+	}
+
+	// Inside the backoff: no request, and the error says it was not sent.
+	_, err := mc.MarketDescriptionByID(msg(), 9, types.None[string](), locales)
+	if !errors.Is(err, apipolicy.ErrSkipped) {
+		t.Fatalf("second message-mode read: err = %v, want ErrSkipped", err)
+	}
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("hits = %d, want 1: no request within the message-path backoff", got)
+	}
+
+	// A public getter is not held back.
+	hang.Store(false)
+	if _, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), locales); err != nil {
+		t.Fatalf("public read: %v", err)
+	}
+	if got := hits.Load(); got != 2 {
+		t.Fatalf("hits = %d, want 2: the getter must fetch", got)
+	}
+}
+
+// The backoff of the test above expires: the next message-mode read of a
+// cold catalog fetches again.
+func TestMarketDescriptionCache_MessagePathColdBackoffExpires(t *testing.T) {
+	var hits atomic.Int64
+	var hang atomic.Bool
+	hang.Store(true)
+	srv := slowCatalogServer(t, &hits, &hang)
+	mc := newMarketDescriptionCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	t.Cleanup(cancel)
+	mc.refreshBackoff = 30 * time.Millisecond
+	locales := []types.Locale{types.EnLocale}
+	msg := func() context.Context {
+		return apipolicy.WithBudget(ctx, apipolicy.Message, 100*time.Millisecond)
+	}
+
+	if _, err := mc.MarketDescriptionByID(msg(), 9, types.None[string](), locales); err == nil {
+		t.Fatal("first message-mode read: want an error")
+	}
+	// The API recovers and the backoff lapses.
+	hang.Store(false)
+	time.Sleep(60 * time.Millisecond)
+	if _, err := mc.MarketDescriptionByID(msg(), 9, types.None[string](), locales); err != nil {
+		t.Fatalf("message-mode read after the backoff: %v", err)
+	}
+	if got := hits.Load(); got != 2 {
+		t.Fatalf("hits = %d, want 2: the lapsed backoff must allow the fetch", got)
+	}
+}
