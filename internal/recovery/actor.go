@@ -1605,15 +1605,18 @@ func (a *recoveryActor) producerDownObserved(reason types.ProducerDownReason, ob
 			obs = &cursorObservation{at: ts, err: err}
 		}
 		ts := a.lowerDelayFloor(*obs)
-		if a.recoveryState == types.StartedRecoveryState && a.currentRecovery != nil &&
+		if a.isPerformingRecovery() && a.currentRecovery != nil &&
 			a.delayDownRequestID != a.currentRecovery.recoveryID {
 			// Processing fell behind while this snapshot request is in
 			// flight (the first stale evaluation of it; the producer may
 			// already be down for an earlier delay, e.g. during a repeat).
 			// It is not interrupted, so its completion decides whether to
-			// repeat it (snapshotRecoveryFinished). A failed lookup leaves
-			// the cursor zero; the repeat then reaches back to the
-			// recovery's own start.
+			// repeat it (snapshotRecoveryFinished). An interrupted recovery
+			// is marked too: its replacement is issued while processing
+			// may still lag, and takes the mark over
+			// (makeSnapshotRecovery). A failed lookup leaves the cursor
+			// zero; the repeat then reaches back to the recovery's own
+			// start.
 			a.delayDownRequestID = a.currentRecovery.recoveryID
 			a.delayCursor = ts
 		}

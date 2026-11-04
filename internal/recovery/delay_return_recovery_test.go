@@ -1893,3 +1893,68 @@ func TestActor_ProcessingDelayDown_UnreadableCursorOnTheTickIsNotReadAgain(t *te
 		t.Fatalf("floor = %v: taken from a second read of the cursor", a.recoveryFloor)
 	}
 }
+
+// Processing falls behind after a lost subscription put the recovery into
+// the interrupted state and before its replacement starts. The delay is
+// marked on the interrupted recovery and handed to the replacement, which
+// must not report the producer up with the gap unfilled.
+func TestActor_DelayDownDuringAnInterruptedRecovery_ReplacementIsRepeated(t *testing.T) {
+	fake := newFakeManagerOps()
+	now := time.Now().Truncate(time.Millisecond)
+	a, hits := steadyActor(t, fake, now.Add(-10*time.Second))
+	if err := a.systemAliveReceived(aliveAt(now.Add(-8*time.Second)), true); err != nil {
+		t.Fatal(err)
+	}
+	a.onMessageProcessingEnded(now.Add(-5 * time.Second))
+	if err := a.systemAliveReceived(aliveAt(now), false); err != nil {
+		t.Fatal(err)
+	}
+	waitRecoverHits(t, hits, 2)
+	r1 := a.currentRecovery.recoveryID
+	// The subscription is lost again while R1 runs.
+	if err := a.systemAliveReceived(aliveAt(now), false); err != nil {
+		t.Fatal(err)
+	}
+	if a.recoveryState != types.InterruptedRecoveryState {
+		t.Fatalf("setup: state = %v, want Interrupted", a.recoveryState)
+	}
+
+	// Processing falls behind now, with R1 interrupted.
+	p := holdProcessing(a)
+	tickAt(a, now.Add(30*time.Second))
+	if a.downReason != types.ProcessingQueueDelayViolationProducerDownReason || a.delayDownRequestID != r1 {
+		t.Fatalf("down reason %v, delay mark %d, want the delay marked on the interrupted R1 %d",
+			a.downReason, a.delayDownRequestID, r1)
+	}
+	_, upBefore := downEventCounts(fake)
+
+	// R1 completes on the wire; the replacement is issued with the mark.
+	if err := a.snapshotRecoveryFinished(r1); err != nil {
+		t.Fatal(err)
+	}
+	waitRecoverHits(t, hits, 3)
+	r2 := a.currentRecovery.recoveryID
+	if r2 == r1 || a.delayDownRequestID != r2 {
+		t.Fatalf("replacement id=%d (R1 %d) mark=%d, want the mark carried to the replacement", r2, r1, a.delayDownRequestID)
+	}
+
+	// The replacement completes while processing still lags.
+	if err := a.snapshotRecoveryFinished(r2); err != nil {
+		t.Fatal(err)
+	}
+	if _, up := downEventCounts(fake); up != upBefore {
+		t.Fatalf("producer-up events went from %d to %d, want none", upBefore, up)
+	}
+	if !a.isFlaggedDown() || !a.delayRepeatWaiting {
+		t.Fatalf("down=%v waiting=%v, want down with a repeat waiting", a.isFlaggedDown(), a.delayRepeatWaiting)
+	}
+	catchUp(a, p, time.Now())
+	waitRecoverHits(t, hits, 4)
+	if err := a.snapshotRecoveryFinished(a.currentRecovery.recoveryID); err != nil {
+		t.Fatal(err)
+	}
+	if a.isFlaggedDown() {
+		t.Fatal("producer still down after the repeat completed")
+	}
+	waitDetachedDone(t, a, 3*time.Second)
+}
