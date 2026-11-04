@@ -336,6 +336,15 @@ func WithInitialSnapshotTime(d time.Duration) Option {
 
 // WithHTTPClientTimeout overrides the per-request timeout on the API client.
 // Default 30s; valid range is up to 60s in practice.
+//
+// It does not bound the REST requests of the feed message path, which share
+// one fixed 2 s budget per message (see "When the REST API is down" in the
+// README). A cold event build makes several sequential requests (summary,
+// tournament, competitors, fixture, market catalog per locale), and a request
+// that times out after it was sent counts as an API failure, so with an API
+// that answers each request in more than roughly 250 ms the first messages of
+// a new match are delivered with a nil event and no market names. Use
+// WithPreloadLocales to take the market catalog out of that build.
 func WithHTTPClientTimeout(d time.Duration) Option {
 	return func(c *Config) { c.httpClientTimeout = d }
 }

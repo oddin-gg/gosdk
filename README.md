@@ -227,12 +227,33 @@ tournament, competitors and fixture that are not cached yet). That happens on
 the session goroutine, so it never waits for a failing API the way a public
 getter does: one attempt per request, no retries, and the whole build shares
 one 2 s budget (each request gets what is left of it); market and outcome
-name resolution during the build is covered by the same budget. When the
-build fails (a failed market or outcome name lookup counts too), the message
-is delivered at once with a nil event or nameless markets, and messages for
-the same event skip the API for up to 10 seconds; the first successful API
-response of any call ends that at once. The public entity reads
-(`Client.Match`, ...) keep their retries and are not affected.
+name resolution during the build is covered by the same budget.
+
+Only a failure **of the API** opens the event's failure window: a 5xx, a 429,
+a transport error, a timeout after the request was sent, a
+`SERVICE_UNAVAILABLE` envelope, or a response that cannot be read. A failed
+event build or market/outcome name lookup of that kind delivers the message
+at once with a nil event or nameless markets, and messages for the same
+event then skip the API for up to 10 seconds; the first successful API
+response of any call ends that at once. These do **not** open the window: a
+404 for an event that is not in the API yet (the message is delivered with a
+nil event, but names still resolve and the next message tries again), any
+other 4xx, a request that was never sent because the 2 s budget was already
+spent, and local name-resolution errors over a healthy catalog. Market name
+catalogs have a window of their own: after a catalog download for a message
+failed or ran out of its budget, messages for the next 30 seconds send no
+catalog request and resolve no names for that locale (a stale catalog keeps
+serving its names). The public entity reads (`Client.Match`, ...) keep their
+retries and are not affected.
+
+**A healthy but slow API counts too.** A cold event build is several
+sequential requests (the summary, the tournament, each competitor, the
+fixture, and the market catalog for every locale) that share the one 2 s
+budget, and a timeout after a request was sent is a failure of the API. With
+requests slower than roughly 250 ms the first messages of a new match
+therefore arrive with a nil event and no market names, and open the window,
+where a public getter would return the complete event, late. Add `WithPreloadLocales(...)` so the
+market catalog is loaded up front and does not take part in that build.
 
 ### Delivery guarantees
 
@@ -258,6 +279,10 @@ the subscription has re-bound its queue, the next alive starts a snapshot
 recovery reaching back at least to the loss (one alive interval further
 back than strictly needed, on purpose). Watch
 `RecoveryEvents()` / `ProducerStatus()` for the down → up cycle.
+A producer status is also published when only its `IsDelayed` flag flips (a
+delay starting or ending), and a repeated down status with the same reason is
+published too, so do not count statuses as up/down transitions: compare with
+the previous status you saw.
 
 ### Recovery
 
