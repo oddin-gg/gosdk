@@ -10,6 +10,7 @@ import (
 	"github.com/oddin-gg/gosdk/internal/apipolicy"
 	"github.com/oddin-gg/gosdk/internal/cache"
 	"github.com/oddin-gg/gosdk/internal/sdkerr"
+	"github.com/oddin-gg/gosdk/types"
 )
 
 // reportNameFailure records only what says the API is unavailable: a
@@ -26,6 +27,9 @@ func TestReportNameFailure_Classification(t *testing.T) {
 		{"500, wrapped", fmt.Errorf("fetch market description: %w", &api.Error{Status: 500}), true},
 		{"transport failure", errors.New("connection refused"), true},
 		{"404 not found", &api.Error{Status: 404}, false},
+		{"200 envelope not found", &api.Error{Status: 200, Code: types.NotFoundResponseCode}, false},
+		{"200 envelope forbidden", &api.Error{Status: 200, Code: types.ForbiddenResponseCode}, false},
+		{"200 envelope service unavailable", &api.Error{Status: 200, Code: types.ServiceUnavailableResponseCode}, true},
 		{"404, wrapped", fmt.Errorf("fetch market description: %w", &api.Error{Status: 404}), false},
 		{"context canceled, wrapped", fmt.Errorf("lookup: %w", context.Canceled), false},
 		{"client closed", sdkerr.ErrClosed, false},
