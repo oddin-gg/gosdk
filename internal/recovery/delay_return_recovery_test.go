@@ -1594,3 +1594,85 @@ func TestActor_DelayDownDuringEveryAttempt_UnreadableTimingStaysDownAndKeepsTheF
 	failing.Store(false)
 	requireReturnRecoversFrom(t, a, hits, p, int32(3+maxDelayRepeats), want)
 }
+
+// A recovery that processing fell behind during is interrupted by an alive
+// that says "not subscribed", and replaced once it completes. The
+// replacement starts while processing may still lag, so its replay can be
+// dropped as well: it carries the need to repeat, and its completion with
+// processing behind does not report the producer up.
+func TestActor_DelayDownDuringRecovery_InterruptedReplacementKeepsTheRepeatDecision(t *testing.T) {
+	fake := newFakeManagerOps()
+	a, hits, r1, _ := genuineDelayDuringRecovery(t, fake)
+	p := holdProcessing(a)
+	if a.delayDownRequestID != r1 {
+		t.Fatalf("setup: delay mark = %d, want R1 %d", a.delayDownRequestID, r1)
+	}
+	if err := a.systemAliveReceived(aliveAt(time.Now()), false); err != nil {
+		t.Fatal(err)
+	}
+	if a.recoveryState != types.InterruptedRecoveryState {
+		t.Fatalf("setup: state = %v, want Interrupted", a.recoveryState)
+	}
+	_, upBefore := downEventCounts(fake)
+
+	// R1 completes on the wire; the interruption asks for a fresh one.
+	if err := a.snapshotRecoveryFinished(r1); err != nil {
+		t.Fatal(err)
+	}
+	waitRecoverHits(t, hits, 3)
+	r2 := a.currentRecovery.recoveryID
+	if r2 == r1 || a.recoveryState != types.StartedRecoveryState {
+		t.Fatalf("replacement: id=%d (R1 %d) state=%v, want a new Started recovery", r2, r1, a.recoveryState)
+	}
+	if a.delayDownRequestID != r2 {
+		t.Fatalf("delay mark = %d, want the replacement %d", a.delayDownRequestID, r2)
+	}
+
+	// The replacement completes while processing still lags.
+	if err := a.snapshotRecoveryFinished(r2); err != nil {
+		t.Fatal(err)
+	}
+	if _, up := downEventCounts(fake); up != upBefore {
+		t.Fatalf("producer-up events went from %d to %d, want none", upBefore, up)
+	}
+	if !a.isFlaggedDown() || !a.delayRepeatWaiting || a.recoveryState != types.CompletedRecoveryState {
+		t.Fatalf("down=%v waiting=%v state=%v, want down with a repeat waiting", a.isFlaggedDown(), a.delayRepeatWaiting, a.recoveryState)
+	}
+
+	// Processing catches up: the repeat goes out and completes the chain.
+	catchUp(a, p, time.Now())
+	waitRecoverHits(t, hits, 4)
+	if err := a.snapshotRecoveryFinished(a.currentRecovery.recoveryID); err != nil {
+		t.Fatal(err)
+	}
+	if a.isFlaggedDown() {
+		t.Fatal("producer still down after the repeat completed")
+	}
+	waitDetachedDone(t, a, 3*time.Second)
+}
+
+// The same when the interrupted recovery is replaced by the next alive
+// before it has completed (a lost subscription ends this way).
+func TestActor_DelayDownDuringRecovery_InterruptedThenReplacedByAnAlive_KeepsTheRepeatDecision(t *testing.T) {
+	fake := newFakeManagerOps()
+	a, hits, r1, _ := genuineDelayDuringRecovery(t, fake)
+	holdProcessing(a)
+	if err := a.systemAliveReceived(aliveAt(time.Now()), false); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.systemAliveReceived(aliveAt(time.Now()), true); err != nil {
+		t.Fatal(err)
+	}
+	waitRecoverHits(t, hits, 3)
+	r2 := a.currentRecovery.recoveryID
+	if r2 == r1 || a.delayDownRequestID != r2 {
+		t.Fatalf("replacement id=%d (R1 %d) delay mark=%d, want the mark on the replacement", r2, r1, a.delayDownRequestID)
+	}
+	if err := a.snapshotRecoveryFinished(r2); err != nil {
+		t.Fatal(err)
+	}
+	if !a.isFlaggedDown() || !a.delayRepeatWaiting {
+		t.Fatalf("down=%v waiting=%v, want down with a repeat waiting", a.isFlaggedDown(), a.delayRepeatWaiting)
+	}
+	waitDetachedDone(t, a, 3*time.Second)
+}

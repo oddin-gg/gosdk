@@ -1822,9 +1822,26 @@ func (a *recoveryActor) resumeDeferredRecovery() {
 }
 
 func (a *recoveryActor) makeSnapshotRecovery(timestamp time.Time) error {
-	// A recovery that is not a repeat starts a new chain of delay repeats.
-	a.abandonDelayRepeat()
-	return a.issueSnapshotRecovery(time.Now(), a.resolveRecoverFrom(time.Now(), timestamp, true))
+	// A recovery that processing fell behind during and that something else
+	// replaces before it completed (an interruption, a lost subscription, a
+	// failed request) leaves its mark with the replacement: the replacement
+	// starts while processing may still lag, so its own replay can be
+	// dropped just as well, and clearing the mark here would let it report
+	// the producer up with that gap unfilled. A waiting repeat has no
+	// request to hand the mark to; the recovery that replaces it reaches back
+	// to the repeat's start instead (abandonDelayRepeat).
+	carry := a.delayDownRequestID != 0 && !a.delayRepeatWaiting
+	if !carry {
+		// A recovery that is not a repeat starts a new chain of delay repeats.
+		a.abandonDelayRepeat()
+	}
+	if err := a.issueSnapshotRecovery(time.Now(), a.resolveRecoverFrom(time.Now(), timestamp, true)); err != nil {
+		return err
+	}
+	if carry {
+		a.delayDownRequestID = a.currentRecovery.recoveryID
+	}
+	return nil
 }
 
 // resolveRecoverFrom turns the cursor a recovery would use on its own into
