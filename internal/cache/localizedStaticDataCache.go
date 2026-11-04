@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sync/singleflight"
@@ -160,60 +161,80 @@ func (l *LocalizedStaticDataCache) loadLocales(ctx context.Context, locales []ty
 			return err
 		}
 		loc := locale
-		ch := l.sf.DoChan(string(loc)+apipolicy.Suffix(ctx), func() (interface{}, error) {
-			// Double-check inside the critical region.
-			l.mux.RLock()
-			_, alreadyLoaded := l.loadedLocales[loc]
-			l.mux.RUnlock()
-			if alreadyLoaded {
-				return nil, nil
-			}
+		// A flight runs on its STARTER's budget: a message-path caller
+		// that only joined one can get the starter's budget running out
+		// without having used its own, and then asks once more (see
+		// lru.JoinerMayRetry).
+		flight := func(owner *atomic.Bool) <-chan singleflight.Result {
+			return l.sf.DoChan(string(loc)+apipolicy.Suffix(ctx), func() (interface{}, error) {
+				owner.Store(true)
+				// Double-check inside the critical region.
+				l.mux.RLock()
+				_, alreadyLoaded := l.loadedLocales[loc]
+				l.mux.RUnlock()
+				if alreadyLoaded {
+					return nil, nil
+				}
 
-			// Built INSIDE the flight body: only the winner runs this
-			// closure, so coalesced waiters don't each retain a timer.
-			fetchCtx, cancel := context.WithTimeout(l.lifeCtx, lru.LoadTimeout)
-			defer cancel()
-			fetchCtx = apipolicy.Carry(fetchCtx, ctx) // the caller's call policy, not its cancellation
-			data, err := l.fetcher(fetchCtx, loc)
-			if err != nil {
-				return nil, err
-			}
+				// Built INSIDE the flight body: only the winner runs this
+				// closure, so coalesced waiters don't each retain a timer.
+				fetchCtx, cancel := context.WithTimeout(l.lifeCtx, lru.LoadTimeout)
+				defer cancel()
+				fetchCtx = apipolicy.Carry(fetchCtx, ctx) // the caller's call policy, not its cancellation
+				data, err := l.fetcher(fetchCtx, loc)
+				if err != nil {
+					return nil, err
+				}
 
-			l.mux.Lock()
-			// Close-gate: a flight whose fetch finished just before the
-			// cache lifetime was cancelled could otherwise pause here,
-			// survive a successful Client.Close, then resume and commit —
-			// contradicting Close's "nil return ⇒ all internal work
-			// finished" contract. Re-check the lifetime immediately before
-			// the commit (mirrors the EventCache / whoami close-gates),
-			// shrinking the window to the few instructions under the lock.
-			if l.lifeCtx.Err() != nil {
+				l.mux.Lock()
+				// Close-gate: a flight whose fetch finished just before the
+				// cache lifetime was cancelled could otherwise pause here,
+				// survive a successful Client.Close, then resume and commit —
+				// contradicting Close's "nil return ⇒ all internal work
+				// finished" contract. Re-check the lifetime immediately before
+				// the commit (mirrors the EventCache / whoami close-gates),
+				// shrinking the window to the few instructions under the lock.
+				if l.lifeCtx.Err() != nil {
+					l.mux.Unlock()
+					return nil, l.lifeCtx.Err()
+				}
+				for _, sd := range data {
+					localCache, ok := l.internalCache[sd.GetID()]
+					if !ok {
+						localCache = make(map[types.Locale]string)
+						l.internalCache[sd.GetID()] = localCache
+					}
+					if d, ok := sd.GetDescription().Get(); ok {
+						localCache[loc] = d
+					}
+				}
+				// Mark the locale loaded EVEN when data is empty so the
+				// next call doesn't re-fetch unconditionally.
+				l.loadedLocales[loc] = struct{}{}
 				l.mux.Unlock()
-				return nil, l.lifeCtx.Err()
-			}
-			for _, sd := range data {
-				localCache, ok := l.internalCache[sd.GetID()]
-				if !ok {
-					localCache = make(map[types.Locale]string)
-					l.internalCache[sd.GetID()] = localCache
+				return nil, nil
+			})
+		}
+		retried := false
+		owner := new(atomic.Bool)
+		ch := flight(owner)
+	wait:
+		for {
+			select {
+			case r := <-ch:
+				if r.Err != nil {
+					if !retried && !owner.Load() && lru.JoinerMayRetry(ctx, r.Err) {
+						retried = true
+						owner = new(atomic.Bool)
+						ch = flight(owner)
+						continue
+					}
+					return r.Err
 				}
-				if d, ok := sd.GetDescription().Get(); ok {
-					localCache[loc] = d
-				}
+				break wait
+			case <-ctx.Done():
+				return ctx.Err()
 			}
-			// Mark the locale loaded EVEN when data is empty so the
-			// next call doesn't re-fetch unconditionally.
-			l.loadedLocales[loc] = struct{}{}
-			l.mux.Unlock()
-			return nil, nil
-		})
-		select {
-		case r := <-ch:
-			if r.Err != nil {
-				return r.Err
-			}
-		case <-ctx.Done():
-			return ctx.Err()
 		}
 	}
 	return nil

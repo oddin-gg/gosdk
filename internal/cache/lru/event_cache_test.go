@@ -887,3 +887,79 @@ func TestEventCache_AdmissionRedoesALoadWhoseBaseWasEvicted(t *testing.T) {
 		t.Fatalf("locales = %v, want just de (en was evicted)", v.Locales())
 	}
 }
+
+// A message-path caller that joined a flight started by a message with little
+// budget left gets that flight's deadline error without having used its own
+// budget: it asks once more under its own. The starter keeps its own error.
+func TestEventCache_Get_JoinerRetriesOnceWhenTheStartersBudgetRanOut(t *testing.T) {
+	var calls atomic.Int32
+	entered := make(chan struct{})
+	gate := make(chan struct{})
+	ok := recordingLoader(&calls, false)
+	loader := func(ctx context.Context, key string, locales []string, existing *localizedFoo, has bool) (*localizedFoo, error) {
+		if calls.Load() == 0 {
+			calls.Add(1)
+			close(entered)
+			<-gate
+			return nil, context.DeadlineExceeded
+		}
+		return ok(ctx, key, locales, existing, has)
+	}
+	c := NewEventCache[string, string, *localizedFoo](Config{}, loader)
+	starterCtx := apipolicy.WithBudget(t.Context(), apipolicy.Message, time.Millisecond)
+	joinerCtx := apipolicy.With(t.Context(), apipolicy.Message)
+
+	starter := make(chan error, 1)
+	go func() {
+		_, _, err := c.Get(starterCtx, "k", []string{"en"})
+		starter <- err
+	}()
+	<-entered
+	joiner := make(chan error, 1)
+	go func() {
+		_, _, err := c.Get(joinerCtx, "k", []string{"en"})
+		joiner <- err
+	}()
+	waitJoined()
+	close(gate)
+
+	if err := <-joiner; err != nil {
+		t.Fatalf("joiner err = %v, want success from the retry under its own budget", err)
+	}
+	if err := <-starter; !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("starter err = %v, want its own deadline error", err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("loads = %d, want 2 (the flight and one retry; the starter does not retry)", got)
+	}
+}
+
+// At most one retry per call: a second deadline error is returned.
+func TestEventCache_Get_JoinerRetriesAtMostOnce(t *testing.T) {
+	var calls atomic.Int32
+	entered := make(chan struct{})
+	gate := make(chan struct{})
+	loader := func(context.Context, string, []string, *localizedFoo, bool) (*localizedFoo, error) {
+		if calls.Add(1) == 1 {
+			close(entered)
+			<-gate
+		}
+		return nil, context.DeadlineExceeded
+	}
+	c := NewEventCache[string, string, *localizedFoo](Config{}, loader)
+	go func() { _, _, _ = c.Get(apipolicy.With(t.Context(), apipolicy.Message), "k", []string{"en"}) }()
+	<-entered
+	joiner := make(chan error, 1)
+	go func() {
+		_, _, err := c.Get(apipolicy.With(t.Context(), apipolicy.Message), "k", []string{"en"})
+		joiner <- err
+	}()
+	waitJoined()
+	close(gate)
+	if err := <-joiner; !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want the deadline error after the one retry", err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("loads = %d, want 2", got)
+	}
+}

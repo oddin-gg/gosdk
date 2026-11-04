@@ -403,3 +403,70 @@ func TestLocalizedStaticDataCache_MessagePolicyLoadIsIndependentOfAGettersLoad(t
 		t.Fatalf("getter: %v", err)
 	}
 }
+
+// A message-path caller that joined a flight started by a message with little
+// budget left gets that flight's deadline error without having used its own
+// budget: it asks once more under its own. The starter keeps its own error.
+func TestLocalizedStaticDataCache_JoinerRetriesOnceWhenTheStartersBudgetRanOut(t *testing.T) {
+	var calls atomic.Int32
+	entered := make(chan struct{})
+	gate := make(chan struct{})
+	c := refreshTestCache(func(context.Context, types.Locale) ([]types.StaticData, error) {
+		if calls.Add(1) == 1 {
+			close(entered)
+			<-gate
+			return nil, context.DeadlineExceeded
+		}
+		return []types.StaticData{{ID: 1, Description: types.Some("one")}}, nil
+	})
+	t.Cleanup(c.Close)
+	locales := []types.Locale{types.EnLocale}
+	starterCtx := apipolicy.WithBudget(t.Context(), apipolicy.Message, time.Millisecond)
+	joinerCtx := apipolicy.With(t.Context(), apipolicy.Message)
+
+	starter := make(chan error, 1)
+	go func() { starter <- c.loadLocales(starterCtx, locales) }()
+	<-entered
+	joiner := make(chan error, 1)
+	go func() { joiner <- c.loadLocales(joinerCtx, locales) }()
+	time.Sleep(50 * time.Millisecond) // the joiner parks on the flight
+	close(gate)
+
+	if err := <-joiner; err != nil {
+		t.Fatalf("joiner err = %v, want success from the retry under its own budget", err)
+	}
+	if err := <-starter; !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("starter err = %v, want its own deadline error", err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("fetches = %d, want 2 (the flight and one retry; the starter does not retry)", got)
+	}
+}
+
+// At most one retry per call: a second deadline error is returned.
+func TestLocalizedStaticDataCache_JoinerRetriesAtMostOnce(t *testing.T) {
+	var calls atomic.Int32
+	entered := make(chan struct{})
+	gate := make(chan struct{})
+	c := refreshTestCache(func(context.Context, types.Locale) ([]types.StaticData, error) {
+		if calls.Add(1) == 1 {
+			close(entered)
+			<-gate
+		}
+		return nil, context.DeadlineExceeded
+	})
+	t.Cleanup(c.Close)
+	locales := []types.Locale{types.EnLocale}
+	go func() { _ = c.loadLocales(apipolicy.With(t.Context(), apipolicy.Message), locales) }()
+	<-entered
+	joiner := make(chan error, 1)
+	go func() { joiner <- c.loadLocales(apipolicy.With(t.Context(), apipolicy.Message), locales) }()
+	time.Sleep(50 * time.Millisecond)
+	close(gate)
+	if err := <-joiner; !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want the deadline error after the one retry", err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("fetches = %d, want 2", got)
+	}
+}

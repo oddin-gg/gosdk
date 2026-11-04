@@ -272,117 +272,137 @@ func (c *EventCache[K, L, T]) get(ctx context.Context, key K, locales []L, clear
 	// The LoadTimeout ctx is created INSIDE the flight body — only the
 	// winning caller's closure runs, so building it out here would leak
 	// one live timer per coalesced waiter until the 60s timeout fired.
-	ch := c.sf.DoChan(c.sfKeyFor(ctx, key), func() (any, error) {
-		loadCtx, loadCancel := context.WithTimeout(base, LoadTimeout)
-		defer loadCancel()
-		// The load is detached from this caller's cancellation, not from
-		// its call policy: a message-path caller's load must stay a
-		// single short attempt.
-		loadCtx = apipolicy.Carry(loadCtx, ctx)
-		// Snapshot the flight's start BEFORE reading the existing entry:
-		// the pre-Add check below discards this flight's merge if a
-		// Clear lands after this point (see clearedAt field doc).
-		started := time.Now()
-		// Re-check inside the singleflight critical region in case another
-		// goroutine populated the entry while we were waiting.
-		existing, hadExisting := c.lru.Get(key)
-		if hadExisting && coversAll(existing.Locales(), locales) {
-			return existing, nil
-		}
-
-		missing := missingLocales(existingLocales(existing, hadExisting), locales)
-		if len(missing) == 0 {
-			if hadExisting {
+	//
+	// A flight runs on its STARTER's budget: a message-path caller that
+	// only joined one can get the starter's budget running out without
+	// having used its own, and then asks once more (see JoinerMayRetry).
+	// The retry is per call and independent of the recursion counters.
+	flight := func(owner *atomic.Bool) <-chan singleflight.Result {
+		return c.sf.DoChan(c.sfKeyFor(ctx, key), func() (any, error) {
+			owner.Store(true)
+			loadCtx, loadCancel := context.WithTimeout(base, LoadTimeout)
+			defer loadCancel()
+			// The load is detached from this caller's cancellation, not from
+			// its call policy: a message-path caller's load must stay a
+			// single short attempt.
+			loadCtx = apipolicy.Carry(loadCtx, ctx)
+			// Snapshot the flight's start BEFORE reading the existing entry:
+			// the pre-Add check below discards this flight's merge if a
+			// Clear lands after this point (see clearedAt field doc).
+			started := time.Now()
+			// Re-check inside the singleflight critical region in case another
+			// goroutine populated the entry while we were waiting.
+			existing, hadExisting := c.lru.Get(key)
+			if hadExisting && coversAll(existing.Locales(), locales) {
 				return existing, nil
 			}
-			// Cold key + no requested locales: nothing cached and
-			// nothing to load. Returning the zero T here would box a
-			// typed-nil into the flight result (`r.Val == nil` is false
-			// for a nil *T in an interface) and panic on the coverage
-			// re-check's Locales() call. Surface it as an error instead.
-			return zero, fmt.Errorf("no cached entry for key %v and no locales requested: %w", key, ErrEntryNotPopulated)
-		}
 
-		// A load that finds the cache changed under it (below) is redone
-		// on the new base; bounded so a storm of concurrent admissions
-		// cannot livelock a flight.
-		var updated T
-		for merges := 0; ; merges++ {
-			var lerr error
-			updated, lerr = c.loader(loadCtx, key, missing, existing, hadExisting)
-			if lerr != nil {
-				return zero, lerr
-			}
-
-			// Sanity check: every requested locale should now be present.
-			if !coversAll(updated.Locales(), locales) {
-				return zero, fmt.Errorf("loader for key %v returned without populating all requested locales: %w", key, ErrEntryNotPopulated)
-			}
-
-			// Admit-or-discard, mutually exclusive with Clear: if a Clear
-			// landed after `started`, our merge base (and thus `updated`)
-			// may contain invalidated data — discard and let the caller
-			// retry from the now-empty entry.
-			//
-			// Close-gate: a flight whose fetch completed just before the
-			// owner's lifetime was cancelled could otherwise pause here,
-			// survive a successful client Close, then resume and mutate the
-			// cache — contradicting Close's quiescence guarantee. The
-			// re-check immediately before admission shrinks that window to
-			// a few instructions. (base is the lifetime ctx when the owner
-			// configured one; the WithoutCancel fallback never fires.)
-			c.clearMu.Lock()
-			cleared := c.clearedAt[key].After(started) || c.purgedAt.After(started) || base.Err() != nil
-			if cleared {
-				c.clearMu.Unlock()
-				return zero, errClearedDuringLoad
-			}
-			// Flights of different call policies for the same key run
-			// concurrently, each merging into a clone of the entry it
-			// saw: the one admitted second would overwrite the locales
-			// the first loaded. If the cache no longer holds the entry
-			// this load was based on, merge on top of what it holds now
-			// (the other flight may already cover everything needed).
-			if cur, curOK := c.lru.Peek(key); merges < maxAdmissionMerges && (curOK != hadExisting || (curOK && cur != existing)) {
-				c.clearMu.Unlock()
-				existing, hadExisting = cur, curOK
-				if hadExisting && coversAll(existing.Locales(), locales) {
+			missing := missingLocales(existingLocales(existing, hadExisting), locales)
+			if len(missing) == 0 {
+				if hadExisting {
 					return existing, nil
 				}
-				missing = missingLocales(existingLocales(existing, hadExisting), locales)
-				continue
+				// Cold key + no requested locales: nothing cached and
+				// nothing to load. Returning the zero T here would box a
+				// typed-nil into the flight result (`r.Val == nil` is false
+				// for a nil *T in an interface) and panic on the coverage
+				// re-check's Locales() call. Surface it as an error instead.
+				return zero, fmt.Errorf("no cached entry for key %v and no locales requested: %w", key, ErrEntryNotPopulated)
 			}
-			c.lru.Add(key, updated)
-			if c.onAdmit != nil {
-				c.onAdmit(key, updated)
+
+			// A load that finds the cache changed under it (below) is redone
+			// on the new base; bounded so a storm of concurrent admissions
+			// cannot livelock a flight.
+			var updated T
+			for merges := 0; ; merges++ {
+				var lerr error
+				updated, lerr = c.loader(loadCtx, key, missing, existing, hadExisting)
+				if lerr != nil {
+					return zero, lerr
+				}
+
+				// Sanity check: every requested locale should now be present.
+				if !coversAll(updated.Locales(), locales) {
+					return zero, fmt.Errorf("loader for key %v returned without populating all requested locales: %w", key, ErrEntryNotPopulated)
+				}
+
+				// Admit-or-discard, mutually exclusive with Clear: if a Clear
+				// landed after `started`, our merge base (and thus `updated`)
+				// may contain invalidated data — discard and let the caller
+				// retry from the now-empty entry.
+				//
+				// Close-gate: a flight whose fetch completed just before the
+				// owner's lifetime was cancelled could otherwise pause here,
+				// survive a successful client Close, then resume and mutate the
+				// cache — contradicting Close's quiescence guarantee. The
+				// re-check immediately before admission shrinks that window to
+				// a few instructions. (base is the lifetime ctx when the owner
+				// configured one; the WithoutCancel fallback never fires.)
+				c.clearMu.Lock()
+				cleared := c.clearedAt[key].After(started) || c.purgedAt.After(started) || base.Err() != nil
+				if cleared {
+					c.clearMu.Unlock()
+					return zero, errClearedDuringLoad
+				}
+				// Flights of different call policies for the same key run
+				// concurrently, each merging into a clone of the entry it
+				// saw: the one admitted second would overwrite the locales
+				// the first loaded. If the cache no longer holds the entry
+				// this load was based on, merge on top of what it holds now
+				// (the other flight may already cover everything needed).
+				if cur, curOK := c.lru.Peek(key); merges < maxAdmissionMerges && (curOK != hadExisting || (curOK && cur != existing)) {
+					c.clearMu.Unlock()
+					existing, hadExisting = cur, curOK
+					if hadExisting && coversAll(existing.Locales(), locales) {
+						return existing, nil
+					}
+					missing = missingLocales(existingLocales(existing, hadExisting), locales)
+					continue
+				}
+				c.lru.Add(key, updated)
+				if c.onAdmit != nil {
+					c.onAdmit(key, updated)
+				}
+				c.clearMu.Unlock()
+				break
 			}
-			c.clearMu.Unlock()
-			break
-		}
-		return updated, nil
-	})
+			return updated, nil
+		})
+	}
 
 	var v T
-	select {
-	case r := <-ch:
-		if errors.Is(r.Err, errClearedDuringLoad) {
-			if clearRetries >= maxClearRetries {
-				// Only reachable under a sustained storm of Clears for
-				// this key, each landing within one load window. Bail
-				// with a transient error rather than livelock.
-				return zero, false, fmt.Errorf("cache load for key %v: %w", key, errClearedDuringLoad)
+	retried := false
+	owner := new(atomic.Bool)
+	ch := flight(owner)
+	for {
+		select {
+		case r := <-ch:
+			if r.Err != nil && !retried && !owner.Load() && JoinerMayRetry(ctx, r.Err) {
+				retried = true
+				owner = new(atomic.Bool)
+				ch = flight(owner)
+				continue
 			}
-			return c.get(ctx, key, locales, clearRetries+1, coverageRetries)
+			if errors.Is(r.Err, errClearedDuringLoad) {
+				if clearRetries >= maxClearRetries {
+					// Only reachable under a sustained storm of Clears for
+					// this key, each landing within one load window. Bail
+					// with a transient error rather than livelock.
+					return zero, false, fmt.Errorf("cache load for key %v: %w", key, errClearedDuringLoad)
+				}
+				return c.get(ctx, key, locales, clearRetries+1, coverageRetries)
+			}
+			if r.Err != nil {
+				return zero, false, r.Err
+			}
+			var ok bool
+			if v, ok = r.Val.(T); !ok {
+				return zero, false, nil
+			}
+		case <-ctx.Done():
+			return zero, false, ctx.Err()
 		}
-		if r.Err != nil {
-			return zero, false, r.Err
-		}
-		var ok bool
-		if v, ok = r.Val.(T); !ok {
-			return zero, false, nil
-		}
-	case <-ctx.Done():
-		return zero, false, ctx.Err()
+		break
 	}
 
 	// Re-check coverage for THIS caller. If we coalesced onto another

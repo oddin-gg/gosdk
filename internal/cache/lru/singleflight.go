@@ -89,7 +89,7 @@ func LoadCoalesced[T any](
 		select {
 		case r := <-ch:
 			if r.Err != nil {
-				if attempt == 0 && !started.Load() && joinerMayRetry(ctx, r.Err) {
+				if attempt == 0 && !started.Load() && JoinerMayRetry(ctx, r.Err) {
 					continue
 				}
 				return zero, r.Err
@@ -104,11 +104,12 @@ func LoadCoalesced[T any](
 	}
 }
 
-// joinerMayRetry reports whether a caller that joined a flight should ask
+// JoinerMayRetry reports whether a caller that joined a flight should ask
 // again: the flight ended on a deadline (the starter's budget), while this
 // caller's own context is alive and, under a message mode, its own budget is
-// not spent.
-func joinerMayRetry(ctx context.Context, err error) bool {
+// not spent. Every loader that coalesces on a flight and serves the message
+// path uses it, so the rule stays in one place.
+func JoinerMayRetry(ctx context.Context, err error) bool {
 	if !errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
 		return false
 	}
