@@ -986,9 +986,19 @@ func (a *recoveryActor) onTick(now time.Time, inactivityArmed bool) {
 	case aliveInterval > a.cfg.MaxInactivity():
 		downReason = types.AliveInternalViolationProducerDownReason
 		err = a.producerDown(downReason)
-	case !a.calculateTiming(now):
-		downReason = types.ProcessingQueueDelayViolationProducerDownReason
-		err = a.producerDown(downReason)
+	default:
+		fresh, obs := a.observeTiming(now)
+		if obs.err != nil {
+			a.logger.WithError(obs.err).Warn("failed to get last processed message gen timestamp")
+		}
+		if !fresh {
+			downReason = types.ProcessingQueueDelayViolationProducerDownReason
+			// The floor is taken from the cursor this check judged, not
+			// from a second read: a session can finish a newer message
+			// in between, and the floor would land past messages the
+			// broker dropped.
+			err = a.producerDownObserved(downReason, &obs)
+		}
 	}
 	if err != nil {
 		a.logger.WithError(err).
@@ -1528,16 +1538,32 @@ func (a *recoveryActor) processingActive(now time.Time) bool {
 // caller that must not act on a transient lookup failure can tell the two
 // apart.
 func (a *recoveryActor) timingFresh(now time.Time) (bool, error) {
+	fresh, obs := a.observeTiming(now)
+	return fresh, obs.err
+}
+
+// cursorObservation is one read of the last processed message: the cursor,
+// or the error that kept it from being read.
+type cursorObservation struct {
+	at  time.Time
+	err error
+}
+
+// observeTiming is timingFresh that also returns the cursor it judged, so
+// a caller that acts on the verdict works from the same observation instead
+// of reading again. An unreadable cursor is not fresh.
+func (a *recoveryActor) observeTiming(now time.Time) (bool, cursorObservation) {
 	maxInactivity := a.cfg.MaxInactivity()
 	lastProcessed, err := a.lastProcessedMessageGenTimestamp()
+	obs := cursorObservation{at: lastProcessed, err: err}
 	if err != nil {
-		return false, err
+		return false, obs
 	}
 	processedFresh := lastProcessed.IsZero() ||
 		now.Sub(lastProcessed).Abs() < maxInactivity
 	userAliveFresh := a.lastUserSessionAlive.IsZero() ||
 		now.Sub(a.lastUserSessionAlive).Abs() < maxInactivity
-	return processedFresh && userAliveFresh, nil
+	return processedFresh && userAliveFresh, obs
 }
 
 // producerDown matches manager.producerDown exactly. Pre-actor:
@@ -1545,6 +1571,13 @@ func (a *recoveryActor) timingFresh(now time.Time) (bool, error) {
 // then notifyProducerChangedState emitted on msgCh. The actor flow is
 // the same — only the actor's own state mutates without locks.
 func (a *recoveryActor) producerDown(reason types.ProducerDownReason) error {
+	return a.producerDownObserved(reason, nil)
+}
+
+// producerDownObserved is producerDown for a caller that already read the
+// last processed message to decide on a processing delay: the floor of the
+// delay is taken from that observation (nil reads it now).
+func (a *recoveryActor) producerDownObserved(reason types.ProducerDownReason, obs *cursorObservation) error {
 	if a.isDisabled() {
 		return nil
 	}
@@ -1567,23 +1600,11 @@ func (a *recoveryActor) producerDown(reason types.ProducerDownReason) error {
 		// processed once the backlog drains: remember where processing
 		// stood when it fell behind, so the recovery on the way back
 		// reaches that far (the floor keeps the earliest such point).
-		ts, tsErr := a.lastProcessedMessageGenTimestamp()
-		if tsErr != nil || ts.IsZero() {
-			// Nothing has been processed in this run yet (a stale
-			// user-session alive can flag the delay first, e.g.
-			// during the first recovery after an open), or the cursor
-			// cannot be read right now. A failed lookup must not leave
-			// the delay without a floor: once processing catches up the
-			// recovery on the way back would start from the new
-			// cursor, past the messages dropped meanwhile.
-			if tsErr != nil {
-				a.logger.WithError(tsErr).WithField("producer_id", a.producerID).
-					Warn("recovery: last processed message unknown while processing fell behind; the recovery on the way back reaches back to the start of the last recovery or the configured resume point")
-			}
-			a.lowerFloorWithoutProcessedCursor()
-		} else {
-			a.lowerRecoveryFloor(ts)
+		if obs == nil {
+			ts, err := a.lastProcessedMessageGenTimestamp()
+			obs = &cursorObservation{at: ts, err: err}
 		}
+		ts := a.lowerDelayFloor(*obs)
 		if a.recoveryState == types.StartedRecoveryState && a.currentRecovery != nil &&
 			a.delayDownRequestID != a.currentRecovery.recoveryID {
 			// Processing fell behind while this snapshot request is in
@@ -1616,6 +1637,30 @@ func (a *recoveryActor) producerDown(reason types.ProducerDownReason) error {
 	}
 
 	return a.notifyProducerChangedState(reason.ToProducerStatusReason())
+}
+
+// lowerDelayFloor lowers the recovery floor of a processing delay to the
+// observed last processed message and returns that cursor (zero when it was
+// zero or unreadable).
+func (a *recoveryActor) lowerDelayFloor(obs cursorObservation) time.Time {
+	ts := obs.at
+	if obs.err != nil || ts.IsZero() {
+		// Nothing has been processed in this run yet (a stale
+		// user-session alive can flag the delay first, e.g.
+		// during the first recovery after an open), or the cursor
+		// cannot be read right now. A failed lookup must not leave
+		// the delay without a floor: once processing catches up the
+		// recovery on the way back would start from the new
+		// cursor, past the messages dropped meanwhile.
+		if obs.err != nil {
+			a.logger.WithError(obs.err).WithField("producer_id", a.producerID).
+				Warn("recovery: last processed message unknown while processing fell behind; the recovery on the way back reaches back to the start of the last recovery or the configured resume point")
+		}
+		a.lowerFloorWithoutProcessedCursor()
+		return time.Time{}
+	}
+	a.lowerRecoveryFloor(ts)
+	return ts
 }
 
 // lowerFloorWithoutProcessedCursor sets the floor of a processing delay

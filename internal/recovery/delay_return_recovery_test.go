@@ -1845,3 +1845,51 @@ func TestActor_ProcessingDelayDown_SystemAlivesDoNotMoveTheFloor(t *testing.T) {
 	}
 	waitDetachedDone(t, a, 3*time.Second)
 }
+
+// The tick that decides processing fell behind and the floor it sets read
+// the same cursor. A session can end a newer message between two reads, and
+// a floor taken from the second one lands past messages the broker dropped.
+func TestActor_ProcessingDelayDown_FloorIsTheCursorTheTickJudged(t *testing.T) {
+	fake := newFakeManagerOps()
+	now := time.Now().Truncate(time.Millisecond)
+	a, _ := steadyActor(t, fake, now.Add(-10*time.Second))
+
+	stale := now.Add(-2 * time.Minute)
+	var reads atomic.Int32
+	a.lastProcessedFn = func() (time.Time, error) {
+		if reads.Add(1) == 1 {
+			return stale, nil
+		}
+		return now, nil // a session finished a newer message meanwhile
+	}
+	tickAt(a, now)
+	if a.downReason != types.ProcessingQueueDelayViolationProducerDownReason {
+		t.Fatalf("setup: down reason = %v, want the processing delay", a.downReason)
+	}
+	if !a.recoveryFloor.Equal(stale) {
+		t.Fatalf("floor = %v, want the cursor the tick judged %v", a.recoveryFloor, stale)
+	}
+}
+
+// The same when the tick could not read the cursor: the floor falls back to
+// the last recovery's start, even if the cursor is readable a moment later.
+func TestActor_ProcessingDelayDown_UnreadableCursorOnTheTickIsNotReadAgain(t *testing.T) {
+	fake := newFakeManagerOps()
+	now := time.Now().Truncate(time.Millisecond)
+	a, _ := steadyActor(t, fake, now.Add(-10*time.Second))
+
+	var reads atomic.Int32
+	a.lastProcessedFn = func() (time.Time, error) {
+		if reads.Add(1) == 1 {
+			return time.Time{}, errors.New("lookup failed")
+		}
+		return now, nil
+	}
+	tickAt(a, now)
+	if a.downReason != types.ProcessingQueueDelayViolationProducerDownReason {
+		t.Fatalf("setup: down reason = %v, want the processing delay", a.downReason)
+	}
+	if a.recoveryFloor.Equal(now) {
+		t.Fatalf("floor = %v: taken from a second read of the cursor", a.recoveryFloor)
+	}
+}
