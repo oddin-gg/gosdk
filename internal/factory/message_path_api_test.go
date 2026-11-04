@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -789,7 +790,10 @@ func TestMessagePath_NoteBuildFailureClassification(t *testing.T) {
 		{"client closed", sdkerr.ErrClosed, false},
 		{"500", &api.Error{Status: 500}, true},
 		{"429", &api.Error{Status: 429}, true},
-		{"transport failure", errors.New("connection refused"), true},
+		{"transport failure", &url.Error{Op: "Get", URL: "https://x", Err: errors.New("connection refused")}, true},
+		{"unreadable or undecodable body", fmt.Errorf("fetch: %w", api.ErrBadResponse), true},
+		{"200 envelope service unavailable", &api.Error{Status: 200, Code: types.ServiceUnavailableResponseCode}, true},
+		{"local error", errors.New("unsupported outcome type"), false},
 		{"timed out after sending", fmt.Errorf("fetch: %w", context.DeadlineExceeded), true},
 	}
 	for _, tc := range cases {

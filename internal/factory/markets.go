@@ -3,7 +3,9 @@ package factory
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 
@@ -266,16 +268,20 @@ func (nf *nameFailures) first() error {
 	return nf.err
 }
 
-// saysAPIUnavailable reports whether err says something about the API being
-// unavailable: not a skipped request (the event is already in the failure
-// window), not one refused for a spent budget (it was never sent), not the
-// caller's cancellation or a closed client (shutdown), not an entity the API
-// reports as absent, and not an answer of a healthy API (a 404 for an event
-// that is not in REST yet, say, or a 200 whose envelope says NOT_FOUND).
-// 429 and a 2xx envelope saying the service is unavailable are the
-// exceptions — the server is shedding load or cannot serve. One
-// classification for the lookups of names and for the build of an event,
-// so the two open the failure window on the same errors.
+// saysAPIUnavailable reports whether err says the API is unavailable. The
+// classification is positive: only a failure that comes from the API call
+// counts. That is a transport or network failure, a timeout after the
+// request was sent, a server failure (5xx), a rate limit (429), a 2xx
+// envelope saying the service is unavailable, and a response that could not
+// be read or understood (api.ErrBadResponse). Everything else is local and
+// says nothing about the API: a skipped request (the event is already in the
+// failure window), one refused for a spent budget (never sent), the caller's
+// cancellation or a closed client (shutdown), an entity the API reports as
+// absent, an answer of a healthy API (a 404 for an event not in REST yet, a
+// 200 whose envelope says NOT_FOUND), and an error of the local name
+// resolution over a healthy catalog (an unsupported outcome type, say).
+// One classification for the lookups of names and for the build of an
+// event, so the two open the failure window on the same errors.
 func saysAPIUnavailable(err error) bool {
 	if err == nil {
 		return false
@@ -286,14 +292,19 @@ func saysAPIUnavailable(err error) bool {
 	}
 	var apiErr *api.Error
 	if errors.As(err, &apiErr) {
-		if apiErr.Status >= 400 && apiErr.Status < 500 && apiErr.Status != http.StatusTooManyRequests {
-			return false
-		}
-		if apiErr.Status >= 200 && apiErr.Status < 300 && apiErr.Code != "" {
-			return api.ServerUnavailableCode(apiErr.Code)
+		switch {
+		case apiErr.Status >= 200 && apiErr.Status < 300:
+			return apiErr.Code != "" && api.ServerUnavailableCode(apiErr.Code)
+		default:
+			return apiErr.Status >= 500 || apiErr.Status == http.StatusTooManyRequests
 		}
 	}
-	return true
+	if errors.Is(err, api.ErrBadResponse) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	var urlErr *url.Error
+	return errors.As(err, &netErr) || errors.As(err, &urlErr)
 }
 
 // reportNameFailure records err in ctx's sink when it says something about

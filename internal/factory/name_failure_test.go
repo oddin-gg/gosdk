@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"testing"
 
 	"github.com/oddin-gg/gosdk/internal/api"
@@ -25,7 +27,11 @@ func TestReportNameFailure_Classification(t *testing.T) {
 		{"429 rate limited", &api.Error{Status: 429}, true},
 		{"503 unavailable", &api.Error{Status: 503}, true},
 		{"500, wrapped", fmt.Errorf("fetch market description: %w", &api.Error{Status: 500}), true},
-		{"transport failure", errors.New("connection refused"), true},
+		{"transport failure", &url.Error{Op: "Get", URL: "https://x", Err: errors.New("connection refused")}, true},
+		{"network error", &net.OpError{Op: "dial", Err: errors.New("no route")}, true},
+		{"unreadable or undecodable body", fmt.Errorf("fetch: %w", api.ErrBadResponse), true},
+		{"local name resolution error", errors.New("unsupported outcome type"), false},
+		{"local error, wrapped", fmt.Errorf("outcome name: %w", errors.New("no such specifier")), false},
 		{"404 not found", &api.Error{Status: 404}, false},
 		{"200 envelope not found", &api.Error{Status: 200, Code: types.NotFoundResponseCode}, false},
 		{"200 envelope forbidden", &api.Error{Status: 200, Code: types.ForbiddenResponseCode}, false},

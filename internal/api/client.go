@@ -771,12 +771,12 @@ func (c *Client) fetchDataValidated(ctx context.Context, path string, entity int
 	answered := false
 	dec := xml.NewDecoder(&byteLimitReader{r: resp.Body, left: maxSuccessBodyBytes})
 	if decodeErr := dec.Decode(entity); decodeErr != nil {
-		callErr = fmt.Errorf("api: decode %s: %w", path, decodeErr)
+		callErr = badResponse(fmt.Errorf("api: decode %s: %w", path, decodeErr))
 	} else if eofErr := utils.EnsureXMLEOF(dec); eofErr != nil {
 		// A trailing second document previously decoded "successfully"
 		// as the first root — reject it before envelope/identity checks
 		// and observer dispatch.
-		callErr = fmt.Errorf("api: decode %s: %w", path, eofErr)
+		callErr = badResponse(fmt.Errorf("api: decode %s: %w", path, eofErr))
 	} else {
 		answered = true
 		if rwc, ok := entity.(ResponseWithCode); ok && rwc.Code() != types.OkResponseCode {
@@ -791,7 +791,7 @@ func (c *Client) fetchDataValidated(ctx context.Context, path string, entity int
 		// fetchDataValidated. A failure must stop the response from
 		// reaching any cache-populating observer below.
 		if verr := validate(); verr != nil {
-			callErr = fmt.Errorf("api: %s: response identity: %w", path, verr)
+			callErr = badResponse(fmt.Errorf("api: %s: response identity: %w", path, verr))
 			// A response about another resource says the routing is
 			// broken, not that the API is healthy.
 			answered = false
