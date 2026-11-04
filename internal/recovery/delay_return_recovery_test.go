@@ -1791,3 +1791,57 @@ func TestActor_ReturnFromProcessingDelayDown_CursorLostAtTheAlive_RecoversFromTh
 		})
 	}
 }
+
+// The floor of a processing delay is where processing stood when it fell
+// behind, and the system alives that arrive while it lags must not move it:
+// they say nothing about the messages the broker dropped from the queue of a
+// stalled session. The recovery on the way back reaches back to that point,
+// however many system alives came in between, and the producer manager's
+// cursor stays where the stalled processing left it.
+func TestActor_ProcessingDelayDown_SystemAlivesDoNotMoveTheFloor(t *testing.T) {
+	fake := newFakeManagerOps()
+	now := time.Now().Truncate(time.Millisecond)
+	a, hits := steadyActor(t, fake, now.Add(-10*time.Second))
+	stoodAt := now.Add(-2 * time.Minute)
+	a.onMessageProcessingEnded(stoodAt)
+	a.onTick(now, true)
+	if a.downReason != types.ProcessingQueueDelayViolationProducerDownReason {
+		t.Fatalf("setup: down reason = %v, want the processing delay", a.downReason)
+	}
+	if !a.recoveryFloor.Equal(stoodAt) {
+		t.Fatalf("setup: floor = %v, want %v", a.recoveryFloor, stoodAt)
+	}
+
+	// System alives keep coming while the user's processing is stalled.
+	for i := 1; i <= 3; i++ {
+		a.onAlive(evAlive{
+			timestamp:       aliveAt(now.Add(time.Duration(i) * time.Second)),
+			isSubscribed:    true,
+			messageInterest: types.SystemAliveOnly,
+		})
+	}
+	prod, err := a.pm.GetProducer(a.ctx, a.producerID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := prod.LastProcessedMessageGenTimestamp(); !got.Equal(stoodAt) {
+		t.Fatalf("processed cursor = %v after system alives, want it where processing stood %v", got, stoodAt)
+	}
+	if !a.recoveryFloor.Equal(stoodAt) || a.recoveryFloorFull {
+		t.Fatalf("floor = %v (full=%v) after system alives, want %v", a.recoveryFloor, a.recoveryFloorFull, stoodAt)
+	}
+	if hits.recover.Load() != 1 {
+		t.Fatalf("recovery POSTs = %d, want 1: processing still lags", hits.recover.Load())
+	}
+
+	// Processing catches up; the next system alive starts the way back.
+	back := now.Add(10 * time.Second)
+	a.onMessageProcessingEnded(back)
+	a.onAlive(evAlive{timestamp: aliveAt(back), isSubscribed: true, messageInterest: types.SystemAliveOnly})
+	waitRecoverHits(t, hits, 2)
+	if got := hits.lastAfterMillis.Load(); got > stoodAt.UnixMilli() {
+		t.Fatalf("recovery after=%d (%v), want at or before where processing stood %d (%v)",
+			got, time.UnixMilli(got), stoodAt.UnixMilli(), stoodAt)
+	}
+	waitDetachedDone(t, a, 3*time.Second)
+}
