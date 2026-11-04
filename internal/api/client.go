@@ -149,8 +149,10 @@ type Client struct {
 	// on its body; nor does a 200 whose envelope says the service is
 	// unavailable. An envelope about the resource (not found, forbidden)
 	// does count: the API answered. A consumer that remembers a failure
-	// together with the value read before the attempt can tell that the
-	// API has answered since: see SuccessCount.
+	// together with the value read AFTER the failed attempt (an earlier call
+	// of the same build may have succeeded meanwhile, and that success
+	// predates the failure) can tell that the API has answered since: see
+	// SuccessCount.
 	successCount atomic.Uint64
 }
 

@@ -12,6 +12,21 @@
 // context: the API client makes one attempt with a short timeout and no
 // retries, and, for an event the factory recently failed to build, makes no
 // request at all.
+//
+// The policy holds only while every loader that coalesces concurrent calls
+// onto one flight does three things. It detaches the flight's context from
+// the caller's cancellation but keeps the caller's policy: Carry. It keeps
+// flights of different policies apart in the flight key: Suffix, so a getter
+// that waits through retries does not hold a message-path caller behind it
+// and a single-attempt failure does not become a getter's answer. And a
+// loader that discards flights by key (a Clear that calls Forget) discards
+// the keys of every policy: the Suffixes loop (loaders that detach callers by
+// a generation number in the key do not forget keys and need no loop). A
+// loader that misses one of these either lets a message wait out a getter's
+// retries or lets a getter share the failure of a message's one attempt.
+// lru.LoadCoalesced does the first two for its callers, and EventCache all
+// three; a new loader should use one of them rather than call singleflight
+// directly.
 package apipolicy
 
 import (
