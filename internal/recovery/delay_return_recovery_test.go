@@ -1386,7 +1386,8 @@ func downEventCounts(fake *fakeManagerOps) (down, up int) {
 // requireDownForDelayWithFloor checks the state of a chain that ran out
 // while processing still lagged: the producer stays down for the delay with
 // no up reported, nothing waits or runs, and the range is kept as the floor.
-func requireDownForDelayWithFloor(t *testing.T, a *recoveryActor, fake *fakeManagerOps, upBefore int, want time.Time) {
+// repeats is the count the chain carries on to the return path.
+func requireDownForDelayWithFloor(t *testing.T, a *recoveryActor, fake *fakeManagerOps, upBefore int, want time.Time, repeats int) {
 	t.Helper()
 	if _, up := downEventCounts(fake); up != upBefore {
 		t.Fatalf("producer-up events went from %d to %d, want none while processing still lags", upBefore, up)
@@ -1395,9 +1396,9 @@ func requireDownForDelayWithFloor(t *testing.T, a *recoveryActor, fake *fakeMana
 		t.Fatal("last status is up")
 	}
 	if !a.isFlaggedDown() || a.downReason != types.ProcessingQueueDelayViolationProducerDownReason ||
-		a.delayRepeatWaiting || a.recoveryState != types.CompletedRecoveryState || a.delayRepeats != 0 {
-		t.Fatalf("down=%v reason=%v waiting=%v state=%v repeats=%d, want down for the delay, nothing waiting, Completed, chain reset",
-			a.isFlaggedDown(), a.downReason, a.delayRepeatWaiting, a.recoveryState, a.delayRepeats)
+		a.delayRepeatWaiting || a.recoveryState != types.CompletedRecoveryState || a.delayRepeats != repeats {
+		t.Fatalf("down=%v reason=%v waiting=%v state=%v repeats=%d, want down for the delay, nothing waiting, Completed, %d repeats counted",
+			a.isFlaggedDown(), a.downReason, a.delayRepeatWaiting, a.recoveryState, a.delayRepeats, repeats)
 	}
 	if want.IsZero() || !a.recoveryFloor.Equal(want) {
 		t.Fatalf("floor = %v, want the range the chain was to cover %v", a.recoveryFloor, want)
@@ -1444,13 +1445,13 @@ func TestActor_DelayRepeat_WaitExpiresWhileStillLagging_StaysDownAndKeepsTheFloo
 	_, upBefore := downEventCounts(fake)
 
 	lag(a, p, a.currentRecovery.chainStartedAt.Add(a.cfg.MaxRecoveryExecution()+time.Minute))
-	requireDownForDelayWithFloor(t, a, fake, upBefore, want)
+	requireDownForDelayWithFloor(t, a, fake, upBefore, want, 0)
 	if n := strings.Count(sink.String(), "processing fell behind during every recovery attempt"); n != 1 {
 		t.Fatalf("warn logged %d times, want 1:\n%s", n, sink.String())
 	}
 	// Further stale ticks neither warn again nor report up.
 	lag(a, p, time.Now().Add(time.Hour))
-	requireDownForDelayWithFloor(t, a, fake, upBefore, want)
+	requireDownForDelayWithFloor(t, a, fake, upBefore, want, 0)
 	if n := strings.Count(sink.String(), "processing fell behind during every recovery attempt"); n != 1 {
 		t.Fatalf("warn logged %d times after more ticks, want 1", n)
 	}
@@ -1492,13 +1493,13 @@ func TestActor_DelayDownDuringEveryAttempt_StillLaggingStaysDownAndKeepsTheFloor
 	if err := a.snapshotRecoveryFinished(id); err != nil {
 		t.Fatal(err)
 	}
-	requireDownForDelayWithFloor(t, a, fake, upBefore, want)
+	requireDownForDelayWithFloor(t, a, fake, upBefore, want, maxDelayRepeats)
 	if n := strings.Count(sink.String(), "processing fell behind during every recovery attempt"); n != 1 {
 		t.Fatalf("warn logged %d times, want 1:\n%s", n, sink.String())
 	}
 	// A tick that finds processing still behind keeps it that way.
 	lag(a, p, time.Now().Add(time.Hour))
-	requireDownForDelayWithFloor(t, a, fake, upBefore, want)
+	requireDownForDelayWithFloor(t, a, fake, upBefore, want, maxDelayRepeats)
 	requireReturnRecoversFrom(t, a, hits, p, int32(3+maxDelayRepeats), want)
 }
 
@@ -1535,9 +1536,9 @@ func TestActor_DelayRepeat_WaitExpiresWithUnreadableTiming_StaysDownAndKeepsTheF
 
 	failing.Store(true)
 	tickAt(a, a.currentRecovery.chainStartedAt.Add(a.cfg.MaxRecoveryExecution()+time.Minute))
-	requireDownForDelayWithFloor(t, a, fake, upBefore, want)
+	requireDownForDelayWithFloor(t, a, fake, upBefore, want, 0)
 	tickAt(a, time.Now().Add(time.Hour))
-	requireDownForDelayWithFloor(t, a, fake, upBefore, want)
+	requireDownForDelayWithFloor(t, a, fake, upBefore, want, 0)
 	if n := strings.Count(sink.String(), "processing fell behind during every recovery attempt"); n != 1 {
 		t.Fatalf("warn logged %d times, want 1:\n%s", n, sink.String())
 	}
@@ -1585,9 +1586,9 @@ func TestActor_DelayDownDuringEveryAttempt_UnreadableTimingStaysDownAndKeepsTheF
 	if err := a.snapshotRecoveryFinished(id); err != nil {
 		t.Fatal(err)
 	}
-	requireDownForDelayWithFloor(t, a, fake, upBefore, want)
+	requireDownForDelayWithFloor(t, a, fake, upBefore, want, maxDelayRepeats)
 	tickAt(a, time.Now().Add(time.Hour))
-	requireDownForDelayWithFloor(t, a, fake, upBefore, want)
+	requireDownForDelayWithFloor(t, a, fake, upBefore, want, maxDelayRepeats)
 	if n := strings.Count(sink.String(), "processing fell behind during every recovery attempt"); n != 1 {
 		t.Fatalf("warn logged %d times, want 1:\n%s", n, sink.String())
 	}
@@ -1694,9 +1695,9 @@ func TestActor_DelayRepeat_WaitExpiresWhileTheFirstMessageIsInProcessing_StaysDo
 	a.onMessageProcessingStarted(at)
 	expired := a.currentRecovery.chainStartedAt.Add(a.cfg.MaxRecoveryExecution() + time.Minute)
 	tickAt(a, expired)
-	requireDownForDelayWithFloor(t, a, fake, upBefore, want)
+	requireDownForDelayWithFloor(t, a, fake, upBefore, want, 0)
 	tickAt(a, expired.Add(time.Hour))
-	requireDownForDelayWithFloor(t, a, fake, upBefore, want)
+	requireDownForDelayWithFloor(t, a, fake, upBefore, want, 0)
 	if n := strings.Count(sink.String(), "processing fell behind during every recovery attempt"); n != 1 {
 		t.Fatalf("warn logged %d times, want 1:\n%s", n, sink.String())
 	}
@@ -2035,6 +2036,122 @@ func TestActor_RecoveryCompletingWithFreshTiming_ReportsUpWithoutARepeat(t *test
 	time.Sleep(50 * time.Millisecond)
 	if hits.recover.Load() != 2 {
 		t.Fatalf("recovery POSTs = %d, want 2", hits.recover.Load())
+	}
+	waitDetachedDone(t, a, 3*time.Second)
+}
+
+// A chain that stayed down because the first message is still in processing
+// is not returned by the next system alive while it is: the return recovery
+// would be queued behind that message, the situation the guard protects. It
+// is issued once the message has ended.
+func TestActor_ReturnFromProcessingDelayDown_WaitsWhileTheFirstMessageIsInProcessing(t *testing.T) {
+	fake := newFakeManagerOps()
+	a, hits, at := waitingRepeat(t, fake)
+	var cursor atomic.Int64 // 0 = no message has ended
+	a.lastProcessedFn = func() (time.Time, error) {
+		if v := cursor.Load(); v != 0 {
+			return time.Unix(0, v), nil
+		}
+		return time.Time{}, nil
+	}
+	want := a.delayRepeatFrom
+	_, upBefore := downEventCounts(fake)
+
+	a.onMessageProcessingStarted(at)
+	expired := a.currentRecovery.chainStartedAt.Add(a.cfg.MaxRecoveryExecution() + time.Minute)
+	tickAt(a, expired)
+	requireDownForDelayWithFloor(t, a, fake, upBefore, want, 0)
+
+	if err := a.systemAliveReceived(aliveAt(time.Now()), true); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if hits.recover.Load() != 2 {
+		t.Fatalf("recovery POSTs = %d, want 2: no return recovery behind the first message", hits.recover.Load())
+	}
+
+	// The message ends: the next alive returns the chain.
+	cursor.Store(time.Now().UnixNano())
+	a.onMessageProcessingEnded(time.Now())
+	if err := a.systemAliveReceived(aliveAt(time.Now()), true); err != nil {
+		t.Fatal(err)
+	}
+	waitRecoverHits(t, hits, 3)
+	if got := hits.lastAfterMillis.Load(); got != want.UnixMilli() {
+		t.Fatalf("return recovery after=%d, want the floor %d", got, want.UnixMilli())
+	}
+	waitDetachedDone(t, a, 3*time.Second)
+}
+
+// The bound of repeats holds across a stay-down: the return recovery that
+// follows a chain that ran out does not get three repeats of its own. When
+// it completes while processing still lags the producer stays down again
+// at once, and the count is cleared only by a recovery that completes with
+// processing current, which reports the producer up.
+func TestActor_DelayRepeatBound_HoldsAcrossAStayDown(t *testing.T) {
+	fake := newFakeManagerOps()
+	a, hits, r1, _ := genuineDelayDuringRecovery(t, fake)
+	p := holdProcessing(a)
+	id := r1
+	at := time.Now()
+	for i := 1; i <= maxDelayRepeats; i++ {
+		if err := a.snapshotRecoveryFinished(id); err != nil {
+			t.Fatal(err)
+		}
+		catchUp(a, p, at)
+		waitRecoverHits(t, hits, int32(2+i))
+		id = a.currentRecovery.recoveryID
+		at = at.Add(time.Second)
+		lag(a, p, at)
+		at = at.Add(time.Second)
+	}
+	want := a.currentRecovery.recoverFrom
+	if !a.delayCursor.IsZero() && a.delayCursor.Before(want) {
+		want = a.delayCursor
+	}
+	_, upBefore := downEventCounts(fake)
+	if err := a.snapshotRecoveryFinished(id); err != nil {
+		t.Fatal(err)
+	}
+	requireDownForDelayWithFloor(t, a, fake, upBefore, want, maxDelayRepeats)
+
+	// Processing is current for the alive, the return recovery goes out and
+	// processing falls behind again while it runs.
+	posts := int32(3 + maxDelayRepeats)
+	p.set(time.Now())
+	if err := a.systemAliveReceived(aliveAt(time.Now()), true); err != nil {
+		t.Fatal(err)
+	}
+	waitRecoverHits(t, hits, posts)
+	lag(a, p, time.Now().Add(time.Second))
+	if err := a.snapshotRecoveryFinished(a.currentRecovery.recoveryID); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if hits.recover.Load() != posts {
+		t.Fatalf("recovery POSTs = %d, want %d: the return recovery was repeated", hits.recover.Load(), posts)
+	}
+	if !a.isFlaggedDown() || a.delayRepeatWaiting || a.delayRepeats != maxDelayRepeats {
+		t.Fatalf("down=%v waiting=%v repeats=%d, want down, nothing waiting, %d repeats still counted",
+			a.isFlaggedDown(), a.delayRepeatWaiting, a.delayRepeats, maxDelayRepeats)
+	}
+	if _, up := downEventCounts(fake); up != upBefore {
+		t.Fatalf("producer-up events went from %d to %d, want none", upBefore, up)
+	}
+
+	// A return recovery that completes with processing current reports the
+	// producer up and clears the count.
+	p.set(time.Now())
+	if err := a.systemAliveReceived(aliveAt(time.Now()), true); err != nil {
+		t.Fatal(err)
+	}
+	waitRecoverHits(t, hits, posts+1)
+	p.set(time.Now())
+	if err := a.snapshotRecoveryFinished(a.currentRecovery.recoveryID); err != nil {
+		t.Fatal(err)
+	}
+	if a.isFlaggedDown() || a.delayRepeats != 0 || a.delayStayedDown {
+		t.Fatalf("down=%v repeats=%d stayedDown=%v, want up with the count cleared", a.isFlaggedDown(), a.delayRepeats, a.delayStayedDown)
 	}
 	waitDetachedDone(t, a, 3*time.Second)
 }

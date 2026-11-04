@@ -151,6 +151,13 @@ type recoveryActor struct {
 	// delayRepeats is how many repeats this chain has issued; the chain ends
 	// when the producer is reported up or a new chain starts.
 	delayRepeats int
+	// delayStayedDown is set when a chain ended with the producer staying
+	// down for the delay: the recoveries that follow (the return path)
+	// continue its repeat count instead of starting at zero, so a consumer
+	// that lags every time cannot cycle through the full bound again and
+	// again. Cleared with the chain when a recovery completes with
+	// processing current (resetDelayChain).
+	delayStayedDown bool
 	// delayRepeatWaiting is set between the completion of a recovery that
 	// fell behind and the issue of its repeat. The producer stays down and
 	// the recovery state is Completed (nothing is in flight; currentRecovery
@@ -1416,7 +1423,7 @@ func (a *recoveryActor) systemAliveReceived(timestamp types.MessageTimestamp, su
 		!a.isPerformingRecovery() &&
 		downReason == types.ProcessingQueueDelayViolationProducerDownReason &&
 		!a.delayRepeatWaiting && // the repeat is issued by the tick (serviceDelayRepeat)
-		a.calculateTiming(now)
+		a.processingCurrentForReturn(now)
 	isInRecovery := state != types.NotStartedRecoveryState &&
 		state != types.ErrorRecoveryState &&
 		state != types.InterruptedRecoveryState
@@ -1471,6 +1478,19 @@ func (a *recoveryActor) systemAliveReceived(timestamp types.MessageTimestamp, su
 		}
 	}
 	return nil
+}
+
+// processingCurrentForReturn is calculateTiming for the return path of a
+// processing delay, which also holds while the first message is still in
+// processing (firstMessageStillInProcessing): a chain that stayed down for
+// that reason is not returned then, as the return recovery would land on the
+// queue the guard protects. Both judge one read of the cursor.
+func (a *recoveryActor) processingCurrentForReturn(now time.Time) bool {
+	fresh, obs := a.observeTiming(now)
+	if obs.err != nil {
+		a.logger.WithError(obs.err).Warn("failed to get last processed message gen timestamp")
+	}
+	return fresh && !a.firstMessageStillInProcessingFor(obs)
 }
 
 // recoveryChainStartedAt is when the current recovery first went out,
@@ -1880,8 +1900,14 @@ func (a *recoveryActor) makeSnapshotRecovery(timestamp time.Time) error {
 	// to the repeat's start instead (abandonDelayRepeat).
 	carry := a.delayDownRequestID != 0 && !a.delayRepeatWaiting
 	if !carry {
-		// A recovery that is not a repeat starts a new chain of delay repeats.
+		// A recovery that is not a repeat starts a new chain of delay
+		// repeats, except after a chain that stayed down: the repeats
+		// already spent still count.
+		repeats, stayedDown := a.delayRepeats, a.delayStayedDown
 		a.abandonDelayRepeat()
+		if stayedDown {
+			a.keepRepeatsAcrossStayDown(repeats)
+		}
 	}
 	if err := a.issueSnapshotRecovery(time.Now(), a.resolveRecoverFrom(time.Now(), timestamp, true)); err != nil {
 		return err
@@ -2196,6 +2222,7 @@ func (a *recoveryActor) markDelayIfLagging(requestID int, now time.Time) {
 // and reports the producer up when it completes. Actor goroutine only.
 func (a *recoveryActor) endExhaustedDelayChain(requestID int, started, now, from time.Time) error {
 	log := a.logger.WithField("producer_id", a.producerID).WithField("attempts", a.delayRepeats+1)
+	repeats := a.delayRepeats
 	fresh, err := a.timingFresh(now)
 	if err == nil && fresh && a.firstMessageStillInProcessing() {
 		// timingFresh counts a missing last-processed timestamp as fresh;
@@ -2217,6 +2244,7 @@ func (a *recoveryActor) endExhaustedDelayChain(requestID int, started, now, from
 		a.delayRepeatFrom = from
 		a.recoveryState = types.CompletedRecoveryState
 		a.abandonDelayRepeat()
+		a.keepRepeatsAcrossStayDown(repeats)
 		return nil
 	}
 	log.Warn("recovery: processing fell behind during every recovery attempt; messages the broker dropped meanwhile may be missing")
@@ -2247,8 +2275,16 @@ func (a *recoveryActor) resetDelayChain() {
 	a.delayDownRequestID = 0
 	a.delayCursor = time.Time{}
 	a.delayRepeats = 0
+	a.delayStayedDown = false
 	a.delayRepeatWaiting = false
 	a.delayRepeatFrom = time.Time{}
+}
+
+// keepRepeatsAcrossStayDown restores the repeat count of a chain that ended
+// with the producer staying down, after the chain state was cleared.
+func (a *recoveryActor) keepRepeatsAcrossStayDown(repeats int) {
+	a.delayRepeats = repeats
+	a.delayStayedDown = true
 }
 
 // abandonDelayRepeat drops a repeat that has not been issued because
