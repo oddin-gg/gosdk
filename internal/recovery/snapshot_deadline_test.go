@@ -989,3 +989,35 @@ func TestActor_SnapshotCompleteDeadline_OnlySystemAlivesIsNoClientProcessing(t *
 	waitRecoverHits(t, hits, 2)
 	waitDetachedDone(t, a, 3*time.Second)
 }
+
+// TestActor_SnapshotCompleteDeadline_LateSnapshotCompleteOfTheOldIDRenewsNothing:
+// only a snapshot_complete of the CURRENT request is a sign of life. The late
+// one of an abandoned request arrives just before a tick; it must not renew
+// the deadline of the new request, which has been silent for longer than it.
+func TestActor_SnapshotCompleteDeadline_LateSnapshotCompleteOfTheOldIDRenewsNothing(t *testing.T) {
+	srv, hits := fixtureSrv(t)
+	defer srv.Close()
+	a := newWiredActor(t, srv, newFakeManagerOps())
+
+	oldID := startRecovery(t, a, hits, time.Now().Add(-10*time.Minute).Truncate(time.Millisecond), 1)
+	a.onTick(a.currentRecovery.recoveryStartedAt.Add(6*time.Minute), false)
+	newID := a.currentRecovery.recoveryID
+	if newID == oldID {
+		t.Fatal("setup: the request was not re-issued")
+	}
+	waitRecoverHits(t, hits, 2)
+	waitDetachedDone(t, a, 3*time.Second)
+	// The new request went out 6 minutes ago and nothing was heard since.
+	a.currentRecovery.recoveryStartedAt = time.Now().Add(-6 * time.Minute)
+
+	a.onSnapshotComplete(evSnapshotComplete{requestID: oldID, messageInterest: types.LiveOnlyMessageInterest})
+	if !a.currentRecovery.renewedAt.IsZero() {
+		t.Fatalf("a snapshot_complete of the old id renewed the new request: %v", a.currentRecovery.renewedAt)
+	}
+	a.onTick(time.Now().Add(time.Second), false)
+	if a.currentRecovery.recoveryID == newID {
+		t.Fatal("the late snapshot_complete of the old id kept the silent new request from being re-issued")
+	}
+	waitRecoverHits(t, hits, 3)
+	waitDetachedDone(t, a, 3*time.Second)
+}
