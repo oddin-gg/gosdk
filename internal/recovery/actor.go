@@ -2077,6 +2077,11 @@ func (a *recoveryActor) snapshotRecoveryFinished(requestID int) error {
 func (a *recoveryActor) endExhaustedDelayChain(requestID int, started, now, from time.Time) error {
 	log := a.logger.WithField("producer_id", a.producerID).WithField("attempts", a.delayRepeats+1)
 	if fresh, err := a.timingFresh(now); err != nil || !fresh {
+		if err != nil {
+			// An unreadable timing counts as still lagging; the cause is
+			// part of the one warning below.
+			log = log.WithError(err)
+		}
 		log.Warn("recovery: processing fell behind during every recovery attempt and still lags; the producer stays down until processing is current, then the range is recovered again")
 		// The completed recovery stays as currentRecovery, nothing is in
 		// flight, and no repeat waits: the return path takes it from here.
