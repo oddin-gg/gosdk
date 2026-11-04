@@ -319,3 +319,60 @@ func TestDo_MessagePolicy_RequestsShareOneBudget(t *testing.T) {
 		t.Fatal("a request went out after the budget was spent")
 	}
 }
+
+// Only a healthy answer advances the success counter: a 200 whose envelope
+// says the service is unavailable, or whose document is about another
+// resource, is not one — counting it would void what the message path
+// remembers about a failing API while that API is still down. An envelope
+// about the resource itself (not found, forbidden) is.
+func TestClient_SuccessCount_OnlyHealthyAnswersCount(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		call func(c *Client) error
+		want uint64 // advance of the counter
+	}{
+		{"envelope OK", `<producers response_code="OK"/>`, fetchProducersOnly, 1},
+		{"envelope service unavailable", `<producers response_code="SERVICE_UNAVAILABLE"/>`, fetchProducersOnly, 0},
+		{"envelope not found", `<producers response_code="NOT_FOUND"/>`, fetchProducersOnly, 1},
+		{"envelope forbidden", `<producers response_code="FORBIDDEN"/>`, fetchProducersOnly, 1},
+		{
+			"identity mismatch",
+			`<player_profile><player id="od:player:8" name="Q"/></player_profile>`,
+			func(c *Client) error {
+				_, err := c.FetchPlayerProfile(t.Context(), "od:player:9", types.EnLocale)
+				return err
+			},
+			0,
+		},
+		{
+			"identity match",
+			`<player_profile><player id="od:player:9" name="P"/></player_profile>`,
+			func(c *Client) error {
+				_, err := c.FetchPlayerProfile(t.Context(), "od:player:9", types.EnLocale)
+				return err
+			},
+			1,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/xml")
+				_, _ = io.WriteString(w, `<?xml version="1.0"?>`+tc.body)
+			}))
+			defer srv.Close()
+			c := newTestClient(t, srv)
+			before := c.SuccessCount()
+			_ = tc.call(c)
+			if got := c.SuccessCount() - before; got != tc.want {
+				t.Fatalf("counter advanced by %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func fetchProducersOnly(c *Client) error {
+	_, err := c.FetchProducers(context.Background())
+	return err
+}

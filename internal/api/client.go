@@ -139,19 +139,23 @@ type Client struct {
 	lifeCancel context.CancelFunc
 	inflight   sync.WaitGroup
 
-	// successCount counts successful responses of any endpoint: a 2xx whose
-	// body was then read in full (and, for an entity, decoded). The status
+	// successCount counts healthy responses of any endpoint: a 2xx whose
+	// body was then read in full (and, for an entity, decoded), that passed
+	// the identity check of its resource and whose envelope is not a
+	// service-unavailable answer (see ServerUnavailableCode). The status
 	// line alone does not count, since an API that degrades into slow or
 	// truncated bodies still answers headers, and counting those would void
 	// a consumer's memory of the failure on every request that then fails
-	// on its body. A consumer that remembers a failure together with the
+	// on its body; nor does a 200 whose envelope says the service is
+	// unavailable. An envelope about the resource (not found, forbidden)
+	// does count: the API answered. A consumer that remembers a failure together with the
 	// value read before the attempt can tell that the API has answered
 	// since: see SuccessCount.
 	successCount atomic.Uint64
 }
 
-// SuccessCount returns a counter that advances on every successful
-// response of any endpoint (a 2xx whose body was read in full). The feed message path uses it to drop
+// SuccessCount returns a counter that advances on every healthy
+// response of any endpoint (see successCount). The feed message path uses it to drop
 // everything it remembers about a failing API as soon as the API answers
 // again, whichever call that was.
 func (c *Client) SuccessCount() uint64 { return c.successCount.Load() }
@@ -762,6 +766,9 @@ func (c *Client) fetchDataValidated(ctx context.Context, path string, entity int
 	// emitted Err=nil — indistinguishable from success on the
 	// observability stream while the caller received an error.
 	var callErr error
+	// answered: the body arrived whole and decoded, and the envelope is a
+	// healthy API's answer (see ServerUnavailableCode).
+	answered := false
 	dec := xml.NewDecoder(&byteLimitReader{r: resp.Body, left: maxSuccessBodyBytes})
 	if decodeErr := dec.Decode(entity); decodeErr != nil {
 		callErr = fmt.Errorf("api: decode %s: %w", path, decodeErr)
@@ -771,12 +778,12 @@ func (c *Client) fetchDataValidated(ctx context.Context, path string, entity int
 		// and observer dispatch.
 		callErr = fmt.Errorf("api: decode %s: %w", path, eofErr)
 	} else {
-		// The whole body arrived and decoded: the API answered coherently,
-		// whatever the envelope says. Counted here, not when the headers
-		// arrive (see successCount).
-		c.successCount.Add(1)
+		answered = true
 		if rwc, ok := entity.(ResponseWithCode); ok && rwc.Code() != types.OkResponseCode {
 			callErr = &Error{Method: http.MethodGet, Path: path, Status: resp.StatusCode, Code: rwc.Code()}
+			// An envelope that says the service cannot serve right now is
+			// not an answer of a healthy API.
+			answered = !ServerUnavailableCode(rwc.Code())
 		}
 	}
 	if callErr == nil && validate != nil {
@@ -785,7 +792,14 @@ func (c *Client) fetchDataValidated(ctx context.Context, path string, entity int
 		// reaching any cache-populating observer below.
 		if verr := validate(); verr != nil {
 			callErr = fmt.Errorf("api: %s: response identity: %w", path, verr)
+			// A response about another resource says the routing is
+			// broken, not that the API is healthy.
+			answered = false
 		}
+	}
+	if answered {
+		// Counted here, not when the headers arrive (see successCount).
+		c.successCount.Add(1)
 	}
 	c.emit(pc, callErr) // streaming capture: emit AFTER body has flowed through tee
 	if callErr != nil {
@@ -884,6 +898,16 @@ func (c *Client) doNoBody(ctx context.Context, method, path string, idempotent b
 	c.successCount.Add(1)
 	c.emit(pc, nil)
 	return true, nil
+}
+
+// ServerUnavailableCode reports whether an envelope response_code says the
+// server cannot serve right now (SERVICE_UNAVAILABLE), as opposed to an
+// answer about the resource (NOT_FOUND, FORBIDDEN, BAD_REQUEST, CONFLICT,
+// NOT_IMPLEMENTED, ...) that only a healthy API gives. One decision for the
+// success counter and for the consumers that classify a decoded non-OK
+// envelope on a 2xx response.
+func ServerUnavailableCode(c types.ResponseCode) bool {
+	return c == types.ServiceUnavailableResponseCode
 }
 
 // isSuccessResponseCode reports whether a <response> envelope code means
