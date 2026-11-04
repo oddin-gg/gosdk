@@ -1029,15 +1029,23 @@ A snapshot recovery that never completes would hold its producer down until
 `WithMaxRecoveryExecution` (default 6 h), so each one carries a deadline
 (`WithSnapshotCompleteDeadline`, default 5 minutes; must be > 0 and not above
 `WithMaxRecoveryExecution`, and it follows that cap when only the cap is
-lowered). Every message carrying the recovery's request id renews it. When it
-passes with no such message and the client is not processing a message of the
-producer (the replay is slow to be handled, not missing), the actor logs once at
-WARN and re-issues the snapshot from the **same recover-from point** under a
-NEW request id; the producer stays down, a `snapshot_complete` of the abandoned
+lowered). Every message carrying the recovery's request id renews it, and so
+does any `snapshot_complete` of it. The deadline is held, not passed, while the
+replay may only be slow to be handled: processing of the producer lags behind
+and messages are being taken up, the processed cursor cannot be read, the first
+message is still in processing, a client message of any producer has been stuck
+in processing longer than `MaxInactivity` (the session queue is shared), or a
+lost session in scope has not re-bound its queue. It does not apply to a
+producer that no open client session has in scope (a LiveOnly or PrematchOnly
+client's other producer, a client that never subscribed): no replay can reach
+the client, so that recovery waits for `MaxRecoveryExecution` as before. When
+the deadline passes, the actor logs once at WARN and re-issues the snapshot
+from the **same recover-from point** under a NEW request id; the producer stays down, a `snapshot_complete` of the abandoned
 request id is ignored, and the existing request rate limiting and the
 `MaxRecoveryExecution` cap still apply. Keeping the original point matters:
 clamping again against the current time would drop the slice between the two
-requests. Enforcement is periodic (the manager's ~10 s tick), so the deadline
+requests; if a request of the chain is dropped (its POST fails, or a cap
+expires it), its range stays the floor of the next one. Enforcement is periodic (the manager's ~10 s tick), so the deadline
 is a lower bound. Tests use shortened windows against the httptest API, like
 the rest of this section.
 
