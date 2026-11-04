@@ -331,11 +331,14 @@ func TestClient_SuccessCount_OnlyHealthyAnswersCount(t *testing.T) {
 		body string
 		call func(c *Client) error
 		want uint64 // advance of the counter
+		// badResponse: the error must carry ErrBadResponse, which decides
+		// whether the message path counts the failure against the API.
+		badResponse bool
 	}{
-		{"envelope OK", `<producers response_code="OK"/>`, fetchProducersOnly, 1},
-		{"envelope service unavailable", `<producers response_code="SERVICE_UNAVAILABLE"/>`, fetchProducersOnly, 0},
-		{"envelope not found", `<producers response_code="NOT_FOUND"/>`, fetchProducersOnly, 1},
-		{"envelope forbidden", `<producers response_code="FORBIDDEN"/>`, fetchProducersOnly, 1},
+		{"envelope OK", `<producers response_code="OK"/>`, fetchProducersOnly, 1, false},
+		{"envelope service unavailable", `<producers response_code="SERVICE_UNAVAILABLE"/>`, fetchProducersOnly, 0, false},
+		{"envelope not found", `<producers response_code="NOT_FOUND"/>`, fetchProducersOnly, 1, false},
+		{"envelope forbidden", `<producers response_code="FORBIDDEN"/>`, fetchProducersOnly, 1, false},
 		{
 			"identity mismatch",
 			`<player_profile><player id="od:player:8" name="Q"/></player_profile>`,
@@ -344,6 +347,7 @@ func TestClient_SuccessCount_OnlyHealthyAnswersCount(t *testing.T) {
 				return err
 			},
 			0,
+			true,
 		},
 		{
 			"identity match",
@@ -353,6 +357,7 @@ func TestClient_SuccessCount_OnlyHealthyAnswersCount(t *testing.T) {
 				return err
 			},
 			1,
+			false,
 		},
 	}
 	for _, tc := range cases {
@@ -364,9 +369,12 @@ func TestClient_SuccessCount_OnlyHealthyAnswersCount(t *testing.T) {
 			defer srv.Close()
 			c := newTestClient(t, srv)
 			before := c.SuccessCount()
-			_ = tc.call(c)
+			err := tc.call(c)
 			if got := c.SuccessCount() - before; got != tc.want {
 				t.Fatalf("counter advanced by %d, want %d", got, tc.want)
+			}
+			if got := errors.Is(err, ErrBadResponse); got != tc.badResponse {
+				t.Fatalf("errors.Is(err, ErrBadResponse) = %v, want %v (err = %v)", got, tc.badResponse, err)
 			}
 		})
 	}
