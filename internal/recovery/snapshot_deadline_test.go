@@ -954,13 +954,16 @@ func TestActor_SnapshotCompleteDeadline_InProcessingCountsAcrossSessions(t *test
 	}
 }
 
-// TestActor_SnapshotCompleteDeadline_OnlySystemAlivesIsNoClientProcessing: all
-// sessions of the client are closed (or never took a message) while the
-// SDK's own alive-only session keeps receiving alives. The user-session
-// alive is stale, but nothing is processed, so the silence of a lost request
-// is evidence and the request is re-issued at the deadline. The system
-// session reports no processing (see session.processFeedMessage), so the
-// actor sees no start and its guard stays idle.
+// TestActor_SnapshotCompleteDeadline_OnlySystemAlivesIsNoClientProcessing pins
+// the actor's side of the alive-only session: an open client session has the
+// producer in scope but processes nothing, while system alives (what the
+// SDK's own alive-only session delivers) keep arriving. Such alives are not
+// client processing: they leave the in-processing count and the processing
+// guard idle, so the silence of a lost request is evidence and it is
+// re-issued at the deadline. The other side, that the session does not
+// report system alives as processing in the first place, is pinned by the
+// session test TestSession_ProcessFeedMessage_SystemAliveSessionIsNotClientProcessing;
+// this test calls onAlive directly and does not go through the session.
 func TestActor_SnapshotCompleteDeadline_OnlySystemAlivesIsNoClientProcessing(t *testing.T) {
 	srv, hits := fixtureSrv(t)
 	defer srv.Close()

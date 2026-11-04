@@ -2283,7 +2283,9 @@ func (c *Client) ConnectionState() ConnectionState {
 func (c *Client) ConnectionEvents() <-chan ConnectionEvent { return c.connEvents }
 
 // RecoveryEvents returns the lossy event channel for recovery state
-// transitions. Closed on Close.
+// changes. A producer status event is published on every status change,
+// including a change of IsDelayed alone, so a repeated status with the
+// same IsDown and reason is not a new up/down transition. Closed on Close.
 func (c *Client) RecoveryEvents() <-chan RecoveryEvent { return c.recvEvents }
 
 // APIEvents returns the lossy channel for HTTP API call events.

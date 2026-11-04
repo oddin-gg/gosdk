@@ -22,7 +22,7 @@ type recoveryData struct {
 	chainStartedAt time.Time
 	// renewedAt is the latest sign of life the actor goroutine itself saw
 	// for this request (a partial snapshot_complete); the latest one seen
-	// by the message path lives in recoveryActor.lastRecoveryMsg.
+	// by the message path lives in recoveryActor.recoveryMark.
 	renewedAt time.Time
 	// cancelAPI cancels this snapshot recovery's PostRecovery when the
 	// recovery is superseded. Nil for completed/placeholder data.
