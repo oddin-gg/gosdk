@@ -1345,6 +1345,9 @@ func TestManager_ClientSessionInScope_TracksOpenSessions(t *testing.T) {
 		t.Fatal("no client session is open, nothing is in scope")
 	}
 	m.OnClientSessionOpened(uuid.New(), types.SystemAliveOnly)
+	if len(m.clientSessions) != 0 {
+		t.Fatalf("the alive-only session was registered: %v", m.clientSessions)
+	}
 	if m.clientSessionsCanComplete(1) {
 		t.Fatal("the SDK's alive-only session must not count as a client session")
 	}
