@@ -818,3 +818,76 @@ func TestActor_SnapshotCompleteDeadline_AStaleCursorWithMessagesStartingIsABackl
 	waitRecoverHits(t, hits, 2)
 	waitDetachedDone(t, a, 3*time.Second)
 }
+
+// TestActor_SnapshotCompleteDeadline_InProcessingCountsAcrossSessions: the
+// guard counts messages per producer over all sessions. One session ending
+// its message (with a zero timestamp) does not hide another's message that
+// is still in processing; the request is re-issued only after the last one
+// ended and a further deadline of silence passed. An end without a start
+// leaves the count at zero, not negative, so a later start counts as one.
+// Driven through the manager's callbacks, the way the sessions call them.
+func TestActor_SnapshotCompleteDeadline_InProcessingCountsAcrossSessions(t *testing.T) {
+	srv, hits := fixtureSrv(t)
+	defer srv.Close()
+	a := newWiredActor(t, srv, newFakeManagerOps())
+	m := &Manager{
+		logger:          newDiscardLogger(),
+		actors:          map[int]*recoveryActor{a.producerID: a},
+		processingTimes: map[uuid.UUID]time.Time{},
+	}
+	m.state.Store(mgrStateOpen)
+
+	oldID := startRecovery(t, a, hits, time.Now().Add(-10*time.Minute).Truncate(time.Millisecond), 1)
+	started := a.currentRecovery.recoveryStartedAt
+
+	first, second := uuid.New(), uuid.New()
+	m.OnMessageProcessingStarted(first, a.producerID, time.Now())
+	m.OnMessageProcessingStarted(second, a.producerID, time.Now())
+	if ts, _ := a.lastProcessedMessageGenTimestamp(); !ts.IsZero() {
+		t.Fatalf("test setup: last processed = %v, want zero", ts)
+	}
+	if got := a.inProcessing.Load(); got != 2 {
+		t.Fatalf("in processing = %d, want 2", got)
+	}
+
+	notReissued := func(at time.Duration, why string) {
+		t.Helper()
+		a.onTick(started.Add(at), false)
+		time.Sleep(50 * time.Millisecond)
+		if a.currentRecovery.recoveryID != oldID || hits.recover.Load() != 1 {
+			t.Fatalf("re-issued %s: id=%d (was %d) posts=%d", why, a.currentRecovery.recoveryID, oldID, hits.recover.Load())
+		}
+	}
+	notReissued(6*time.Minute, "with two messages in processing")
+
+	// One session ends its message without a timestamp; the other's is
+	// still in processing, so the silence is still no evidence.
+	m.OnMessageProcessingEnded(first, a.producerID, time.Time{})
+	if got := a.inProcessing.Load(); got != 1 {
+		t.Fatalf("in processing = %d after one end, want 1", got)
+	}
+	notReissued(12*time.Minute, "while the second session's message was in processing")
+
+	// The second ends too: the deadline counts from the next tick.
+	m.OnMessageProcessingEnded(second, a.producerID, time.Time{})
+	if got := a.inProcessing.Load(); got != 0 {
+		t.Fatalf("in processing = %d after both ended, want 0", got)
+	}
+	notReissued(14*time.Minute, "right after the last message ended, before a full deadline of silence")
+	a.onTick(started.Add(20*time.Minute), false)
+	if a.currentRecovery.recoveryID == oldID {
+		t.Fatal("nothing in processing and a further deadline of silence, but not re-issued")
+	}
+	waitRecoverHits(t, hits, 2)
+	waitDetachedDone(t, a, 3*time.Second)
+
+	// An extra end is clamped at zero, never negative.
+	m.OnMessageProcessingEnded(uuid.New(), a.producerID, time.Time{})
+	if got := a.inProcessing.Load(); got != 0 {
+		t.Fatalf("in processing = %d after an end without a start, want 0", got)
+	}
+	m.OnMessageProcessingStarted(uuid.New(), a.producerID, time.Now())
+	if got := a.inProcessing.Load(); got != 1 {
+		t.Fatalf("in processing = %d after a start following an extra end, want 1", got)
+	}
+}
