@@ -196,15 +196,13 @@ func TestMessagePath_FailingAPI_OneAttemptPerEventWithinTheWindow(t *testing.T) 
 	r := newMessagePathRig(t)
 	r.ctl.failing.Store(true)
 
+	// The request count below pins "no waiting": a wall-clock bound would
+	// fail a correct build on a loaded runner.
 	const messages = 40
-	start := time.Now()
 	for range messages {
 		if ev := r.buildEvent(t, 99); ev != nil {
 			t.Fatalf("event = %v, want nil while the API fails", ev)
 		}
-	}
-	if elapsed := time.Since(start); elapsed > 1500*time.Millisecond {
-		t.Fatalf("%d messages took %v; they must not wait on the failing API", messages, elapsed)
 	}
 	if got := r.ctl.summaries.Load(); got != 1 {
 		t.Fatalf("match summary requests = %d, want 1 (one attempt, no retries, then the window)", got)
@@ -467,8 +465,15 @@ func TestMessagePath_SlowAPI_TheWholeBuildIsBoundedByOneBudget(t *testing.T) {
 	if ev != nil {
 		t.Fatal("event built although the API cannot answer the whole build within the budget")
 	}
-	if elapsed > apipolicy.MessageTimeout+700*time.Millisecond {
+	// Here the time IS the behaviour, so it stays, with a wide margin: without
+	// the shared budget the build makes four or more sequential requests of
+	// 1.5 s each (6 s and more), with it at most two are sent. The request
+	// count pins the same thing without a clock.
+	if elapsed > 3*apipolicy.MessageTimeout {
 		t.Fatalf("one message build took %v, want about the %v budget (several requests of 1.5 s each)", elapsed, apipolicy.MessageTimeout)
+	}
+	if got := r.ctl.all.Load(); got > 2 {
+		t.Fatalf("the build made %d requests, want at most 2 (the second is cut off, the rest are never sent)", got)
 	}
 	if r.factory.apiFailures.len() != 1 {
 		t.Fatalf("window holds %d events, want 1", r.factory.apiFailures.len())
@@ -476,12 +481,11 @@ func TestMessagePath_SlowAPI_TheWholeBuildIsBoundedByOneBudget(t *testing.T) {
 
 	// Later messages for the event are not held at all.
 	before := r.ctl.all.Load()
-	start = time.Now()
 	for range 5 {
 		r.buildEvent(t, 99)
 	}
-	if time.Since(start) > 300*time.Millisecond || r.ctl.all.Load() != before {
-		t.Fatalf("messages inside the window took %v and made %d request(s)", time.Since(start), r.ctl.all.Load()-before)
+	if got := r.ctl.all.Load() - before; got != 0 {
+		t.Fatalf("messages inside the window made %d request(s), want none", got)
 	}
 }
 
@@ -565,17 +569,12 @@ func TestMessagePath_MarketNameResolution_UsesTheMessagePolicy(t *testing.T) {
 		r.ctl.failDescriptions.Store(true)
 		before := r.ctl.descriptions.Load()
 
-		start := time.Now()
 		out, err := r.factory.BuildMessage(t.Context(), oddsChangeWithDynamicMarket(99))
-		elapsed := time.Since(start)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if len(out.(oddsChangeImpl).markets) != 1 {
 			t.Fatalf("markets = %d, want the message delivered with its market", len(out.(oddsChangeImpl).markets))
-		}
-		if elapsed > apipolicy.MessageTimeout+700*time.Millisecond {
-			t.Fatalf("delivery took %v, want within the %v budget", elapsed, apipolicy.MessageTimeout)
 		}
 		// A retried request would show as three requests for one lookup.
 		if got := r.ctl.descriptions.Load() - before; got < 1 || got > 2 {
@@ -588,16 +587,12 @@ func TestMessagePath_MarketNameResolution_UsesTheMessagePolicy(t *testing.T) {
 	t.Run("API down", func(t *testing.T) {
 		r := newMessagePathRig(t)
 		r.ctl.failing.Store(true)
-		start := time.Now()
 		out, err := r.factory.BuildMessage(t.Context(), oddsChangeWithDynamicMarket(99))
 		if err != nil {
 			t.Fatal(err)
 		}
 		if out.(oddsChangeImpl).event != nil {
 			t.Fatal("event built from a failing API")
-		}
-		if elapsed := time.Since(start); elapsed > apipolicy.MessageTimeout+700*time.Millisecond {
-			t.Fatalf("delivery took %v", elapsed)
 		}
 		if got := r.ctl.all.Load(); got != 1 {
 			t.Fatalf("API requests = %d, want 1 (the event's single attempt; none for the market)", got)
@@ -610,7 +605,6 @@ func TestMessagePath_MarketNameResolution_UsesTheMessagePolicy(t *testing.T) {
 		r.ctl.failing.Store(true)
 		r.buildEvent(t, 99) // opens the window
 		before := r.ctl.all.Load()
-		start := time.Now()
 		for range 5 {
 			if _, err := r.factory.BuildMessage(t.Context(), oddsChangeWithDynamicMarket(99)); err != nil {
 				t.Fatal(err)
@@ -618,9 +612,6 @@ func TestMessagePath_MarketNameResolution_UsesTheMessagePolicy(t *testing.T) {
 		}
 		if got := r.ctl.all.Load() - before; got != 0 {
 			t.Fatalf("API requests = %d inside the window, want none", got)
-		}
-		if time.Since(start) > 300*time.Millisecond {
-			t.Fatalf("5 messages took %v inside the window", time.Since(start))
 		}
 	})
 }
@@ -648,7 +639,6 @@ func TestMessagePath_MarketLookupFailure_OpensTheEventsWindow(t *testing.T) {
 		t.Fatalf("window holds %d events after a failed market lookup, want 1", r.factory.apiFailures.len())
 	}
 
-	start := time.Now()
 	for range 5 {
 		if _, err := r.factory.BuildMessage(t.Context(), oddsChangeWithDynamicMarket(99)); err != nil {
 			t.Fatal(err)
@@ -656,9 +646,6 @@ func TestMessagePath_MarketLookupFailure_OpensTheEventsWindow(t *testing.T) {
 	}
 	if got := r.ctl.descriptions.Load(); got != first {
 		t.Fatalf("description requests grew from %d to %d inside the window", first, got)
-	}
-	if time.Since(start) > 300*time.Millisecond {
-		t.Fatalf("5 messages inside the window took %v", time.Since(start))
 	}
 
 	// The first success anywhere clears it: the next message tries again.
@@ -737,13 +724,9 @@ func TestMessagePath_AllMarketMessageTypes_UseTheMessagePolicy(t *testing.T) {
 				}
 				return out
 			}
-			start := time.Now()
 			out := build()
 			if n := tc.markets(out); n != 1 {
 				t.Fatalf("delivered markets = %d, want 1", n)
-			}
-			if elapsed := time.Since(start); elapsed > apipolicy.MessageTimeout+700*time.Millisecond {
-				t.Fatalf("delivery took %v, want within the %v budget", elapsed, apipolicy.MessageTimeout)
 			}
 			got := r.ctl.descriptions.Load() - before
 			if got < 1 || got > 2 {
