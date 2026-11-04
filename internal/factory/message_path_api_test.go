@@ -854,3 +854,33 @@ func TestAPIFailureWindow_FullWindowKeepsEntriesNewerThanTheCaller(t *testing.T)
 		t.Fatalf("%d of %d current entries survived a stale caller, want all but the one evicted", kept, apiFailureWindowMax)
 	}
 }
+
+// An event the API answers with 404 (not in REST yet) says nothing about the
+// description API: the message's market names still resolve under its own
+// budget. A failure that says the API is unavailable makes no further request.
+func TestMessagePath_EventNotFound_NamesStillResolve(t *testing.T) {
+	t.Run("event 404, descriptions healthy", func(t *testing.T) {
+		r := newMessagePathRig(t)
+		r.ctl.notFoundSummaries.Store(true)
+		out, err := r.factory.BuildMessage(t.Context(), oddsChangeWithDynamicMarket(99))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out.(oddsChangeImpl).event != nil {
+			t.Fatal("event built for a 404")
+		}
+		if got := r.ctl.descriptions.Load(); got < 1 {
+			t.Fatalf("description requests = %d, want names resolved after a 404 event", got)
+		}
+	})
+	t.Run("event 5xx", func(t *testing.T) {
+		r := newMessagePathRig(t)
+		r.ctl.failing.Store(true)
+		if _, err := r.factory.BuildMessage(t.Context(), oddsChangeWithDynamicMarket(99)); err != nil {
+			t.Fatal(err)
+		}
+		if got := r.ctl.descriptions.Load(); got != 0 {
+			t.Fatalf("description requests = %d, want none after an unavailable API", got)
+		}
+	})
+}

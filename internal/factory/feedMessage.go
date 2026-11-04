@@ -76,11 +76,13 @@ func (f *FeedMessageFactory) messagePolicy(ctx context.Context, eventID *types.U
 }
 
 // afterEventBuild returns the context the rest of the build (markets) runs
-// under: the same budget while the event built, and no API requests once its
-// build failed (the window is open for it from then on, and one failed
-// attempt per message is all the API gets).
-func afterEventBuild(ctx, pctx context.Context, eventFailed bool) context.Context {
-	if eventFailed {
+// under: the same budget while the event built or failed in a way that says
+// nothing about the API (a 404 for an event not in REST yet: the description
+// API is fine and names still resolve), and no API requests once the event's
+// build said the API is unavailable (the window is open for it from then on,
+// and one failed attempt per message is all the API gets).
+func afterEventBuild(ctx, pctx context.Context, eventUnavailable bool) context.Context {
+	if eventUnavailable {
 		return apipolicy.With(ctx, apipolicy.MessageSkip)
 	}
 	return pctx
@@ -199,7 +201,9 @@ func (f *FeedMessageFactory) BuildMessage(ctx context.Context, feedMessage *type
 	}
 
 	var event interface{}
-	eventFailed := false
+	// eventUnavailable: the event build failed in a way that says the API is
+	// unavailable (see saysAPIUnavailable).
+	eventUnavailable := false
 	pctx, skip := f.messagePolicy(ctx, rk.EventID)
 	switch types.EventType(rk.EventID.Type) {
 	case types.TournamentEventType:
@@ -209,7 +213,7 @@ func (f *FeedMessageFactory) BuildMessage(ctx context.Context, feedMessage *type
 		t, err := f.buildTournament(pctx, skip, *rk.EventID, *rk.SportID, f.buildLocales())
 		switch {
 		case err != nil:
-			eventFailed = true
+			eventUnavailable = saysAPIUnavailable(err)
 			// Transient cache/API failures during AMQP decode used to
 			// be silently dropped — consumers saw a non-nil message
 			// with event==nil and no log entry, indistinguishable
@@ -224,7 +228,7 @@ func (f *FeedMessageFactory) BuildMessage(ctx context.Context, feedMessage *type
 		match, err := f.buildMatch(pctx, skip, *rk.EventID, f.buildLocales(), rk.SportID)
 		switch {
 		case err != nil:
-			eventFailed = true
+			eventUnavailable = saysAPIUnavailable(err)
 			f.warnBuildFailed("match", err, *rk.EventID, rk.FullRoutingKey)
 		case match != nil:
 			event = *match
@@ -243,13 +247,14 @@ func (f *FeedMessageFactory) BuildMessage(ctx context.Context, feedMessage *type
 	// Market and outcome name resolution may fetch descriptions: same
 	// budget and policy as the event build (and no requests at all once the
 	// event's build failed).
-	mctx, nameFails := withNameFailures(afterEventBuild(ctx, pctx, eventFailed))
+	mctx, nameFails := withNameFailures(afterEventBuild(ctx, pctx, eventUnavailable))
 	defer func() {
 		// Name resolution swallows API failures; a message whose event is
 		// not already in the failure window records one, so the next
 		// messages of the event skip the API instead of each paying the
-		// budget again (the first success anywhere clears it).
-		if err := nameFails.first(); err != nil && !skip && !eventFailed {
+		// budget again (the first success anywhere clears it). An event
+		// build that already said the API is unavailable has recorded it.
+		if err := nameFails.first(); err != nil && !skip && !eventUnavailable {
 			f.noteBuildFailure(pctx, *rk.EventID, err)
 		}
 	}()
