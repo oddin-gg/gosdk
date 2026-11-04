@@ -44,11 +44,20 @@ type recoveryActor struct {
 	// last processed message timestamp. Tests only.
 	lastProcessedFn func() (time.Time, error)
 
-	// processingStarted is set once the first message has begun processing.
-	// The producer's last-message timestamp cannot tell this: system alives
-	// advance it too. Written from the session goroutines that call
-	// OnMessageProcessingStarted directly, so atomic.
-	processingStarted atomic.Bool
+	// inProcessing counts the messages of this producer that are in
+	// processing right now: every start adds one, every end takes one, a
+	// zero-timestamp end included (the session ends a message whose build
+	// or downstream send failed with a zero timestamp, and the message is
+	// out of processing all the same). The producer's last-message
+	// timestamp cannot tell this: system alives advance it too. A counter
+	// rather than marks of the last start and end, because sessions
+	// process concurrently and one session's end must not hide another's
+	// message still in a stalled callback. The session pairs every start
+	// with exactly one end; an end that were doubled is clamped at zero
+	// and only ends the guard early, which re-issues a request, where a
+	// lost end would stall the recovery. Written from the session
+	// goroutines that call the processing callbacks directly, so atomic.
+	inProcessing atomic.Int64
 
 	// Inbox + lifecycle.
 	inbox    chan actorEvent
@@ -798,17 +807,25 @@ func (a *recoveryActor) validateProducerSnapshotCompletes(received []types.Messa
 // --- Event handlers ---
 
 func (a *recoveryActor) onMessageProcessingStarted(t time.Time) {
+	// Counted before the zero check: the session ends every start, so the
+	// count must see every start too.
+	a.inProcessing.Add(1)
 	if t.IsZero() {
 		a.logger.WithField("producer_id", a.producerID).Warn("recovery: processing started with zero timestamp")
 		return
 	}
-	a.processingStarted.Store(true)
 	if err := a.pm.SetProducerLastMessageTimestamp(a.producerID, t); err != nil {
 		a.logger.WithError(err).WithField("producer_id", a.producerID).Error("recovery: set producer last message timestamp")
 	}
 }
 
 func (a *recoveryActor) onMessageProcessingEnded(t time.Time) {
+	for {
+		n := a.inProcessing.Load()
+		if n <= 0 || a.inProcessing.CompareAndSwap(n, n-1) {
+			break
+		}
+	}
 	if t.IsZero() {
 		return
 	}
@@ -1021,7 +1038,7 @@ func (a *recoveryActor) expireSnapshotCompleteDeadline(now time.Time) {
 	// one just like behind a backlog. Processing has not completed a single
 	// message, so the silence is no evidence either.
 	if lastProcessed, err := a.lastProcessedMessageGenTimestamp(); err != nil ||
-		(lastProcessed.IsZero() && a.processingStarted.Load()) {
+		(lastProcessed.IsZero() && a.inProcessing.Load() > 0) {
 		a.currentRecovery.renewedAt = now
 		return
 	}

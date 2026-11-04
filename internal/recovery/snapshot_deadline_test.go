@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/oddin-gg/gosdk/internal/api"
 	"github.com/oddin-gg/gosdk/internal/config"
 	"github.com/oddin-gg/gosdk/types"
@@ -712,4 +714,53 @@ func holdProcessing(a *recoveryActor) *procClock {
 	p.set(time.Now().Add(-time.Minute))
 	a.lastProcessedFn = func() (time.Time, error) { return time.Unix(0, p.v.Load()), nil }
 	return p
+}
+
+// TestActor_SnapshotCompleteDeadline_AFirstMessageThatEndedWithoutATimestampIsNotInProcessing:
+// the session ends a message whose build or downstream send failed with a
+// ZERO timestamp. Nothing is processed, so there is still no last-processed
+// timestamp, but the message is out of processing: the silence of a lost
+// snapshot request is evidence again, and the request is re-issued at the
+// deadline instead of waiting for the recovery cap. Driven through the
+// manager's callbacks, the way the session calls them.
+func TestActor_SnapshotCompleteDeadline_AFirstMessageThatEndedWithoutATimestampIsNotInProcessing(t *testing.T) {
+	srv, hits := fixtureSrv(t)
+	defer srv.Close()
+	a := newWiredActor(t, srv, newFakeManagerOps())
+	m := &Manager{
+		logger:          newDiscardLogger(),
+		actors:          map[int]*recoveryActor{a.producerID: a},
+		processingTimes: map[uuid.UUID]time.Time{},
+	}
+	m.state.Store(mgrStateOpen)
+
+	oldID := startRecovery(t, a, hits, time.Now().Add(-10*time.Minute).Truncate(time.Millisecond), 1)
+	started := a.currentRecovery.recoveryStartedAt
+
+	sid := uuid.New()
+	m.OnMessageProcessingStarted(sid, a.producerID, time.Now())
+	// While the message is in processing the silence is no evidence.
+	a.onTick(started.Add(6*time.Minute), false)
+	time.Sleep(50 * time.Millisecond)
+	if a.currentRecovery.recoveryID != oldID || hits.recover.Load() != 1 {
+		t.Fatalf("re-issued while the first message was in processing: id=%d posts=%d", a.currentRecovery.recoveryID, hits.recover.Load())
+	}
+
+	// The message's build fails: it ends with a zero timestamp.
+	m.OnMessageProcessingEnded(sid, a.producerID, time.Time{})
+	if ts, _ := a.lastProcessedMessageGenTimestamp(); !ts.IsZero() {
+		t.Fatalf("test setup: last processed = %v, want zero", ts)
+	}
+	// The deadline counts from the next tick, then the silence is evidence.
+	// (The tick in processing moved the mark to +6m.)
+	a.onTick(started.Add(8*time.Minute), false)
+	if a.currentRecovery.recoveryID != oldID {
+		t.Fatal("re-issued right after the message ended, before a full deadline of silence")
+	}
+	a.onTick(started.Add(12*time.Minute), false)
+	if a.currentRecovery.recoveryID == oldID {
+		t.Fatal("the first message ended without a timestamp and the silence went on, but the request was not re-issued")
+	}
+	waitRecoverHits(t, hits, 2)
+	waitDetachedDone(t, a, 3*time.Second)
 }

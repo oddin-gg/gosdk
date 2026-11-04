@@ -642,11 +642,12 @@ func (m *Manager) OnRecoveryMessageReceived(producerID int, requestID int) {
 // OnMessageProcessingEnded warns on >1s processing and dispatches the
 // gen timestamp to the actor.
 func (m *Manager) OnMessageProcessingEnded(sessionID uuid.UUID, producerID int, timestamp time.Time) {
-	if !timestamp.IsZero() {
-		if a := m.findOrSpawn(producerID); a != nil {
-			// Direct call — same rationale as OnMessageProcessingStarted.
-			a.onMessageProcessingEnded(timestamp)
-		}
+	if a := m.findOrSpawn(producerID); a != nil {
+		// Direct call — same rationale as OnMessageProcessingStarted. A
+		// zero timestamp (a message whose build or send failed) reaches the
+		// actor too: it advances no cursor, but the message is out of
+		// processing.
+		a.onMessageProcessingEnded(timestamp)
 	}
 
 	m.processingMu.Lock()
