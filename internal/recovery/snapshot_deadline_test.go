@@ -354,6 +354,30 @@ func TestActor_SnapshotCompleteDeadline_MaxRecoveryExecutionCapsTheTotalOnTheAli
 	}
 }
 
+// A producer disabled in the middle of a recovery is not asked for its
+// snapshot again when the deadline passes.
+func TestActor_SnapshotCompleteDeadline_DisabledProducerIsNotReissued(t *testing.T) {
+	srv, hits := fixtureSrv(t)
+	defer srv.Close()
+	a := newWiredActor(t, srv, newFakeManagerOps())
+
+	id := startRecovery(t, a, hits, time.Time{}, 1)
+	start := a.currentRecovery.recoveryStartedAt
+	if err := a.pm.SetProducerState(t.Context(), 1, false); err != nil {
+		t.Fatalf("SetProducerState: %v", err)
+	}
+
+	a.onTick(start.Add(6*time.Minute), false)
+	a.onTick(start.Add(12*time.Minute), false)
+	if a.currentRecovery == nil || a.currentRecovery.recoveryID != id {
+		t.Fatal("a disabled producer's recovery was re-issued after the deadline")
+	}
+	time.Sleep(50 * time.Millisecond)
+	if got := hits.recover.Load(); got != 1 {
+		t.Fatalf("snapshot POSTs = %d, want 1", got)
+	}
+}
+
 // A re-issue held back by a lost session that has not re-bound its queue
 // waits (the replay would go nowhere); it happens once the rebind lands.
 func TestActor_SnapshotCompleteDeadline_WaitsForPendingRebind(t *testing.T) {

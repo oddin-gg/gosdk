@@ -1017,6 +1017,11 @@ func (a *recoveryActor) expireSnapshotCompleteDeadline(now time.Time) {
 	if !a.isPerformingRecovery() || a.currentRecovery == nil {
 		return
 	}
+	// A producer disabled in the middle of a recovery is left alone, as
+	// the inactivity check of onTick does: nothing is replayed for it.
+	if a.isDisabled() {
+		return
+	}
 	deadline := a.snapshotCompleteDeadline()
 	if deadline <= 0 {
 		return
