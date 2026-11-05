@@ -50,6 +50,13 @@ type apiCtl struct {
 	tournaments     atomic.Int32 // GET .../tournaments/<id>/info
 	summaries       atomic.Int32 // GET .../sport_events/<id>/summary
 	all             atomic.Int32 // every request except the producer catalog
+	// catalog, when set, is served as the market description catalog.
+	catalog atomic.Pointer[string]
+	// failPlayers fails only the player profile endpoint with a server
+	// error; notFoundPlayers answers it with 404 (a healthy API).
+	failPlayers     atomic.Bool
+	notFoundPlayers atomic.Bool
+	players         atomic.Int32 // GET .../players/<id>/profile
 }
 
 type messagePathRig struct {
@@ -101,6 +108,24 @@ func newMessagePathRig(t *testing.T) *messagePathRig {
 			ctl.descriptions.Add(1)
 			if ctl.failDescriptions.Load() || ctl.failing.Load() {
 				http.Error(w, "<error/>", http.StatusInternalServerError)
+				return
+			}
+		}
+		if isDescription {
+			if c := ctl.catalog.Load(); c != nil && strings.HasSuffix(r.URL.Path, "/markets") {
+				w.Header().Set("Content-Type", "application/xml")
+				_, _ = io.WriteString(w, *c)
+				return
+			}
+		}
+		if strings.Contains(r.URL.Path, "/players/") {
+			ctl.players.Add(1)
+			if ctl.failPlayers.Load() {
+				http.Error(w, "<error/>", http.StatusInternalServerError)
+				return
+			}
+			if ctl.notFoundPlayers.Load() {
+				http.Error(w, "<error/>", http.StatusNotFound)
 				return
 			}
 		}
@@ -659,6 +684,78 @@ func TestMessagePath_MarketLookupFailure_OpensTheEventsWindow(t *testing.T) {
 	if got := r.ctl.descriptions.Load(); got <= first {
 		t.Fatalf("description requests = %d after a success cleared the window, want a new attempt", got)
 	}
+}
+
+const playerPropsCatalog = `<?xml version="1.0"?>
+<market_descriptions response_code="OK">
+  <market id="7" name="{player} kills" groups="all|player_props">
+    <specifiers><specifier name="player" type="string"/></specifiers>
+    <outcomes><outcome id="1" name="yes"/></outcomes>
+  </market>
+</market_descriptions>`
+
+func oddsChangeWithPlayerProps(eventNum int) *types.FeedMessage {
+	m := oddsChangeFor(eventNum)
+	m.Message.(*feedXML.OddsChange).Odds.Markets = []*feedXML.MarketWithOutcome{
+		feedMarket(7, "player=od:player:301", "1"),
+	}
+	return m
+}
+
+// The player lookup of a player-props market name is a name lookup like the
+// others: when the player endpoint says the API is unavailable the first
+// message opens the event's window and the following ones make no player
+// request; a 404 answer of a healthy API does not open it.
+func TestMessagePath_PlayerPropsNameLookup(t *testing.T) {
+	setup := func(t *testing.T) *messagePathRig {
+		t.Helper()
+		r := newMessagePathRig(t)
+		if ev := r.buildEvent(t, 99); ev == nil {
+			t.Fatal("setup: event not built from a healthy API")
+		}
+		c := playerPropsCatalog
+		r.ctl.catalog.Store(&c)
+		return r
+	}
+
+	t.Run("server error opens the window", func(t *testing.T) {
+		r := setup(t)
+		r.ctl.failPlayers.Store(true)
+		before := r.ctl.players.Load()
+		if _, err := r.factory.BuildMessage(t.Context(), oddsChangeWithPlayerProps(99)); err != nil {
+			t.Fatal(err)
+		}
+		first := r.ctl.players.Load()
+		if first-before < 1 {
+			t.Fatalf("first message made %d player request(s), want its attempt", first-before)
+		}
+		if r.factory.apiFailures.len() != 1 {
+			t.Fatalf("window holds %d events after a failed player lookup, want 1", r.factory.apiFailures.len())
+		}
+		for range 5 {
+			if _, err := r.factory.BuildMessage(t.Context(), oddsChangeWithPlayerProps(99)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if got := r.ctl.players.Load(); got != first {
+			t.Fatalf("player requests grew from %d to %d inside the window", first, got)
+		}
+	})
+
+	t.Run("not found does not open the window", func(t *testing.T) {
+		r := setup(t)
+		r.ctl.notFoundPlayers.Store(true)
+		before := r.ctl.players.Load()
+		if _, err := r.factory.BuildMessage(t.Context(), oddsChangeWithPlayerProps(99)); err != nil {
+			t.Fatal(err)
+		}
+		if r.ctl.players.Load() == before {
+			t.Fatal("no player request was made")
+		}
+		if r.factory.apiFailures.len() != 0 {
+			t.Fatalf("window holds %d events after a player not-found, want 0", r.factory.apiFailures.len())
+		}
+	})
 }
 
 // A lookup the API answers with "not found" says nothing about its health and

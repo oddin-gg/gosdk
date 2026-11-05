@@ -289,6 +289,9 @@ func (m *marketDataImpl) getPropsName(ctx context.Context, entityID string, loca
 			},
 		)
 		if err != nil {
+			// Swallowed like the other name lookups, but reported so a
+			// failing player endpoint opens the event's failure window.
+			reportNameFailure(ctx, err)
 			return "", false
 		}
 		return player.Name, true
