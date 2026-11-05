@@ -365,8 +365,27 @@ func pastTheCap(t *testing.T, from time.Time) (*recoveryActor, *recoveryHits) {
 		return &deadlineCfg{minimalCfg: m, maxRecovery: 12 * time.Minute, deadline: 5 * time.Minute}
 	})
 	startRecovery(t, a, hits, from, 1)
+	// A chain asks from a point at or before its own start, so a point
+	// is older than the cap once the chain is past it.
 	a.currentRecovery.chainStartedAt = time.Now().Add(-13 * time.Minute)
 	return a, hits
+}
+
+// capFrom is the point of a chain dropped at the cap: before the chain's
+// start, so older than the 12-minute lookback of pastTheCap.
+func capFrom() time.Time { return time.Now().Add(-14 * time.Minute).Truncate(time.Millisecond) }
+
+// afterTheLookback checks the request that follows a recovery dropped at the
+// cap reaches back the whole lookback (12 minutes before it was made):
+// everything of the dropped range that any request can still recover.
+func afterTheLookback(t *testing.T, hits *recoveryHits, madeFrom, madeTo time.Time) {
+	t.Helper()
+	waitRecoverHits(t, hits, 2)
+	got := time.UnixMilli(hits.lastAfterMillis.Load())
+	lo, hi := madeFrom.Add(-12*time.Minute).Truncate(time.Millisecond), madeTo.Add(-12*time.Minute)
+	if got.Before(lo) || got.After(hi) {
+		t.Fatalf("next recovery: after=%v, want the lookback, between %v and %v", got, lo, hi)
+	}
 }
 
 // afterTheCap checks the request that follows a recovery dropped at the cap
@@ -387,20 +406,51 @@ func afterTheCap(t *testing.T, hits *recoveryHits, want time.Time) {
 }
 
 // The tick drops a recovery that has outlived MaxRecoveryExecution; the
-// request after it must still reach back to where it started, not to a
-// cursor clamped against a later "now".
-func TestActor_RecoveryCapOnTickKeepsTheOriginalPoint(t *testing.T) {
-	from := time.Now().Add(-10 * time.Minute).Truncate(time.Millisecond)
-	a, hits := pastTheCap(t, from)
+// request after it must still reach back as far as it can, the whole
+// lookback, not only to the producer's later cursor.
+func TestActor_RecoveryCapOnTickReachesBackTheLookback(t *testing.T) {
+	a, hits := pastTheCap(t, capFrom())
 
 	a.onTick(time.Now(), false)
 	if a.currentRecovery != nil || a.recoveryState != types.ErrorRecoveryState {
 		t.Fatalf("setup: the tick left recovery=%v state=%v", a.currentRecovery, a.recoveryState)
 	}
+	made := time.Now()
 	if err := a.makeSnapshotRecovery(time.Now().Add(-time.Minute).Truncate(time.Millisecond)); err != nil {
 		t.Fatal(err)
 	}
-	afterTheCap(t, hits, from)
+	afterTheLookback(t, hits, made, time.Now())
+	waitDetachedDone(t, a, 3*time.Second)
+}
+
+// The floor a recovery dropped at the cap leaves is older than the lookback,
+// so no request can start at or before it. Once the recovery after the cap,
+// which reaches back the whole lookback, completes, the floor is gone: a later
+// short gap is recovered from its own cursor, not again from the lookback.
+func TestActor_RecoveryCapFloorEndsWithTheNextCompletedRecovery(t *testing.T) {
+	a, hits := pastTheCap(t, capFrom())
+
+	a.onTick(time.Now(), false)
+	if err := a.makeSnapshotRecovery(time.Now().Add(-time.Minute).Truncate(time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	waitRecoverHits(t, hits, 2)
+	waitDetachedDone(t, a, 3*time.Second)
+	if err := a.snapshotRecoveryFinished(a.currentRecovery.recoveryID); err != nil {
+		t.Fatal(err)
+	}
+	if !a.recoveryFloor.IsZero() || a.recoveryFloorFull {
+		t.Fatalf("floor after the completed recovery: %v (full=%v), want none", a.recoveryFloor, a.recoveryFloorFull)
+	}
+
+	cursor := time.Now().Add(-10 * time.Second).Truncate(time.Millisecond)
+	if err := a.makeSnapshotRecovery(cursor); err != nil {
+		t.Fatal(err)
+	}
+	waitRecoverHits(t, hits, 3)
+	if got := hits.lastAfterMillis.Load(); got != cursor.UnixMilli() {
+		t.Fatalf("short-gap recovery: after=%v, want its cursor %v", time.UnixMilli(got), cursor)
+	}
 	waitDetachedDone(t, a, 3*time.Second)
 }
 
@@ -419,10 +469,9 @@ func TestActor_RecoveryCapOnTickKeepsTheFullHistory(t *testing.T) {
 }
 
 // The alive path drops the same recovery and starts the next one itself,
-// from the producer's cursor: it too must keep the original point.
-func TestActor_RecoveryCapOnAliveKeepsTheOriginalPoint(t *testing.T) {
-	from := time.Now().Add(-10 * time.Minute).Truncate(time.Millisecond)
-	a, hits := pastTheCap(t, from)
+// from the producer's cursor: it too must reach back the whole lookback.
+func TestActor_RecoveryCapOnAliveReachesBackTheLookback(t *testing.T) {
+	a, hits := pastTheCap(t, capFrom())
 
 	// The producer's cursor is a later point than the dropped request's.
 	now := time.Now()
@@ -432,7 +481,7 @@ func TestActor_RecoveryCapOnAliveKeepsTheOriginalPoint(t *testing.T) {
 	if err := a.systemAliveReceived(types.MessageTimestamp{Created: now, Received: now}, true); err != nil {
 		t.Fatal(err)
 	}
-	afterTheCap(t, hits, from)
+	afterTheLookback(t, hits, now, time.Now())
 	waitDetachedDone(t, a, 3*time.Second)
 }
 

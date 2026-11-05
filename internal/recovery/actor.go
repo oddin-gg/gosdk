@@ -1746,6 +1746,17 @@ func (a *recoveryActor) makeSnapshotRecovery(timestamp time.Time) error {
 		maxRecovery := a.cfg.MaxRecoveryExecution()
 		if now.Sub(recoverFrom) > maxRecovery {
 			recoverFrom = now.Add(-maxRecovery)
+			// Nothing older than the lookback can be recovered by any
+			// request, so a floor below it is covered by this one as far
+			// as it can be. The floor moves up to the clamped point:
+			// this request's completion clears it, where a floor left
+			// below would outlive every completion (none can start at or
+			// before it) and pull each later recovery back to the full
+			// lookback. A recovery dropped at MaxRecoveryExecution always
+			// leaves such a floor: its point is older than the cap.
+			if !a.recoveryFloor.IsZero() && a.recoveryFloor.Before(recoverFrom) {
+				a.recoveryFloor = recoverFrom
+			}
 		}
 		// Defensive clamp (the public setter rejects future cursors, but
 		// message-timestamp-derived cursors flow in unvalidated): asking
