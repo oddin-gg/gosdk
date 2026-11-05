@@ -779,9 +779,12 @@ func (m *Manager) OnClientSessionOpened(session uuid.UUID, messageInterest types
 // only once each of its scopes has had its own snapshot_complete. A
 // mixed live|prematch producer with only a LiveOnly session open is
 // therefore not completable: its replay arrives, the prematch half is
-// dropped, and a re-request would change nothing. A producer the catalog
-// cannot describe counts as completable when any session is open (the
-// conservative answer: keep re-requesting rather than give up).
+// dropped, and a re-request would change nothing. A producer missing
+// from the catalog is the catalog's placeholder, which has both scopes,
+// so it is judged like a mixed producer, as the sessions filter it; only
+// when the catalog cannot be read at all (before Open) does any open
+// session count as able to complete it (the conservative answer: keep
+// re-requesting rather than give up).
 func (m *Manager) clientSessionsCanComplete(producerID int) bool {
 	interests := m.clientInterests()
 	if len(interests) == 0 {
@@ -861,8 +864,9 @@ func (m *Manager) sessionQueueSettled(session uuid.UUID) {
 // drains its own queue, whatever the stuck one holds, so it does not
 // count: a LiveOnly session stuck on a live message must not hold the
 // deadline of a prematch producer replaying to a healthy session. A
-// session missing from the registry, or a producer the catalog cannot
-// describe, counts (the conservative answer: hold the deadline).
+// session missing from the registry counts, and so does every stalled
+// session while the catalog cannot be read (the conservative answer:
+// hold the deadline).
 //
 // The two registries have their own mutexes and are never locked
 // together, nor while the producer catalog is asked: the stalled
