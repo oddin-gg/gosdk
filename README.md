@@ -220,6 +220,41 @@ need no market/outcome display names at all, or are prepared to compose
 them yourself. The SDK logs one Info line at `Client.New` when the option
 is off, so an unexpected `None` later has a findable cause.
 
+### When the REST API is down
+
+Building the event of a feed message may need the REST API (a match, its
+tournament, competitors and fixture that are not cached yet). That happens on
+the session goroutine, so it never waits for a failing API the way a public
+getter does: one attempt per request, no retries, and the whole build shares
+one 2 s budget (each request gets what is left of it); market and outcome
+name resolution during the build is covered by the same budget.
+
+Only a failure **of the API** opens the event's failure window: a 5xx, a 429,
+a transport error, a timeout after the request was sent, a
+`SERVICE_UNAVAILABLE` envelope, or a response that cannot be read. A failed
+event build or market/outcome name lookup of that kind delivers the message
+at once with a nil event or nameless markets, and messages for the same
+event then skip the API for up to 10 seconds; the first successful API
+response of any call ends that at once. These do **not** open the window: a
+404 for an event that is not in the API yet (the message is delivered with a
+nil event, but names still resolve and the next message tries again), any
+other 4xx, a request that was never sent because the 2 s budget was already
+spent, and local name-resolution errors over a healthy catalog. Market name
+catalogs have a window of their own: after a catalog download for a message
+failed or ran out of its budget, messages for the next 30 seconds send no
+catalog request and resolve no names for that locale (a stale catalog keeps
+serving its names). The public entity reads (`Client.Match`, ...) keep their
+retries and are not affected.
+
+**A healthy but slow API counts too.** A cold event build is several
+sequential requests (the summary, the tournament, each competitor, the
+fixture, and the market catalog for every locale) that share the one 2 s
+budget, and a timeout after a request was sent is a failure of the API. With
+requests slower than roughly 250 ms the first messages of a new match
+therefore arrive with a nil event and no market names, and open the window,
+where a public getter would return the complete event, late. Add `WithPreloadLocales(...)` so the
+market catalog is loaded up front and does not take part in that build.
+
 ### Delivery guarantees
 
 The SDK consumes with manual acknowledgement and acks a delivery when its
@@ -244,6 +279,10 @@ the subscription has re-bound its queue, the next alive starts a snapshot
 recovery reaching back at least to the loss (one alive interval further
 back than strictly needed, on purpose). Watch
 `RecoveryEvents()` / `ProducerStatus()` for the down → up cycle.
+A producer status is also published when only its `IsDelayed` flag flips (a
+delay starting or ending), and a repeated down status with the same reason is
+published too, so do not count statuses as up/down transitions: compare with
+the previous status you saw.
 
 ### Recovery
 
@@ -259,6 +298,34 @@ if res.Status == types.RecoveryStatusCompleted { ... }
 
 The handle is reliable — even if the lossy `RecoveryEvents()` channel
 drops the event, `Done()` unblocks correctly.
+
+A producer's snapshot recovery has a **snapshot-complete deadline**
+(`WithSnapshotCompleteDeadline`, default 5 minutes): if neither a message
+carrying the recovery's request id nor its `snapshot_complete` arrives for
+that long, the SDK logs once at WARN and requests the snapshot again from
+the same point under a new request id; the producer stays down meanwhile.
+`WithMaxRecoveryExecution` (default 6 h) still caps the whole attempt.
+
+### Memory bound
+
+The per-entity caches are size-capped LRUs with a 12 h TTL; none of the
+caps is configurable. At most this many entries are held:
+
+| Cache | Entries (cap) |
+|---|---|
+| matches, fixtures, competitors, tournaments (one cache each) | 5 000 per cache |
+| match status | 5 000 |
+| players (one entry per player and locale) | 10 000 |
+| dynamic market variants | 5 000 |
+
+An entry is dropped when the cap pushes it out, when it is read after its
+TTL, and — so that an idle but growing cache does not sit at its cap with
+entries nobody reads any more — by a small sweep on every insert that
+removes up to four expired entries from the least recently used end. The
+catalogs (sports, static market descriptions, void reasons, match-status
+descriptions) are small and kept whole. Memory therefore grows with the
+number of distinct entities seen within the last 12 hours, never beyond the
+caps above.
 
 ### Observability
 

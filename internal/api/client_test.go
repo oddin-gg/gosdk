@@ -27,6 +27,7 @@ type testConfig struct {
 func (c *testConfig) AccessToken() *string                    { return &c.token }
 func (c *testConfig) DefaultLocale() types.Locale             { return types.EnLocale }
 func (c *testConfig) MaxInactivity() time.Duration            { return 20 * time.Second }
+func (c *testConfig) SnapshotCompleteDeadline() time.Duration { return 5 * time.Minute }
 func (c *testConfig) MaxRecoveryExecution() time.Duration     { return 360 * time.Minute }
 func (c *testConfig) MessagingPort() int                      { return 5672 }
 func (c *testConfig) SdkNodeID() *int                         { return nil }

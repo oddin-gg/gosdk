@@ -21,6 +21,7 @@ type fakeSnapshotProcessor struct {
 	calls atomic.Int32
 }
 
+func (f *fakeSnapshotProcessor) OnRecoveryMessageReceived(int, int)                   {}
 func (f *fakeSnapshotProcessor) OnMessageProcessingStarted(uuid.UUID, int, time.Time) {}
 func (f *fakeSnapshotProcessor) OnMessageProcessingEnded(uuid.UUID, int, time.Time)   {}
 func (f *fakeSnapshotProcessor) OnAliveReceived(int, types.MessageTimestamp, bool, types.MessageInterest) {
@@ -33,6 +34,7 @@ func (f *fakeSnapshotProcessor) OnSnapshotCompleteReceived(context.Context, int,
 func (f *fakeSnapshotProcessor) OnFeedChannelLost(uuid.UUID, types.MessageInterest, time.Time) {}
 func (f *fakeSnapshotProcessor) OnFeedChannelRestored(uuid.UUID)                               {}
 func (f *fakeSnapshotProcessor) OnFeedSessionGone(uuid.UUID)                                   {}
+func (f *fakeSnapshotProcessor) OnClientSessionOpened(uuid.UUID, types.MessageInterest)        {}
 
 // TestSession_SnapshotComplete_AckOnlyWhenAdmitted pins the High-finding
 // fix: a snapshot_complete delivery is acked ONLY when the recovery

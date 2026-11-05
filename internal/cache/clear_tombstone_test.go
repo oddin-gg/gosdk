@@ -234,6 +234,7 @@ type fakeCacheCfg struct{}
 func (f *fakeCacheCfg) AccessToken() *string                    { s := "tok"; return &s }
 func (f *fakeCacheCfg) DefaultLocale() types.Locale             { return types.EnLocale }
 func (f *fakeCacheCfg) MaxInactivity() time.Duration            { return 20 * time.Second }
+func (f *fakeCacheCfg) SnapshotCompleteDeadline() time.Duration { return 5 * time.Minute }
 func (f *fakeCacheCfg) MaxRecoveryExecution() time.Duration     { return 6 * time.Hour }
 func (f *fakeCacheCfg) MessagingPort() int                      { return 5672 }
 func (f *fakeCacheCfg) SdkNodeID() *int                         { return nil }

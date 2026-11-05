@@ -5,8 +5,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
+	"github.com/oddin-gg/gosdk/internal/apipolicy"
 	"github.com/oddin-gg/gosdk/internal/config"
 	feedXML "github.com/oddin-gg/gosdk/internal/feed/xml"
 	log "github.com/oddin-gg/gosdk/internal/log"
@@ -37,6 +39,119 @@ type FeedMessageFactory struct {
 	producerManager       *producer.Manager
 	oddsFeedConfiguration config.Config
 	logger                *log.Logger
+
+	// buildFailThrottles holds one log throttle per kind of message-path
+	// build failure ("match", "tournament"), created on first use so the
+	// zero-value factory still works. Keyed per kind, not per event id:
+	// an API outage fails the build for every event, and one line per
+	// message is what made the log unreadable.
+	buildFailThrottles sync.Map // string -> *log.Throttle
+	// throttleNow is the throttles' clock; nil means time.Now (tests).
+	throttleNow func() time.Time
+
+	// apiFailures remembers events whose message-path build just failed
+	// against the API; see apiFailureWindow.
+	apiFailures apiFailureWindow
+}
+
+// apiSuccessCount is the REST API's success counter (0 without an entity
+// factory); see apiFailureWindow.
+func (f *FeedMessageFactory) apiSuccessCount() uint64 {
+	return f.entityFactory.APISuccessCount()
+}
+
+// messagePolicy returns the ONE call-policy context of a message build and
+// whether the event is inside the failure window. Everything the build does
+// that may reach the REST API (the event and its parts, market and outcome
+// name resolution) runs under it: one 2 s budget in all, one attempt per
+// request, no retries; and, for an event whose build failed within the last
+// few seconds, no API request at all (caches may still answer). Public
+// getters are not affected: they keep their own policy.
+func (f *FeedMessageFactory) messagePolicy(ctx context.Context, eventID *types.URN) (context.Context, bool) {
+	skip := eventID != nil && f.apiFailures.blocked(*eventID, f.apiSuccessCount())
+	if skip {
+		return apipolicy.With(ctx, apipolicy.MessageSkip), true
+	}
+	return apipolicy.With(ctx, apipolicy.Message), false
+}
+
+// afterEventBuild returns the context the rest of the build (markets) runs
+// under: the same budget while the event built or failed in a way that says
+// nothing about the API (a 404 for an event not in REST yet: the description
+// API is fine and names still resolve), and no API requests once the event's
+// build said the API is unavailable (the window is open for it from then on,
+// and one failed attempt per message is all the API gets).
+func afterEventBuild(ctx, pctx context.Context, eventUnavailable bool) context.Context {
+	if eventUnavailable {
+		return apipolicy.With(ctx, apipolicy.MessageSkip)
+	}
+	return pctx
+}
+
+// buildMatch builds the event of a feed message under the policy context
+// from messagePolicy. A failure is remembered until the window expires or
+// the API answers any call successfully.
+func (f *FeedMessageFactory) buildMatch(pctx context.Context, skip bool, id types.URN, locales []types.Locale, sportID *types.URN) (*types.Match, error) {
+	m, err := f.entityFactory.BuildMatch(pctx, id, locales, sportID)
+	if err != nil && !skip {
+		f.noteBuildFailure(pctx, id, err)
+	}
+	return m, err
+}
+
+// buildTournament is buildMatch for a tournament event.
+func (f *FeedMessageFactory) buildTournament(pctx context.Context, skip bool, id types.URN, sportID types.URN, locales []types.Locale) (*types.Tournament, error) {
+	t, err := f.entityFactory.BuildTournament(pctx, id, sportID, locales)
+	if err != nil && !skip {
+		f.noteBuildFailure(pctx, id, err)
+	}
+	return t, err
+}
+
+// noteBuildFailure opens the window for id, unless the failure says nothing
+// about the API: the caller's own cancellation, a closed client (shutdown), a
+// request refused because the shared budget was already spent (nothing was
+// sent; an earlier request of the same build that timed out is recorded on
+// its own), or an answer of a healthy API such as a 404 for an event that is
+// not in REST yet (see saysAPIUnavailable).
+//
+// The entry is bound to the success counter as read NOW, after the failed
+// attempt, not before the build: one build makes several calls, and an
+// earlier one that succeeded (the match summary, before the tournament
+// fails) already advanced the counter — binding to the pre-build value would
+// void the entry at once and the window would never open in a partial
+// outage. Any success from here on still clears it.
+func (f *FeedMessageFactory) noteBuildFailure(ctx context.Context, id types.URN, err error) {
+	if ctx.Err() != nil || !saysAPIUnavailable(err) {
+		return
+	}
+	f.apiFailures.record(id, f.apiSuccessCount())
+}
+
+// buildFailWarnInterval bounds each build-failure warn kind to one line
+// per interval; the line carries the number of warns held back.
+const buildFailWarnInterval = time.Minute
+
+// warnBuildFailed logs a failed message-path build at WARN, throttled per
+// kind: the first failure goes out at once, later ones at most once per
+// buildFailWarnInterval with a suppressed count.
+func (f *FeedMessageFactory) warnBuildFailed(kind string, err error, eventID types.URN, routingKey string) {
+	if f.logger == nil {
+		return
+	}
+	th, ok := f.buildFailThrottles.Load(kind)
+	if !ok {
+		th, _ = f.buildFailThrottles.LoadOrStore(kind, log.NewThrottle(buildFailWarnInterval, f.throttleNow))
+	}
+	suppressed, emit := th.(*log.Throttle).Allow()
+	if !emit {
+		return
+	}
+	l := f.logger.WithError(err)
+	if suppressed > 0 {
+		l = l.WithField("suppressed", suppressed)
+	}
+	l.Warnf("feed message: build %s %s failed for route %q", kind, eventID.ToString(), routingKey)
 }
 
 // buildLocales returns the locale set message events are built with:
@@ -86,29 +201,35 @@ func (f *FeedMessageFactory) BuildMessage(ctx context.Context, feedMessage *type
 	}
 
 	var event interface{}
+	// eventUnavailable: the event build failed in a way that says the API is
+	// unavailable (see saysAPIUnavailable).
+	eventUnavailable := false
+	pctx, skip := f.messagePolicy(ctx, rk.EventID)
 	switch types.EventType(rk.EventID.Type) {
 	case types.TournamentEventType:
 		if rk.SportID == nil {
 			return nil, fmt.Errorf("feed message: tournament route %q missing sport id", rk.FullRoutingKey)
 		}
-		t, err := f.entityFactory.BuildTournament(ctx, *rk.EventID, *rk.SportID, f.buildLocales())
+		t, err := f.buildTournament(pctx, skip, *rk.EventID, *rk.SportID, f.buildLocales())
 		switch {
-		case err != nil && f.logger != nil:
+		case err != nil:
+			eventUnavailable = saysAPIUnavailable(err)
 			// Transient cache/API failures during AMQP decode used to
 			// be silently dropped — consumers saw a non-nil message
 			// with event==nil and no log entry, indistinguishable
 			// from "unsupported event type". Log so the failure is
 			// observable; behaviour (dispatch with event==nil)
 			// preserved for parity with Java/.NET.
-			f.logger.WithError(err).Warnf("feed message: build tournament %s failed for route %q", rk.EventID.ToString(), rk.FullRoutingKey)
+			f.warnBuildFailed("tournament", err, *rk.EventID, rk.FullRoutingKey)
 		case t != nil:
 			event = *t
 		}
 	case types.MatchEventType:
-		match, err := f.entityFactory.BuildMatch(ctx, *rk.EventID, f.buildLocales(), rk.SportID)
+		match, err := f.buildMatch(pctx, skip, *rk.EventID, f.buildLocales(), rk.SportID)
 		switch {
-		case err != nil && f.logger != nil:
-			f.logger.WithError(err).Warnf("feed message: build match %s failed for route %q", rk.EventID.ToString(), rk.FullRoutingKey)
+		case err != nil:
+			eventUnavailable = saysAPIUnavailable(err)
+			f.warnBuildFailed("match", err, *rk.EventID, rk.FullRoutingKey)
 		case match != nil:
 			event = *match
 		}
@@ -123,11 +244,25 @@ func (f *FeedMessageFactory) BuildMessage(ctx context.Context, feedMessage *type
 		return nil, err
 	}
 
+	// Market and outcome name resolution may fetch descriptions: same
+	// budget and policy as the event build (and no requests at all once the
+	// event's build failed).
+	mctx, nameFails := withNameFailures(afterEventBuild(ctx, pctx, eventUnavailable))
+	defer func() {
+		// Name resolution swallows API failures; a message whose event is
+		// not already in the failure window records one, so the next
+		// messages of the event skip the API instead of each paying the
+		// budget again (the first success anywhere clears it). An event
+		// build that already said the API is unavailable has recorded it.
+		if err := nameFails.first(); err != nil && !skip && !eventUnavailable {
+			f.noteBuildFailure(pctx, *rk.EventID, err)
+		}
+	}()
 	switch msg := feedMessage.Message.(type) {
 	case *feedXML.OddsChange:
 		markets := make([]types.MarketWithOdds, len(msg.Odds.Markets))
 		for i := range msg.Odds.Markets {
-			markets[i] = f.marketFactory.BuildMarketWithOdds(ctx, event, msg.Odds.Markets[i])
+			markets[i] = f.marketFactory.BuildMarketWithOdds(mctx, event, msg.Odds.Markets[i])
 		}
 		return oddsChangeImpl{
 			producer:   producer,
@@ -148,7 +283,7 @@ func (f *FeedMessageFactory) BuildMessage(ctx context.Context, feedMessage *type
 	case *feedXML.BetSettlement:
 		markets := make([]types.MarketWithSettlement, len(msg.Markets.Markets))
 		for i := range msg.Markets.Markets {
-			markets[i] = f.marketFactory.BuildMarketWithSettlement(ctx, event, msg.Markets.Markets[i])
+			markets[i] = f.marketFactory.BuildMarketWithSettlement(mctx, event, msg.Markets.Markets[i])
 		}
 		return betSettlementImpl{
 			producer:   producer,
@@ -161,7 +296,7 @@ func (f *FeedMessageFactory) BuildMessage(ctx context.Context, feedMessage *type
 	case *feedXML.BetCancel:
 		markets := make([]types.MarketCancel, len(msg.Markets))
 		for i := range msg.Markets {
-			markets[i] = f.marketFactory.BuildMarketCancel(ctx, event, msg.Markets[i])
+			markets[i] = f.marketFactory.BuildMarketCancel(mctx, event, msg.Markets[i])
 		}
 		return betCancelImpl{
 			producer:   producer,
@@ -182,7 +317,7 @@ func (f *FeedMessageFactory) BuildMessage(ctx context.Context, feedMessage *type
 	case *feedXML.RollbackBetSettlement:
 		markets := make([]types.Market, len(msg.Markets))
 		for i := range msg.Markets {
-			markets[i] = f.marketFactory.BuildMarket(ctx, event, &msg.Markets[i].MarketAttributes)
+			markets[i] = f.marketFactory.BuildMarket(mctx, event, &msg.Markets[i].MarketAttributes)
 		}
 		return rollbackBetSettlementImpl{
 			producer:   producer,
@@ -195,7 +330,7 @@ func (f *FeedMessageFactory) BuildMessage(ctx context.Context, feedMessage *type
 	case *feedXML.RollbackBetCancel:
 		markets := make([]types.Market, len(msg.Markets))
 		for i := range msg.Markets {
-			markets[i] = f.marketFactory.BuildMarket(ctx, event, &msg.Markets[i].MarketAttributes)
+			markets[i] = f.marketFactory.BuildMarket(mctx, event, &msg.Markets[i].MarketAttributes)
 		}
 		return rollbackBetCancelImpl{
 			producer:   producer,
@@ -242,10 +377,11 @@ func (f *FeedMessageFactory) BuildUnparsableMessage(ctx context.Context, feedMes
 
 	var event interface{}
 	if rk := feedMessage.RoutingKey; rk != nil && rk.EventID != nil {
+		pctx, skip := f.messagePolicy(ctx, rk.EventID)
 		switch types.EventType(rk.EventID.Type) {
 		case types.TournamentEventType:
 			if rk.SportID != nil {
-				t, err := f.entityFactory.BuildTournament(ctx, *rk.EventID, *rk.SportID, []types.Locale{f.oddsFeedConfiguration.DefaultLocale()})
+				t, err := f.buildTournament(pctx, skip, *rk.EventID, *rk.SportID, []types.Locale{f.oddsFeedConfiguration.DefaultLocale()})
 				switch {
 				case err != nil && f.logger != nil:
 					f.logger.WithError(err).Warnf("unparsable: build tournament %s failed for route %q", rk.EventID.ToString(), rk.FullRoutingKey)
@@ -254,7 +390,7 @@ func (f *FeedMessageFactory) BuildUnparsableMessage(ctx context.Context, feedMes
 				}
 			}
 		case types.MatchEventType:
-			match, err := f.entityFactory.BuildMatch(ctx, *rk.EventID, []types.Locale{f.oddsFeedConfiguration.DefaultLocale()}, rk.SportID)
+			match, err := f.buildMatch(pctx, skip, *rk.EventID, []types.Locale{f.oddsFeedConfiguration.DefaultLocale()}, rk.SportID)
 			switch {
 			case err != nil && f.logger != nil:
 				f.logger.WithError(err).Warnf("unparsable: build match %s failed for route %q", rk.EventID.ToString(), rk.FullRoutingKey)

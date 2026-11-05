@@ -65,9 +65,13 @@ func ProducerHasScope(p Producer, scope ProducerScope) bool {
 }
 
 // ProducerStatus is the producer-side payload published on
-// RecoveryEvents() when a producer transitions up / down. v2.33
-// relocated from types/message.go (the interface is a producer-state
-// concept, not a message concept).
+// RecoveryEvents() whenever the producer's status changes: when it goes
+// up or down, and also when only IsDelayed flips while it stays up or
+// down. A down status can therefore repeat with the same reason; compare
+// IsDown and ProducerStatusReason with the previous status rather than
+// counting statuses as up/down transitions. v2.33 relocated from
+// types/message.go (the interface is a producer-state concept, not a
+// message concept).
 type ProducerStatus interface {
 	Message
 	IsDown() bool

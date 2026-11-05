@@ -30,8 +30,13 @@ func (d DummyManager) OnSnapshotCompleteReceived(ctx context.Context, producerID
 	return nil
 }
 
+// OnRecoveryMessageReceived ...
+func (d DummyManager) OnRecoveryMessageReceived(producerID int, requestID int) {}
+
 func (d DummyManager) OnFeedChannelLost(uuid.UUID, types.MessageInterest, time.Time) {}
 
 func (d DummyManager) OnFeedChannelRestored(uuid.UUID) {}
 
 func (d DummyManager) OnFeedSessionGone(uuid.UUID) {}
+
+func (d DummyManager) OnClientSessionOpened(uuid.UUID, types.MessageInterest) {}

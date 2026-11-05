@@ -336,6 +336,24 @@ func (f *fakeMessageBuilder) BuildUnparsableMessage(_ context.Context, _ *types.
 
 type recordingRecoveryProcessor struct {
 	endedTimestamp atomic.Pointer[time.Time]
+	recoveryMsgs   atomic.Pointer[[]recoveryMsgSeen]
+}
+
+// recoveryMsgSeen is one OnRecoveryMessageReceived call.
+type recoveryMsgSeen struct{ producerID, requestID int }
+
+func (r *recordingRecoveryProcessor) OnRecoveryMessageReceived(producerID, requestID int) {
+	for {
+		cur := r.recoveryMsgs.Load()
+		var next []recoveryMsgSeen
+		if cur != nil {
+			next = append(next, *cur...)
+		}
+		next = append(next, recoveryMsgSeen{producerID, requestID})
+		if r.recoveryMsgs.CompareAndSwap(cur, &next) {
+			return
+		}
+	}
 }
 
 func (r *recordingRecoveryProcessor) OnMessageProcessingStarted(uuid.UUID, int, time.Time) {}
@@ -351,6 +369,7 @@ func (r *recordingRecoveryProcessor) OnSnapshotCompleteReceived(context.Context,
 func (r *recordingRecoveryProcessor) OnFeedChannelLost(uuid.UUID, types.MessageInterest, time.Time) {}
 func (r *recordingRecoveryProcessor) OnFeedChannelRestored(uuid.UUID)                               {}
 func (r *recordingRecoveryProcessor) OnFeedSessionGone(uuid.UUID)                                   {}
+func (r *recordingRecoveryProcessor) OnClientSessionOpened(uuid.UUID, types.MessageInterest)        {}
 
 // stubMessage implements every public message interface (OddsChange,
 // BetStop, BetCancel, BetSettlement, FixtureChangeMessage,
@@ -524,6 +543,7 @@ func (s *spyCacheNotifier) OnFeedMessageReceived(*types.FeedMessage) {
 
 type noopRecoveryProcessor struct{}
 
+func (noopRecoveryProcessor) OnRecoveryMessageReceived(int, int)                   {}
 func (noopRecoveryProcessor) OnMessageProcessingStarted(uuid.UUID, int, time.Time) {}
 func (noopRecoveryProcessor) OnMessageProcessingEnded(uuid.UUID, int, time.Time)   {}
 func (noopRecoveryProcessor) OnAliveReceived(int, types.MessageTimestamp, bool, types.MessageInterest) {
@@ -535,6 +555,7 @@ func (noopRecoveryProcessor) OnSnapshotCompleteReceived(context.Context, int, in
 func (noopRecoveryProcessor) OnFeedChannelLost(uuid.UUID, types.MessageInterest, time.Time) {}
 func (noopRecoveryProcessor) OnFeedChannelRestored(uuid.UUID)                               {}
 func (noopRecoveryProcessor) OnFeedSessionGone(uuid.UUID)                                   {}
+func (noopRecoveryProcessor) OnClientSessionOpened(uuid.UUID, types.MessageInterest)        {}
 
 func TestSession_ProcessFeedMessage_ReplayDoesNotNotifyCache(t *testing.T) {
 	for _, tc := range []struct {
@@ -1399,6 +1420,7 @@ type fakeOFC struct{}
 func (f *fakeOFC) AccessToken() *string                    { s := "x"; return &s }
 func (f *fakeOFC) DefaultLocale() types.Locale             { return types.EnLocale }
 func (f *fakeOFC) MaxInactivity() time.Duration            { return 20 * time.Second }
+func (f *fakeOFC) SnapshotCompleteDeadline() time.Duration { return 5 * time.Minute }
 func (f *fakeOFC) MaxRecoveryExecution() time.Duration     { return 360 * time.Minute }
 func (f *fakeOFC) MessagingPort() int                      { return 5672 }
 func (f *fakeOFC) SdkNodeID() *int                         { return nil }
@@ -1756,6 +1778,7 @@ type countingRecoveryProcessor struct {
 	ended   atomic.Int32
 }
 
+func (c *countingRecoveryProcessor) OnRecoveryMessageReceived(int, int) {}
 func (c *countingRecoveryProcessor) OnMessageProcessingStarted(uuid.UUID, int, time.Time) {
 	c.started.Add(1)
 }
@@ -1771,6 +1794,7 @@ func (c *countingRecoveryProcessor) OnSnapshotCompleteReceived(context.Context, 
 func (c *countingRecoveryProcessor) OnFeedChannelLost(uuid.UUID, types.MessageInterest, time.Time) {}
 func (c *countingRecoveryProcessor) OnFeedChannelRestored(uuid.UUID)                               {}
 func (c *countingRecoveryProcessor) OnFeedSessionGone(uuid.UUID)                                   {}
+func (c *countingRecoveryProcessor) OnClientSessionOpened(uuid.UUID, types.MessageInterest)        {}
 
 type erroringMessageBuilder struct{}
 

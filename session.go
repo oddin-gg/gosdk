@@ -122,7 +122,19 @@ type recoveryMessageProcessor interface {
 	// OnFeedSessionGone reports that the session's consumer has exited
 	// for good; it needs no queue and must not hold recoveries back.
 	OnFeedSessionGone(session uuid.UUID)
+	// OnClientSessionOpened reports a session of the client about to
+	// consume with the given interest; OnFeedSessionGone ends it. The
+	// recovery manager needs the scopes a snapshot replay can reach.
+	OnClientSessionOpened(session uuid.UUID, messageInterest types.MessageInterest)
+	// OnMessageProcessingStarted / OnMessageProcessingEnded bracket the
+	// processing of ONE message of a session of the client, strictly
+	// paired. The SDK's own alive-only session does not report them.
 	OnMessageProcessingStarted(sessionID uuid.UUID, producerID int, timestamp time.Time)
+	// OnRecoveryMessageReceived reports a message that carries a recovery
+	// request id (the replay of a snapshot or event recovery): the
+	// recovery it belongs to is alive, which renews its snapshot-complete
+	// deadline. Direct, never blocks.
+	OnRecoveryMessageReceived(producerID int, requestID int)
 	OnMessageProcessingEnded(sessionID uuid.UUID, producerID int, timestamp time.Time)
 	OnAliveReceived(producerID int, timestamp types.MessageTimestamp, isSubscribed bool, messageInterest types.MessageInterest)
 	// OnSnapshotCompleteReceived admits a snapshot-complete to the
@@ -196,8 +208,17 @@ func (o *oddsFeedSessionImpl) Open(
 		return errors.New("gosdk: session: open called twice")
 	}
 
+	// Registered before the consumer starts, so its exit cannot come first
+	// and leave a closed session registered. Replay sessions (no hooks)
+	// are not part of the live feed.
+	if !o.isReplay {
+		o.recoveryMessageProcessor.OnClientSessionOpened(o.sessionID, *messageInterest)
+	}
 	ch, err := o.channelConsumer.Open(ctx, routingKeys, messageInterest)
 	if err != nil {
+		if !o.isReplay {
+			o.recoveryMessageProcessor.OnFeedSessionGone(o.sessionID)
+		}
 		return fmt.Errorf("gosdk: session: channel consumer open (interest=%s, keys=%d): %w", *messageInterest, len(routingKeys), err)
 	}
 
@@ -407,7 +428,20 @@ func (o *oddsFeedSessionImpl) processMessage(ctx context.Context, env feed.Queue
 
 func (o *oddsFeedSessionImpl) processFeedMessage(ctx context.Context, feedMessage *types.FeedMessage, messageInterest types.MessageInterest, ack func(), emitRaw bool, rawMsg *types.RawFeedMessage) {
 	producerID := feedMessage.Message.Product()
-	o.recoveryMessageProcessor.OnMessageProcessingStarted(o.sessionID, producerID, time.Now())
+	// The alive-only session is the SDK's own (it feeds the recovery state
+	// machine, nothing reaches the client through it), so its messages are
+	// not the client's processing: reporting them would advance the
+	// processed cursor and keep the processing guard "busy" with every
+	// alive, whatever the client's own sessions are doing. The sessions of
+	// the client bind the alive key as well, so a healthy client still
+	// advances the cursor with the alives it processes.
+	reportsProcessing := messageInterest != types.SystemAliveOnly
+	if reportsProcessing {
+		o.recoveryMessageProcessor.OnMessageProcessingStarted(o.sessionID, producerID, time.Now())
+	}
+	if requestID, ok := recoveryRequestID(feedMessage.Message); ok {
+		o.recoveryMessageProcessor.OnRecoveryMessageReceived(producerID, requestID)
+	}
 
 	// Pair every OnMessageProcessingStarted with exactly one
 	// OnMessageProcessingEnded. Pre-v2.24 the BuildMessage failure
@@ -420,7 +454,7 @@ func (o *oddsFeedSessionImpl) processFeedMessage(ctx context.Context, feedMessag
 	// fallback fires only when none of the success branches did,
 	// using time.Time{} (no cursor advance — same convention the
 	// SnapshotComplete branch uses).
-	processingEnded := false
+	processingEnded := !reportsProcessing
 	endProcessing := func(messageGenTs time.Time) {
 		if processingEnded {
 			return
@@ -548,6 +582,32 @@ func (o *oddsFeedSessionImpl) processFeedMessage(ctx context.Context, feedMessag
 	if admitted {
 		endProcessing(feedMessage.Timestamp.Created)
 	}
+}
+
+// recoveryRequestID returns the recovery request id a feed message
+// carries: only the replay of a recovery sets it (live messages have none).
+func recoveryRequestID(msg types.BasicMessage) (int, bool) {
+	var id *int
+	switch m := msg.(type) {
+	case *feedXML.OddsChange:
+		id = m.RequestID
+	case *feedXML.BetSettlement:
+		id = m.RequestID
+	case *feedXML.FixtureChange:
+		id = m.RequestID
+	case *feedXML.BetStop:
+		id = m.RequestID
+	case *feedXML.BetCancel:
+		id = m.RequestID
+	case *feedXML.RollbackBetSettlement:
+		id = m.RequestID
+	case *feedXML.RollbackBetCancel:
+		id = m.RequestID
+	}
+	if id == nil {
+		return 0, false
+	}
+	return *id, true
 }
 
 // send pushes a sessionEnvelope to the output channel under ctx-bounded

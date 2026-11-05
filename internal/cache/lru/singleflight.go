@@ -2,9 +2,13 @@ package lru
 
 import (
 	"context"
+	"errors"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sync/singleflight"
+
+	"github.com/oddin-gg/gosdk/internal/apipolicy"
 )
 
 // LoadTimeout is the soft outer bound applied to every detached
@@ -64,21 +68,76 @@ func LoadCoalesced[T any](
 	if base == nil {
 		base = context.WithoutCancel(ctx)
 	}
-	ch := sf.DoChan(sfKey, func() (any, error) {
-		loadCtx, cancel := context.WithTimeout(base, LoadTimeout)
-		defer cancel()
-		return fn(loadCtx)
-	})
-	select {
-	case r := <-ch:
-		if r.Err != nil {
-			return zero, r.Err
+	// The call policy of the caller rides along (see apipolicy): flights of
+	// different policies are separate, and the load keeps its caller's.
+	//
+	// A flight runs on its STARTER's budget, and the key only tells the
+	// mode, so a caller that joined a flight can get the starter's budget
+	// running out (a deadline error) while its own budget is untouched. It
+	// then asks again once, under its own budget: it starts a new flight or
+	// joins a newer one. Only the message modes retry (a public getter's
+	// load has no per-message budget), and only a joiner: the starter's
+	// error is its own.
+	for attempt := 0; ; attempt++ {
+		var started atomic.Bool
+		ch := sf.DoChan(sfKey+apipolicy.Suffix(ctx), func() (any, error) {
+			started.Store(true)
+			loadCtx, cancel := context.WithTimeout(base, LoadTimeout)
+			defer cancel()
+			return fn(apipolicy.Carry(loadCtx, ctx))
+		})
+		FlightRegistered()
+		select {
+		case r := <-ch:
+			if r.Err != nil {
+				if attempt == 0 && !started.Load() && JoinerMayRetry(ctx, r.Err) {
+					continue
+				}
+				return zero, r.Err
+			}
+			if r.Val == nil {
+				return zero, nil
+			}
+			return r.Val.(T), nil
+		case <-ctx.Done():
+			return zero, ctx.Err()
 		}
-		if r.Val == nil {
-			return zero, nil
-		}
-		return r.Val.(T), nil
-	case <-ctx.Done():
-		return zero, ctx.Err()
 	}
+}
+
+// JoinerMayRetry reports whether a caller that joined a flight should ask
+// again: the flight ended on a deadline (the starter's budget), while this
+// caller's own context is alive and, under a message mode, its own budget is
+// not spent. Every loader that coalesces on a flight and serves the message
+// path uses it, so the rule stays in one place.
+func JoinerMayRetry(ctx context.Context, err error) bool {
+	if !errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
+		return false
+	}
+	if apipolicy.ModeOf(ctx) == apipolicy.Default {
+		return false
+	}
+	remaining, ok := apipolicy.Remaining(ctx)
+	return ok && remaining > 0
+}
+
+// flightHook is a test-only seam: see SetFlightRegisteredHook.
+var flightHook atomic.Pointer[func()]
+
+// FlightRegistered is called by every coalescing loader right after it
+// registered on a flight (as its starter or as a joiner), before it waits.
+// It does nothing in production.
+func FlightRegistered() {
+	if h := flightHook.Load(); h != nil {
+		(*h)()
+	}
+}
+
+// SetFlightRegisteredHook installs fn to be called by FlightRegistered and
+// returns the function that removes it. Tests use it to release a gated
+// flight only once a joiner is certainly parked on it, instead of sleeping
+// and hoping it got there.
+func SetFlightRegisteredHook(fn func()) (restore func()) {
+	flightHook.Store(&fn)
+	return func() { flightHook.Store(nil) }
 }
