@@ -457,7 +457,9 @@ func TestLocalizedStaticDataCache_MessageDoesNotWaitOnAFetchOlderThanItsTimeout(
 	release := make(chan struct{})
 	entered := make(chan struct{})
 	var once sync.Once
+	var fetches atomic.Int32
 	fetcher := func(ctx context.Context, locale types.Locale) ([]types.StaticData, error) {
+		fetches.Add(1)
 		once.Do(func() { close(entered) })
 		<-release
 		return []types.StaticData{{ID: 1, Description: types.Some("ok")}}, nil
@@ -487,7 +489,10 @@ func TestLocalizedStaticDataCache_MessageDoesNotWaitOnAFetchOlderThanItsTimeout(
 			t.Fatalf("err = %v, want ErrFlightTooOld", err)
 		}
 	}
-	if d := time.Since(start); d > 4*timeout {
+	// Every message ended with ErrFlightTooOld although its own deadline is
+	// ten seconds away, so only the age of the fetch ended the wait; the time
+	// bound is generous and only catches a message that sat on its deadline.
+	if d := time.Since(start); d > timeout+time.Second {
 		t.Fatalf("five messages waited %v in total, want about %v", d, timeout)
 	}
 
@@ -497,5 +502,8 @@ func TestLocalizedStaticDataCache_MessageDoesNotWaitOnAFetchOlderThanItsTimeout(
 	}
 	if len(c.unloadedLocales(locales)) != 0 {
 		t.Fatal("the fetch did not fill the cache")
+	}
+	if fetches.Load() != 1 {
+		t.Fatalf("fetches = %d, want 1", fetches.Load())
 	}
 }

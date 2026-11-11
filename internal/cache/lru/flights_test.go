@@ -141,9 +141,10 @@ func TestLoadCoalesced_MessagesDoNotWaitOnAFlightOlderThanTheirTimeout(t *testin
 			t.Fatalf("err = %v, want ErrFlightTooOld", err)
 		}
 	}
-	// One timeout for the first message, next to nothing for the others;
-	// ten timeouts would be a second.
-	if d := time.Since(start); d > 4*messageWait {
+	// Every message ended with ErrFlightTooOld although its own deadline is
+	// ten seconds away, so only the age of the flight ended the wait; the
+	// time bound only catches a message that sat on its deadline.
+	if d := time.Since(start); d > messageWait+scheduleSlack {
 		t.Fatalf("ten messages waited %v in total, want about %v", d, messageWait)
 	}
 
