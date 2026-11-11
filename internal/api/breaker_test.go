@@ -220,6 +220,25 @@ func TestBreaker_OpensOnAPIFailures(t *testing.T) {
 	}
 }
 
+// A non-idempotent mutation is not retried after a transport error, and the
+// broken connection still counts against the API.
+func TestBreaker_OpensOnATransportErrorOfANonIdempotentMutation(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err == nil {
+			_ = conn.Close()
+		}
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+	if ok, err := c.postEmpty(t.Context(), "/x", false); err == nil || ok {
+		t.Fatalf("ok=%v err=%v, want a failure", ok, err)
+	}
+	if !c.Breaker().Open() {
+		t.Fatal("the breaker did not open")
+	}
+}
+
 // Failures that say nothing about the API leave the breaker closed: a caller
 // that gave up, a closed client, an answer about the request (404).
 func TestBreaker_DoesNotOpenOnTheCallersOwnOutcome(t *testing.T) {
@@ -261,6 +280,28 @@ func TestBreaker_DoesNotOpenOnTheCallersOwnOutcome(t *testing.T) {
 		}
 		if c.Breaker().Open() {
 			t.Fatal("the caller's cancellation of a body read opened the breaker")
+		}
+	})
+	t.Run("caller cancels a stalled mutation body", func(t *testing.T) {
+		started := make(chan struct{})
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `<?xml version="1.0"?><response response_code="O`)
+			w.(http.Flusher).Flush()
+			close(started)
+			<-r.Context().Done()
+		}))
+		defer srv.Close()
+		c := newTestClient(t, srv)
+		c.maxAttempts = 1
+		c.httpClient.Timeout = 30 * time.Second
+		ctx, cancel := context.WithCancel(t.Context())
+		go func() { <-started; cancel() }()
+		if ok, err := c.postEmpty(ctx, "/x", true); err == nil || ok {
+			t.Fatalf("ok=%v err=%v, want a failure", ok, err)
+		}
+		if c.Breaker().Open() {
+			t.Fatal("the caller's cancellation of a mutation body read opened the breaker")
 		}
 	})
 	t.Run("closed client", func(t *testing.T) {
