@@ -881,12 +881,14 @@ func (c *Client) doNoBody(ctx context.Context, method, path string, idempotent b
 	// is some other payload and stays accepted; a body that does not
 	// fully decode (truncated, malformed, or with trailing documents) is
 	// UNVERIFIED and fails.
-	if apiErr, ok := c.classifyMutationBody(method, path, resp.StatusCode, body); !ok {
+	if apiErr, ok, understood := c.classifyMutationBody(method, path, resp.StatusCode, body); !ok {
 		// A decoded envelope about the resource (FORBIDDEN, NOT_FOUND,
 		// CONFLICT, ...) is a healthy API's answer, like a decoded
 		// non-OK envelope on a fetch; a body that did not decode or an
-		// envelope saying the service is unavailable is not.
-		if apiErr.Code != "" && !isServiceUnavailable(apiErr.Code) {
+		// envelope saying the service is unavailable is not. Whether the
+		// body decoded is stated by the classifier, not inferred from the
+		// code: a decoded rejection may carry no code at all.
+		if understood && !isServiceUnavailable(apiErr.Code) {
 			c.breaker.success()
 		} else {
 			c.noteUnanswered(ctx)
@@ -938,11 +940,15 @@ func isSuccessResponseCode(c types.ResponseCode) bool {
 }
 
 // classifyMutationBody decides whether a 2xx mutation body represents an
-// accepted operation. Returns (nil, true) on acceptance; (*Error, false)
-// on rejection or an unverifiable body. See the caller for the policy.
-func (c *Client) classifyMutationBody(method, path string, status int, body []byte) (*Error, bool) {
+// accepted operation. Returns (nil, true, true) on acceptance; on a
+// rejection (*Error, false, understood). understood is true when the body
+// was a complete, decoded document (so the rejection is the API's answer,
+// whatever code it carries) and false for a truncated, malformed or
+// trailing-content body whose meaning is unknown. See the caller for the
+// policy.
+func (c *Client) classifyMutationBody(method, path string, status int, body []byte) (*Error, bool, bool) {
 	if len(bytes.TrimSpace(body)) == 0 {
-		return nil, true // empty 202/204 / empty OK
+		return nil, true, true // empty 202/204 / empty OK
 	}
 	// Attempt to decode as the <response> envelope. data.Error pins
 	// XMLName to "response", so Decode errors when the root is anything
@@ -955,11 +961,11 @@ func (c *Client) classifyMutationBody(method, path string, status int, body []by
 		// cannot trust the classification.
 		if eofErr := utils.EnsureXMLEOF(dec); eofErr != nil {
 			return &Error{Method: method, Path: path, Status: status,
-				Message: "2xx <response> envelope with trailing content; acceptance unverified"}, false
+				Message: "2xx <response> envelope with trailing content; acceptance unverified"}, false, false
 		}
 		code := types.ResponseCode(env.Code)
 		if isSuccessResponseCode(code) {
-			return nil, true
+			return nil, true, true
 		}
 		// Empty or non-success code on a <response> root → rejection.
 		return &Error{
@@ -968,7 +974,7 @@ func (c *Client) classifyMutationBody(method, path string, status int, body []by
 			Status:  status,
 			Code:    code,
 			Message: string(c.redactSensitive([]byte(env.Message))),
-		}, false
+		}, false, true
 	}
 	// A bare <error>…</error> root is the API's OTHER defined error shape
 	// (see xml.ErrorBody). A 2xx carrying it means the mutation was NOT
@@ -979,23 +985,25 @@ func (c *Client) classifyMutationBody(method, path string, status int, body []by
 	// handles stayed pending until their (up to 6h) timeout.
 	if root, ok := xmlRootLocal(body); ok && root == "error" {
 		var env data.ErrorBody
-		_ = xml.Unmarshal(body, &env) // best-effort; message is diagnostic
+		// A truncated or malformed <error> is a rejection whose content
+		// cannot be trusted: it is not an answer of a healthy API.
+		decoded := xml.Unmarshal(body, &env) == nil
 		return &Error{
 			Method:  method,
 			Path:    path,
 			Status:  status,
 			Code:    types.ResponseCode(env.Code),
 			Message: string(c.redactSensitive([]byte(env.Message))),
-		}, false
+		}, false, decoded
 	}
 	// Not a <response>/<error> root. If the body is otherwise well-formed
 	// XML it is some other success payload; if it does not parse at all it
 	// is a truncated/malformed body whose acceptance cannot be verified.
 	if wellFormedXML(body) {
-		return nil, true
+		return nil, true, true
 	}
 	return &Error{Method: method, Path: path, Status: status,
-		Message: "2xx body is malformed/truncated; acceptance unverified"}, false
+		Message: "2xx body is malformed/truncated; acceptance unverified"}, false, false
 }
 
 // xmlRootLocal returns the local name of the first XML start element in

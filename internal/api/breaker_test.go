@@ -419,6 +419,10 @@ func TestBreaker_ClosedByAHealthyAnswer_AMutationOnlyOnceItsBodyWasVerified(t *t
 			_, _ = io.WriteString(w, `<response response_code="NOT_FOUND"/>`)
 		case "conflict":
 			_, _ = io.WriteString(w, `<response response_code="CONFLICT"/>`)
+		case "bare_error":
+			_, _ = io.WriteString(w, `<error/>`)
+		case "no_code":
+			_, _ = io.WriteString(w, `<response/>`)
 		default:
 			_, _ = io.WriteString(w, `<?xml version="1.0"?><response response_code="OK"/>`)
 		}
@@ -438,7 +442,7 @@ func TestBreaker_ClosedByAHealthyAnswer_AMutationOnlyOnceItsBodyWasVerified(t *t
 		}
 	}
 
-	for _, m := range []string{"forbidden", "not_found", "conflict"} {
+	for _, m := range []string{"forbidden", "not_found", "conflict", "bare_error", "no_code"} {
 		mode.Store(m)
 		c.Breaker().Trip()
 		if ok, err := c.postEmpty(t.Context(), "/x", true); err == nil || ok {
