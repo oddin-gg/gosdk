@@ -55,6 +55,14 @@ func (b *Breaker) closeLocked() {
 	b.opened = make(chan struct{})
 }
 
+// SetOpenFor changes how long the breaker stays open after a failure. For
+// tests that need a short time; production uses the default.
+func (b *Breaker) SetOpenFor(d time.Duration) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.openFor = d
+}
+
 // Open reports whether the breaker is open.
 func (b *Breaker) Open() bool {
 	b.mu.Lock()

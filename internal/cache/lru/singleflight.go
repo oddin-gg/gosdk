@@ -2,7 +2,6 @@ package lru
 
 import (
 	"context"
-	"errors"
 	"sync/atomic"
 	"time"
 
@@ -73,59 +72,31 @@ func LoadCoalesced[T any](
 		// not the message path's.
 		base = apipolicy.WithoutGate(context.WithoutCancel(ctx))
 	}
-	// The call policy of the caller rides along (see apipolicy): flights of
-	// different policies are separate, and the load keeps its caller's.
-	//
-	// A flight runs on its STARTER's budget, and the key only tells the
-	// mode, so a caller that joined a flight can get the starter's budget
-	// running out (a deadline error) while its own budget is untouched. It
-	// then asks again once, under its own budget: it starts a new flight or
-	// joins a newer one. Only the message modes retry (a public getter's
-	// load has no per-message budget), and only a joiner: the starter's
-	// error is its own.
-	for attempt := 0; ; attempt++ {
-		var started atomic.Bool
-		ch := sf.DoChan(sfKey+apipolicy.Suffix(ctx), func() (any, error) {
-			started.Store(true)
-			loadCtx, cancel := context.WithTimeout(base, LoadTimeout)
-			defer cancel()
-			return fn(apipolicy.Carry(loadCtx, ctx))
-		})
-		FlightRegistered()
-		select {
-		case <-GateOpened(ctx):
-			return zero, apipolicy.ErrSkipped
-		case r := <-ch:
-			if r.Err != nil {
-				if attempt == 0 && !started.Load() && JoinerMayRetry(ctx, r.Err) {
-					continue
-				}
-				return zero, r.Err
-			}
-			if r.Val == nil {
-				return zero, nil
-			}
-			return r.Val.(T), nil
-		case <-ctx.Done():
-			return zero, ctx.Err()
+	// The flight carries neither the caller's message mark nor a budget:
+	// it runs for whoever asks, under the default call policy, and each
+	// caller bounds only its own wait. A caller on the message path also
+	// stops waiting once the gate opens; the flight goes on and fills the
+	// cache for later callers.
+	ch := sf.DoChan(sfKey, func() (any, error) {
+		loadCtx, cancel := context.WithTimeout(base, LoadTimeout)
+		defer cancel()
+		return fn(loadCtx)
+	})
+	FlightRegistered()
+	select {
+	case <-GateOpened(ctx):
+		return zero, apipolicy.ErrSkipped
+	case r := <-ch:
+		if r.Err != nil {
+			return zero, r.Err
 		}
+		if r.Val == nil {
+			return zero, nil
+		}
+		return r.Val.(T), nil
+	case <-ctx.Done():
+		return zero, ctx.Err()
 	}
-}
-
-// JoinerMayRetry reports whether a caller that joined a flight should ask
-// again: the flight ended on a deadline (the starter's budget), while this
-// caller's own context is alive and, under a message mode, its own budget is
-// not spent. Every loader that coalesces on a flight and serves the message
-// path uses it, so the rule stays in one place.
-func JoinerMayRetry(ctx context.Context, err error) bool {
-	if !errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
-		return false
-	}
-	if apipolicy.ModeOf(ctx) == apipolicy.Default {
-		return false
-	}
-	remaining, ok := apipolicy.Remaining(ctx)
-	return ok && remaining > 0
 }
 
 // flightHook is a test-only seam: see SetFlightRegisteredHook.

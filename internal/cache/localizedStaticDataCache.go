@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"golang.org/x/sync/singleflight"
@@ -164,13 +163,10 @@ func (l *LocalizedStaticDataCache) loadLocales(ctx context.Context, locales []ty
 			return err
 		}
 		loc := locale
-		// A flight runs on its STARTER's budget: a message-path caller
-		// that only joined one can get the starter's budget running out
-		// without having used its own, and then asks once more (see
-		// lru.JoinerMayRetry).
-		flight := func(owner *atomic.Bool) <-chan singleflight.Result {
-			return l.sf.DoChan(string(loc)+apipolicy.Suffix(ctx), func() (interface{}, error) {
-				owner.Store(true)
+		// The flight has no budget of its own and carries no message mark:
+		// it runs for whoever asks, and each caller bounds only its wait.
+		flight := func() <-chan singleflight.Result { //nolint:contextcheck // deliberate detach: the flight runs under the cache lifetime, not the caller's context
+			return l.sf.DoChan(string(loc), func() (interface{}, error) {
 				// Double-check inside the critical region.
 				l.mux.RLock()
 				_, alreadyLoaded := l.loadedLocales[loc]
@@ -183,7 +179,6 @@ func (l *LocalizedStaticDataCache) loadLocales(ctx context.Context, locales []ty
 				// closure, so coalesced waiters don't each retain a timer.
 				fetchCtx, cancel := context.WithTimeout(l.lifeCtx, lru.LoadTimeout)
 				defer cancel()
-				fetchCtx = apipolicy.Carry(fetchCtx, ctx) // the caller's call policy, not its cancellation
 				data, err := l.fetcher(fetchCtx, loc)
 				if err != nil {
 					return nil, err
@@ -218,30 +213,17 @@ func (l *LocalizedStaticDataCache) loadLocales(ctx context.Context, locales []ty
 				return nil, nil
 			})
 		}
-		retried := false
-		owner := new(atomic.Bool)
-		ch := flight(owner)
+		ch := flight()
 		lru.FlightRegistered()
-	wait:
-		for {
-			select {
-			case <-lru.GateOpened(ctx):
-				return apipolicy.ErrSkipped
-			case r := <-ch:
-				if r.Err != nil {
-					if !retried && !owner.Load() && lru.JoinerMayRetry(ctx, r.Err) {
-						retried = true
-						owner = new(atomic.Bool)
-						ch = flight(owner)
-						lru.FlightRegistered()
-						continue
-					}
-					return r.Err
-				}
-				break wait
-			case <-ctx.Done():
-				return ctx.Err()
+		select {
+		case <-lru.GateOpened(ctx):
+			return apipolicy.ErrSkipped
+		case r := <-ch:
+			if r.Err != nil {
+				return r.Err
 			}
+		case <-ctx.Done():
+			return ctx.Err()
 		}
 	}
 	return nil

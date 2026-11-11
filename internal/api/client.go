@@ -20,7 +20,6 @@ import (
 	"github.com/cenkalti/backoff/v5"
 
 	data "github.com/oddin-gg/gosdk/internal/api/xml"
-	"github.com/oddin-gg/gosdk/internal/apipolicy"
 	"github.com/oddin-gg/gosdk/internal/config"
 	"github.com/oddin-gg/gosdk/internal/sdkerr"
 	"github.com/oddin-gg/gosdk/internal/utils"
@@ -1063,22 +1062,6 @@ func wellFormedXML(body []byte) bool {
 // For non-OK statuses do() emits the event inline (those bodies are
 // always small enough not to need streaming) and returns pc=nil.
 func (c *Client) do(ctx context.Context, method, path string, locale *types.Locale, idempotent bool) (*http.Response, *pendingCapture, error) {
-	// Message-path policy (see package apipolicy): never queue behind a
-	// failing API on the session goroutine.
-	policy := apipolicy.ModeOf(ctx)
-	if policy == apipolicy.MessageSkip {
-		return nil, nil, apipolicy.ErrSkipped
-	}
-	var remaining time.Duration
-	if policy == apipolicy.Message {
-		// The build shares one budget across all its requests; a request
-		// that starts after it is spent never goes out (ErrBudgetSpent, so
-		// callers can tell it from a request that was sent and timed out).
-		remaining, _ = apipolicy.Remaining(ctx)
-		if remaining <= 0 {
-			return nil, nil, fmt.Errorf("api: %s %s: %w: %w", method, path, apipolicy.ErrBudgetSpent, context.DeadlineExceeded)
-		}
-	}
 	// Reject new requests after Close, and register this one as in-flight
 	// — both under mu so the check and the WaitGroup.Add can't straddle a
 	// concurrent Close (which sets closed under mu BEFORE Wait).
@@ -1093,18 +1076,7 @@ func (c *Client) do(ctx context.Context, method, path string, locale *types.Loca
 	// Derive the request ctx from the caller's ctx AND the client
 	// lifetime: Close cancels lifeCtx, aborting this request even if the
 	// caller passed a ctx that never fires (e.g. context.Background()).
-	var (
-		reqCtx    context.Context
-		cancelReq context.CancelFunc
-	)
-	if policy == apipolicy.Message {
-		// What is left of the build's one budget, body included (cancelReq
-		// fires when the body is closed): a build that makes several
-		// requests is bounded as a whole.
-		reqCtx, cancelReq = context.WithTimeout(ctx, remaining)
-	} else {
-		reqCtx, cancelReq = context.WithCancel(ctx)
-	}
+	reqCtx, cancelReq := context.WithCancel(ctx)
 	//nolint:contextcheck // lifeCtx is the client-lifetime cancellation root; AfterFunc wires it to abort this request, it is not a request-scoped parent
 	stopLife := context.AfterFunc(c.lifeCtx, cancelReq)
 	ctx = reqCtx
@@ -1284,9 +1256,6 @@ func (c *Client) do(ctx context.Context, method, path string, locale *types.Loca
 		// backoff/v5 treats WithMaxTries(0) as UNLIMITED attempts —
 		// never let a zero value through the uint conversion.
 		tries = defaultMaxAttempts
-	}
-	if policy == apipolicy.Message {
-		tries = 1 // no retries on the message path
 	}
 	r, err := backoff.Retry(ctx, op,
 		backoff.WithBackOff(exp),

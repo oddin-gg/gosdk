@@ -204,13 +204,6 @@ func (c *EventCache[K, L, T]) sfKey(key K) string {
 	return fmt.Sprintf("%d|%v", c.purgeGen.Load(), key)
 }
 
-// sfKeyFor is the key a caller with ctx's call policy flies under: the
-// base key plus the policy suffix, so flights of different policies never
-// share a load (see apipolicy.Suffix).
-func (c *EventCache[K, L, T]) sfKeyFor(ctx context.Context, key K) string {
-	return c.sfKey(key) + apipolicy.Suffix(ctx)
-}
-
 // Get returns the cached entry for key, ensuring it is populated for every
 // locale in `locales`. If any locale is missing, the loader is invoked
 // (deduplicated across concurrent callers via singleflight) and merged into
@@ -279,19 +272,13 @@ func (c *EventCache[K, L, T]) get(ctx context.Context, key K, locales []L, clear
 	// winning caller's closure runs, so building it out here would leak
 	// one live timer per coalesced waiter until the 60s timeout fired.
 	//
-	// A flight runs on its STARTER's budget: a message-path caller that
-	// only joined one can get the starter's budget running out without
-	// having used its own, and then asks once more (see JoinerMayRetry).
-	// The retry is per call and independent of the recursion counters.
-	flight := func(owner *atomic.Bool) <-chan singleflight.Result {
-		return c.sf.DoChan(c.sfKeyFor(ctx, key), func() (any, error) {
-			owner.Store(true)
+	// A flight has no budget of its own and carries no message mark: it
+	// runs for whoever asks, under the default call policy, and each caller
+	// bounds only its own wait (below).
+	flight := func() <-chan singleflight.Result {
+		return c.sf.DoChan(c.sfKey(key), func() (any, error) {
 			loadCtx, loadCancel := context.WithTimeout(base, LoadTimeout)
 			defer loadCancel()
-			// The load is detached from this caller's cancellation, not from
-			// its call policy: a message-path caller's load must stay a
-			// single short attempt.
-			loadCtx = apipolicy.Carry(loadCtx, ctx)
 			// Snapshot the flight's start BEFORE reading the existing entry:
 			// the pre-Add check below discards this flight's merge if a
 			// Clear lands after this point (see clearedAt field doc).
@@ -377,42 +364,30 @@ func (c *EventCache[K, L, T]) get(ctx context.Context, key K, locales []L, clear
 	}
 
 	var v T
-	retried := false
-	owner := new(atomic.Bool)
-	ch := flight(owner)
+	ch := flight()
 	FlightRegistered()
-	for {
-		select {
-		case <-GateOpened(ctx):
-			return zero, false, apipolicy.ErrSkipped
-		case r := <-ch:
-			if r.Err != nil && !retried && !owner.Load() && JoinerMayRetry(ctx, r.Err) {
-				retried = true
-				owner = new(atomic.Bool)
-				ch = flight(owner)
-				FlightRegistered()
-				continue
+	select {
+	case <-GateOpened(ctx):
+		return zero, false, apipolicy.ErrSkipped
+	case r := <-ch:
+		if errors.Is(r.Err, errClearedDuringLoad) {
+			if clearRetries >= maxClearRetries {
+				// Only reachable under a sustained storm of Clears for
+				// this key, each landing within one load window. Bail
+				// with a transient error rather than livelock.
+				return zero, false, fmt.Errorf("cache load for key %v: %w", key, errClearedDuringLoad)
 			}
-			if errors.Is(r.Err, errClearedDuringLoad) {
-				if clearRetries >= maxClearRetries {
-					// Only reachable under a sustained storm of Clears for
-					// this key, each landing within one load window. Bail
-					// with a transient error rather than livelock.
-					return zero, false, fmt.Errorf("cache load for key %v: %w", key, errClearedDuringLoad)
-				}
-				return c.get(ctx, key, locales, clearRetries+1, coverageRetries)
-			}
-			if r.Err != nil {
-				return zero, false, r.Err
-			}
-			var ok bool
-			if v, ok = r.Val.(T); !ok {
-				return zero, false, nil
-			}
-		case <-ctx.Done():
-			return zero, false, ctx.Err()
+			return c.get(ctx, key, locales, clearRetries+1, coverageRetries)
 		}
-		break
+		if r.Err != nil {
+			return zero, false, r.Err
+		}
+		var ok bool
+		if v, ok = r.Val.(T); !ok {
+			return zero, false, nil
+		}
+	case <-ctx.Done():
+		return zero, false, ctx.Err()
 	}
 
 	// Re-check coverage for THIS caller. If we coalesced onto another
@@ -480,9 +455,7 @@ func (c *EventCache[K, L, T]) Clear(key K) {
 	// the generation after the unlock: post-Purge callers use a
 	// different key, so this only detaches the pre-clear flight it is
 	// meant to discard.
-	for _, suffix := range apipolicy.Suffixes {
-		c.sf.Forget(flightKey + suffix)
-	}
+	c.sf.Forget(flightKey)
 }
 
 // clearForgetHook is a test-only seam invoked in Clear after the flight

@@ -274,7 +274,7 @@ func TestSession_BetStop_FactoryOutputDispatchesAsBetStop(t *testing.T) {
 	// nil entityFactory + marketFactory: the Player-type routing key
 	// below skips both build paths, so the factory only exercises
 	// timestamp + producer-cache + impl construction.
-	f := factory.NewFeedMessageFactory(nil, nil, pm, cfg, log.New(nil))
+	f := factory.NewFeedMessageFactory(nil, nil, pm, cfg, log.New(nil), nil)
 
 	rk := &types.RoutingKeyInfo{
 		FullRoutingKey: "hi.pre.-.bet_stop.1.123.-.-.-",
