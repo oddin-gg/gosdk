@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -390,32 +391,66 @@ func TestBreaker_ClosedByAHealthyAnswer_OnlyAfterTheBodyWasRead(t *testing.T) {
 }
 
 // The same holds for a call that does not decode an entity: a POST whose 2xx
-// body cannot be read or verified does not close the breaker.
+// body cannot be read, is too large, cannot be verified or says the service is
+// unavailable opens a closed breaker, while a verified body, accepted or a
+// decoded rejection about the resource, closes an open one.
 func TestBreaker_ClosedByAHealthyAnswer_AMutationOnlyOnceItsBodyWasVerified(t *testing.T) {
-	var truncated atomic.Bool
+	var mode atomic.Value
+	mode.Store("ok")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/xml")
-		if truncated.Load() {
+		switch mode.Load() {
+		case "truncated":
 			w.Header().Set("Content-Length", "4096")
 			_, _ = io.WriteString(w, `<?xml version="1.0"?><response response_code="O`)
-			return
+		case "oversized":
+			_, _ = io.WriteString(w, `<?xml version="1.0"?><response response_code="OK"><message>`)
+			_, _ = io.WriteString(w, strings.Repeat("a", maxErrorBodyBytes+1))
+			_, _ = io.WriteString(w, `</message></response>`)
+		case "malformed":
+			_, _ = io.WriteString(w, `<payload><a></payload>`)
+		case "trailing":
+			_, _ = io.WriteString(w, `<response response_code="OK"/><response response_code="OK"/>`)
+		case "unavailable":
+			_, _ = io.WriteString(w, `<response response_code="SERVICE_UNAVAILABLE"/>`)
+		case "forbidden":
+			_, _ = io.WriteString(w, `<response response_code="FORBIDDEN"/>`)
+		case "not_found":
+			_, _ = io.WriteString(w, `<response response_code="NOT_FOUND"/>`)
+		case "conflict":
+			_, _ = io.WriteString(w, `<response response_code="CONFLICT"/>`)
+		default:
+			_, _ = io.WriteString(w, `<?xml version="1.0"?><response response_code="OK"/>`)
 		}
-		_, _ = io.WriteString(w, `<?xml version="1.0"?><response response_code="OK"/>`)
 	}))
 	defer srv.Close()
 	c := newTestClient(t, srv)
 	c.maxAttempts = 1
 
-	truncated.Store(true)
-	c.Breaker().Trip()
-	if ok, err := c.postEmpty(t.Context(), "/x", true); err == nil || ok {
-		t.Fatalf("truncated body: ok=%v err=%v, want a failure", ok, err)
-	}
-	if !c.Breaker().Open() {
-		t.Fatal("truncated body: the breaker was closed")
+	for _, m := range []string{"truncated", "oversized", "malformed", "trailing", "unavailable"} {
+		mode.Store(m)
+		c.breaker.success()
+		if ok, err := c.postEmpty(t.Context(), "/x", true); err == nil || ok {
+			t.Fatalf("%s body: ok=%v err=%v, want a failure", m, ok, err)
+		}
+		if !c.Breaker().Open() {
+			t.Fatalf("%s body: the breaker stayed closed", m)
+		}
 	}
 
-	truncated.Store(false)
+	for _, m := range []string{"forbidden", "not_found", "conflict"} {
+		mode.Store(m)
+		c.Breaker().Trip()
+		if ok, err := c.postEmpty(t.Context(), "/x", true); err == nil || ok {
+			t.Fatalf("%s envelope: ok=%v err=%v, want a rejection", m, ok, err)
+		}
+		if c.Breaker().Open() {
+			t.Fatalf("%s envelope: a healthy answer left the breaker open", m)
+		}
+	}
+
+	mode.Store("ok")
+	c.Breaker().Trip()
 	if ok, err := c.postEmpty(t.Context(), "/x", true); err != nil || !ok {
 		t.Fatalf("complete body: ok=%v err=%v", ok, err)
 	}

@@ -853,6 +853,7 @@ func (c *Client) doNoBody(ctx context.Context, method, path string, idempotent b
 			slog.String("error", readErr.Error()),
 		)
 		err := fmt.Errorf("api: %s %s: 2xx response body unreadable, acceptance unverified: %w", method, path, readErr)
+		c.noteUnanswered(ctx)
 		c.emit(pc, err)
 		return false, err
 	}
@@ -869,6 +870,7 @@ func (c *Client) doNoBody(ctx context.Context, method, path string, idempotent b
 	// acceptance, reported as an error.
 	if len(body) > maxErrorBodyBytes {
 		err := fmt.Errorf("api: %s %s: 2xx response body exceeds %d bytes, rejection envelope could not be verified", method, path, maxErrorBodyBytes)
+		c.noteUnanswered(ctx)
 		c.emit(pc, err)
 		return false, err
 	}
@@ -880,6 +882,15 @@ func (c *Client) doNoBody(ctx context.Context, method, path string, idempotent b
 	// fully decode (truncated, malformed, or with trailing documents) is
 	// UNVERIFIED and fails.
 	if apiErr, ok := c.classifyMutationBody(method, path, resp.StatusCode, body); !ok {
+		// A decoded envelope about the resource (FORBIDDEN, NOT_FOUND,
+		// CONFLICT, ...) is a healthy API's answer, like a decoded
+		// non-OK envelope on a fetch; a body that did not decode or an
+		// envelope saying the service is unavailable is not.
+		if apiErr.Code != "" && !isServiceUnavailable(apiErr.Code) {
+			c.breaker.success()
+		} else {
+			c.noteUnanswered(ctx)
+		}
 		c.emit(pc, apiErr)
 		return false, fmt.Errorf("api: %s %s: %w", method, path, apiErr)
 	}
@@ -887,6 +898,16 @@ func (c *Client) doNoBody(ctx context.Context, method, path string, idempotent b
 	c.breaker.success()
 	c.emit(pc, nil)
 	return true, nil
+}
+
+// noteUnanswered counts a response the API did not answer properly (its body
+// unreadable, too large, unverifiable, or a service-unavailable envelope)
+// against the breaker. Not when the caller gave up: its cancellation can cut
+// a body short without the API being at fault.
+func (c *Client) noteUnanswered(ctx context.Context) {
+	if c.callerAlive(ctx) {
+		c.breaker.failure()
+	}
 }
 
 // callerAlive reports whether neither the caller's context nor the client's
