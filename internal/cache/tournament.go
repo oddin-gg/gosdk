@@ -323,7 +323,7 @@ func (t *TournamentCache) TournamentIcon(ctx context.Context, id types.URN, loca
 		return v, nil
 	}
 
-	return lru.LoadCoalesced(ctx, t.lifetime, &t.iconSF, "icon|"+id.ToString()+"|"+string(locale), func(loadCtx context.Context) (*string, error) {
+	return lru.LoadCoalesced(ctx, t.lifetime, &t.iconSF, iconFlightKey(id, locale), func(loadCtx context.Context) (*string, error) {
 		// A flight that ended just before this one started has stored it.
 		if v, ok := t.loadIcon(id); ok {
 			return v, nil
@@ -382,6 +382,9 @@ func (t *TournamentCache) ClearCacheItem(id types.URN) {
 	t.iconMu.Lock()
 	delete(t.icons, id)
 	t.iconMu.Unlock()
+	// See CompetitorCache.ClearCacheItem: later callers start a fresh icon
+	// fetch instead of joining one that began before the clear.
+	t.iconSF.ForgetPrefix(iconFlightPrefix(id))
 }
 
 func newTournamentCache(lifeCtx context.Context, client *api.Client, logger *log.Logger) *TournamentCache {

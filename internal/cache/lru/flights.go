@@ -3,6 +3,7 @@ package lru
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 
@@ -80,6 +81,18 @@ func (g *Flights) Do(key string, fn func() (any, error)) (any, error) {
 func (g *Flights) Forget(key string) {
 	g.mu.Lock()
 	delete(g.m, key)
+	g.mu.Unlock()
+}
+
+// ForgetPrefix is Forget for every key that starts with prefix, for a caller
+// that invalidates one item whose flights are keyed per variant (locale).
+func (g *Flights) ForgetPrefix(prefix string) {
+	g.mu.Lock()
+	for k := range g.m {
+		if strings.HasPrefix(k, prefix) {
+			delete(g.m, k)
+		}
+	}
 	g.mu.Unlock()
 }
 

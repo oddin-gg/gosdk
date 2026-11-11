@@ -258,7 +258,7 @@ func (c *CompetitorCache) CompetitorIcon(ctx context.Context, id types.URN, loca
 		return v, nil
 	}
 
-	return lru.LoadCoalesced(ctx, c.lifetime, &c.iconSF, "icon|"+id.ToString()+"|"+string(locale), func(loadCtx context.Context) (*string, error) {
+	return lru.LoadCoalesced(ctx, c.lifetime, &c.iconSF, iconFlightKey(id, locale), func(loadCtx context.Context) (*string, error) {
 		// A flight that ended just before this one started has stored it.
 		if v, ok := c.loadIcon(id); ok {
 			return v, nil
@@ -281,10 +281,22 @@ func (c *CompetitorCache) CompetitorIcon(ctx context.Context, id types.URN, loca
 	})
 }
 
+// iconFlightKey is the key of one icon lookup in an icon flight group; every
+// locale of an item shares the iconFlightPrefix.
+func iconFlightKey(id types.URN, locale types.Locale) string {
+	return iconFlightPrefix(id) + string(locale)
+}
+
+func iconFlightPrefix(id types.URN) string { return "icon|" + id.ToString() + "|" }
+
 // ClearCacheItem removes both the entry and its icon.
 func (c *CompetitorCache) ClearCacheItem(id types.URN) {
 	c.lru.Clear(id)
 	c.deleteIcon(id)
+	// A caller arriving after the clear must not join an icon fetch that
+	// began before it and receive the icon the clear invalidated; that
+	// fetch still ends for its own callers but stores nothing.
+	c.iconSF.ForgetPrefix(iconFlightPrefix(id))
 }
 
 func newCompetitorCache(lifeCtx context.Context, client *api.Client, logger *log.Logger) *CompetitorCache {

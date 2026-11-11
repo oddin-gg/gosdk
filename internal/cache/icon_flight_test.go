@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -189,6 +190,81 @@ func TestIconLookup_ClearDuringTheFetchSuppressesTheIcon(t *testing.T) {
 			}
 			if f.cached() {
 				t.Fatal("the icon was stored although a Clear landed during the fetch")
+			}
+		})
+	}
+}
+
+// A caller that arrives after a Clear starts its own fetch: it does not join
+// the one that began before the Clear and receive the icon the Clear
+// invalidated.
+func TestIconLookup_ACallerAfterAClearDoesNotJoinThePreClearFetch(t *testing.T) {
+	const competitorFmt = `<?xml version="1.0"?>
+<competitor_profile generated_at="2026-01-01T00:00:00Z">
+  <competitor id="od:competitor:3" name="Team" abbreviation="TM" icon_path="%s"/>
+</competitor_profile>`
+	const tournamentFmt = `<?xml version="1.0"?>
+<tournament_info generated_at="2026-01-01T00:00:00Z">
+  <tournament id="od:tournament:7" name="T" icon_path="%s">
+    <sport id="od:sport:1" name="Football"/>
+  </tournament>
+</tournament_info>`
+	for _, tc := range []struct {
+		name, format string
+		icon         func(t *testing.T, srv *httptest.Server) (get func(context.Context) (*string, error), clear func())
+	}{
+		{"competitor", competitorFmt, func(t *testing.T, srv *httptest.Server) (func(context.Context) (*string, error), func()) {
+			cc := newCompetitorCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+			id := types.URN{Prefix: "od", Type: "competitor", ID: 3}
+			return func(ctx context.Context) (*string, error) { return cc.CompetitorIcon(ctx, id, types.EnLocale) },
+				func() { cc.ClearCacheItem(id) }
+		}},
+		{"tournament", tournamentFmt, func(t *testing.T, srv *httptest.Server) (func(context.Context) (*string, error), func()) {
+			tc := newTournamentCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+			id := types.URN{Prefix: "od", Type: "tournament", ID: 7}
+			return func(ctx context.Context) (*string, error) { return tc.TournamentIcon(ctx, id, types.EnLocale) },
+				func() { tc.ClearCacheItem(id) }
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var requests atomic.Int32
+			entered := make(chan struct{}, 4)
+			gate := make(chan struct{})
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				icon := "/icons/new.png"
+				if requests.Add(1) == 1 {
+					icon = "/icons/old.png"
+					entered <- struct{}{}
+					select {
+					case <-gate:
+					case <-r.Context().Done():
+						return
+					}
+				}
+				w.Header().Set("Content-Type", "application/xml")
+				_, _ = fmt.Fprintf(w, tc.format, icon)
+			}))
+			defer srv.Close()
+			defer close(gate)
+			get, clear := tc.icon(t, srv)
+
+			first := make(chan *string, 1)
+			go func() {
+				got, _ := get(context.Background())
+				first <- got
+			}()
+			<-entered
+			clear()
+
+			// Bounded: joining the held fetch would wait for it.
+			ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+			defer cancel()
+			got, err := get(ctx)
+			if err != nil || got == nil || *got != "/icons/new.png" {
+				t.Fatalf("icon after the clear = %v err = %v, want the fresh /icons/new.png", got, err)
+			}
+			if n := requests.Load(); n != 2 {
+				t.Fatalf("requests = %d, want 2", n)
 			}
 		})
 	}
