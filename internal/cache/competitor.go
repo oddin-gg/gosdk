@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"golang.org/x/sync/errgroup"
-	"golang.org/x/sync/singleflight"
 
 	"github.com/oddin-gg/gosdk/internal/api"
 	"github.com/oddin-gg/gosdk/internal/api/xml"
@@ -56,7 +55,7 @@ type CompetitorCache struct {
 	// lifetime is the detach root of the icon flights (cancelled with the
 	// owning manager); iconSF coalesces concurrent fetches of one icon.
 	lifetime context.Context
-	iconSF   singleflight.Group
+	iconSF   lru.Flights
 }
 
 // loadIcon returns (icon, true) if the URN has a recorded icon (which may

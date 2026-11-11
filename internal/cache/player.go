@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"golang.org/x/sync/errgroup"
-	"golang.org/x/sync/singleflight"
 
 	"github.com/oddin-gg/gosdk/internal/api"
 	"github.com/oddin-gg/gosdk/internal/cache/lru"
@@ -59,7 +58,7 @@ type PlayersCache struct {
 	// every key, so unrelated player IDs / locales couldn't load
 	// concurrently — a 4-locale preload of N players ran 4N
 	// sequential HTTP calls instead of N parallel batches.
-	loadGroup singleflight.Group
+	loadGroup lru.Flights
 
 	// clearMu + clearedIDsAt + purgedAt: the clear-vs-in-flight-load
 	// tombstone (same invariant as lru.EventCache). A loader snapshots

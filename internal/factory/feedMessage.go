@@ -75,7 +75,7 @@ func (f *FeedMessageFactory) startMessage(parent context.Context) (context.Conte
 	}
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	if f.breaker != nil {
-		ctx = apipolicy.WithMessage(ctx, f.breaker)
+		ctx = apipolicy.WithMessage(ctx, f.breaker, timeout)
 	}
 	return ctx, func() {
 		if f.breaker != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) && parent.Err() == nil {

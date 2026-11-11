@@ -8,8 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"golang.org/x/sync/singleflight"
-
 	"github.com/oddin-gg/gosdk/internal/apipolicy"
 )
 
@@ -66,7 +64,7 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 
 // With the gate open, a marked caller neither starts nor joins a flight.
 func TestLoadCoalesced_GateOpenSkipsWithoutStartingOrJoiningAFlight(t *testing.T) {
-	var sf singleflight.Group
+	var sf Flights
 	gate := newTestGate()
 	flights, _ := countFlights(t)
 
@@ -88,7 +86,7 @@ func TestLoadCoalesced_GateOpenSkipsWithoutStartingOrJoiningAFlight(t *testing.T
 	defer func() { close(release); <-done }()
 
 	gate.setOpen()
-	marked := apipolicy.WithMessage(t.Context(), gate)
+	marked := apipolicy.WithMessage(t.Context(), gate, apipolicy.MessageTimeout)
 	_, err := LoadCoalesced(marked, t.Context(), &sf, "k", func(context.Context) (int, error) {
 		loads.Add(1)
 		return 2, nil
@@ -116,9 +114,9 @@ func TestLoadCoalesced_GateOpenSkipsWithoutStartingOrJoiningAFlight(t *testing.T
 // A caller that waits on a flight is released the moment the gate opens, and
 // the flight goes on: the next caller finds what it loaded.
 func TestLoadCoalesced_GateOpenedReleasesAWaiterAndTheFlightGoesOn(t *testing.T) {
-	var sf singleflight.Group
+	var sf Flights
 	gate := newTestGate()
-	marked := apipolicy.WithMessage(t.Context(), gate)
+	marked := apipolicy.WithMessage(t.Context(), gate, apipolicy.MessageTimeout)
 
 	release := make(chan struct{})
 	var stored atomic.Int32
@@ -164,7 +162,7 @@ func TestLoadCoalesced_GateOpenedReleasesAWaiterAndTheFlightGoesOn(t *testing.T)
 // A caller without the mark ignores the gate, open or not; so does a marked
 // caller while the gate is closed.
 func TestLoadCoalesced_UnmarkedCallerIgnoresTheGate(t *testing.T) {
-	var sf singleflight.Group
+	var sf Flights
 	gate := newTestGate()
 	gate.setOpen()
 
@@ -174,7 +172,7 @@ func TestLoadCoalesced_UnmarkedCallerIgnoresTheGate(t *testing.T) {
 	}
 
 	closed := newTestGate()
-	got, err = LoadCoalesced(apipolicy.WithMessage(t.Context(), closed), t.Context(), &sf, "k2", func(context.Context) (int, error) { return 6, nil })
+	got, err = LoadCoalesced(apipolicy.WithMessage(t.Context(), closed, apipolicy.MessageTimeout), t.Context(), &sf, "k2", func(context.Context) (int, error) { return 6, nil })
 	if err != nil || got != 6 {
 		t.Fatalf("marked, gate closed: got=%d err=%v", got, err)
 	}
@@ -183,9 +181,9 @@ func TestLoadCoalesced_UnmarkedCallerIgnoresTheGate(t *testing.T) {
 // The flight itself is not the message path's: what it loads in turn must
 // not see the caller's mark, even when it is rooted in the caller's context.
 func TestLoadCoalesced_TheFlightDoesNotCarryTheGate(t *testing.T) {
-	var sf singleflight.Group
+	var sf Flights
 	gate := newTestGate()
-	marked := apipolicy.WithMessage(t.Context(), gate)
+	marked := apipolicy.WithMessage(t.Context(), gate, apipolicy.MessageTimeout)
 	var sawGate atomic.Bool
 	_, err := LoadCoalesced(marked, nil, &sf, "k", func(loadCtx context.Context) (int, error) {
 		sawGate.Store(apipolicy.GateOf(loadCtx) != nil)
@@ -206,7 +204,7 @@ func TestEventCache_GateOpenSkipsWithoutStartingOrJoiningAFlight(t *testing.T) {
 	gate.setOpen()
 	flights, _ := countFlights(t)
 
-	_, _, err := c.Get(apipolicy.WithMessage(t.Context(), gate), "m", []string{"en"})
+	_, _, err := c.Get(apipolicy.WithMessage(t.Context(), gate, apipolicy.MessageTimeout), "m", []string{"en"})
 	if !errors.Is(err, apipolicy.ErrSkipped) {
 		t.Fatalf("err = %v, want ErrSkipped", err)
 	}
@@ -218,7 +216,7 @@ func TestEventCache_GateOpenSkipsWithoutStartingOrJoiningAFlight(t *testing.T) {
 	if _, _, err := c.Get(t.Context(), "m", []string{"en"}); err != nil {
 		t.Fatal(err)
 	}
-	if v, ok, err := c.Get(apipolicy.WithMessage(t.Context(), gate), "m", []string{"en"}); err != nil || !ok || v == nil {
+	if v, ok, err := c.Get(apipolicy.WithMessage(t.Context(), gate, apipolicy.MessageTimeout), "m", []string{"en"}); err != nil || !ok || v == nil {
 		t.Fatalf("a cached entry was not served with the gate open: ok=%v err=%v", ok, err)
 	}
 }
@@ -235,7 +233,7 @@ func TestEventCache_GateOpenedReleasesAWaiterAndTheFlightFillsTheCache(t *testin
 		return base(ctx, key, locales, existing, has)
 	})
 	gate := newTestGate()
-	marked := apipolicy.WithMessage(t.Context(), gate)
+	marked := apipolicy.WithMessage(t.Context(), gate, apipolicy.MessageTimeout)
 
 	errc := make(chan error, 1)
 	go func() {
@@ -278,7 +276,7 @@ func TestEventCache_TheFlightDoesNotCarryTheGate(t *testing.T) {
 		var n atomic.Int32
 		return recordingLoader(&n, false)(ctx, key, locales, existing, has)
 	})
-	if _, _, err := c.Get(apipolicy.WithMessage(t.Context(), newTestGate()), "m", []string{"en"}); err != nil {
+	if _, _, err := c.Get(apipolicy.WithMessage(t.Context(), newTestGate(), apipolicy.MessageTimeout), "m", []string{"en"}); err != nil {
 		t.Fatal(err)
 	}
 	if sawGate.Load() {

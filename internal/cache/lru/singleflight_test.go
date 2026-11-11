@@ -7,14 +7,12 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"golang.org/x/sync/singleflight"
 )
 
 // TestLoadCoalesced_Basic exercises the happy path: fn runs once,
 // returns a value, caller receives it.
 func TestLoadCoalesced_Basic(t *testing.T) {
-	var sf singleflight.Group
+	var sf Flights
 	got, err := LoadCoalesced(t.Context(), nil, &sf, "k", func(ctx context.Context) (int, error) {
 		return 42, nil
 	})
@@ -28,7 +26,7 @@ func TestLoadCoalesced_Basic(t *testing.T) {
 
 // TestLoadCoalesced_ErrorPropagates verifies fn errors reach the caller.
 func TestLoadCoalesced_ErrorPropagates(t *testing.T) {
-	var sf singleflight.Group
+	var sf Flights
 	wantErr := errors.New("boom")
 	_, err := LoadCoalesced(t.Context(), nil, &sf, "k", func(ctx context.Context) (int, error) {
 		return 0, wantErr
@@ -41,7 +39,7 @@ func TestLoadCoalesced_ErrorPropagates(t *testing.T) {
 // TestLoadCoalesced_AlreadyCancelledCtxNoFetch — already-cancelled ctx
 // must not start a detached load.
 func TestLoadCoalesced_AlreadyCancelledCtxNoFetch(t *testing.T) {
-	var sf singleflight.Group
+	var sf Flights
 	var calls atomic.Int32
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
@@ -62,7 +60,7 @@ func TestLoadCoalesced_AlreadyCancelledCtxNoFetch(t *testing.T) {
 // TestLoadCoalesced_FirstCallerCancellationDoesNotKillSharedLoad —
 // short-deadline first caller cannot cancel the load for later waiters.
 func TestLoadCoalesced_FirstCallerCancellationDoesNotKillSharedLoad(t *testing.T) {
-	var sf singleflight.Group
+	var sf Flights
 	var calls atomic.Int32
 	// Handshake instead of sleeps: `started` proves caller A OWNS the
 	// registered flight before B launches (a descheduled A would
@@ -129,7 +127,7 @@ func TestLoadCoalesced_FirstCallerCancellationDoesNotKillSharedLoad(t *testing.T
 // TestLoadCoalesced_SecondCallerCtxBoundedWait — a slow load must not
 // block a later caller past its own deadline.
 func TestLoadCoalesced_SecondCallerCtxBoundedWait(t *testing.T) {
-	var sf singleflight.Group
+	var sf Flights
 	released := make(chan struct{})
 	defer close(released)
 	started := make(chan struct{})
@@ -193,7 +191,7 @@ func (r *registrations) wait(t *testing.T, want int32) {
 // StartCoalesced returns at once, runs one flight for any number of starts
 // and a LoadCoalesced caller that asks meanwhile shares it.
 func TestStartCoalesced_OneFlightWithoutWaiting(t *testing.T) {
-	var sf singleflight.Group
+	var sf Flights
 	var calls atomic.Int32
 	release := make(chan struct{})
 	fn := func(ctx context.Context) (int, error) {
@@ -222,7 +220,7 @@ func TestStartCoalesced_OneFlightWithoutWaiting(t *testing.T) {
 // The flight lives on the lifetime it was given: Close of the owner cancels
 // it, and the caller that started it has no say.
 func TestStartCoalesced_RunsOnTheLifetime(t *testing.T) {
-	var sf singleflight.Group
+	var sf Flights
 	life, stop := context.WithCancel(t.Context())
 	seen := make(chan error, 1)
 	StartCoalesced(life, &sf, "k", func(ctx context.Context) (int, error) {

@@ -5,8 +5,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"golang.org/x/sync/singleflight"
-
 	"github.com/oddin-gg/gosdk/internal/apipolicy"
 )
 
@@ -24,8 +22,9 @@ import (
 // (deliberate slow-loader stress tests) override this directly.
 var LoadTimeout = 60 * time.Second
 
-// LoadCoalesced runs `fn` under singleflight keyed on `sfKey`, coalescing
-// concurrent callers with identical keys into a single in-flight load.
+// LoadCoalesced runs `fn` as a flight (see Flights) keyed on `sfKey`,
+// coalescing concurrent callers with identical keys into a single in-flight
+// load.
 //
 // Cancellation semantics:
 //   - If the caller's ctx is already done, returns ctx.Err() immediately
@@ -50,7 +49,7 @@ var LoadTimeout = 60 * time.Second
 func LoadCoalesced[T any](
 	ctx context.Context,
 	lifetime context.Context,
-	sf *singleflight.Group,
+	sf *Flights,
 	sfKey string,
 	fn func(context.Context) (T, error),
 ) (T, error) {
@@ -77,38 +76,31 @@ func LoadCoalesced[T any](
 	// caller bounds only its own wait. A caller on the message path also
 	// stops waiting once the gate opens; the flight goes on and fills the
 	// cache for later callers.
-	ch := sf.DoChan(sfKey, func() (any, error) {
+	f := sf.Go(sfKey, func() (any, error) {
 		loadCtx, cancel := context.WithTimeout(base, LoadTimeout)
 		defer cancel()
 		return fn(loadCtx)
 	})
 	FlightRegistered()
-	select {
-	case <-GateOpened(ctx):
-		return zero, apipolicy.ErrSkipped
-	case r := <-ch:
-		if r.Err != nil {
-			return zero, r.Err
-		}
-		if r.Val == nil {
-			return zero, nil
-		}
-		return r.Val.(T), nil
-	case <-ctx.Done():
-		return zero, ctx.Err()
+	val, err := f.Await(ctx)
+	if err != nil {
+		return zero, err
 	}
+	if val == nil {
+		return zero, nil
+	}
+	return val.(T), nil
 }
 
-// StartCoalesced starts the flight of key under singleflight without waiting
+// StartCoalesced starts the flight of key as a flight without waiting
 // for it, or does nothing more than join the one that is running. It is the
 // background refresh of a value the caller can serve stale: the flight runs
 // under `lifetime` (the owning cache's, so Close cancels it) with the same
 // LoadTimeout as LoadCoalesced, carries no message mark, and its result is
-// dropped: fn stores what it loads. The result channel is buffered, so no
-// goroutine waits for it.
+// dropped: fn stores what it loads. No goroutine waits for it.
 func StartCoalesced[T any](
 	lifetime context.Context,
-	sf *singleflight.Group,
+	sf *Flights,
 	sfKey string,
 	fn func(context.Context) (T, error),
 ) {
@@ -117,7 +109,7 @@ func StartCoalesced[T any](
 		// Standalone/test use: no owner to cancel it, and no caller to inherit from.
 		base = context.Background() //nolint:contextcheck // deliberate: a background refresh has no caller context
 	}
-	sf.DoChan(sfKey, func() (any, error) {
+	sf.Go(sfKey, func() (any, error) {
 		loadCtx, cancel := context.WithTimeout(base, LoadTimeout)
 		defer cancel()
 		return fn(loadCtx)

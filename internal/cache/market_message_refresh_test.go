@@ -24,7 +24,7 @@ func TestMarketDescriptionCache_MessageReadsAStaleCatalogAtOnce(t *testing.T) {
 	hold := make(chan struct{})
 	srv.hold.Store(&hold)
 	defer close(hold)
-	msgCtx := apipolicy.WithMessage(ctx, newGateStub())
+	msgCtx := apipolicy.WithMessage(ctx, newGateStub(), apipolicy.MessageTimeout)
 
 	start := time.Now()
 	entry, err := mc.MarketDescriptionByID(msgCtx, 9, types.None[string](), locales)
@@ -50,7 +50,7 @@ func TestMarketDescriptionCache_ConcurrentStaleMessageReadsStartOneRefresh(t *te
 
 	hold := make(chan struct{})
 	srv.hold.Store(&hold)
-	msgCtx := apipolicy.WithMessage(ctx, newGateStub())
+	msgCtx := apipolicy.WithMessage(ctx, newGateStub(), apipolicy.MessageTimeout)
 	for range 20 {
 		if _, err := mc.MarketDescriptionByID(msgCtx, 9, types.None[string](), locales); err != nil {
 			t.Fatal(err)
@@ -79,14 +79,14 @@ func TestMarketDescriptionCache_NoBackgroundRefreshWhileOpenOrBackedOff(t *testi
 
 	gate := newGateStub()
 	gate.setOpen()
-	if _, err := mc.MarketDescriptionByID(apipolicy.WithMessage(ctx, gate), 9, types.None[string](), locales); err != nil {
+	if _, err := mc.MarketDescriptionByID(apipolicy.WithMessage(ctx, gate, apipolicy.MessageTimeout), 9, types.None[string](), locales); err != nil {
 		t.Fatalf("read with the gate open: %v (the stale entry must be served)", err)
 	}
 
 	mc.mu.Lock()
 	mc.refreshFailedAt[types.EnLocale] = time.Now()
 	mc.mu.Unlock()
-	if _, err := mc.MarketDescriptionByID(apipolicy.WithMessage(ctx, newGateStub()), 9, types.None[string](), locales); err != nil {
+	if _, err := mc.MarketDescriptionByID(apipolicy.WithMessage(ctx, newGateStub(), apipolicy.MessageTimeout), 9, types.None[string](), locales); err != nil {
 		t.Fatalf("read inside the backoff: %v", err)
 	}
 	time.Sleep(100 * time.Millisecond)
@@ -110,7 +110,7 @@ func TestMarketDescriptionCache_GetterJoinsTheBackgroundRefresh(t *testing.T) {
 	hold := make(chan struct{})
 	srv.hold.Store(&hold)
 	srv.serve(strings.ReplaceAll(bulkCatalogWithStaticVariants, `name="Plain"`, `name="Renamed"`))
-	if _, err := mc.MarketDescriptionByID(apipolicy.WithMessage(ctx, newGateStub()), 9, types.None[string](), locales); err != nil {
+	if _, err := mc.MarketDescriptionByID(apipolicy.WithMessage(ctx, newGateStub(), apipolicy.MessageTimeout), 9, types.None[string](), locales); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, "the background refresh to reach the server", func() bool { return srv.bulkHits.Load() == 2 })

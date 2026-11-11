@@ -10,8 +10,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"golang.org/x/sync/singleflight"
-
 	"github.com/oddin-gg/gosdk/internal/api"
 	data "github.com/oddin-gg/gosdk/internal/api/xml"
 	"github.com/oddin-gg/gosdk/internal/apipolicy"
@@ -128,7 +126,7 @@ func variantKey(marketID int, variant types.Optional[string]) CompositeKey {
 //
 // Concurrent-load safety (v2.24): replaces a single global loadMu —
 // which serialized every concurrent loader regardless of key/locale —
-// with a singleflight.Group. Bulk catalog loads (including by-id misses,
+// with a lru.Flights. Bulk catalog loads (including by-id misses,
 // which resolve through the bulk endpoint) share the "*|<locale>" key;
 // dynamic-variant loads get a per-(id,variant,locale) key. Different
 // keys load in parallel; concurrent callers for the same key share a
@@ -256,7 +254,7 @@ type MarketDescriptionCache struct {
 	// in-flight loads.
 	flightGen atomic.Uint64
 
-	sf singleflight.Group
+	sf lru.Flights
 }
 
 // marketTombstonePruneLen is the clearedAt size beyond which

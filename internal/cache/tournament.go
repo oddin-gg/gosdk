@@ -6,8 +6,6 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/sync/singleflight"
-
 	"github.com/oddin-gg/gosdk/internal/api"
 	apiXML "github.com/oddin-gg/gosdk/internal/api/xml"
 	"github.com/oddin-gg/gosdk/internal/cache/lru"
@@ -51,7 +49,7 @@ type TournamentCache struct {
 	// lifetime is the detach root of the icon flights (cancelled with the
 	// owning manager); iconSF coalesces concurrent fetches of one icon.
 	lifetime context.Context
-	iconSF   singleflight.Group
+	iconSF   lru.Flights
 }
 
 // LocalizedTournament holds tournament data; mu guards every field.

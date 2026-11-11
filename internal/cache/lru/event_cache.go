@@ -22,8 +22,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"golang.org/x/sync/singleflight"
-
 	"github.com/oddin-gg/gosdk/internal/apipolicy"
 )
 
@@ -66,7 +64,7 @@ type Loader[K comparable, L comparable, T any] func(
 // dedup of loader calls. Type T must satisfy CachedEntry[L].
 type EventCache[K comparable, L comparable, T CachedEntry[L]] struct {
 	lru    *TTL[K, T]
-	sf     singleflight.Group
+	sf     Flights
 	loader Loader[K, L, T]
 
 	// clearMu + clearedAt implement the Clear-vs-in-flight-load guard.
@@ -267,8 +265,8 @@ func (c *EventCache[K, L, T]) get(ctx context.Context, key K, locales []L, clear
 	// A flight carries no message mark: it runs for whoever asks, with the
 	// getters' retries and timeouts, and each caller bounds only its own
 	// wait (below).
-	flight := func() <-chan singleflight.Result {
-		return c.sf.DoChan(c.sfKey(key), func() (any, error) {
+	flight := func() *Flight {
+		return c.sf.Go(c.sfKey(key), func() (any, error) {
 			loadCtx, loadCancel := context.WithTimeout(base, LoadTimeout)
 			defer loadCancel()
 			// Snapshot the flight's start BEFORE reading the existing entry:
@@ -337,30 +335,24 @@ func (c *EventCache[K, L, T]) get(ctx context.Context, key K, locales []L, clear
 	}
 
 	var v T
-	ch := flight()
+	f := flight()
 	FlightRegistered()
-	select {
-	case <-GateOpened(ctx):
-		return zero, false, apipolicy.ErrSkipped
-	case r := <-ch:
-		if errors.Is(r.Err, errClearedDuringLoad) {
-			if clearRetries >= maxClearRetries {
-				// Only reachable under a sustained storm of Clears for
-				// this key, each landing within one load window. Bail
-				// with a transient error rather than livelock.
-				return zero, false, fmt.Errorf("cache load for key %v: %w", key, errClearedDuringLoad)
-			}
-			return c.get(ctx, key, locales, clearRetries+1, coverageRetries)
+	val, err := f.Await(ctx)
+	if errors.Is(err, errClearedDuringLoad) {
+		if clearRetries >= maxClearRetries {
+			// Only reachable under a sustained storm of Clears for
+			// this key, each landing within one load window. Bail
+			// with a transient error rather than livelock.
+			return zero, false, fmt.Errorf("cache load for key %v: %w", key, errClearedDuringLoad)
 		}
-		if r.Err != nil {
-			return zero, false, r.Err
-		}
-		var ok bool
-		if v, ok = r.Val.(T); !ok {
-			return zero, false, nil
-		}
-	case <-ctx.Done():
-		return zero, false, ctx.Err()
+		return c.get(ctx, key, locales, clearRetries+1, coverageRetries)
+	}
+	if err != nil {
+		return zero, false, err
+	}
+	var ok bool
+	if v, ok = val.(T); !ok {
+		return zero, false, nil
 	}
 
 	// Re-check coverage for THIS caller. If we coalesced onto another

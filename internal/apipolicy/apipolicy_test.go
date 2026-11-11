@@ -17,7 +17,7 @@ func TestGateMark(t *testing.T) {
 	if GateOf(ctx) != nil {
 		t.Fatal("a plain context carries a gate")
 	}
-	marked := WithMessage(ctx, stubGate{open: true})
+	marked := WithMessage(ctx, stubGate{open: true}, MessageTimeout)
 	g := GateOf(marked)
 	if g == nil || !g.Open() {
 		t.Fatalf("the mark was lost or changed: %v", g)
@@ -30,7 +30,7 @@ func TestGateMark(t *testing.T) {
 // The mark follows the context into everything derived from it, and a
 // context derived from a stripped one does not get it back.
 func TestGateMarkIsInherited(t *testing.T) {
-	marked := WithMessage(context.Background(), stubGate{})
+	marked := WithMessage(context.Background(), stubGate{}, MessageTimeout)
 	child, cancel := context.WithCancel(marked)
 	defer cancel()
 	if GateOf(child) == nil {

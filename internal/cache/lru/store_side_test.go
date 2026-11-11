@@ -7,8 +7,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"golang.org/x/sync/singleflight"
 )
 
 type sideEntry struct{ locales []string }
@@ -118,7 +116,7 @@ func TestStoreSide_AtomicWithClear(t *testing.T) {
 // (Manager.Close / client teardown) must cancel the in-flight load
 // instead of letting it run to LoadTimeout.
 func TestLoadCoalesced_LifetimeCancelAbortsDetachedLoad(t *testing.T) {
-	var sf singleflight.Group
+	var sf Flights
 	lifetime, lifetimeCancel := context.WithCancel(context.Background())
 
 	loadCtxErr := make(chan error, 1)

@@ -388,7 +388,7 @@ func TestLocalizedStaticDataCache_GateOpenSkipsTheLoad(t *testing.T) {
 	restore := lru.SetFlightRegisteredHook(func() { flights.Add(1) })
 	defer restore()
 
-	_, err := c.LocalizedItem(apipolicy.WithMessage(t.Context(), gate), 1, []types.Locale{types.EnLocale})
+	_, err := c.LocalizedItem(apipolicy.WithMessage(t.Context(), gate, apipolicy.MessageTimeout), 1, []types.Locale{types.EnLocale})
 	if !errors.Is(err, apipolicy.ErrSkipped) {
 		t.Fatalf("err = %v, want ErrSkipped", err)
 	}
@@ -420,7 +420,7 @@ func TestLocalizedStaticDataCache_GateOpenedReleasesAWaiterAndTheFetchGoesOn(t *
 	c := newLocalizedStaticDataCache(t.Context(), &minimalCfg{}, log.New(nil), nil, fetcher)
 	defer c.Close()
 	gate := newGateStub()
-	marked := apipolicy.WithMessage(t.Context(), gate)
+	marked := apipolicy.WithMessage(t.Context(), gate, apipolicy.MessageTimeout)
 
 	errc := make(chan error, 1)
 	go func() {
@@ -448,5 +448,54 @@ func TestLocalizedStaticDataCache_GateOpenedReleasesAWaiterAndTheFetchGoesOn(t *
 	}
 	if calls.Load() != 1 {
 		t.Fatalf("fetches = %d, want 1", calls.Load())
+	}
+}
+
+// A message-path caller does not wait on a fetch that has run for longer than
+// its timeout; the fetch goes on and fills the cache.
+func TestLocalizedStaticDataCache_MessageDoesNotWaitOnAFetchOlderThanItsTimeout(t *testing.T) {
+	release := make(chan struct{})
+	entered := make(chan struct{})
+	var once sync.Once
+	fetcher := func(ctx context.Context, locale types.Locale) ([]types.StaticData, error) {
+		once.Do(func() { close(entered) })
+		<-release
+		return []types.StaticData{{ID: 1, Description: types.Some("ok")}}, nil
+	}
+	c := newLocalizedStaticDataCache(t.Context(), &minimalCfg{}, log.New(nil), nil, fetcher)
+	defer c.Close()
+	locales := []types.Locale{types.EnLocale}
+
+	getterErr := make(chan error, 1)
+	go func() {
+		_, err := c.LocalizedItem(t.Context(), 1, locales)
+		getterErr <- err
+	}()
+	<-entered
+
+	// The first message waits for the flight's age to reach its timeout, a
+	// later one finds it older and leaves at once. The context deadline is far
+	// away, so only the age of the fetch ends the wait.
+	const timeout = 100 * time.Millisecond
+	marked := apipolicy.WithMessage(t.Context(), newGateStub(), timeout)
+	start := time.Now()
+	for range 5 {
+		ctx, cancel := context.WithTimeout(marked, 10*time.Second)
+		_, err := c.LocalizedItem(ctx, 1, locales)
+		cancel()
+		if !errors.Is(err, lru.ErrFlightTooOld) {
+			t.Fatalf("err = %v, want ErrFlightTooOld", err)
+		}
+	}
+	if d := time.Since(start); d > 4*timeout {
+		t.Fatalf("five messages waited %v in total, want about %v", d, timeout)
+	}
+
+	close(release)
+	if err := <-getterErr; err != nil {
+		t.Fatalf("getter: %v", err)
+	}
+	if len(c.unloadedLocales(locales)) != 0 {
+		t.Fatal("the fetch did not fill the cache")
 	}
 }

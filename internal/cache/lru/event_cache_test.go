@@ -512,7 +512,7 @@ func TestEventCache_MessageAndGetterShareOneFlight(t *testing.T) {
 	registered := trackRegistrations(t)
 
 	// The message caller starts the flight and leaves at its deadline.
-	msgCtx, cancel := context.WithTimeout(apipolicy.WithMessage(t.Context(), newTestGate()), 50*time.Millisecond)
+	msgCtx, cancel := context.WithTimeout(apipolicy.WithMessage(t.Context(), newTestGate(), apipolicy.MessageTimeout), 50*time.Millisecond)
 	defer cancel()
 	msgDone := make(chan error, 1)
 	go func() {

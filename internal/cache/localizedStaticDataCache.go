@@ -6,9 +6,6 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/sync/singleflight"
-
-	"github.com/oddin-gg/gosdk/internal/apipolicy"
 	"github.com/oddin-gg/gosdk/internal/cache/lru"
 	"github.com/oddin-gg/gosdk/internal/config"
 	log "github.com/oddin-gg/gosdk/internal/log"
@@ -50,7 +47,7 @@ type LocalizedStaticDataCache struct {
 	refreshTickPeriod   time.Duration
 	logger              *log.Logger
 	mux                 sync.RWMutex
-	sf                  singleflight.Group
+	sf                  lru.Flights
 }
 
 // LocalizedItem returns a populated LocalizedStaticData for the given
@@ -165,8 +162,8 @@ func (l *LocalizedStaticDataCache) loadLocales(ctx context.Context, locales []ty
 		loc := locale
 		// The flight has no budget of its own and carries no message mark:
 		// it runs for whoever asks, and each caller bounds only its wait.
-		flight := func() <-chan singleflight.Result { //nolint:contextcheck // deliberate detach: the flight runs under the cache lifetime, not the caller's context
-			return l.sf.DoChan(string(loc), func() (interface{}, error) {
+		flight := func() *lru.Flight { //nolint:contextcheck // deliberate detach: the flight runs under the cache lifetime, not the caller's context
+			return l.sf.Go(string(loc), func() (interface{}, error) {
 				// Double-check inside the critical region.
 				l.mux.RLock()
 				_, alreadyLoaded := l.loadedLocales[loc]
@@ -213,17 +210,10 @@ func (l *LocalizedStaticDataCache) loadLocales(ctx context.Context, locales []ty
 				return nil, nil
 			})
 		}
-		ch := flight()
+		f := flight()
 		lru.FlightRegistered()
-		select {
-		case <-lru.GateOpened(ctx):
-			return apipolicy.ErrSkipped
-		case r := <-ch:
-			if r.Err != nil {
-				return r.Err
-			}
-		case <-ctx.Done():
-			return ctx.Err()
+		if _, err := f.Await(ctx); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -293,7 +283,7 @@ func (l *LocalizedStaticDataCache) timerTick(ctx context.Context) {
 
 	for _, locale := range locales {
 		loc := locale
-		_, _, _ = l.sf.Do(string(loc), func() (interface{}, error) {
+		_, _ = l.sf.Do(string(loc), func() (interface{}, error) {
 			// Same bound as loadLocales: the refresh fetch dies with the
 			// cache lifetime (ctx here IS lifeCtx) and can't run forever
 			// on a timeout-less custom HTTP client.
