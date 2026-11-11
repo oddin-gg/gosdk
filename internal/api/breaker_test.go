@@ -464,6 +464,12 @@ func TestBreaker_ClosedByAHealthyAnswer_AMutationOnlyOnceItsBodyWasVerified(t *t
 			_, _ = io.WriteString(w, `<error/>`)
 		case "no_code":
 			_, _ = io.WriteString(w, `<response/>`)
+		case "bare_error_truncated":
+			_, _ = io.WriteString(w, `<error><message>x`)
+		case "bare_error_unavailable":
+			_, _ = io.WriteString(w, `<error response_code="SERVICE_UNAVAILABLE"><message>down</message></error>`)
+		case "bare_error_trailing":
+			_, _ = io.WriteString(w, `<error/><response response_code="SERVICE_UNAVAILABLE"/>`)
 		default:
 			_, _ = io.WriteString(w, `<?xml version="1.0"?><response response_code="OK"/>`)
 		}
@@ -472,7 +478,8 @@ func TestBreaker_ClosedByAHealthyAnswer_AMutationOnlyOnceItsBodyWasVerified(t *t
 	c := newTestClient(t, srv)
 	c.maxAttempts = 1
 
-	for _, m := range []string{"truncated", "oversized", "malformed", "trailing", "unavailable"} {
+	for _, m := range []string{"truncated", "oversized", "malformed", "trailing", "unavailable",
+		"bare_error_truncated", "bare_error_unavailable", "bare_error_trailing"} {
 		mode.Store(m)
 		c.breaker.success()
 		if ok, err := c.postEmpty(t.Context(), "/x", true); err == nil || ok {
