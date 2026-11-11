@@ -213,24 +213,30 @@ func TestFlight_AwaitCountsAPassedDeadlineAsTheCallersOwnExpiry(t *testing.T) {
 
 func TestFlights_ForgetDetachesARunningFlight(t *testing.T) {
 	var sf Flights
-	release := make(chan struct{})
-	first := sf.Go("k", func() (any, error) { <-release; return 1, nil })
+	releaseFirst := make(chan struct{})
+	first := sf.Go("k", func() (any, error) { <-releaseFirst; return 1, nil })
 	sf.Forget("k")
-	second := sf.Go("k", func() (any, error) { return 2, nil })
+	releaseSecond := make(chan struct{})
+	defer close(releaseSecond)
+	var runs atomic.Int32
+	second := sf.Go("k", func() (any, error) { runs.Add(1); <-releaseSecond; return 2, nil })
 	if first == second {
 		t.Fatal("a call after Forget joined the forgotten flight")
 	}
-	if v, _ := second.Await(t.Context()); v != 2 {
-		t.Fatalf("second = %v, want 2", v)
-	}
-	close(release)
+	waitFor(t, "the replacement to start", func() bool { return runs.Load() == 1 })
+
+	// The forgotten flight ends while its replacement still runs: it must
+	// not remove the replacement's slot.
+	close(releaseFirst)
 	if v, _ := first.Await(t.Context()); v != 1 {
 		t.Fatalf("the forgotten flight lost its result: %v", v)
 	}
-	// The ended flight of the forgotten key must not remove the new one's slot.
-	third := sf.Go("k", func() (any, error) { return 3, nil })
-	if v, _ := third.Await(t.Context()); v != 3 {
-		t.Fatalf("third = %v, want 3", v)
+	third := sf.Go("k", func() (any, error) { runs.Add(1); return 3, nil })
+	if third != second {
+		t.Fatal("a call after the forgotten flight ended did not join the running replacement")
+	}
+	if n := runs.Load(); n != 1 {
+		t.Fatalf("loads = %d, want 1", n)
 	}
 }
 
