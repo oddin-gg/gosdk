@@ -6,14 +6,12 @@ module github.com/oddin-gg/gosdk
 // of the modern stdlib without `//go:build go1.x` shims.
 go 1.26.0
 
-// Toolchain: 1.26.10 — the latest patch of the 1.26 line, pulled in when
-// building/testing this module. 1.26.6 left nine reachable standard
-// library vulnerabilities (seven in net/http, one in mime/multipart, one in
-// crypto/tls: GO-2026-6617, 6613, 6612, 6611, 6610, 6608, 6607, 6605,
-// 6603), all fixed in 1.26.9, so `make govulncheck` fails on anything
+// Toolchain: 1.26.11 — the latest patch of the 1.26 line, pulled in when
+// building/testing this module. 1.26.10 leaves GO-2026-6859 (net/http)
+// reachable from the REST client, so `make govulncheck` fails on anything
 // older. Consumers using their own toolchain (their go.mod's `go`
 // directive) are not affected.
-toolchain go1.26.10
+toolchain go1.26.11
 
 require (
 	github.com/cenkalti/backoff/v5 v5.0.3
