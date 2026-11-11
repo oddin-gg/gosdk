@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/oddin-gg/gosdk/types"
@@ -59,3 +60,20 @@ type redactedError struct {
 
 func (e *redactedError) Error() string { return e.msg }
 func (e *redactedError) Unwrap() error { return e.cause }
+
+// ErrBadResponse matches (errors.Is) the failures of a call whose response
+// arrived but could not be read or understood: a body that was cut off,
+// malformed, over the size cap or followed by a second document, and a
+// response about another resource. It says something about the API (or the
+// path to it) rather than about the caller or the local data, which is what
+// lets a consumer tell it from a local error.
+var ErrBadResponse = errors.New("api: bad response")
+
+// badResponseError tags err as ErrBadResponse without changing its text.
+type badResponseError struct{ err error }
+
+func (e *badResponseError) Error() string        { return e.err.Error() }
+func (e *badResponseError) Unwrap() error        { return e.err }
+func (e *badResponseError) Is(target error) bool { return target == ErrBadResponse }
+
+func badResponse(err error) error { return &badResponseError{err: err} }

@@ -127,11 +127,16 @@ func TestEventRecovery_CarriesEventID(t *testing.T) {
 // observe what the actor emitted.
 type fakeManagerOps struct {
 	pendingRebind atomic.Bool
-	mu            sync.Mutex
-	registered    []*Handle
-	completed     []completedHandle
-	nextID        atomic.Uint32
-	emittedMsgs   []types.RecoveryMessage
+	// noClientScope makes the fake report that no client session has any
+	// producer in scope (by default every producer is).
+	noClientScope atomic.Bool
+	// clientBusy makes the fake report a client message in processing.
+	clientBusy  atomic.Bool
+	mu          sync.Mutex
+	registered  []*Handle
+	completed   []completedHandle
+	nextID      atomic.Uint32
+	emittedMsgs []types.RecoveryMessage
 }
 
 type completedHandle struct {
@@ -175,6 +180,12 @@ func (f *fakeManagerOps) LookupHandle(id int) (*Handle, bool) {
 }
 
 func (f *fakeManagerOps) rebindPending(int) bool { return f.pendingRebind.Load() }
+
+func (f *fakeManagerOps) clientSessionsCanComplete(int) bool { return !f.noClientScope.Load() }
+
+func (f *fakeManagerOps) clientProcessingStalled(int, time.Time, time.Duration) bool {
+	return f.clientBusy.Load()
+}
 
 func (f *fakeManagerOps) emitRecoveryMessage(msg types.RecoveryMessage) {
 	f.mu.Lock()
@@ -313,9 +324,10 @@ type fakeCfgWithRecoveryWindow struct {
 	mins int
 }
 
-func (f *fakeCfgWithRecoveryWindow) AccessToken() *string         { s := ""; return &s }
-func (f *fakeCfgWithRecoveryWindow) DefaultLocale() types.Locale  { return types.EnLocale }
-func (f *fakeCfgWithRecoveryWindow) MaxInactivity() time.Duration { return 20 * time.Second }
+func (f *fakeCfgWithRecoveryWindow) AccessToken() *string                    { s := ""; return &s }
+func (f *fakeCfgWithRecoveryWindow) DefaultLocale() types.Locale             { return types.EnLocale }
+func (f *fakeCfgWithRecoveryWindow) MaxInactivity() time.Duration            { return 20 * time.Second }
+func (f *fakeCfgWithRecoveryWindow) SnapshotCompleteDeadline() time.Duration { return 5 * time.Minute }
 func (f *fakeCfgWithRecoveryWindow) MaxRecoveryExecution() time.Duration {
 	return time.Duration(f.mins) * time.Minute
 }

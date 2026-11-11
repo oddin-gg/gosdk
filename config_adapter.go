@@ -29,8 +29,11 @@ func (a *configAdapter) AccessToken() *string {
 func (a *configAdapter) DefaultLocale() types.Locale         { return a.cfg.defaultLocale }
 func (a *configAdapter) MaxInactivity() time.Duration        { return a.cfg.maxInactivity }
 func (a *configAdapter) MaxRecoveryExecution() time.Duration { return a.cfg.maxRecoveryExecution }
-func (a *configAdapter) MessagingPort() int                  { return a.cfg.messagingPort }
-func (a *configAdapter) SdkNodeID() *int                     { return a.cfg.SdkNodeID() }
+func (a *configAdapter) SnapshotCompleteDeadline() time.Duration {
+	return a.cfg.snapshotCompleteDeadline
+}
+func (a *configAdapter) MessagingPort() int { return a.cfg.messagingPort }
+func (a *configAdapter) SdkNodeID() *int    { return a.cfg.SdkNodeID() }
 
 func (a *configAdapter) SelectedEnvironment() *types.Environment {
 	v := a.cfg.selectedEnvironment

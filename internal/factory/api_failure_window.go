@@ -1,0 +1,117 @@
+package factory
+
+import (
+	"sync"
+	"time"
+
+	"github.com/oddin-gg/gosdk/types"
+)
+
+const (
+	// apiFailureWindowTTL is how long an event whose message-path build
+	// failed skips the API.
+	apiFailureWindowTTL = 10 * time.Second
+	// apiFailureWindowMax bounds the number of remembered events.
+	apiFailureWindowMax = 4096
+)
+
+// apiFailureWindow remembers the events whose message-path build just
+// failed against the API. For a short time (apiFailureWindowTTL) a message
+// for such an event is built without asking the API again: during an outage
+// the first message of an event pays one short attempt and the rest of that
+// event's messages go straight out (event == nil), instead of every message
+// paying the full retry cycle on the session goroutine.
+//
+// The whole window ends the moment the API answers successfully again, from
+// any call: entries carry the API's success counter as read after the
+// failed attempt (see FeedMessageFactory.noteBuildFailure), and an entry is
+// only honoured while the counter still has that value, so only a later
+// success voids it. Nothing stays refused once the API is back.
+//
+// The zero value is ready to use.
+type apiFailureWindow struct {
+	mu      sync.Mutex
+	entries map[types.URN]apiFailureEntry
+	// now is the clock; time.Now when nil.
+	now func() time.Time
+}
+
+type apiFailureEntry struct {
+	until time.Time
+	count uint64
+}
+
+func (w *apiFailureWindow) clock() time.Time {
+	if w.now != nil {
+		return w.now()
+	}
+	return time.Now()
+}
+
+// blocked reports whether id failed recently and the API has not answered
+// successfully since (count is the success counter as the caller read it).
+// The counter only grows, so an entry recorded at a count above the
+// caller's was recorded after a success the caller has not seen yet: the
+// caller's snapshot is stale, the entry is current, and it is kept. Only a
+// caller that has seen a success after the entry was recorded (count above
+// the entry's) clears it.
+func (w *apiFailureWindow) blocked(id types.URN, count uint64) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	e, ok := w.entries[id]
+	if !ok {
+		return false
+	}
+	if count > e.count || !w.clock().Before(e.until) {
+		delete(w.entries, id)
+		return false
+	}
+	return true
+}
+
+// record remembers that building id failed; count is the success counter as
+// read AFTER the failed attempt (see FeedMessageFactory.noteBuildFailure: an
+// earlier successful call of the same build already advanced it), so only a
+// success that lands from here on voids the entry.
+func (w *apiFailureWindow) record(id types.URN, count uint64) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.entries == nil {
+		w.entries = make(map[types.URN]apiFailureEntry)
+	}
+	now := w.clock()
+	if _, exists := w.entries[id]; !exists && len(w.entries) >= apiFailureWindowMax {
+		// Full: drop what is no longer honoured (voided by a success this
+		// caller has seen, or expired; an entry above the caller's count is
+		// current, see blocked); if that frees nothing, make room by
+		// dropping one arbitrary entry (the set is a best-effort shield,
+		// not a ledger).
+		for k, e := range w.entries {
+			if count > e.count || !now.Before(e.until) {
+				delete(w.entries, k)
+			}
+		}
+		if len(w.entries) >= apiFailureWindowMax {
+			for k := range w.entries {
+				delete(w.entries, k)
+				break
+			}
+		}
+	}
+	// Two sessions can fail the same event at once: one read the counter,
+	// paused, a success raised it, and the other recorded at the higher
+	// value. The older count must not replace that entry (the next message
+	// would void it and hit the failing API again); an equal count only
+	// refreshes the expiry.
+	if e, ok := w.entries[id]; ok && e.count > count {
+		return
+	}
+	w.entries[id] = apiFailureEntry{until: now.Add(apiFailureWindowTTL), count: count}
+}
+
+// len is the number of remembered events (tests).
+func (w *apiFailureWindow) len() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return len(w.entries)
+}

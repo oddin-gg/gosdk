@@ -453,6 +453,42 @@ func (c *EventCache[K, V]) Purge()
 - Every cache value is a struct with explicit per-locale fields (see §7). All field access is mutex-protected within the entry — no partial-locking like the current code.
 - Default capacity per cache: configurable, sensible defaults (e.g., 5000 matches, 50000 competitors). Default TTL: 12h to match current behavior.
 
+### Message-path call policy and per-policy flights
+
+Two callers ask the API for the same entity: a public getter, which waits for
+the answer and retries, and the feed message path, which builds the event of
+every message on the session goroutine. A getter that waits for a failing API
+delays only itself; the message path doing the same delays every message behind
+it. The path therefore marks its context (`internal/apipolicy`): the API client
+makes **one attempt per request, no retries**, all requests of one message build
+(event parts, market and outcome name lookups) share **one 2 s budget** and each
+inherits what is left, a request begun after it is spent is never sent
+(`ErrBudgetSpent`), and for an event inside the failure window no request is made
+at all (`ErrSkipped`; caches still answer).
+
+The failure window (10 s per event, 4096 events) opens only on a failure **of
+the API**: 5xx, 429, a transport error, a timeout after sending, a
+`SERVICE_UNAVAILABLE` envelope, an unreadable response (`api.ErrBadResponse`).
+A 404 for an event not yet in the API, other 4xx, a spent budget and local
+name-resolution errors do not. Any healthy answer of any call (the client's
+success counter, read after the failed attempt) ends it. One consequence is
+documented for clients: a cold build against a healthy API slower than about
+250 ms per request exceeds the budget and opens the window; `WithPreloadLocales`
+keeps the market catalog out of the build. Market catalogs have a backoff of
+their own (30 s) for message-mode loads, warm or cold.
+
+The policy holds only while every loader that **coalesces calls onto a flight**
+keeps the policy apart. Flights of different policies must not share: a getter
+that retries must not hold a message behind it, and a message's single-attempt
+failure must not become a getter's answer. So the flight key carries a suffix of
+the policy (`apipolicy.Suffix`), the detached flight context carries the caller's
+policy (`apipolicy.Carry`), and invalidation that forgets flights by key covers
+every suffix (`apipolicy.Suffixes`); `lru.LoadCoalesced` and `EventCache` do this
+for their callers. A flight runs on its **starter's** budget, so a message-path
+joiner that gets the starter's deadline error without having used its own budget
+asks once more (`lru.JoinerMayRetry`); the starter never retries its own error
+and a public getter never retries.
+
 ### Static-catalog caches (map + RWMutex)
 
 For: base `MarketDescriptionCache` (everything the bulk catalog returns — see the correction under "Variant / dynamic market descriptions" below), `MarketVoidReasonsCache`, `MatchStatusDescriptionCache`, `SportsCache`.
@@ -491,7 +527,7 @@ The loaded-locale mark itself also expires (`marketCatalogTTL`, 12h). It was per
 
 - **Public methods** on `Client`: `ClearMatch`, `ClearTournament`, `ClearCompetitor`, `ClearPlayer`, `ClearMarketDescription`, `ClearMarketVoidReasons`. Parity with .NET/Java.
 - **Auto-invalidation** on `FixtureChange` feed message: clears the affected match cache entry. Existing behavior, kept.
-- **TTL eviction**: per-cache TTL handled by `expirable.LRU`.
+- **TTL eviction**: per-cache TTL (`lru.TTL`, no background goroutine): an expired entry is never returned, is evicted when read, and every insert also sheds up to four expired entries from the least recently used end, so entries nobody reads again do not sit at the size cap.
 - **LRU eviction**: per-cache size cap.
 
 ## 7. Localization
@@ -986,6 +1022,35 @@ The `SnapshotComplete` message is a **correctness event, not lossy observability
 When the corresponding `SnapshotComplete` arrives (or recovery times out / fails), the actor updates the handle's status (`Completed` / `Failed` / `TimedOut`), closes its `Done` channel, and emits a `RecoveryEvent` on the (lossy) channel. **Even if the channel event is dropped, the handle is reliable** — the caller can `<-handle.Done()`, `handle.Result()`, or `handle.Status()` and get the correct outcome. Handles are GC'd from the manager's map a grace period after completion (constant `recovery.HandleGCGracePeriod`, currently 5 minutes), after which `client.EventRecoveryStatus(requestID)` returns `(_, false)`. Five minutes is generous enough for late pollers without growing the map indefinitely; a consumer that polls only at very long intervals should cache the request ID + outcome itself rather than relying on the SDK map.
 
 Tests drive the actor through full recovery scenarios against an httptest-backed API (real timers with shortened windows — no fake clock): warm-up gating (`inactivityArmed` suppresses producer-down until `initialDelay` elapses), cold start → initial snapshot, producer-down by inactivity → recovery → producer-up, interrupted re-issue, event recovery, handle completion with no channel reader, late/stale API completions, and shutdown-vs-admission races.
+
+### Snapshot-complete deadline
+
+A snapshot recovery that never completes would hold its producer down until
+`WithMaxRecoveryExecution` (default 6 h), so each one carries a deadline
+(`WithSnapshotCompleteDeadline`, default 5 minutes; must be > 0 and not above
+`WithMaxRecoveryExecution`, and it follows that cap when only the cap is
+lowered). Every message carrying the recovery's request id renews it, and so
+does any `snapshot_complete` of it. The deadline is held, not passed, while the
+replay may only be slow to be handled: processing of the producer lags behind
+and messages are being taken up, the processed cursor cannot be read, the first
+message is still in processing, a client message of any producer has been stuck
+in processing longer than `MaxInactivity` in a session that can receive this
+producer (the session queue is shared by the producers of its interest), or a
+lost session in scope has not re-bound its queue. It does not apply to a
+producer whose recovery the open client sessions cannot complete (a LiveOnly or
+PrematchOnly client's other producer, a client that never subscribed, a producer
+of both scopes with only a LiveOnly or only a PrematchOnly session open, since
+it needs a `snapshot_complete` of each scope): that recovery waits for
+`MaxRecoveryExecution` as before. When
+the deadline passes, the actor logs once at WARN and re-issues the snapshot
+from the **same recover-from point** under a NEW request id; the producer stays down, a `snapshot_complete` of the abandoned
+request id is ignored, and the existing request rate limiting and the
+`MaxRecoveryExecution` cap still apply. Keeping the original point matters:
+clamping again against the current time would drop the slice between the two
+requests; if a request of the chain is dropped (its POST fails, or a cap
+expires it), its range stays the floor of the next one. Enforcement is periodic (the manager's ~10 s tick), so the deadline
+is a lower bound. Tests use shortened windows against the httptest API, like
+the rest of this section.
 
 ## 12. Configuration
 

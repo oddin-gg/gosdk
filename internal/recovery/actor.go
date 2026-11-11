@@ -40,6 +40,35 @@ type recoveryActor struct {
 	// Zero = full history (pre-wiring behaviour).
 	initialSnapshotTime time.Duration
 
+	// lastProcessedFn, when set, replaces the producer-manager lookup of the
+	// last processed message timestamp. Tests only.
+	lastProcessedFn func() (time.Time, error)
+
+	// inProcessing counts the messages of this producer that are in
+	// processing right now in the sessions of the client (the SDK's own
+	// alive-only session reports none, see session.processFeedMessage):
+	// every start adds one, every end takes one, a zero-timestamp end
+	// included (the session ends a message whose build or downstream send
+	// failed with a zero timestamp, and the message is out of processing
+	// all the same). The producer's last-message
+	// timestamp cannot tell this: system alives advance it too. A counter
+	// rather than marks of the last start and end, because sessions
+	// process concurrently and one session's end must not hide another's
+	// message still in a stalled callback. The session pairs every start
+	// with exactly one end; an end that were doubled is clamped at zero
+	// and only ends the guard early, which re-issues a request, where a
+	// lost end would stall the recovery. Written from the session
+	// goroutines that call the processing callbacks directly, so atomic.
+	inProcessing atomic.Int64
+
+	// lastProcessingStartNanos is the wall-clock time (Unix nanoseconds) of
+	// the latest processing start, zero before the first. Together with
+	// inProcessing it tells whether the consumer is busy with messages at
+	// all: a stale last-processed timestamp is evidence of a backlog only
+	// while messages are being taken up. Written from the session
+	// goroutines, so atomic.
+	lastProcessingStartNanos atomic.Int64
+
 	// Inbox + lifecycle.
 	inbox    chan actorEvent
 	shutdown chan struct{}
@@ -113,10 +142,64 @@ type recoveryActor struct {
 	downReason             types.ProducerDownReason
 	statusReason           types.ProducerStatusReason
 
+	// recoveryMark is the sign-of-life mark of the CURRENT snapshot
+	// recovery, replaced by a fresh one whenever a snapshot request is made
+	// or re-issued (nil before the first). The session goroutines stamp it
+	// when a message carrying the request id arrives (noteRecoveryMessage);
+	// the tick reads it: a thread-safe setter like the processing-start/end
+	// ones, so a full inbox cannot make a live recovery look silent. It
+	// renews the snapshot-complete deadline of the request it names.
+	//
+	// The mark is one object per request, and a caller loads the pointer
+	// once, checks the id, and writes into THAT object only. A caller of an
+	// abandoned request that passed the check and paused while the actor
+	// installed the replacement can then only touch the abandoned request's
+	// object, never the new request's mark. A message of an event recovery
+	// or of an abandoned request is ignored for the same reason.
+	recoveryMark atomic.Pointer[recoveryMsgMark]
+	// noteGateHook, when set, runs in noteRecoveryMessage between the id
+	// check and the write. Tests only: it models a caller that paused there.
+	noteGateHook func()
+
 	// statusSnapshot is the most recent ProducerStatus emitted by this
 	// actor. Read by external callers (Client.ProducerStatus) under the
 	// atomic-pointer pattern — the actor goroutine is the only writer.
 	statusSnapshot atomic.Pointer[producerStatusImpl]
+}
+
+// recoveryMsgMark is the sign of life of one snapshot request: the latest
+// instant a message carrying its id was seen (unix nanoseconds, 0 = none).
+type recoveryMsgMark struct {
+	requestID int
+	at        atomic.Int64
+}
+
+// note advances the mark to at; an older observation never replaces it.
+func (m *recoveryMsgMark) note(at time.Time) {
+	if at.IsZero() {
+		return
+	}
+	ns := at.UnixNano()
+	for {
+		cur := m.at.Load()
+		if ns <= cur || m.at.CompareAndSwap(cur, ns) {
+			return
+		}
+	}
+}
+
+// seenAt is the latest message instant (zero = none).
+func (m *recoveryMsgMark) seenAt() time.Time {
+	if ns := m.at.Load(); ns != 0 {
+		return time.Unix(0, ns)
+	}
+	return time.Time{}
+}
+
+// publishSnapshotRequest makes id the current snapshot request: a fresh mark
+// that only messages of this id may stamp.
+func (a *recoveryActor) publishSnapshotRequest(id int) {
+	a.recoveryMark.Store(&recoveryMsgMark{requestID: id})
 }
 
 // actorManagerOps is the narrow surface the actor needs back into the
@@ -131,6 +214,14 @@ type actorManagerOps interface {
 	// rebindPending reports whether a lost session in the producer's
 	// scope still has no queue; see Manager.rebindPending.
 	rebindPending(producerID int) bool
+	// clientSessionsCanComplete reports whether the open client sessions
+	// (not the SDK's own alive-only one) can complete the producer's
+	// snapshot recovery; see Manager.clientSessionsCanComplete.
+	clientSessionsCanComplete(producerID int) bool
+	// clientProcessingStalled reports whether a client session that can
+	// receive the producer's replay has had a message in processing for
+	// longer than stalledAfter; see Manager.clientProcessingStalled.
+	clientProcessingStalled(producerID int, now time.Time, stalledAfter time.Duration) bool
 }
 
 // maxPendingEventRecoveries bounds concurrent pending event recoveries
@@ -272,14 +363,25 @@ func (a *recoveryActor) notePendingLoss(lostAt time.Time) {
 // subscribed=false path reaches it directly when the producer is
 // already flagged down, bypassing producerDown.
 func (a *recoveryActor) interruptRecovery() {
-	if a.currentRecovery != nil {
-		if a.currentRecovery.recoverFrom.IsZero() {
-			a.recoveryFloorFull = true
-		} else {
-			a.lowerRecoveryFloor(a.currentRecovery.recoverFrom)
-		}
-	}
+	a.keepRecoveryRangeAsFloor(a.currentRecovery)
 	a.recoveryState = types.InterruptedRecoveryState
+}
+
+// keepRecoveryRangeAsFloor folds the range of a snapshot recovery that is
+// about to be dropped into the floor, so the recovery that replaces it
+// reaches back as far: its recover-from point may come from the lookback
+// clamp or the initial snapshot window, which a later request would clamp
+// against a later "now". A zero point means the request covered the
+// producer's full history. Actor goroutine only.
+func (a *recoveryActor) keepRecoveryRangeAsFloor(rec *recoveryData) {
+	if rec == nil {
+		return
+	}
+	if rec.recoverFrom.IsZero() {
+		a.recoveryFloorFull = true
+		return
+	}
+	a.lowerRecoveryFloor(rec.recoverFrom)
 }
 
 // lowerRecoveryFloor moves the recovery floor to t if t is earlier (or
@@ -627,6 +729,9 @@ func (a *recoveryActor) timestampForRecovery() (time.Time, error) {
 }
 
 func (a *recoveryActor) lastProcessedMessageGenTimestamp() (time.Time, error) {
+	if a.lastProcessedFn != nil { // test seam: a lookup that fails on demand
+		return a.lastProcessedFn()
+	}
 	prod, err := a.pm.GetProducer(a.ctx, a.producerID)
 	if err != nil {
 		return time.Time{}, err
@@ -650,8 +755,27 @@ func (a *recoveryActor) isKnownRecovery(requestID int) bool {
 }
 
 func (a *recoveryActor) snapshotValidationNeeded(interest types.MessageInterest) bool {
+	return snapshotValidationNeeded(interest)
+}
+
+// snapshotValidationNeeded reports whether a snapshot_complete received
+// through the interest completes the recovery only together with the
+// other scopes of the producer; any other interest completes it at once.
+func snapshotValidationNeeded(interest types.MessageInterest) bool {
 	return interest == types.LiveOnlyMessageInterest ||
 		interest == types.PrematchOnlyMessageInterest
+}
+
+// scopeSnapshotInterest is the interest whose snapshot_complete finishes
+// the given producer scope.
+func scopeSnapshotInterest(scope types.ProducerScope) (types.MessageInterest, bool) {
+	switch scope {
+	case types.LiveProducerScope:
+		return types.LiveOnlyMessageInterest, true
+	case types.PrematchProducerScope:
+		return types.PrematchOnlyMessageInterest, true
+	}
+	return "", false
 }
 
 // validateSnapshotComplete checks whether a SnapshotComplete with this
@@ -709,13 +833,8 @@ func (a *recoveryActor) validateProducerSnapshotCompletes(received []types.Messa
 	scopes := prod.ProducerScopes()
 	finished := make([]bool, len(scopes))
 	for i, scope := range scopes {
-		var want types.MessageInterest
-		switch scope {
-		case types.LiveProducerScope:
-			want = types.LiveOnlyMessageInterest
-		case types.PrematchProducerScope:
-			want = types.PrematchOnlyMessageInterest
-		default:
+		want, ok := scopeSnapshotInterest(scope)
+		if !ok {
 			return false, errors.New("unknown producer scope")
 		}
 		finished[i] = slices.Contains(received, want)
@@ -731,6 +850,10 @@ func (a *recoveryActor) validateProducerSnapshotCompletes(received []types.Messa
 // --- Event handlers ---
 
 func (a *recoveryActor) onMessageProcessingStarted(t time.Time) {
+	// Counted before the zero check: the session ends every start, so the
+	// count must see every start too.
+	a.inProcessing.Add(1)
+	a.lastProcessingStartNanos.Store(time.Now().UnixNano())
 	if t.IsZero() {
 		a.logger.WithField("producer_id", a.producerID).Warn("recovery: processing started with zero timestamp")
 		return
@@ -741,6 +864,12 @@ func (a *recoveryActor) onMessageProcessingStarted(t time.Time) {
 }
 
 func (a *recoveryActor) onMessageProcessingEnded(t time.Time) {
+	for {
+		n := a.inProcessing.Load()
+		if n <= 0 || a.inProcessing.CompareAndSwap(n, n-1) {
+			break
+		}
+	}
 	if t.IsZero() {
 		return
 	}
@@ -763,6 +892,12 @@ func (a *recoveryActor) onAlive(e evAlive) {
 }
 
 func (a *recoveryActor) onSnapshotComplete(e evSnapshotComplete) {
+	// Any snapshot_complete of the current request is a sign of life, even
+	// a partial one (one scope of a mixed producer): the snapshot-complete
+	// deadline restarts from it.
+	if a.currentRecovery != nil && a.currentRecovery.recoveryID == e.requestID {
+		a.currentRecovery.renewedAt = time.Now()
+	}
 	switch {
 	case a.isDisabled():
 		a.logger.WithField("producer_id", a.producerID).WithField("request_id", e.requestID).Info("recovery: snapshot complete for disabled producer")
@@ -780,6 +915,11 @@ func (a *recoveryActor) onSnapshotComplete(e evSnapshotComplete) {
 }
 
 func (a *recoveryActor) onTick(now time.Time, inactivityArmed bool) {
+	// Last, after any transition this tick made (a producer-down for a
+	// processing delay emits its own status): keep the published
+	// "delayed" flag in step with the timing. See refreshDelayedFlag.
+	defer a.refreshDelayedFlag(now)
+
 	// Timeout scan for in-flight event recoveries: per NEXT.md the
 	// configured MaxRecoveryExecution caps the wall time a single
 	// recovery may take. Without this scan, an event recovery whose
@@ -789,6 +929,7 @@ func (a *recoveryActor) onTick(now time.Time, inactivityArmed bool) {
 	// enforcement lag is bounded by tickPeriod, not initialDelay+tickPeriod.
 	a.expireStuckEventRecoveries(now)
 	a.expireStuckSnapshotRecovery(now)
+	a.expireSnapshotCompleteDeadline(now)
 
 	// Suppress the producer-down inactivity check until the warm-up window
 	// has elapsed: with no alive baseline yet, aliveInterval would be huge
@@ -823,6 +964,186 @@ func (a *recoveryActor) onTick(now time.Time, inactivityArmed bool) {
 	}
 }
 
+// noteRecoveryMessage records that a message carrying requestID arrived
+// at `at`: the recovery is alive, so its snapshot-complete deadline is
+// measured from here. Safe from any goroutine; a message of an older
+// request never replaces a newer observation, and a message of any id other
+// than the current snapshot request's is ignored.
+func (a *recoveryActor) noteRecoveryMessage(requestID int, at time.Time) {
+	m := a.recoveryMark.Load()
+	if m == nil || m.requestID != requestID {
+		return
+	}
+	if a.noteGateHook != nil {
+		a.noteGateHook()
+	}
+	m.note(at)
+}
+
+// snapshotCompleteDeadline is the effective deadline: the configured one,
+// never above MaxRecoveryExecution (which the deadline subdivides).
+func (a *recoveryActor) snapshotCompleteDeadline() time.Duration {
+	d := a.cfg.SnapshotCompleteDeadline()
+	if maxAge := a.cfg.MaxRecoveryExecution(); maxAge > 0 && (d <= 0 || d > maxAge) {
+		d = maxAge
+	}
+	return d
+}
+
+// lastSignOfLife is the latest instant the current snapshot recovery
+// showed life: its request going out, a message carrying its request id,
+// or a (partial) snapshot_complete of it.
+func (a *recoveryActor) lastSignOfLife() time.Time {
+	rec := a.currentRecovery
+	last := rec.recoveryStartedAt
+	if rec.renewedAt.After(last) {
+		last = rec.renewedAt
+	}
+	if m := a.recoveryMark.Load(); m != nil && m.requestID == rec.recoveryID {
+		if at := m.seenAt(); at.After(last) {
+			last = at
+		}
+	}
+	return last
+}
+
+// reissueRecoverFrom is the recover-from point of a deadline re-issue: the
+// ORIGINAL resolved point, unchanged. It is not clamped to the lookback limit
+// again (the clamp is relative to now, so a re-issue minutes later would start
+// later than the request it replaces and skip the messages in between). The
+// only thing that may move it is a recovery floor lowered since the original
+// request (a channel loss, a processing delay), which pulls it back as it
+// would for any request, to at most the lookback limit.
+func (a *recoveryActor) reissueRecoverFrom(original time.Time) time.Time {
+	switch {
+	case a.recoveryFloorFull:
+		return time.Time{}
+	case original.IsZero() || a.recoveryFloor.IsZero() || !a.recoveryFloor.Before(original):
+		return original
+	}
+	// A floor lowered since the original request pulls the point back, to at
+	// most the lookback limit — and never later than the original point: the
+	// limit moves with the clock, so a floor older than it, clamped now, can
+	// land after a cursor that was resolved minutes ago.
+	from := a.recoveryFloor
+	if maxRecovery := a.cfg.MaxRecoveryExecution(); time.Since(from) > maxRecovery {
+		from = time.Now().Add(-maxRecovery)
+	}
+	if from.After(original) {
+		return original
+	}
+	return from
+}
+
+// expireSnapshotCompleteDeadline re-issues a snapshot recovery that has
+// shown no sign of life for the snapshot-complete deadline. Before this the
+// only way out of a lost request or a lost snapshot_complete was
+// MaxRecoveryExecution (6 h by default), with the producer down all along.
+//
+// The replacement is a NEW request (new id) from the same recover-from
+// point; the abandoned request's POST is cancelled and its late
+// snapshot_complete is ignored as unknown, so it cannot complete the new
+// recovery. The producer is not touched: it stays down, the recovery state
+// goes back to Started. The chain keeps its original start, so
+// MaxRecoveryExecution still caps the total. A re-issue held back by a
+// lost session that has not re-bound its queue yet waits for the next
+// tick; request rate limiting (HTTP 429 handling) is the API client's.
+func (a *recoveryActor) expireSnapshotCompleteDeadline(now time.Time) {
+	if !a.isPerformingRecovery() || a.currentRecovery == nil {
+		return
+	}
+	// A producer disabled in the middle of a recovery is left alone, as
+	// the inactivity check of onTick does: nothing is replayed for it.
+	if a.isDisabled() {
+		return
+	}
+	deadline := a.snapshotCompleteDeadline()
+	if deadline <= 0 {
+		return
+	}
+	last := a.lastSignOfLife()
+	if last.IsZero() || now.Sub(last) <= deadline {
+		return
+	}
+	if a.mgr.rebindPending(a.producerID) {
+		return
+	}
+	// A replay the open client sessions cannot complete reaches nobody
+	// useful: a LiveOnly or PrematchOnly client drops the other scope's
+	// messages, snapshot_complete included, and a client that never
+	// subscribed has only the SDK's own alive-only session. A mixed
+	// live|prematch producer needs a snapshot_complete of each scope, so
+	// with only a LiveOnly session open it cannot finish either. No
+	// completing snapshot_complete can come, so every deadline would be a
+	// request to the recovery API for nothing; such a recovery keeps
+	// waiting for MaxRecoveryExecution.
+	if !a.mgr.clientSessionsCanComplete(a.producerID) {
+		return
+	}
+	// A session queue is shared by all producers of its interest and
+	// drained one message at a time: while a client message of any
+	// producer is stuck in processing in a session that can receive this
+	// producer (longer than MaxInactivity, the feed's own tolerance for
+	// silence), this producer's replay may sit behind it whatever the per-producer
+	// guards below see, and a re-issue would queue a second replay there.
+	// A message in processing for a short time is no evidence: a busy
+	// client always has one, and holding on it would disable the deadline.
+	if a.mgr.clientProcessingStalled(a.producerID, now, a.cfg.MaxInactivity()) {
+		a.currentRecovery.renewedAt = now
+		return
+	}
+	// The deadline is measured on MESSAGES the actor has seen of this request;
+	// with a consumer backlog the replay sits unprocessed behind it, and the
+	// recovery looks silent for as long as the backlog stands. A re-issue
+	// then only adds a second replay to the queue it is stuck in (and the
+	// next one, every deadline). While processing lags and messages are
+	// being taken up, or its state cannot be read, the silence is no
+	// evidence: the mark moves forward, so the deadline counts again once
+	// processing is current. A stale last-processed timestamp alone is not
+	// a backlog: when nothing is processed at all, a lost request would
+	// otherwise wait for MaxRecoveryExecution.
+	fresh, err := a.timingFresh(now)
+	if err != nil || (!fresh && a.processingActive(now)) {
+		a.currentRecovery.renewedAt = now
+		return
+	}
+	// timingFresh counts a missing last-processed timestamp as fresh (a
+	// baseline that does not exist yet must not flag a producer down). On a
+	// first recovery the first message can stay in processing longer than
+	// the deadline, a stalled client callback for one: no message has ended,
+	// so there is no baseline, yet the replay is queued behind the stalled
+	// one just like behind a backlog. Processing has not completed a single
+	// message, so the silence is no evidence either.
+	if lastProcessed, err := a.lastProcessedMessageGenTimestamp(); err != nil ||
+		(lastProcessed.IsZero() && a.inProcessing.Load() > 0) {
+		a.currentRecovery.renewedAt = now
+		return
+	}
+	old := a.currentRecovery
+	wasInterrupted := a.recoveryState == types.InterruptedRecoveryState
+	a.logger.
+		WithField("producer_id", a.producerID).
+		WithField("request_id", old.recoveryID).
+		WithField("silent_for", now.Sub(last).Round(time.Second)).
+		WithField("deadline", deadline).
+		Warn("recovery: snapshot recovery did not complete within the deadline; requesting it again")
+	if err := a.issueSnapshotRecovery(time.Now(), a.reissueRecoverFrom(old.recoverFrom)); err != nil {
+		// Nothing was replaced (makeSnapshotRecovery fails before it
+		// touches state), so the next tick retries.
+		a.logger.WithError(err).WithField("producer_id", a.producerID).
+			Error("recovery: re-issue snapshot recovery after the deadline")
+		return
+	}
+	a.currentRecovery.chainStartedAt = old.chainStartedAt
+	if wasInterrupted {
+		// An interrupted recovery (its replay may have been lost, see
+		// interruptRecovery) stays interrupted: the replacement completes
+		// through the interrupted path, which issues the fresh recovery
+		// the interruption requires before the producer is reported up.
+		a.recoveryState = types.InterruptedRecoveryState
+	}
+}
+
 // expireStuckEventRecoveries scans active event recoveries for
 // requests whose start time is older than MaxRecoveryExecution and
 // transitions them to RecoveryStatusTimedOut. Pure-state in the actor
@@ -843,7 +1164,7 @@ func (a *recoveryActor) expireStuckSnapshotRecovery(now time.Time) {
 	if maxAge <= 0 {
 		return // defense-in-depth; New rejects non-positive values
 	}
-	started := a.lastRecoveryStartedAt()
+	started := a.currentRecovery.chainStartedAt
 	if started.IsZero() || now.Sub(started) <= maxAge {
 		return
 	}
@@ -852,6 +1173,7 @@ func (a *recoveryActor) expireStuckSnapshotRecovery(now time.Time) {
 		WithField("request_id", a.currentRecovery.recoveryID).
 		WithField("started_at", started).
 		Error("recovery: snapshot recovery exceeded MaxRecoveryExecution; transitioning to Error")
+	a.keepRecoveryRangeAsFloor(a.currentRecovery)
 	a.currentRecovery = nil
 	a.recoveryState = types.ErrorRecoveryState
 }
@@ -1081,10 +1403,11 @@ func (a *recoveryActor) systemAliveReceived(timestamp types.MessageTimestamp, su
 				return err
 			}
 		}
-		recoveryTiming := now.Sub(a.lastRecoveryStartedAt())
+		recoveryTiming := now.Sub(a.recoveryChainStartedAt())
 		maxInterval := a.cfg.MaxRecoveryExecution()
 		if a.isPerformingRecovery() && recoveryTiming > maxInterval {
 			a.recoveryState = types.ErrorRecoveryState
+			a.keepRecoveryRangeAsFloor(a.currentRecovery)
 			a.currentRecovery = nil
 			if err := a.startSnapshotRecovery(recoveryTimestamp); err != nil {
 				return err
@@ -1109,6 +1432,16 @@ func (a *recoveryActor) systemAliveReceived(timestamp types.MessageTimestamp, su
 		}
 	}
 	return nil
+}
+
+// recoveryChainStartedAt is when the current recovery first went out,
+// across re-issues after the snapshot-complete deadline (zero without a
+// current recovery).
+func (a *recoveryActor) recoveryChainStartedAt() time.Time {
+	if a.currentRecovery != nil {
+		return a.currentRecovery.chainStartedAt
+	}
+	return time.Time{}
 }
 
 func (a *recoveryActor) lastRecoveryStartedAt() time.Time {
@@ -1137,17 +1470,45 @@ func (a *recoveryActor) lastRecoveryStartedAt() time.Time {
 // first observation. Genuine alive silence is still caught by the
 // aliveInterval check in onTick, which fires before this one.
 func (a *recoveryActor) calculateTiming(now time.Time) bool {
-	maxInactivity := a.cfg.MaxInactivity()
-	lastProcessed, err := a.lastProcessedMessageGenTimestamp()
+	fresh, err := a.timingFresh(now)
 	if err != nil {
 		a.logger.WithError(err).Warn("failed to get last processed message gen timestamp")
 		return false
+	}
+	return fresh
+}
+
+// processingActive reports whether the client is busy with this
+// producer's messages (the SDK's own alive-only session does not report
+// processing, so its alives never make the client look busy): one is in
+// processing now, or one started within MaxInactivity. MaxInactivity is
+// the feed's own tolerance for silence
+// (the same bound timingFresh applies to the alives), so a consumer that
+// took up no message for that long is idle, not backed up.
+func (a *recoveryActor) processingActive(now time.Time) bool {
+	if a.inProcessing.Load() > 0 {
+		return true
+	}
+	started := a.lastProcessingStartNanos.Load()
+	return started != 0 &&
+		now.Sub(time.Unix(0, started)).Abs() <= a.cfg.MaxInactivity()
+}
+
+// timingFresh is calculateTiming without the error folding: it reports
+// the producer manager's error instead of treating it as "delayed", so a
+// caller that must not act on a transient lookup failure can tell the two
+// apart.
+func (a *recoveryActor) timingFresh(now time.Time) (bool, error) {
+	maxInactivity := a.cfg.MaxInactivity()
+	lastProcessed, err := a.lastProcessedMessageGenTimestamp()
+	if err != nil {
+		return false, err
 	}
 	processedFresh := lastProcessed.IsZero() ||
 		now.Sub(lastProcessed).Abs() < maxInactivity
 	userAliveFresh := a.lastUserSessionAlive.IsZero() ||
 		now.Sub(a.lastUserSessionAlive).Abs() < maxInactivity
-	return processedFresh && userAliveFresh
+	return processedFresh && userAliveFresh, nil
 }
 
 // producerDown matches manager.producerDown exactly. Pre-actor:
@@ -1231,12 +1592,18 @@ func (a *recoveryActor) notifyProducerChangedState(reason types.ProducerStatusRe
 	}
 	a.statusReason = reason
 
+	now := time.Now()
+	return a.publishStatus(reason, !a.calculateTiming(now), now)
+}
+
+// publishStatus stores the status snapshot Client.ProducerStatus returns
+// and emits it on the recovery stream. The snapshot survives even when
+// the lossy RecoveryEvents channel drops the corresponding event.
+func (a *recoveryActor) publishStatus(reason types.ProducerStatusReason, delayed bool, now time.Time) error {
 	producerData, err := a.pm.GetProducer(a.ctx, a.producerID)
 	if err != nil {
 		return err
 	}
-	now := time.Now()
-	delayed := !a.calculateTiming(now)
 	impl := &producerStatusImpl{
 		producer: producerData,
 		timestamp: types.MessageTimestamp{
@@ -1246,12 +1613,40 @@ func (a *recoveryActor) notifyProducerChangedState(reason types.ProducerStatusRe
 		isDelayed:            delayed,
 		producerStatusReason: reason,
 	}
-	// Snapshot for Client.ProducerStatus(producerID) — survives even
-	// when the lossy RecoveryEvents channel drops the corresponding
-	// event.
 	a.statusSnapshot.Store(impl)
 	a.mgr.emitRecoveryMessage(types.RecoveryMessage{ProducerStatus: impl})
 	return nil
+}
+
+// refreshDelayedFlag re-evaluates the processing/alive timing on the tick
+// and publishes a new status when ONLY the delayed flag differs from the
+// last published one (reason unchanged). The flag used to be computed once,
+// at the emission of a reason change: a producer that came up delayed
+// (the resume point is old when the first recovery completes) stayed
+// "delayed" in both the event stream and Client.ProducerStatus for as long
+// as its reason did not change — an hour, in a soak test — while it was up
+// and current.
+//
+// It publishes only on a real change of the flag (never per tick), does
+// nothing before the first status exists (the reason-change path owns the
+// first emission) or for a disabled producer, and skips a tick whose
+// timing could not be read rather than reporting a lookup failure as a
+// delay.
+func (a *recoveryActor) refreshDelayedFlag(now time.Time) {
+	cur := a.statusSnapshot.Load()
+	if cur == nil || a.isDisabled() {
+		return
+	}
+	fresh, err := a.timingFresh(now)
+	if err != nil {
+		return
+	}
+	if delayed := !fresh; delayed != cur.isDelayed {
+		if err := a.publishStatus(cur.producerStatusReason, delayed, now); err != nil {
+			a.logger.WithError(err).WithField("producer_id", a.producerID).
+				Warn("recovery: publish refreshed producer status")
+		}
+	}
 }
 
 // currentStatus returns the most recent ProducerStatus this actor
@@ -1351,6 +1746,17 @@ func (a *recoveryActor) makeSnapshotRecovery(timestamp time.Time) error {
 		maxRecovery := a.cfg.MaxRecoveryExecution()
 		if now.Sub(recoverFrom) > maxRecovery {
 			recoverFrom = now.Add(-maxRecovery)
+			// Nothing older than the lookback can be recovered by any
+			// request, so a floor below it is covered by this one as far
+			// as it can be. The floor moves up to the clamped point:
+			// this request's completion clears it, where a floor left
+			// below would outlive every completion (none can start at or
+			// before it) and pull each later recovery back to the full
+			// lookback. A recovery dropped at MaxRecoveryExecution always
+			// leaves such a floor: its point is older than the cap.
+			if !a.recoveryFloor.IsZero() && a.recoveryFloor.Before(recoverFrom) {
+				a.recoveryFloor = recoverFrom
+			}
 		}
 		// Defensive clamp (the public setter rejects future cursors, but
 		// message-timestamp-derived cursors flow in unvalidated): asking
@@ -1361,6 +1767,13 @@ func (a *recoveryActor) makeSnapshotRecovery(timestamp time.Time) error {
 		}
 	}
 
+	return a.issueSnapshotRecovery(now, recoverFrom)
+}
+
+// issueSnapshotRecovery sends a snapshot recovery request for exactly
+// recoverFrom (already resolved, floored and clamped by the caller): new
+// request id, state Started, detached POST.
+func (a *recoveryActor) issueSnapshotRecovery(now, recoverFrom time.Time) error {
 	requestID := a.mgr.nextRequestID()
 	producerName, err := a.producerName()
 	if err != nil {
@@ -1376,6 +1789,7 @@ func (a *recoveryActor) makeSnapshotRecovery(timestamp time.Time) error {
 	}
 	apiCtx, cancelAPI := context.WithCancel(a.ctx)
 	a.currentRecovery = newRecoveryData(requestID, now)
+	a.publishSnapshotRequest(requestID)
 	a.currentRecovery.recoverFrom = recoverFrom
 	a.currentRecovery.cancelAPI = cancelAPI
 	a.recoveryState = types.StartedRecoveryState
@@ -1411,10 +1825,19 @@ func (a *recoveryActor) makeSnapshotRecovery(timestamp time.Time) error {
 			err:          apiErr,
 			producerName: producerName,
 		}); err != nil {
-			a.logger.WithError(err).
+			l := a.logger.WithError(err).
 				WithField("producer_id", a.producerID).
-				WithField("request_id", requestID).
-				Warn("recovery: snapshot recovery API result lost (actor shutdown raced API completion)")
+				WithField("request_id", requestID)
+			const lostMsg = "recovery: snapshot recovery API result lost (actor shutdown raced API completion)"
+			// An actor that is shutting down (a.ctx cancelled, or
+			// sendCtx's ErrManagerClosed) is an ordinary close during
+			// a recovery: nothing for an operator to act on. Any other
+			// delivery failure keeps the warn.
+			if errors.Is(err, ErrManagerClosed) || a.ctx.Err() != nil {
+				l.Debug(lostMsg)
+			} else {
+				l.Warn(lostMsg)
+			}
 		}
 	}()
 	return nil
@@ -1459,6 +1882,7 @@ func (a *recoveryActor) onSnapshotRecoveryAPICompleted(e evSnapshotRecoveryAPICo
 			WithField("producer_id", a.producerID).
 			WithField("request_id", e.requestID).
 			Error("recovery: PostRecovery API failed; transitioning to Error")
+		a.keepRecoveryRangeAsFloor(a.currentRecovery)
 		a.currentRecovery = nil
 		a.recoveryState = types.ErrorRecoveryState
 		return

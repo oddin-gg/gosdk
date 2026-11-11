@@ -159,6 +159,11 @@ type Manager struct {
 	tickDropWarnMu     sync.Mutex
 	tickDropLastWarnAt map[int]time.Time
 
+	// slowProcessingThrottle bounds the "processing message took more
+	// than 1s" warn: a stalled consumer or a slow dependency makes every
+	// message slow, which used to mean one line per message.
+	slowProcessingThrottle *log.Throttle
+
 	// inboxDrops counts residual lossy inbox drops. NOTE the correctness
 	// inputs no longer flow through the lossy path at all:
 	// snapshot_complete uses reliable ctx-bounded admission (sendCtx),
@@ -179,6 +184,13 @@ type Manager struct {
 	// a recovery whose head was lost and discharge the floor.
 	lostMu       sync.Mutex
 	lostSessions map[uuid.UUID]types.MessageInterest
+
+	// clientSessions holds the open sessions of the client with their
+	// interest (the SDK's own alive-only session is not one of them): the
+	// only places a snapshot replay can be delivered to. Added when a
+	// session opens, removed when its consumer is gone.
+	clientMu       sync.Mutex
+	clientSessions map[uuid.UUID]types.MessageInterest
 }
 
 // tickDropWarnInterval bounds how often per-producer tick-drop warns are
@@ -186,6 +198,10 @@ type Manager struct {
 // per producer before a fresh warn — enough to suppress one-off blips
 // while still surfacing sustained backpressure within a minute.
 const tickDropWarnInterval = 60 * time.Second
+
+// slowProcessingWarnInterval bounds the slow-message-processing warn to
+// one line per interval; the line carries the number of warns held back.
+const slowProcessingWarnInterval = time.Minute
 
 // NewManager constructs the recovery manager. Open(ctx) must be called
 // before any actors are spawned. initialSnapshotTime is the lookback
@@ -202,6 +218,8 @@ func NewManager(cfg config.Config, producerManager *producer.Manager, apiClient 
 		handles:             make(map[int]*Handle),
 		processingTimes:     make(map[uuid.UUID]time.Time),
 		tickDropLastWarnAt:  make(map[int]time.Time),
+
+		slowProcessingThrottle: log.NewThrottle(slowProcessingWarnInterval, nil),
 	}
 }
 
@@ -600,7 +618,10 @@ func (m *Manager) findOrSpawn(producerID int) *recoveryActor {
 // --- Inbound feed events (called from session.go on the AMQP path) ---
 
 // OnMessageProcessingStarted records the per-session start time and
-// dispatches to the actor. No-op when the manager has been Closed
+// dispatches to the actor. Called for the sessions of the client only: the
+// SDK's own alive-only session is not the client's processing and reports
+// nothing (the processed cursor and the in-processing count mean "how far
+// the client got"). No-op when the manager has been Closed
 // (callbacks may fire from sessions racing with shutdown).
 func (m *Manager) OnMessageProcessingStarted(sessionID uuid.UUID, producerID int, timestamp time.Time) {
 	m.processingMu.Lock()
@@ -616,14 +637,27 @@ func (m *Manager) OnMessageProcessingStarted(sessionID uuid.UUID, producerID int
 	}
 }
 
+// OnRecoveryMessageReceived records that a feed message carrying a
+// recovery request id arrived for the producer: the recovery is alive, so
+// its snapshot-complete deadline restarts. Direct thread-safe call, no
+// inbox (a full inbox must not make a live recovery look silent); a no-op
+// when the manager is closed. Called for every message with a request id,
+// before the message is built, so a slow build cannot delay the signal.
+func (m *Manager) OnRecoveryMessageReceived(producerID int, requestID int) {
+	if a := m.findOrSpawn(producerID); a != nil {
+		a.noteRecoveryMessage(requestID, time.Now())
+	}
+}
+
 // OnMessageProcessingEnded warns on >1s processing and dispatches the
 // gen timestamp to the actor.
 func (m *Manager) OnMessageProcessingEnded(sessionID uuid.UUID, producerID int, timestamp time.Time) {
-	if !timestamp.IsZero() {
-		if a := m.findOrSpawn(producerID); a != nil {
-			// Direct call — same rationale as OnMessageProcessingStarted.
-			a.onMessageProcessingEnded(timestamp)
-		}
+	if a := m.findOrSpawn(producerID); a != nil {
+		// Direct call — same rationale as OnMessageProcessingStarted. A
+		// zero timestamp (a message whose build or send failed) reaches the
+		// actor too: it advances no cursor, but the message is out of
+		// processing.
+		a.onMessageProcessingEnded(timestamp)
 	}
 
 	m.processingMu.Lock()
@@ -635,7 +669,13 @@ func (m *Manager) OnMessageProcessingEnded(sessionID uuid.UUID, producerID int, 
 	case !ok || start.IsZero():
 		m.logger.Warn("message processing ended, but was not started")
 	case time.Since(start).Milliseconds() > 1000:
-		m.logger.Warnf("processing message took more than 1s - %d ms", time.Since(start).Milliseconds())
+		if suppressed, ok := m.slowProcessingThrottle.Allow(); ok {
+			l := m.logger
+			if suppressed > 0 {
+				l = l.WithField("suppressed", suppressed)
+			}
+			l.Warnf("processing message took more than 1s - %d ms", time.Since(start).Milliseconds())
+		}
 	}
 }
 
@@ -707,7 +747,91 @@ func (m *Manager) OnFeedChannelRestored(session uuid.UUID) { m.sessionQueueSettl
 
 // OnFeedSessionGone reports that a session's consumer exited for good.
 // It needs no queue, so it must not hold recoveries back.
-func (m *Manager) OnFeedSessionGone(session uuid.UUID) { m.sessionQueueSettled(session) }
+func (m *Manager) OnFeedSessionGone(session uuid.UUID) {
+	m.clientMu.Lock()
+	delete(m.clientSessions, session)
+	m.clientMu.Unlock()
+	m.sessionQueueSettled(session)
+}
+
+// OnClientSessionOpened registers a session of the client and its
+// interest: from now on its scope counts as one a replay can reach. The
+// SDK's own alive-only session is never registered, it receives no replay.
+func (m *Manager) OnClientSessionOpened(session uuid.UUID, messageInterest types.MessageInterest) {
+	if messageInterest == types.SystemAliveOnly {
+		return
+	}
+	m.clientMu.Lock()
+	if m.clientSessions == nil {
+		m.clientSessions = make(map[uuid.UUID]types.MessageInterest)
+	}
+	m.clientSessions[session] = messageInterest
+	m.clientMu.Unlock()
+}
+
+// clientSessionsCanComplete reports whether the open client sessions can
+// complete the recovery of the producer: whether its snapshot_complete
+// can reach the client in a form the recovery accepts. That is so when a
+// session with the producer in scope needs no per-scope validation (any
+// interest but LiveOnly and PrematchOnly: one snapshot_complete ends the
+// recovery), or when the LiveOnly and PrematchOnly sessions in scope
+// together cover every scope of the producer, since such a recovery ends
+// only once each of its scopes has had its own snapshot_complete. A
+// mixed live|prematch producer with only a LiveOnly session open is
+// therefore not completable: its replay arrives, the prematch half is
+// dropped, and a re-request would change nothing. A producer missing
+// from the catalog is the catalog's placeholder, which has both scopes,
+// so it is judged like a mixed producer, as the sessions filter it; only
+// when the catalog cannot be read at all (before Open) does any open
+// session count as able to complete it (the conservative answer: keep
+// re-requesting rather than give up).
+func (m *Manager) clientSessionsCanComplete(producerID int) bool {
+	interests := m.clientInterests()
+	if len(interests) == 0 {
+		return false
+	}
+	prod, err := m.producerManager.GetProducerCached(producerID)
+	if err != nil {
+		return true
+	}
+	covered := make(map[types.MessageInterest]bool, 2)
+	inScope := false
+	for _, mi := range interests {
+		if !mi.IsProducerInScope(prod) {
+			continue
+		}
+		inScope = true
+		if !snapshotValidationNeeded(mi) {
+			return true
+		}
+		covered[mi] = true
+	}
+	if !inScope {
+		return false
+	}
+	for _, scope := range prod.ProducerScopes() {
+		want, ok := scopeSnapshotInterest(scope)
+		if !ok {
+			return true
+		}
+		if !covered[want] {
+			return false
+		}
+	}
+	return true
+}
+
+// clientInterests copies the interests of the open client sessions, so
+// the producer catalog is asked without the registry locked.
+func (m *Manager) clientInterests() []types.MessageInterest {
+	m.clientMu.Lock()
+	defer m.clientMu.Unlock()
+	out := make([]types.MessageInterest, 0, len(m.clientSessions))
+	for _, mi := range m.clientSessions {
+		out = append(out, mi)
+	}
+	return out
+}
 
 func (m *Manager) sessionQueueSettled(session uuid.UUID) {
 	m.lostMu.Lock()
@@ -729,6 +853,59 @@ func (m *Manager) sessionQueueSettled(session uuid.UUID) {
 		}
 		a.send(evChannelRebound{}) // lossy nudge; the tick is the fallback
 	}
+}
+
+// clientProcessingStalled reports whether a client session that can
+// receive the producer's replay has had one message in processing for
+// longer than stalledAfter at now (the SDK's alive-only session reports
+// none). A busy client always has some message in processing; only one
+// that has stayed there that long says the session's queue is stuck
+// behind it. A session whose interest has not the producer in scope
+// drains its own queue, whatever the stuck one holds, so it does not
+// count: a LiveOnly session stuck on a live message must not hold the
+// deadline of a prematch producer replaying to a healthy session. A
+// session missing from the registry counts, and so does every stalled
+// session while the catalog cannot be read (the conservative answer:
+// hold the deadline).
+//
+// The two registries have their own mutexes and are never locked
+// together, nor while the producer catalog is asked: the stalled
+// sessions are copied out of one, then looked up in the other.
+func (m *Manager) clientProcessingStalled(producerID int, now time.Time, stalledAfter time.Duration) bool {
+	m.processingMu.Lock()
+	var stalled []uuid.UUID
+	for session, started := range m.processingTimes {
+		if !started.IsZero() && now.Sub(started) > stalledAfter {
+			stalled = append(stalled, session)
+		}
+	}
+	m.processingMu.Unlock()
+	if len(stalled) == 0 {
+		return false
+	}
+
+	interests := make([]types.MessageInterest, 0, len(stalled))
+	m.clientMu.Lock()
+	for _, session := range stalled {
+		mi, ok := m.clientSessions[session]
+		if !ok {
+			m.clientMu.Unlock()
+			return true
+		}
+		interests = append(interests, mi)
+	}
+	m.clientMu.Unlock()
+
+	prod, err := m.producerManager.GetProducerCached(producerID)
+	if err != nil {
+		return true
+	}
+	for _, mi := range interests {
+		if mi.IsProducerInScope(prod) {
+			return true
+		}
+	}
+	return false
 }
 
 // rebindPending reports whether any lost session whose interest covers

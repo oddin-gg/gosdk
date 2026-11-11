@@ -29,6 +29,10 @@ type Config interface {
 	DefaultLocale() types.Locale
 	MaxInactivity() time.Duration
 	MaxRecoveryExecution() time.Duration
+	// SnapshotCompleteDeadline is how long a snapshot recovery may go
+	// without a message of its own before it is re-requested; never above
+	// MaxRecoveryExecution.
+	SnapshotCompleteDeadline() time.Duration
 	MessagingPort() int
 	SdkNodeID() *int
 	SelectedEnvironment() *types.Environment
