@@ -108,7 +108,7 @@ func (f *Flight) Await(ctx context.Context) (any, error) {
 	if d, ok := apipolicy.TimeoutOf(ctx); ok {
 		left := d - time.Since(f.started)
 		if left <= 0 {
-			return nil, ErrFlightTooOld
+			return nil, tooOldOr(ctx)
 		}
 		t := time.NewTimer(left)
 		defer t.Stop()
@@ -120,8 +120,24 @@ func (f *Flight) Await(ctx context.Context) (any, error) {
 	case <-f.done:
 		return f.val, f.err
 	case <-tooOld:
-		return nil, ErrFlightTooOld
+		return nil, tooOldOr(ctx)
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+}
+
+// tooOldOr is ErrFlightTooOld unless the caller's own time has run out too: a
+// message whose own time ran out is not a message that left a slow flight
+// early, and the flight's timer may fire together with the context's. The
+// context's error is the one that counts, since it tells the factory the
+// message waited its whole time. The deadline is read directly because the
+// context only reports it once its own timer has run, which can lag behind.
+func tooOldOr(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if dl, ok := ctx.Deadline(); ok && !time.Now().Before(dl) {
+		return context.DeadlineExceeded
+	}
+	return ErrFlightTooOld
 }

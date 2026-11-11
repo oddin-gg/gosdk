@@ -169,3 +169,31 @@ func TestBuildUnparsableMessage_BuildFailureWarnsAreThrottledPerKind(t *testing.
 		t.Fatalf("match lines = %d, want 1 (a kind of its own)\n%s", got, sink.String())
 	}
 }
+
+// The message's timer counts as fired once its deadline has passed, even if
+// the context has not reported it yet.
+func TestMessageTimerFired(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), time.Hour)
+	defer cancel()
+	if messageTimerFired(ctx) {
+		t.Fatal("a message with time left reads as expired")
+	}
+	if !messageTimerFired(laggingDeadline{Context: t.Context(), deadline: time.Now().Add(-time.Millisecond)}) {
+		t.Fatal("a passed deadline does not read as expired")
+	}
+	if messageTimerFired(t.Context()) {
+		t.Fatal("a context without a deadline reads as expired")
+	}
+	cancelled, stop := context.WithCancel(t.Context())
+	stop()
+	if messageTimerFired(cancelled) {
+		t.Fatal("a cancelled context without a deadline reads as the message timer")
+	}
+}
+
+type laggingDeadline struct {
+	context.Context
+	deadline time.Time
+}
+
+func (c laggingDeadline) Deadline() (time.Time, bool) { return c.deadline, true }

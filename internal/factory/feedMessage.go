@@ -78,11 +78,23 @@ func (f *FeedMessageFactory) startMessage(parent context.Context) (context.Conte
 		ctx = apipolicy.WithMessage(ctx, f.breaker, timeout)
 	}
 	return ctx, func() {
-		if f.breaker != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) && parent.Err() == nil {
+		if f.breaker != nil && parent.Err() == nil && messageTimerFired(ctx) {
 			f.breaker.Trip()
 		}
 		cancel()
 	}
+}
+
+// messageTimerFired reports whether the message's own timer ran out. The
+// deadline is compared as well as the context's error because the context
+// only reports it once its timer has run, which can lag behind a wait that
+// ended at the same instant.
+func messageTimerFired(ctx context.Context) bool {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return true
+	}
+	dl, ok := ctx.Deadline()
+	return ok && ctx.Err() == nil && !time.Now().Before(dl)
 }
 
 // buildFailWarnInterval bounds each build-failure warn kind to one line

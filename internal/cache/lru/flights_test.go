@@ -160,6 +160,48 @@ func TestFlight_AwaitReturnsTheResultOfAYoungFlight(t *testing.T) {
 	}
 }
 
+// When the flight is older than the message timeout and the message's own
+// context has ended as well, the context's error is the answer: it is the
+// message's own time that ran out, and the two ends can fire together.
+func TestFlight_AwaitPrefersTheCallersOwnExpiry(t *testing.T) {
+	var sf Flights
+	release := make(chan struct{})
+	defer close(release)
+	f := sf.Go("k", func() (any, error) { <-release; return 1, nil })
+	time.Sleep(2 * messageWait)
+
+	ctx, cancel := context.WithTimeout(apipolicy.WithMessage(t.Context(), newTestGate(), messageWait), time.Nanosecond)
+	defer cancel()
+	<-ctx.Done()
+	if _, err := f.Await(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want DeadlineExceeded", err)
+	}
+}
+
+// laggingCtx is a context whose deadline has passed but whose error is not
+// set yet, as a context is for the instant between its deadline and its timer
+// running.
+type laggingCtx struct {
+	context.Context
+	deadline time.Time
+}
+
+func (c laggingCtx) Deadline() (time.Time, bool) { return c.deadline, true }
+
+func TestFlight_AwaitCountsAPassedDeadlineAsTheCallersOwnExpiry(t *testing.T) {
+	var sf Flights
+	release := make(chan struct{})
+	defer close(release)
+	f := sf.Go("k", func() (any, error) { <-release; return 1, nil })
+	time.Sleep(2 * messageWait)
+
+	base := apipolicy.WithMessage(t.Context(), newTestGate(), messageWait)
+	ctx := laggingCtx{Context: base, deadline: time.Now().Add(-time.Millisecond)}
+	if _, err := f.Await(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want DeadlineExceeded", err)
+	}
+}
+
 func TestFlights_ForgetDetachesARunningFlight(t *testing.T) {
 	var sf Flights
 	release := make(chan struct{})
