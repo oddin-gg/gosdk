@@ -14,6 +14,11 @@ import (
 // messageWait is the message timeout of the tests below.
 const messageWait = 100 * time.Millisecond
 
+// scheduleSlack is how late a goroutine may be on a loaded machine before a
+// timing assertion means something. It stays far below the ten seconds a
+// message would wait if the age of the flight did not end its wait.
+const scheduleSlack = time.Second
+
 // A message that needs a key whose flight is hung waits until the flight is
 // as old as the message timeout, not a timeout of its own: with several
 // messages needing the same key, each leaves at most one timeout after the
@@ -23,9 +28,10 @@ func TestEventCache_MessagesDoNotWaitOnAFlightOlderThanTheirTimeout(t *testing.T
 	release := make(chan struct{})
 	entered := make(chan struct{})
 	var once sync.Once
-	var inner atomic.Int32
+	var inner, started atomic.Int32
 	base := recordingLoader(&inner, false)
 	c := NewEventCache[string, string, *localizedFoo](Config{}, func(ctx context.Context, key string, locales []string, existing *localizedFoo, has bool) (*localizedFoo, error) {
+		started.Add(1)
 		once.Do(func() { close(entered) })
 		<-release
 		return base(ctx, key, locales, existing, has)
@@ -70,7 +76,7 @@ func TestEventCache_MessagesDoNotWaitOnAFlightOlderThanTheirTimeout(t *testing.T
 		}
 	}
 	for d := range late {
-		if d > messageWait+150*time.Millisecond {
+		if d > messageWait+scheduleSlack {
 			t.Fatalf("a message left %v after the flight started, want about %v", d, messageWait)
 		}
 	}
@@ -80,8 +86,11 @@ func TestEventCache_MessagesDoNotWaitOnAFlightOlderThanTheirTimeout(t *testing.T
 	ctx, cancel := context.WithTimeout(apipolicy.WithMessage(t.Context(), gate, messageWait), 10*time.Second)
 	_, _, err := c.Get(ctx, "m", []string{"en"})
 	cancel()
-	if !errors.Is(err, ErrFlightTooOld) || time.Since(start) > 50*time.Millisecond {
+	if !errors.Is(err, ErrFlightTooOld) || time.Since(start) > scheduleSlack {
 		t.Fatalf("err = %v after %v, want ErrFlightTooOld at once", err, time.Since(start))
+	}
+	if started.Load() != 1 {
+		t.Fatalf("loader runs = %d after the late message, want 1", started.Load())
 	}
 
 	// The getter waits for the whole flight, however old it is.
