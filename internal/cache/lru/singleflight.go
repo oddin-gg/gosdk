@@ -72,8 +72,8 @@ func LoadCoalesced[T any](
 		// not the message path's.
 		base = apipolicy.WithoutGate(context.WithoutCancel(ctx))
 	}
-	// The flight carries neither the caller's message mark nor a budget:
-	// it runs for whoever asks, under the default call policy, and each
+	// The flight does not carry the caller's message mark: it runs for
+	// whoever asks, with the getters' retries and timeouts, and each
 	// caller bounds only its own wait. A caller on the message path also
 	// stops waiting once the gate opens; the flight goes on and fills the
 	// cache for later callers.

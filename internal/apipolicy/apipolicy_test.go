@@ -5,45 +5,11 @@ import (
 	"testing"
 )
 
-func TestModeOfDefaultsAndCarry(t *testing.T) {
-	ctx := context.Background()
-	if ModeOf(ctx) != Default || Suffix(ctx) != "" {
-		t.Fatal("a plain context must carry the default policy and an empty suffix")
-	}
-	msg := With(ctx, Message)
-	if ModeOf(msg) != Message || Suffix(msg) != "|msg" {
-		t.Fatalf("Message: mode=%v suffix=%q", ModeOf(msg), Suffix(msg))
-	}
-	skip := With(ctx, MessageSkip)
-	if ModeOf(skip) != MessageSkip || Suffix(skip) != "|skip" {
-		t.Fatalf("MessageSkip: mode=%v suffix=%q", ModeOf(skip), Suffix(skip))
-	}
+type otherKey struct{}
 
-	// Carry moves the policy onto an unrelated (detached) context, and
-	// leaves a default caller's destination untouched.
-	detached := context.Background()
-	if got := ModeOf(Carry(detached, msg)); got != Message {
-		t.Fatalf("Carry did not move the policy: %v", got)
-	}
-	if got := Carry(detached, ctx); got != detached {
-		t.Fatal("Carry from a default context must return dst unchanged")
-	}
+type stubGate struct{ open bool }
 
-	// Every suffix is listed for invalidation.
-	seen := map[string]bool{}
-	for _, s := range Suffixes {
-		seen[s] = true
-	}
-	for _, c := range []context.Context{ctx, msg, skip} {
-		if !seen[Suffix(c)] {
-			t.Fatalf("suffix %q missing from Suffixes", Suffix(c))
-		}
-	}
-}
-
-type stubGate struct{}
-
-func (stubGate) Open() bool              { return true }
+func (g stubGate) Open() bool            { return g.open }
 func (stubGate) Opened() <-chan struct{} { return nil }
 
 func TestGateMark(t *testing.T) {
@@ -51,15 +17,29 @@ func TestGateMark(t *testing.T) {
 	if GateOf(ctx) != nil {
 		t.Fatal("a plain context carries a gate")
 	}
-	marked := WithMessage(ctx, stubGate{})
-	if GateOf(marked) == nil {
-		t.Fatal("the mark was lost")
+	marked := WithMessage(ctx, stubGate{open: true})
+	g := GateOf(marked)
+	if g == nil || !g.Open() {
+		t.Fatalf("the mark was lost or changed: %v", g)
 	}
 	if GateOf(WithoutGate(marked)) != nil {
 		t.Fatal("WithoutGate left the mark in place")
 	}
-	// The mark does not touch the call policy of the same context.
-	if ModeOf(marked) != Default || Suffix(marked) != "" {
-		t.Fatal("the gate mark changed the call policy")
+}
+
+// The mark follows the context into everything derived from it, and a
+// context derived from a stripped one does not get it back.
+func TestGateMarkIsInherited(t *testing.T) {
+	marked := WithMessage(context.Background(), stubGate{})
+	child, cancel := context.WithCancel(marked)
+	defer cancel()
+	if GateOf(child) == nil {
+		t.Fatal("a derived context lost the mark")
+	}
+	if GateOf(context.WithoutCancel(marked)) == nil {
+		t.Fatal("a context detached from the caller's cancellation lost the mark; WithoutGate is the way to drop it")
+	}
+	if GateOf(context.WithValue(WithoutGate(marked), otherKey{}, 1)) != nil {
+		t.Fatal("a context derived from a stripped one has the mark again")
 	}
 }

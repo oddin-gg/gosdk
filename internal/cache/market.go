@@ -802,7 +802,7 @@ func (m *MarketDescriptionCache) catalogFlight(
 
 // refreshInBackground starts the bulk refresh of the locales without waiting
 // for it: the flight is the one loadOne would join, under the cache's
-// lifetime and the default call policy, so a getter that asks meanwhile
+// lifetime with the getters' retries and timeouts, so a getter that asks meanwhile
 // shares it and a message that asked is not held up. A flight that finds
 // itself superseded is not re-registered: the flight that superseded it
 // covers the locale.

@@ -264,9 +264,9 @@ func (c *EventCache[K, L, T]) get(ctx context.Context, key K, locales []L, clear
 	// winning caller's closure runs, so building it out here would leak
 	// one live timer per coalesced waiter until the 60s timeout fired.
 	//
-	// A flight has no budget of its own and carries no message mark: it
-	// runs for whoever asks, under the default call policy, and each caller
-	// bounds only its own wait (below).
+	// A flight carries no message mark: it runs for whoever asks, with the
+	// getters' retries and timeouts, and each caller bounds only its own
+	// wait (below).
 	flight := func() <-chan singleflight.Result {
 		return c.sf.DoChan(c.sfKey(key), func() (any, error) {
 			loadCtx, loadCancel := context.WithTimeout(base, LoadTimeout)

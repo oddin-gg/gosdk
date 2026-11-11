@@ -753,7 +753,7 @@ func (c *Client) fetchDataValidated(ctx context.Context, path string, entity int
 	// observability stream while the caller received an error.
 	var callErr error
 	// answered: the body arrived whole and decoded, and the envelope is a
-	// healthy API's answer (see ServerUnavailableCode).
+	// healthy API's answer (see isServiceUnavailable).
 	answered := false
 	dec := xml.NewDecoder(&byteLimitReader{r: resp.Body, left: maxSuccessBodyBytes})
 	if decodeErr := dec.Decode(entity); decodeErr != nil {
@@ -769,7 +769,7 @@ func (c *Client) fetchDataValidated(ctx context.Context, path string, entity int
 			callErr = &Error{Method: http.MethodGet, Path: path, Status: resp.StatusCode, Code: rwc.Code()}
 			// An envelope that says the service cannot serve right now is
 			// not an answer of a healthy API.
-			answered = !ServerUnavailableCode(rwc.Code())
+			answered = !isServiceUnavailable(rwc.Code())
 		}
 	}
 	if callErr == nil && validate != nil {
@@ -895,13 +895,13 @@ func (c *Client) callerAlive(ctx context.Context) bool {
 	return ctx.Err() == nil && c.lifeCtx.Err() == nil
 }
 
-// ServerUnavailableCode reports whether an envelope response_code says the
+// isServiceUnavailable reports whether an envelope response_code says the
 // server cannot serve right now (SERVICE_UNAVAILABLE), as opposed to an
 // answer about the resource (NOT_FOUND, FORBIDDEN, BAD_REQUEST, CONFLICT,
 // NOT_IMPLEMENTED, ...) that only a healthy API gives. One decision for the
-// success counter and for the consumers that classify a decoded non-OK
-// envelope on a 2xx response.
-func ServerUnavailableCode(c types.ResponseCode) bool {
+// breaker and for the code that classifies a decoded non-OK envelope on a
+// 2xx response.
+func isServiceUnavailable(c types.ResponseCode) bool {
 	return c == types.ServiceUnavailableResponseCode
 }
 

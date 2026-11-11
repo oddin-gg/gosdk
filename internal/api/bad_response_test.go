@@ -8,7 +8,6 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/oddin-gg/gosdk/internal/apipolicy"
 	"github.com/oddin-gg/gosdk/types"
 )
 
@@ -40,7 +39,7 @@ func TestClient_BadResponse_IsTaggedOnUndecodableBodies(t *testing.T) {
 		want bool
 	}{{"truncated", true}, {"invalid", true}, {"trailing", true}, {"missing", false}} {
 		mode.Store(tc.mode)
-		ctx := apipolicy.With(t.Context(), apipolicy.Message)
+		ctx := t.Context()
 		_, err := c.FetchSports(ctx, types.EnLocale)
 		if err == nil {
 			t.Fatalf("%s: no error", tc.mode)
