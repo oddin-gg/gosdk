@@ -327,8 +327,8 @@ func (f *FeedMessageFactory) BuildUnparsableMessage(ctx context.Context, feedMes
 			if rk.SportID != nil {
 				t, err := f.entityFactory.BuildTournament(bctx, *rk.EventID, *rk.SportID, []types.Locale{f.oddsFeedConfiguration.DefaultLocale()})
 				switch {
-				case err != nil && f.logger != nil:
-					f.logger.WithError(err).Warnf("unparsable: build tournament %s failed for route %q", rk.EventID.ToString(), rk.FullRoutingKey)
+				case err != nil:
+					f.warnBuildFailed("unparsable tournament", err, *rk.EventID, rk.FullRoutingKey)
 				case t != nil:
 					event = *t
 				}
@@ -336,8 +336,8 @@ func (f *FeedMessageFactory) BuildUnparsableMessage(ctx context.Context, feedMes
 		case types.MatchEventType:
 			match, err := f.entityFactory.BuildMatch(bctx, *rk.EventID, []types.Locale{f.oddsFeedConfiguration.DefaultLocale()}, rk.SportID)
 			switch {
-			case err != nil && f.logger != nil:
-				f.logger.WithError(err).Warnf("unparsable: build match %s failed for route %q", rk.EventID.ToString(), rk.FullRoutingKey)
+			case err != nil:
+				f.warnBuildFailed("unparsable match", err, *rk.EventID, rk.FullRoutingKey)
 			case match != nil:
 				event = *match
 			}
