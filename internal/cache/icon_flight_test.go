@@ -211,7 +211,7 @@ func TestIconLookup_ACallerAfterAClearDoesNotJoinThePreClearFetch(t *testing.T) 
 </tournament_info>`
 	for _, tc := range []struct {
 		name, format string
-		icon         func(t *testing.T, srv *httptest.Server) (get func(context.Context) (*string, error), clear func())
+		icon         func(t *testing.T, srv *httptest.Server) (get func(context.Context) (*string, error), forget func())
 	}{
 		{"competitor", competitorFmt, func(t *testing.T, srv *httptest.Server) (func(context.Context) (*string, error), func()) {
 			cc := newCompetitorCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
@@ -246,7 +246,7 @@ func TestIconLookup_ACallerAfterAClearDoesNotJoinThePreClearFetch(t *testing.T) 
 			}))
 			defer srv.Close()
 			defer close(gate)
-			get, clear := tc.icon(t, srv)
+			get, forget := tc.icon(t, srv)
 
 			first := make(chan *string, 1)
 			go func() {
@@ -254,7 +254,7 @@ func TestIconLookup_ACallerAfterAClearDoesNotJoinThePreClearFetch(t *testing.T) 
 				first <- got
 			}()
 			<-entered
-			clear()
+			forget()
 
 			// Bounded: joining the held fetch would wait for it.
 			ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
