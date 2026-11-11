@@ -154,7 +154,14 @@ type Client struct {
 	// predates the failure) can tell that the API has answered since: see
 	// SuccessCount.
 	successCount atomic.Uint64
+
+	// breaker is fed by every attempt's outcome (see Breaker). Nothing in
+	// the client reads it.
+	breaker *Breaker
 }
+
+// Breaker returns the client's breaker of the REST API's availability.
+func (c *Client) Breaker() *Breaker { return c.breaker }
 
 // SuccessCount returns a counter that advances on every healthy response
 // of any endpoint (see successCount). The feed message path uses it to
@@ -193,6 +200,7 @@ func NewWithLogger(cfg config.Config, logger *slog.Logger, timeout time.Duration
 		observers:   make([]Observer, 0),
 		lifeCtx:     lifeCtx,
 		lifeCancel:  lifeCancel,
+		breaker:     newBreaker(time.Now, breakerOpenFor),
 	}
 }
 
@@ -802,6 +810,12 @@ func (c *Client) fetchDataValidated(ctx context.Context, path string, entity int
 	if answered {
 		// Counted here, not when the headers arrive (see successCount).
 		c.successCount.Add(1)
+		c.breaker.success()
+	} else if c.callerAlive(ctx) {
+		// A body cut off, malformed or about another resource, or a
+		// service-unavailable envelope. Not when the caller gave up: its
+		// cancellation can cut a body short without the API being at fault.
+		c.breaker.failure()
 	}
 	c.emit(pc, callErr) // streaming capture: emit AFTER body has flowed through tee
 	if callErr != nil {
@@ -898,8 +912,15 @@ func (c *Client) doNoBody(ctx context.Context, method, path string, idempotent b
 	// The body was read in full and verified: the API accepted the request.
 	// Counted here, not when the headers arrive (see successCount).
 	c.successCount.Add(1)
+	c.breaker.success()
 	c.emit(pc, nil)
 	return true, nil
+}
+
+// callerAlive reports whether neither the caller's context nor the client's
+// lifetime has ended, i.e. whether a failure can be the API's.
+func (c *Client) callerAlive(ctx context.Context) bool {
+	return ctx.Err() == nil && c.lifeCtx.Err() == nil
 }
 
 // ServerUnavailableCode reports whether an envelope response_code says the
@@ -1156,6 +1177,12 @@ func (c *Client) do(ctx context.Context, method, path string, locale *types.Loca
 				c.emitEvent(req, 0, time.Since(started), attempts, locale, reqBody, reqTruncated, ctx.Err())
 				return nil, backoff.Permanent(fmt.Errorf("api: %s %s attempt=%d: %w", method, path, attempts, ctx.Err()))
 			}
+			// The request ctx is alive, so this is the API or the path to it
+			// failing (a refused or reset connection, http.Client.Timeout),
+			// not a caller that gave up.
+			if c.lifeCtx.Err() == nil {
+				c.breaker.failure()
+			}
 			if !idempotent {
 				// A transport error does NOT prove the server never
 				// processed the request: http.Client.Timeout firing while
@@ -1217,6 +1244,7 @@ func (c *Client) do(ctx context.Context, method, path string, locale *types.Loca
 			_ = r.Body.Close()
 			retryErr := c.toAPIError(method, path, r.StatusCode, parserBytes)
 			c.emitEventReqResp(req, r.StatusCode, latency, attempts, reqBody, reqTruncated, eventBytes, truncated, locale, retryErr)
+			c.breaker.failure()
 			return nil, retryErr
 		case r.StatusCode >= 400 && r.StatusCode < 500:
 			// Client error — read the body ONCE; reuse for both the
@@ -1236,6 +1264,7 @@ func (c *Client) do(ctx context.Context, method, path string, locale *types.Loca
 			_ = r.Body.Close()
 			retryErr := c.toAPIError(method, path, r.StatusCode, parserBytes)
 			c.emitEventReqResp(req, r.StatusCode, latency, attempts, reqBody, reqTruncated, eventBytes, truncated, locale, retryErr)
+			c.breaker.failure()
 			if !idempotent {
 				// Server may have processed the request — re-issuing
 				// would re-execute. Treat 5xx as terminal.
