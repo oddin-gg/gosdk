@@ -165,7 +165,7 @@ func TestLoadCoalesced_SecondCallerCtxBoundedWait(t *testing.T) {
 }
 
 // registrations counts the loaders that registered on a flight (starters and
-// joiners alike), so a test can release a gated flight once its joiner is
+// waiters alike), so a test can release a gated flight once its waiter is
 // certainly parked on it instead of sleeping and hoping it got there.
 type registrations struct{ n atomic.Int32 }
 

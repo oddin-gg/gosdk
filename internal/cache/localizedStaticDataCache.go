@@ -160,8 +160,8 @@ func (l *LocalizedStaticDataCache) loadLocales(ctx context.Context, locales []ty
 			return err
 		}
 		loc := locale
-		// The flight has no budget of its own and carries no message mark:
-		// it runs for whoever asks, and each caller bounds only its wait.
+		// The flight carries no message mark: it runs for whoever asks, and
+		// each caller bounds only its wait.
 		flight := func() *lru.Flight { //nolint:contextcheck // deliberate detach: the flight runs under the cache lifetime, not the caller's context
 			return l.sf.Go(string(loc), func() (interface{}, error) {
 				// Double-check inside the critical region.
@@ -172,7 +172,7 @@ func (l *LocalizedStaticDataCache) loadLocales(ctx context.Context, locales []ty
 					return nil, nil
 				}
 
-				// Built INSIDE the flight body: only the winner runs this
+				// Built INSIDE the flight body: only the starter runs this
 				// closure, so coalesced waiters don't each retain a timer.
 				fetchCtx, cancel := context.WithTimeout(l.lifeCtx, lru.LoadTimeout)
 				defer cancel()

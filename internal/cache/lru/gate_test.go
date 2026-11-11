@@ -41,7 +41,7 @@ func (g *testGate) setOpen() {
 	}
 }
 
-// countFlights counts the registrations on a flight (starter or joiner)
+// countFlights counts the registrations on a flight (starter or other waiter)
 // until the returned function is called.
 func countFlights(t *testing.T) (count *atomic.Int32, restore func()) {
 	t.Helper()
