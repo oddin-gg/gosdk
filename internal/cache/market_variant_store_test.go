@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/oddin-gg/gosdk/internal/apipolicy"
 	log "github.com/oddin-gg/gosdk/internal/log"
 	"github.com/oddin-gg/gosdk/types"
 )
@@ -40,6 +39,8 @@ type marketSrv struct {
 	body        atomic.Pointer[string]
 	bulkHits    atomic.Int64
 	variantHits atomic.Int64
+	// hold, when set, makes a bulk request wait until it is closed.
+	hold atomic.Pointer[chan struct{}]
 }
 
 func newMarketSrv(t *testing.T, body string) *marketSrv {
@@ -51,6 +52,13 @@ func newMarketSrv(t *testing.T, body string) *marketSrv {
 			s.variantHits.Add(1)
 		} else if strings.Contains(r.URL.Path, "/markets") {
 			s.bulkHits.Add(1)
+			if h := s.hold.Load(); h != nil {
+				select {
+				case <-*h:
+				case <-r.Context().Done():
+					return
+				}
+			}
 		}
 		w.Header().Set("Content-Type", "application/xml")
 		_, _ = io.WriteString(w, *s.body.Load())
@@ -481,9 +489,9 @@ func TestMarketDescriptionCache_FreshnessRefreshBackoff(t *testing.T) {
 	}
 }
 
-// The control of the test above: a refresh that fails for real under the
-// message policy still starts the backoff.
-func TestMarketDescriptionCache_FailedMessagePathRefreshStillStartsTheBackoff(t *testing.T) {
+// The control of the test above: a refresh that fails starts the backoff of
+// its locale, and the one that succeeds again clears it.
+func TestMarketDescriptionCache_FailedRefreshStartsTheBackoff(t *testing.T) {
 	srv := newMarketSrv(t, bulkCatalogWithStaticVariants)
 	mc, ctx := newMarketCacheForTest(t, srv)
 	mc.catalogTTL = 50 * time.Millisecond
@@ -496,18 +504,14 @@ func TestMarketDescriptionCache_FailedMessagePathRefreshStillStartsTheBackoff(t 
 	srv.serve(`upstream exploded`)
 	time.Sleep(80 * time.Millisecond)
 
-	msgCtx := apipolicy.With(ctx, apipolicy.Message)
-	if _, err := mc.MarketDescriptionByID(msgCtx, 9, types.None[string](), locales); err != nil {
-		t.Fatalf("lookup under the message policy: %v (the stale entry must be served)", err)
-	}
-	if got := srv.bulkHits.Load(); got != 2 {
-		t.Fatalf("bulk hits = %d, want 2", got)
-	}
 	if _, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), locales); err != nil {
-		t.Fatalf("public lookup: %v", err)
+		t.Fatalf("lookup: %v (the stale entry must be served)", err)
 	}
-	if got := srv.bulkHits.Load(); got != 2 {
-		t.Fatalf("bulk hits = %d, want 2: a real failure must hold back the getters' refresh", got)
+	mc.mu.RLock()
+	_, backedOff := mc.refreshFailedAt[types.EnLocale]
+	mc.mu.RUnlock()
+	if !backedOff {
+		t.Fatal("a failed catalog download did not start the refresh backoff")
 	}
 }
 

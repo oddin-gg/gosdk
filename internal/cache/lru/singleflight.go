@@ -99,6 +99,31 @@ func LoadCoalesced[T any](
 	}
 }
 
+// StartCoalesced starts the flight of key under singleflight without waiting
+// for it, or does nothing more than join the one that is running. It is the
+// background refresh of a value the caller can serve stale: the flight runs
+// under `lifetime` (the owning cache's, so Close cancels it) with the same
+// LoadTimeout as LoadCoalesced, carries no message mark, and its result is
+// dropped: fn stores what it loads. The result channel is buffered, so no
+// goroutine waits for it.
+func StartCoalesced[T any](
+	lifetime context.Context,
+	sf *singleflight.Group,
+	sfKey string,
+	fn func(context.Context) (T, error),
+) {
+	base := lifetime
+	if base == nil {
+		// Standalone/test use: no owner to cancel it, and no caller to inherit from.
+		base = context.Background() //nolint:contextcheck // deliberate: a background refresh has no caller context
+	}
+	sf.DoChan(sfKey, func() (any, error) {
+		loadCtx, cancel := context.WithTimeout(base, LoadTimeout)
+		defer cancel()
+		return fn(loadCtx)
+	})
+}
+
 // flightHook is a test-only seam: see SetFlightRegisteredHook.
 var flightHook atomic.Pointer[func()]
 

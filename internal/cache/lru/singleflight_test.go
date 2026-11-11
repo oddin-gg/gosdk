@@ -189,3 +189,54 @@ func (r *registrations) wait(t *testing.T, want int32) {
 		time.Sleep(time.Millisecond)
 	}
 }
+
+// StartCoalesced returns at once, runs one flight for any number of starts
+// and a LoadCoalesced caller that asks meanwhile shares it.
+func TestStartCoalesced_OneFlightWithoutWaiting(t *testing.T) {
+	var sf singleflight.Group
+	var calls atomic.Int32
+	release := make(chan struct{})
+	fn := func(ctx context.Context) (int, error) {
+		calls.Add(1)
+		<-release
+		return 7, nil
+	}
+	for range 5 {
+		StartCoalesced(t.Context(), &sf, "k", fn)
+	}
+	got := make(chan int, 1)
+	go func() {
+		v, _ := LoadCoalesced(t.Context(), t.Context(), &sf, "k", fn)
+		got <- v
+	}()
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	if v := <-got; v != 7 {
+		t.Fatalf("waiter got %d, want the flight's 7", v)
+	}
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("flights = %d, want 1", n)
+	}
+}
+
+// The flight lives on the lifetime it was given: Close of the owner cancels
+// it, and the caller that started it has no say.
+func TestStartCoalesced_RunsOnTheLifetime(t *testing.T) {
+	var sf singleflight.Group
+	life, stop := context.WithCancel(t.Context())
+	seen := make(chan error, 1)
+	StartCoalesced(life, &sf, "k", func(ctx context.Context) (int, error) {
+		<-ctx.Done()
+		seen <- ctx.Err()
+		return 0, ctx.Err()
+	})
+	stop()
+	select {
+	case err := <-seen:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("flight ended with %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the flight did not stop with its lifetime")
+	}
+}
