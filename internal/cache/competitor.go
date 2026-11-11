@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/oddin-gg/gosdk/internal/api"
 	"github.com/oddin-gg/gosdk/internal/api/xml"
@@ -51,6 +52,11 @@ type CompetitorCache struct {
 	// icons stores types.URN → *string (nil means "fetched, no icon").
 	// Use loadIcon / storeIcon / deleteIcon helpers for type-safe access.
 	icons sync.Map
+
+	// lifetime is the detach root of the icon flights (cancelled with the
+	// owning manager); iconSF coalesces concurrent fetches of one icon.
+	lifetime context.Context
+	iconSF   singleflight.Group
 }
 
 // loadIcon returns (icon, true) if the URN has a recorded icon (which may
@@ -244,26 +250,36 @@ func (c *CompetitorCache) reloadCompetitor(ctx context.Context, id types.URN, lo
 	return c.Competitor(ctx, id, locales)
 }
 
-// CompetitorIcon returns the icon path, fetching the competitor profile if needed.
+// CompetitorIcon returns the icon path, fetching the competitor profile if
+// needed. The fetch is a shared flight: concurrent callers wait on one
+// request, and a caller that gives up does not cancel it, so the icon still
+// lands in the cache for the next one.
 func (c *CompetitorCache) CompetitorIcon(ctx context.Context, id types.URN, locale types.Locale) (*string, error) {
 	if v, ok := c.loadIcon(id); ok {
 		return v, nil
 	}
 
-	fetchStarted := time.Now()
-	data, err := c.apiClient.FetchCompetitorProfile(ctx, id, locale)
-	if err != nil {
-		return nil, fmt.Errorf("fetch competitor icon %s/%s: %w", id.ToString(), locale, err)
-	}
+	return lru.LoadCoalesced(ctx, c.lifetime, &c.iconSF, "icon|"+id.ToString()+"|"+string(locale), func(loadCtx context.Context) (*string, error) {
+		// A flight that ended just before this one started has stored it.
+		if v, ok := c.loadIcon(id); ok {
+			return v, nil
+		}
 
-	// Store under the parent entry's clear-tombstone lock so a
-	// ClearCacheItem racing this fetch isn't undone for the icon —
-	// StoreSide is atomic with Clear, no check-to-write window.
-	// The caller still gets the fresh value.
-	c.lru.StoreSide(id, fetchStarted, func() {
-		c.storeIcon(id, data.IconPath)
+		fetchStarted := time.Now()
+		data, err := c.apiClient.FetchCompetitorProfile(loadCtx, id, locale)
+		if err != nil {
+			return nil, fmt.Errorf("fetch competitor icon %s/%s: %w", id.ToString(), locale, err)
+		}
+
+		// Store under the parent entry's clear-tombstone lock so a
+		// ClearCacheItem racing this fetch isn't undone for the icon —
+		// StoreSide is atomic with Clear, no check-to-write window.
+		// The callers still get the fresh value.
+		c.lru.StoreSide(id, fetchStarted, func() {
+			c.storeIcon(id, data.IconPath)
+		})
+		return data.IconPath, nil
 	})
-	return data.IconPath, nil
 }
 
 // ClearCacheItem removes both the entry and its icon.
@@ -276,6 +292,7 @@ func newCompetitorCache(lifeCtx context.Context, client *api.Client, logger *log
 	cc := &CompetitorCache{
 		apiClient: client,
 		logger:    logger,
+		lifetime:  lifeCtx,
 	}
 	cc.lru = lru.NewEventCache[types.URN, types.Locale, *LocalizedCompetitor](
 		lru.Config{
