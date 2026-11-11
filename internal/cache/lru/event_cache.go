@@ -43,11 +43,7 @@ type LocalizedEntry[L comparable] interface {
 }
 
 // CachedEntry is what EventCache stores: a LocalizedEntry that can also be
-// compared with ==. The admission merge compares the entry a load was based
-// on with the one the cache holds now; requiring comparable makes that a
-// compile-time guarantee instead of a runtime panic for a future value type
-// that is a non-comparable struct. Pointers (what the caches use) compare by
-// identity, which is the intent.
+// compared with ==. Pointers (what the caches use) compare by identity.
 type CachedEntry[L comparable] interface {
 	comparable
 	LocalizedEntry[L]
@@ -116,10 +112,6 @@ var errClearedDuringLoad = errors.New("cache entry cleared during load")
 // and completes unless ANOTHER Clear lands within the same load window —
 // sustained sub-LoadTimeout clear cadence on one key is pathological.
 const maxClearRetries = 3
-
-// maxAdmissionMerges bounds how many times one flight redoes its load on a
-// cache entry another flight admitted in the meantime.
-const maxAdmissionMerges = 3
 
 // clearTombstoneSweepLen is the map size beyond which Clear amortizes a
 // prune of expired tombstones.
@@ -303,62 +295,43 @@ func (c *EventCache[K, L, T]) get(ctx context.Context, key K, locales []L, clear
 				return zero, fmt.Errorf("no cached entry for key %v and no locales requested: %w", key, ErrEntryNotPopulated)
 			}
 
-			// A load that finds the cache changed under it (below) is redone
-			// on the new base; bounded so a storm of concurrent admissions
-			// cannot livelock a flight.
-			var updated T
-			for merges := 0; ; merges++ {
-				var lerr error
-				updated, lerr = c.loader(loadCtx, key, missing, existing, hadExisting)
-				if lerr != nil {
-					return zero, lerr
-				}
-
-				// Sanity check: every requested locale should now be present.
-				if !coversAll(updated.Locales(), locales) {
-					return zero, fmt.Errorf("loader for key %v returned without populating all requested locales: %w", key, ErrEntryNotPopulated)
-				}
-
-				// Admit-or-discard, mutually exclusive with Clear: if a Clear
-				// landed after `started`, our merge base (and thus `updated`)
-				// may contain invalidated data — discard and let the caller
-				// retry from the now-empty entry.
-				//
-				// Close-gate: a flight whose fetch completed just before the
-				// owner's lifetime was cancelled could otherwise pause here,
-				// survive a successful client Close, then resume and mutate the
-				// cache — contradicting Close's quiescence guarantee. The
-				// re-check immediately before admission shrinks that window to
-				// a few instructions. (base is the lifetime ctx when the owner
-				// configured one; the WithoutCancel fallback never fires.)
-				c.clearMu.Lock()
-				cleared := c.clearedAt[key].After(started) || c.purgedAt.After(started) || base.Err() != nil
-				if cleared {
-					c.clearMu.Unlock()
-					return zero, errClearedDuringLoad
-				}
-				// Flights of different call policies for the same key run
-				// concurrently, each merging into a clone of the entry it
-				// saw: the one admitted second would overwrite the locales
-				// the first loaded. If the cache no longer holds the entry
-				// this load was based on, merge on top of what it holds now
-				// (the other flight may already cover everything needed).
-				if cur, curOK := c.lru.Peek(key); merges < maxAdmissionMerges && (curOK != hadExisting || (curOK && cur != existing)) {
-					c.clearMu.Unlock()
-					existing, hadExisting = cur, curOK
-					if hadExisting && coversAll(existing.Locales(), locales) {
-						return existing, nil
-					}
-					missing = missingLocales(existingLocales(existing, hadExisting), locales)
-					continue
-				}
-				c.lru.Add(key, updated)
-				if c.onAdmit != nil {
-					c.onAdmit(key, updated)
-				}
-				c.clearMu.Unlock()
-				break
+			updated, lerr := c.loader(loadCtx, key, missing, existing, hadExisting)
+			if lerr != nil {
+				return zero, lerr
 			}
+
+			// Sanity check: every requested locale should now be present.
+			if !coversAll(updated.Locales(), locales) {
+				return zero, fmt.Errorf("loader for key %v returned without populating all requested locales: %w", key, ErrEntryNotPopulated)
+			}
+
+			// Admit-or-discard, mutually exclusive with Clear: if a Clear
+			// landed after `started`, our merge base (and thus `updated`)
+			// may contain invalidated data — discard and let the caller
+			// retry from the now-empty entry.
+			//
+			// Close-gate: a flight whose fetch completed just before the
+			// owner's lifetime was cancelled could otherwise pause here,
+			// survive a successful client Close, then resume and mutate the
+			// cache — contradicting Close's quiescence guarantee. The
+			// re-check immediately before admission shrinks that window to
+			// a few instructions. (base is the lifetime ctx when the owner
+			// configured one; the WithoutCancel fallback never fires.)
+			//
+			// There is one flight per key, so no other flight admits an entry
+			// for it in the meantime; the flights that overlap across a Clear
+			// or a Purge are the ones discarded here.
+			c.clearMu.Lock()
+			cleared := c.clearedAt[key].After(started) || c.purgedAt.After(started) || base.Err() != nil
+			if cleared {
+				c.clearMu.Unlock()
+				return zero, errClearedDuringLoad
+			}
+			c.lru.Add(key, updated)
+			if c.onAdmit != nil {
+				c.onAdmit(key, updated)
+			}
+			c.clearMu.Unlock()
 			return updated, nil
 		})
 	}

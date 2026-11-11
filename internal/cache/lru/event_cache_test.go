@@ -3,7 +3,6 @@ package lru
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -546,121 +545,5 @@ func TestEventCache_MessageAndGetterShareOneFlight(t *testing.T) {
 	}
 	if _, ok := c.Peek("k"); !ok {
 		t.Fatalf("the flight must fill the cache although the message caller left")
-	}
-}
-
-// mergedFoo is the entry a copy-on-write loader builds: a clone of the
-// existing entry plus the locales asked for.
-func mergedFoo(key string, existing *localizedFoo, has bool, locales ...string) *localizedFoo {
-	e := &localizedFoo{id: key, name: map[string]string{}}
-	if has {
-		existing.mu.Lock()
-		for l, v := range existing.name {
-			e.name[l] = v
-		}
-		existing.mu.Unlock()
-	}
-	for _, l := range locales {
-		e.name[l] = "x-" + l
-	}
-	return e
-}
-
-func fooLocales(f *localizedFoo) map[string]bool {
-	out := map[string]bool{}
-	for _, l := range f.Locales() {
-		out[l] = true
-	}
-	return out
-}
-
-// A cache that keeps changing under a flight cannot hold it forever: after
-// maxAdmissionMerges redone loads the flight admits what it has.
-func TestEventCache_AdmissionMergeIsBounded(t *testing.T) {
-	var c *EventCache[string, string, *localizedFoo]
-	var calls atomic.Int32
-	loader := func(ctx context.Context, key string, locales []string, existing *localizedFoo, has bool) (*localizedFoo, error) {
-		n := calls.Add(1)
-		if n <= 50 {
-			// Another flight admits a different entry while this one loads.
-			c.lru.Add(key, mergedFoo(key, existing, has, fmt.Sprintf("other-%d", n)))
-		}
-		return mergedFoo(key, existing, has, locales...), nil
-	}
-	c = NewEventCache[string, string, *localizedFoo](Config{Lifetime: t.Context()}, loader)
-
-	v, ok, err := c.Get(t.Context(), "k", []string{"en"})
-	if err != nil || !ok {
-		t.Fatalf("Get = %v, %v, %v", v, ok, err)
-	}
-	if got, want := calls.Load(), int32(maxAdmissionMerges+1); got != want {
-		t.Fatalf("loader calls = %d, want %d (the first load plus maxAdmissionMerges redone)", got, want)
-	}
-	cur, ok := c.Peek("k")
-	if !ok || cur != v {
-		t.Fatal("the flight did not admit its result once the bound was reached")
-	}
-	if !fooLocales(cur)["en"] {
-		t.Fatalf("locales = %v, want en", cur.Locales())
-	}
-}
-
-// An entry that appears between the flight's start and its admission, when
-// none existed at the start, is merged into: the load is redone on top of it
-// for the locales it lacks, and nothing it holds is lost.
-func TestEventCache_AdmissionMergesAnEntryThatAppearedDuringTheFlight(t *testing.T) {
-	var c *EventCache[string, string, *localizedFoo]
-	var calls atomic.Int32
-	sawExisting := make(chan bool, 4)
-	loader := func(ctx context.Context, key string, locales []string, existing *localizedFoo, has bool) (*localizedFoo, error) {
-		sawExisting <- has
-		if calls.Add(1) == 1 {
-			c.lru.Add(key, mergedFoo(key, nil, false, "de"))
-		}
-		return mergedFoo(key, existing, has, locales...), nil
-	}
-	c = NewEventCache[string, string, *localizedFoo](Config{Lifetime: t.Context()}, loader)
-
-	v, _, err := c.Get(t.Context(), "k", []string{"en"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := calls.Load(); got != 2 {
-		t.Fatalf("loader calls = %d, want 2 (redone on top of the entry that appeared)", got)
-	}
-	if first, second := <-sawExisting, <-sawExisting; first || !second {
-		t.Fatalf("existing seen by the loads = %v, %v; want false then true", first, second)
-	}
-	if l := fooLocales(v); !l["en"] || !l["de"] {
-		t.Fatalf("locales = %v, want en and de", v.Locales())
-	}
-}
-
-// The reverse: the entry the flight was based on is gone at admission
-// (evicted). The load is redone on the empty cache rather than admitting a
-// merge built on an entry the cache no longer holds.
-func TestEventCache_AdmissionRedoesALoadWhoseBaseWasEvicted(t *testing.T) {
-	var c *EventCache[string, string, *localizedFoo]
-	var calls atomic.Int32
-	loader := func(ctx context.Context, key string, locales []string, existing *localizedFoo, has bool) (*localizedFoo, error) {
-		if calls.Add(1) == 2 {
-			c.lru.Remove(key) // evicted while the second load runs
-		}
-		return mergedFoo(key, existing, has, locales...), nil
-	}
-	c = NewEventCache[string, string, *localizedFoo](Config{Lifetime: t.Context()}, loader)
-
-	if _, _, err := c.Get(t.Context(), "k", []string{"en"}); err != nil {
-		t.Fatal(err)
-	}
-	v, _, err := c.Get(t.Context(), "k", []string{"de"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := calls.Load(); got != 3 {
-		t.Fatalf("loader calls = %d, want 3 (the second load redone after its base was evicted)", got)
-	}
-	if l := fooLocales(v); !l["de"] || l["en"] {
-		t.Fatalf("locales = %v, want just de (en was evicted)", v.Locales())
 	}
 }
