@@ -985,9 +985,12 @@ func (c *Client) classifyMutationBody(method, path string, status int, body []by
 	// handles stayed pending until their (up to 6h) timeout.
 	if root, ok := xmlRootLocal(body); ok && root == "error" {
 		var env data.ErrorBody
-		// A truncated or malformed <error> is a rejection whose content
-		// cannot be trusted: it is not an answer of a healthy API.
-		decoded := xml.Unmarshal(body, &env) == nil
+		// A truncated or malformed <error>, or one followed by another
+		// document, is a rejection whose content cannot be trusted: it is not
+		// an answer of a healthy API. xml.Unmarshal alone would stop after the
+		// first element, so the end of the body is checked explicitly.
+		edec := xml.NewDecoder(bytes.NewReader(body))
+		decoded := edec.Decode(&env) == nil && utils.EnsureXMLEOF(edec) == nil
 		return &Error{
 			Method:  method,
 			Path:    path,
