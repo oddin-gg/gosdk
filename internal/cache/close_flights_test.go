@@ -146,7 +146,7 @@ func TestFlights_ARefreshThatDownloadedBeforeCloseCommitsNothing(t *testing.T) {
 	// The refreshed catalog differs: one market left, renamed. Committed, it
 	// would also prune the other rows.
 	srv.serve(`<?xml version="1.0"?><market_descriptions response_code="OK">` +
-		`<market id="9" name="Renamed"><outcomes><outcome id="1" name="o1"/></outcomes></market>` +
+		`<market id="9" name="Renamed"><outcomes><outcome id="1" name="renamed-o1"/><outcome id="2" name="o2"/></outcomes></market>` +
 		`</market_descriptions>`)
 	hookRan := make(chan struct{})
 	marketCommitGateHook = func(types.Locale) {
@@ -179,5 +179,19 @@ func TestFlights_ARefreshThatDownloadedBeforeCloseCommitsNothing(t *testing.T) {
 	}
 	if got := mc.baseLen(); got != 3 {
 		t.Fatalf("base holds %d entries, want the 3 of the seed: the refresh committed after the lifetime ended", got)
+	}
+	// The market the refresh also carried keeps what the seed stored.
+	existing, ok := mc.lookup(variantKey(9, types.None[string]()))
+	if !ok {
+		t.Fatal("market 9 vanished")
+	}
+	if name, _ := existing.Name(types.EnLocale); name != "Plain" {
+		t.Fatalf("market 9 name = %q, want %q: the refresh committed after the lifetime ended", name, "Plain")
+	}
+	if name, found, _ := existing.OutcomeName("1", types.EnLocale); !found || name != "o1" {
+		t.Fatalf("market 9 outcome 1 = %q (found=%v), want o1", name, found)
+	}
+	if _, found, _ := existing.OutcomeName("2", types.EnLocale); found {
+		t.Fatal("market 9 gained an outcome from a refresh that finished after the lifetime ended")
 	}
 }
