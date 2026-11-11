@@ -14,7 +14,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/cenkalti/backoff/v5"
@@ -138,22 +137,6 @@ type Client struct {
 	lifeCancel context.CancelFunc
 	inflight   sync.WaitGroup
 
-	// successCount counts healthy responses of any endpoint: a 2xx whose
-	// body was then read in full (and, for an entity, decoded), that passed
-	// the identity check of its resource and whose envelope is not a
-	// service-unavailable answer (see ServerUnavailableCode). The status
-	// line alone does not count, since an API that degrades into slow or
-	// truncated bodies still answers headers, and counting those would void
-	// a consumer's memory of the failure on every request that then fails
-	// on its body; nor does a 200 whose envelope says the service is
-	// unavailable. An envelope about the resource (not found, forbidden)
-	// does count: the API answered. A consumer that remembers a failure
-	// together with the value read AFTER the failed attempt (an earlier call
-	// of the same build may have succeeded meanwhile, and that success
-	// predates the failure) can tell that the API has answered since: see
-	// SuccessCount.
-	successCount atomic.Uint64
-
 	// breaker is fed by every attempt's outcome (see Breaker). Nothing in
 	// the client reads it.
 	breaker *Breaker
@@ -161,12 +144,6 @@ type Client struct {
 
 // Breaker returns the client's breaker of the REST API's availability.
 func (c *Client) Breaker() *Breaker { return c.breaker }
-
-// SuccessCount returns a counter that advances on every healthy response
-// of any endpoint (see successCount). The feed message path uses it to
-// drop everything it remembers about a failing API as soon as the API
-// answers again, whichever call that was.
-func (c *Client) SuccessCount() uint64 { return c.successCount.Load() }
 
 // ErrClosed is returned by request methods invoked after Close. It
 // WRAPS the shared closed-client sentinel (sdkerr.ErrClosed ==
@@ -807,8 +784,6 @@ func (c *Client) fetchDataValidated(ctx context.Context, path string, entity int
 		}
 	}
 	if answered {
-		// Counted here, not when the headers arrive (see successCount).
-		c.successCount.Add(1)
 		c.breaker.success()
 	} else if c.callerAlive(ctx) {
 		// A body cut off, malformed or about another resource, or a
@@ -909,8 +884,6 @@ func (c *Client) doNoBody(ctx context.Context, method, path string, idempotent b
 		return false, fmt.Errorf("api: %s %s: %w", method, path, apiErr)
 	}
 	// The body was read in full and verified: the API accepted the request.
-	// Counted here, not when the headers arrive (see successCount).
-	c.successCount.Add(1)
 	c.breaker.success()
 	c.emit(pc, nil)
 	return true, nil
@@ -1198,10 +1171,10 @@ func (c *Client) do(ctx context.Context, method, path string, locale *types.Loca
 			// invoke emit() after consuming the body. Streaming = no full-
 			// body materialization regardless of payload size.
 			//
-			// successCount is NOT advanced here: the status line alone does
-			// not show that the API works (a degraded one answers headers
-			// and then stalls or truncates the body); the caller counts
-			// the response once it has read the body.
+			// The breaker is not told of a success here: the status line
+			// alone does not show that the API works (a degraded one
+			// answers headers and then stalls or truncates the body); the
+			// caller reports it once it has read the body.
 			pc = c.installCapture(r, req, r.StatusCode, latency, attempts, locale, reqBody, reqTruncated)
 			return r, nil
 		case r.StatusCode == http.StatusTooManyRequests:
