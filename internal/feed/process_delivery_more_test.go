@@ -258,7 +258,7 @@ func TestProcessDelivery_FixtureChange_SameTimestampDifferentChangeType_BothAdmi
 }
 
 // TestProcessDelivery_OversizedBody_BoundedRetention is the regression
-// for the oversized-retention hole (Codex P2): bodies over
+// for the oversized-retention hole: bodies over
 // feedXML.MaxFeedMessageBytes were rejected by the decoder, but the
 // resulting UnparsableMessage retained the COMPLETE d.Body — a slow
 // consumer with the default 256-slot public buffer could pin gigabytes
@@ -348,7 +348,7 @@ func TestProcessDelivery_OversizedBody_MalformedRoute_BoundedRetention(t *testin
 }
 
 // TestValidateDecodedMessage is the regression for required-attribute
-// validation (Codex P2): XML decode checks only syntax, so a MISSING
+// validation: XML decode checks only syntax, so a MISSING
 // attribute becomes a zero value that downstream state/cache/recovery
 // processing acts on. These must be rejected (→ UnparsableMessage) so
 // they are ACKed but never processed under an unvalidated identity.

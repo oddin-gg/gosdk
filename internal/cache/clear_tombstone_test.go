@@ -36,7 +36,7 @@ func gatedServer(t *testing.T, body func(r *http.Request) string, entered chan<-
 	return srv, &hits
 }
 
-// TestPlayersCache_ClearDuringLoad_NotResurrected pins the Codex P1:
+// TestPlayersCache_ClearDuringLoad_NotResurrected pins that
 // a Clear landing while a player fetch is in flight must not be undone
 // by the fetch's store — the next read refetches.
 func TestPlayersCache_ClearDuringLoad_NotResurrected(t *testing.T) {

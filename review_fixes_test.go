@@ -84,7 +84,7 @@ func TestWarnDrop_RateLimits(t *testing.T) {
 	}
 	// The warning must actually be EMITTED, exactly once within the
 	// window — pre-fix this test discarded logs and would have passed
-	// with the warning removed entirely (Codex doc finding).
+	// with the warning removed entirely.
 	warns := 0
 	for _, m := range rec.messages() {
 		if strings.Contains(m, "dropped") || strings.Contains(m, "overflow") {
@@ -480,7 +480,7 @@ func TestSession_ProcessFeedMessage_AdvancesRecoveryCursorForAllTypes(t *testing
 
 // TestSession_ProcessFeedMessage_CanceledSendDoesNotAdvanceCursor is the
 // regression for the processed-cursor advance on a never-admitted
-// message (Codex P2): the typed switch ignored send's bool and always
+// message: the typed switch ignored send's bool and always
 // called endProcessing(Created). A ctx-cancelled send (graceful-close
 // deadline / shutdown) delivered and acked NOTHING, yet the cursor
 // advanced — calculateTiming would then see a spuriously recent
@@ -520,7 +520,7 @@ func TestSession_ProcessFeedMessage_CanceledSendDoesNotAdvanceCursor(t *testing.
 
 // --- Replay sessions must not mutate the live cache ---
 //
-// Regression for the reviewer's architectural finding: the cacheManager
+// Regression: the cacheManager
 // is shared across every session of a Client (one cache per Client by
 // design), so without a gate, replay traffic would invalidate live
 // cache entries (a historical fixture_change/odds_change/bet_settlement
@@ -1713,7 +1713,7 @@ func TestRoutingKeys_SpecifiedMatchesOnly_BuildsPerEventKeys(t *testing.T) {
 }
 
 // TestRoutingKeys_RejectsUnknownMessageInterest is the regression for
-// the Codex P2 finding: WithMessageInterest accepted ANY string, which
+// this defect: WithMessageInterest accepted ANY string, which
 // routingKeys interpolated verbatim into RabbitMQ topic bindings. A
 // typo produced a subscription that silently received nothing intended;
 // MessageInterest("#") produced a "#.#" binding broader than any
@@ -1945,7 +1945,7 @@ func TestClient_RecoverGating_RequiresReady(t *testing.T) {
 }
 
 // TestClient_ensureBroker_FailedOpenRetainsGeneration is the regression
-// for the orphaned-generation race (Codex P2): ensureBroker's failed-
+// for the orphaned-generation race: ensureBroker's failed-
 // open rollback ran resetConnectionLayer, replacing the stored feed
 // client — but a CONCURRENT ensureBroker that snapshotted the old
 // generation while mode was still modeBrokerOnly could have its own
@@ -2001,7 +2001,7 @@ func TestClient_ensureBroker_FailedOpenRetainsGeneration(t *testing.T) {
 }
 
 // TestRoutingKeys_RejectsRoutingUnsafeURNs is the regression for topic-
-// binding injection (Codex P2): types.URN has exported fields, so a
+// binding injection: types.URN has exported fields, so a
 // consumer can construct values ParseURN would never produce — and
 // routingKeys interpolated them straight into RabbitMQ topic syntax. A
 // whole-segment '#' in Type ("match.#") made the binding match
@@ -2038,7 +2038,7 @@ func TestRoutingKeys_RejectsRoutingUnsafeURNs(t *testing.T) {
 }
 
 // TestClient_reconcileBrokerMode covers the two-generation broker-open
-// race (Codex P2): an older FAILED ensureBroker's rollback and a newer
+// race: an older FAILED ensureBroker's rollback and a newer
 // SUCCESSFUL one can interleave in either lock order. The reconcile
 // decision must key on the ACTUAL broker state, so the final root mode
 // is correct regardless of ordering — otherwise a successful replay

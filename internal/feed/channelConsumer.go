@@ -1058,7 +1058,7 @@ func (c *ChannelConsumer) processDelivery(ctx context.Context, d amqp.Delivery) 
 
 	// Required-attribute validation: XML decode only checks syntax, so a
 	// MISSING attribute silently becomes a zero value that downstream
-	// state/cache/recovery processing then acts on (Codex P2): a
+	// state/cache/recovery processing then acts on: a
 	// zero-request_id snapshot_complete would be ACKed as an unknown
 	// completion (real recovery stays pending), an absent `subscribed`
 	// would read as "not subscribed" and could mark the producer down,

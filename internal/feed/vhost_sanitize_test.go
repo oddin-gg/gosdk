@@ -5,8 +5,8 @@ import (
 	"testing"
 )
 
-// TestSanitizeVHostForError pins the dial-error vhost sanitization
-// (Codex P3): the virtual host is server text validated only as
+// TestSanitizeVHostForError pins the dial-error vhost sanitization:
+// the virtual host is server text validated only as
 // non-empty, so it must be token-redacted, length-capped, and quoted
 // before it is embedded in caller-facing errors.
 func TestSanitizeVHostForError(t *testing.T) {

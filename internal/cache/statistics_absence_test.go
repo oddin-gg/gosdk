@@ -7,7 +7,7 @@ import (
 )
 
 // TestMakeFeedStatistics_OneSidedPreservesAbsence is the regression for
-// present-zero statistics (Codex P2): a one-sided feed payload such as
+// present-zero statistics: a one-sided feed payload such as
 // <statistics><yellow_cards home="2"/></statistics> must expose the
 // absent AWAY side as None, not Some(0). Pre-fix StatisticsPair.Home/Away
 // were plain ints, so the missing away attribute decoded as a present

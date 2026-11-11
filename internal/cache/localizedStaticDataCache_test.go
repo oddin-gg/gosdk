@@ -18,8 +18,8 @@ import (
 )
 
 // TestLocalizedStaticDataCache_AlreadyCancelledCtxNoFetch is the
-// regression for the reviewer's low finding: an already-cancelled ctx
-// must not start any detached fetcher invocation through WithoutCancel.
+// regression for a ctx that is already cancelled: it must not start any
+// detached fetcher invocation through WithoutCancel.
 func TestLocalizedStaticDataCache_AlreadyCancelledCtxNoFetch(t *testing.T) {
 	var calls atomic.Int32
 	fetcher := func(ctx context.Context, locale types.Locale) ([]types.StaticData, error) {
@@ -178,7 +178,7 @@ func TestLocalizedStaticDataCache_LocaleCoverageValidated(t *testing.T) {
 }
 
 // TestLocalizedStaticDataCache_FirstRefreshAfterInitialDelay is the
-// regression for the Codex P2 scheduling finding: startTimer waited
+// regression for this defect: startTimer waited
 // initialDelay (24h) and then refreshed only on the FIRST TICKER FIRE
 // another tickPeriod (24h) later — data loaded near startup stayed
 // stale for ~48h instead of ~24h. The fix runs timerTick immediately

@@ -292,7 +292,7 @@ func TestEventCache_ContextCancellation(t *testing.T) {
 }
 
 // TestEventCache_FirstCallerCancellationDoesNotKillSharedLoad is the
-// regression for the reviewer's medium finding: pre-fix the singleflight
+// regression for the first caller's context: pre-fix the singleflight
 // load ran with the first caller's ctx, so a short-deadline first caller
 // could cancel the load out from under later waiters.
 //
@@ -372,8 +372,8 @@ func TestEventCache_FirstCallerCancellationDoesNotKillSharedLoad(t *testing.T) {
 	}
 }
 
-// TestEventCache_ConcurrentMixedLocales is the regression for the
-// reviewer's H1 finding: EventCache.Get singleflights only by entity
+// TestEventCache_ConcurrentMixedLocales is the regression for
+// mixed locales: EventCache.Get singleflights only by entity
 // key, so caller A asking for [en] and caller B asking for [ru]
 // share one in-flight load. Pre-fix the shared body used A's
 // `locales` (closure capture); B received A's [en]-only result and
@@ -457,9 +457,9 @@ func TestEventCache_ConcurrentMixedLocales(t *testing.T) {
 	}
 }
 
-// TestEventCache_AlreadyCancelledCtxNoLoad is the regression for the
-// reviewer's low finding: an already-cancelled ctx on a cold-miss
-// path must not trigger a detached loader through WithoutCancel.
+// TestEventCache_AlreadyCancelledCtxNoLoad is the regression for an
+// already-cancelled ctx on a cold-miss
+// path: it must not trigger a detached loader through WithoutCancel.
 func TestEventCache_AlreadyCancelledCtxNoLoad(t *testing.T) {
 	var calls atomic.Int32
 	loader := func(ctx context.Context, key string, locales []string, existing *localizedFoo, has bool) (*localizedFoo, error) {

@@ -49,7 +49,7 @@ func (rt *wedgedConnectRT) RoundTrip(req *http.Request) (*http.Response, error) 
 }
 
 // TestClient_Close_DoesNotHangOnWedgedConnect is the regression for the
-// pre-shutdown deadlock (Codex P1): Close(context.Background()) pre-waited
+// pre-shutdown deadlock: Close(context.Background()) pre-waited
 // on the in-flight Connect's connectDone bounded ONLY by the caller ctx —
 // with no deadline and a connect wedged in producerManager.Open on a
 // cancellation-ignoring transport, that wait never returned, so

@@ -188,7 +188,7 @@ func TestDispatchRecoverEvent_StoppedActor_NoHang(t *testing.T) {
 }
 
 // TestDispatchRecoverEvent_InvalidProducer_NoActorLeak is the regression
-// for the invalid-id actor leak (Codex P2): findOrSpawn allocated a
+// for the invalid-id actor leak: findOrSpawn allocated a
 // 256-slot inbox, registered the actor, and started its goroutine BEFORE
 // any producer validation — the recover command then failed with
 // ErrProducerNotFound inside the actor, but the dead-weight actor lived

@@ -1042,7 +1042,7 @@ func TestManager_GenCursors_RejectGrossFutureSkew(t *testing.T) {
 }
 
 // TestManager_TimestampCursors_Monotonic is the regression for the
-// multi-subscription cursor regression (Codex P2): two subscriptions
+// multi-subscription cursor regression: two subscriptions
 // share the producer manager, and the slower one — finishing an OLDER
 // message later — must not roll a freshness cursor backwards; a
 // regressed cursor made the recovery tick read the producer as delayed
@@ -1120,7 +1120,7 @@ func TestManager_TimestampCursors_Monotonic(t *testing.T) {
 }
 
 // TestManager_Setters_UnknownProducerIsNotFound pins the sentinel on the
-// mutate path (Codex P2): the missing-id branch of mutateProducerByID
+// mutate path: the missing-id branch of mutateProducerByID
 // returned a text-only error, so the PUBLIC setters routed through it
 // (Client.SetProducerEnabled / SetProducerRecoveryFromTimestamp) failed
 // errors.Is(err, ErrProducerNotFound) while GetProducer succeeded — the
@@ -1149,7 +1149,7 @@ func TestManager_Setters_UnknownProducerIsNotFound(t *testing.T) {
 }
 
 // TestManager_Setters_CanceledCtxDoesNotMutate pins the ctx contract on
-// the warm-cache mutate path (Codex P3): a setter invoked with an
+// the warm-cache mutate path: a setter invoked with an
 // already-cancelled context previously mutated producer state and
 // returned nil — cancellation must mean NO side effect.
 func TestManager_Setters_CanceledCtxDoesNotMutate(t *testing.T) {

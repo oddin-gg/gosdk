@@ -9,7 +9,7 @@ import (
 )
 
 // TestVoidReasons_ClearDuringFlight_NextCallRefetches is the regression
-// for the post-clear singleflight interleaving (Codex P2): the cache
+// for the post-clear singleflight interleaving: the cache
 // used a CONSTANT singleflight key, so a caller arriving strictly AFTER
 // ClearMarketVoidReasons returned could JOIN a still-running pre-clear
 // flight and be served its (stale) result directly — the tombstone only

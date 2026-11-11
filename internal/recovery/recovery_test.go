@@ -384,7 +384,7 @@ func TestManager_Cleanup_IsIdempotent(t *testing.T) {
 	}
 }
 
-// TestManager_OpenCloseRace_NoLeak drives the reviewer's scenario:
+// TestManager_OpenCloseRace_NoLeak drives this scenario:
 // Close runs cleanup() while Open is still pre-publication; Open
 // then publishes a session via Store; Open's CAS-fail cleanup() must
 // take that session via Swap and release its resources.

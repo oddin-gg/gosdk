@@ -181,7 +181,7 @@ func TestManager_LogsWhenTokenExpiresSoon(t *testing.T) {
 }
 
 // TestManager_BookmakerDetails_RejectsExpiredToken is the regression
-// for the Codex P3 finding: an expire_at in the past only triggered the
+// for this defect: an expire_at in the past only triggered the
 // "expires soon" warning and was then CACHED as valid — gosdk.New
 // succeeded and authentication failed later, mid-broker/API work. The
 // manager must reject already-expired credentials up front and must not
@@ -321,7 +321,7 @@ func TestManager_BookmakerDetails_ConcurrentCallerCtxIsHonored(t *testing.T) {
 }
 
 // TestManager_BookmakerDetails_FirstCallerCancellationDoesNotKillSharedFetch
-// is the regression for the reviewer's medium finding: if the shared
+// is the regression for the shared fetch: if the shared
 // FetchWhoAmI is invoked with the first caller's ctx, a short-deadline
 // first caller can cancel the HTTP request out from under everyone else
 // who joined the same singleflight.
@@ -411,9 +411,8 @@ func TestManager_BookmakerDetails_FirstCallerCancellationDoesNotKillSharedFetch(
 }
 
 // TestManager_BookmakerDetails_AlreadyCancelledCtxNoFetch is the
-// regression for the reviewer's low finding: an already-cancelled
-// caller ctx must not trigger a detached HTTP fetch through
-// WithoutCancel. Pre-fix, BookmakerDetails would still hit the
+// regression for a caller ctx that is already cancelled: it must not
+// trigger a detached HTTP fetch through WithoutCancel. Pre-fix, BookmakerDetails would still hit the
 // upstream once even though the caller immediately observes ctx.Err.
 func TestManager_BookmakerDetails_AlreadyCancelledCtxNoFetch(t *testing.T) {
 	var hits atomic.Int64
