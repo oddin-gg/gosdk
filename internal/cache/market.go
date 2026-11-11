@@ -636,6 +636,16 @@ func (m *MarketDescriptionCache) loadOne(ctx context.Context, marketID *int, var
 	return nil
 }
 
+// lifetimeEnded reports whether the owner's lifetime was cancelled. The
+// commit steps of a catalog flight call it under m.mu: a flight whose
+// download completed just before Close would otherwise resume afterwards
+// and write into a cache that Close declared quiescent. Same close-gate as
+// lru.EventCache's admission; Close does not take m.mu, so what remains is
+// the few instructions between the check and the store, as there.
+func (m *MarketDescriptionCache) lifetimeEnded() bool {
+	return m.lifetime != nil && m.lifetime.Err() != nil
+}
+
 // catalogFlight is the body of one catalog flight: the bulk download of a
 // locale (what every non-dynamic read resolves through) or the fetch of one
 // dynamic-outcome variant. loadOne runs it under LoadCoalesced for a caller
@@ -715,6 +725,10 @@ func (m *MarketDescriptionCache) catalogFlight(
 		// market that exists upstream.
 		if !isDynamicVariant {
 			m.mu.Lock()
+			if m.lifetimeEnded() {
+				m.mu.Unlock()
+				return struct{}{}, m.lifetime.Err()
+			}
 			superseded := m.fetchCursor[loc].After(loadStarted)
 			if !superseded && loadStarted.After(m.fetchCursor[loc]) {
 				m.fetchCursor[loc] = loadStarted
@@ -773,7 +787,7 @@ func (m *MarketDescriptionCache) catalogFlight(
 		// refetch the Clear asked for; the next read reloads fresh.
 		if !isDynamicVariant {
 			m.mu.Lock()
-			if !m.lastClearAt.After(loadStarted) && !m.fetchCursor[loc].After(loadStarted) {
+			if !m.lifetimeEnded() && !m.lastClearAt.After(loadStarted) && !m.fetchCursor[loc].After(loadStarted) {
 				// Timestamped with the fetch's START, not its
 				// completion: the freshness window must cover the
 				// age of the DATA, not of the transfer. Also
@@ -834,6 +848,9 @@ func (m *MarketDescriptionCache) refreshInBackground(locales []types.Locale) {
 func (m *MarketDescriptionCache) reconcileBulk(locale types.Locale, seen map[CompositeKey]struct{}, loadStarted time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.lifetimeEnded() {
+		return
+	}
 	// An EMPTY response carries no removal authority. response_code=OK
 	// with zero <market> rows decodes successfully (nil slice, nil
 	// error) — an upstream deploy glitch or truncated-but-well-formed
@@ -895,6 +912,12 @@ func (m *MarketDescriptionCache) upsert(description data.MarketDescription, loca
 	key := variantKey(description.ID, types.FromPtr(description.Variant))
 
 	m.mu.Lock()
+	if m.lifetimeEnded() {
+		// The owner is closed: a download that finished across Close
+		// stores nothing.
+		m.mu.Unlock()
+		return nil
+	}
 	if m.clearedAt[key].After(loadStarted) || m.purgedAt.After(loadStarted) {
 		// A Clear for THIS key (or a Purge) landed after the load
 		// started: its data may predate the invalidation. Skip only

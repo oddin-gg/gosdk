@@ -123,3 +123,61 @@ func TestFlights_DetachedFlightsStopAtClose(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+// A background catalog refresh whose download completed just before the
+// lifetime ended must not commit it afterwards: the owner declared the cache
+// quiescent. The lifetime is cancelled at the point between the download and
+// the stores, where the request itself can no longer be cut short.
+func TestFlights_ARefreshThatDownloadedBeforeCloseCommitsNothing(t *testing.T) {
+	srv := newMarketSrv(t, bulkCatalogWithStaticVariants)
+	life, closeCaches := context.WithCancel(t.Context())
+	defer closeCaches()
+	mc := newMarketDescriptionCache(life, newAPIClientForTest(t, srv.Server), log.New(nil))
+	mc.catalogTTL = 50 * time.Millisecond
+	locales := []types.Locale{types.EnLocale}
+	if _, err := mc.MarketDescriptionByID(t.Context(), 9, types.None[string](), locales); err != nil {
+		t.Fatalf("seed lookup: %v", err)
+	}
+	time.Sleep(80 * time.Millisecond)
+	mc.mu.RLock()
+	loadedAt := mc.loadedLocales[types.EnLocale]
+	mc.mu.RUnlock()
+
+	// The refreshed catalog differs: one market left, renamed. Committed, it
+	// would also prune the other rows.
+	srv.serve(`<?xml version="1.0"?><market_descriptions response_code="OK">` +
+		`<market id="9" name="Renamed"><outcomes><outcome id="1" name="o1"/></outcomes></market>` +
+		`</market_descriptions>`)
+	hookRan := make(chan struct{})
+	marketCommitGateHook = func(types.Locale) {
+		closeCaches()
+		close(hookRan)
+	}
+	t.Cleanup(func() { marketCommitGateHook = nil })
+
+	msg := apipolicy.WithMessage(t.Context(), newGateStub(), time.Minute)
+	if _, err := mc.MarketDescriptionByID(msg, 9, types.None[string](), locales); err != nil {
+		t.Fatalf("stale read: %v", err)
+	}
+	select {
+	case <-hookRan:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the background refresh never reached its stores")
+	}
+	// The flight is over once it no longer counts as loading the locale.
+	waitFor(t, "the refresh to end", func() bool {
+		mc.mu.RLock()
+		defer mc.mu.RUnlock()
+		return len(mc.loadingLocales) == 0
+	})
+
+	mc.mu.RLock()
+	after := mc.loadedLocales[types.EnLocale]
+	mc.mu.RUnlock()
+	if !after.Equal(loadedAt) {
+		t.Fatal("a refresh that finished after the lifetime ended marked the locale loaded")
+	}
+	if got := mc.baseLen(); got != 3 {
+		t.Fatalf("base holds %d entries, want the 3 of the seed: the refresh committed after the lifetime ended", got)
+	}
+}
