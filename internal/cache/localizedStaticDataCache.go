@@ -160,6 +160,9 @@ func (l *LocalizedStaticDataCache) loadLocales(ctx context.Context, locales []ty
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		if err := lru.SkippedByGate(ctx); err != nil {
+			return err
+		}
 		loc := locale
 		// A flight runs on its STARTER's budget: a message-path caller
 		// that only joined one can get the starter's budget running out
@@ -222,6 +225,8 @@ func (l *LocalizedStaticDataCache) loadLocales(ctx context.Context, locales []ty
 	wait:
 		for {
 			select {
+			case <-lru.GateOpened(ctx):
+				return apipolicy.ErrSkipped
 			case r := <-ch:
 				if r.Err != nil {
 					if !retried && !owner.Load() && lru.JoinerMayRetry(ctx, r.Err) {

@@ -40,3 +40,26 @@ func TestModeOfDefaultsAndCarry(t *testing.T) {
 		}
 	}
 }
+
+type stubGate struct{}
+
+func (stubGate) Open() bool              { return true }
+func (stubGate) Opened() <-chan struct{} { return nil }
+
+func TestGateMark(t *testing.T) {
+	ctx := context.Background()
+	if GateOf(ctx) != nil {
+		t.Fatal("a plain context carries a gate")
+	}
+	marked := WithMessage(ctx, stubGate{})
+	if GateOf(marked) == nil {
+		t.Fatal("the mark was lost")
+	}
+	if GateOf(WithoutGate(marked)) != nil {
+		t.Fatal("WithoutGate left the mark in place")
+	}
+	// The mark does not touch the call policy of the same context.
+	if ModeOf(marked) != Default || Suffix(marked) != "" {
+		t.Fatal("the gate mark changed the call policy")
+	}
+}

@@ -254,6 +254,11 @@ func (c *EventCache[K, L, T]) get(ctx context.Context, key K, locales []L, clear
 	if err := ctx.Err(); err != nil {
 		return zero, false, err
 	}
+	// A message-path caller does not start or join a flight while the REST
+	// API is known to be failing (see SkippedByGate).
+	if err := SkippedByGate(ctx); err != nil {
+		return zero, false, err
+	}
 
 	// Detach the shared loader from this caller's cancellation so a
 	// short-deadline first caller can't kill the load for later
@@ -265,7 +270,8 @@ func (c *EventCache[K, L, T]) get(ctx context.Context, key K, locales []L, clear
 	// load running indefinitely (see LoadCoalesced for the same defense).
 	base := c.lifetime //nolint:contextcheck // deliberate detach: the owning cache's lifetime ctx, not the caller's, is the correct cancellation root for the shared load
 	if base == nil {
-		base = context.WithoutCancel(ctx)
+		// Without the caller's message mark: see LoadCoalesced.
+		base = apipolicy.WithoutGate(context.WithoutCancel(ctx))
 	}
 
 	// Slow path under singleflight: at most one loader per key in flight.
@@ -377,6 +383,8 @@ func (c *EventCache[K, L, T]) get(ctx context.Context, key K, locales []L, clear
 	FlightRegistered()
 	for {
 		select {
+		case <-GateOpened(ctx):
+			return zero, false, apipolicy.ErrSkipped
 		case r := <-ch:
 			if r.Err != nil && !retried && !owner.Load() && JoinerMayRetry(ctx, r.Err) {
 				retried = true

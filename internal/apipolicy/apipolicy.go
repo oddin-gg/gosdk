@@ -56,8 +56,9 @@ const (
 // request count against it.
 const MessageTimeout = 2 * time.Second
 
-// ErrSkipped is returned for a call made under MessageSkip.
-var ErrSkipped = errors.New("api: request skipped, the API recently failed for this event")
+// ErrSkipped is returned for a load that was skipped because the REST API
+// failed moments ago (see Gate), and for a call made under MessageSkip.
+var ErrSkipped = errors.New("api: skipped, the REST API failed moments ago")
 
 // ErrBudgetSpent is returned for a call made under a message mode whose
 // shared budget (MessageTimeout) was already spent when the call began, so
@@ -140,3 +141,38 @@ func Suffix(ctx context.Context) string {
 // Suffixes lists every suffix Suffix can return, for invalidation that
 // must reach flights of all policies.
 var Suffixes = [...]string{"", "|msg", "|skip"}
+
+// Gate tells the loaders whether the REST API failed moments ago. The API
+// client's breaker implements it; the interface keeps the cache packages
+// from importing the client.
+type Gate interface {
+	// Open reports whether callers that honour the gate must not load.
+	Open() bool
+	// Opened returns a channel that is closed once the gate is open (at
+	// once if it already is). Take a new one after each wake-up.
+	Opened() <-chan struct{}
+}
+
+type gateKey struct{}
+
+// WithMessage marks ctx as belonging to the message path, whose loads honour
+// gate: a coalescing loader called with the mark skips (ErrSkipped) instead
+// of starting or joining a flight while the gate is open, and stops waiting
+// on a flight once it opens. A context without the mark (every getter,
+// every flight) ignores the gate.
+func WithMessage(ctx context.Context, gate Gate) context.Context {
+	return context.WithValue(ctx, gateKey{}, gate)
+}
+
+// WithoutGate returns ctx without the mark of WithMessage. A flight that is
+// rooted in a caller's context (and not in its owner's lifetime) uses it, so
+// the loads the flight makes in turn are not the message path's.
+func WithoutGate(ctx context.Context) context.Context {
+	return context.WithValue(ctx, gateKey{}, Gate(nil))
+}
+
+// GateOf returns the gate of the message mark ctx carries, or nil.
+func GateOf(ctx context.Context) Gate {
+	g, _ := ctx.Value(gateKey{}).(Gate)
+	return g
+}

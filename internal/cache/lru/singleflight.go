@@ -59,6 +59,9 @@ func LoadCoalesced[T any](
 	if err := ctx.Err(); err != nil {
 		return zero, err
 	}
+	if err := SkippedByGate(ctx); err != nil {
+		return zero, err
+	}
 	// base carries no timer/cancel of its own — building it out here is
 	// free even for coalesced callers. The LoadTimeout ctx is created
 	// INSIDE the closure: only the winning singleflight body runs (and
@@ -66,7 +69,9 @@ func LoadCoalesced[T any](
 	// timer per coalesced waiter until the 60s timeout fired.
 	base := lifetime
 	if base == nil {
-		base = context.WithoutCancel(ctx)
+		// Not the caller's message mark either: what the flight loads is
+		// not the message path's.
+		base = apipolicy.WithoutGate(context.WithoutCancel(ctx))
 	}
 	// The call policy of the caller rides along (see apipolicy): flights of
 	// different policies are separate, and the load keeps its caller's.
@@ -88,6 +93,8 @@ func LoadCoalesced[T any](
 		})
 		FlightRegistered()
 		select {
+		case <-GateOpened(ctx):
+			return zero, apipolicy.ErrSkipped
 		case r := <-ch:
 			if r.Err != nil {
 				if attempt == 0 && !started.Load() && JoinerMayRetry(ctx, r.Err) {

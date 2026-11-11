@@ -558,3 +558,112 @@ func (r *registrations) wait(t *testing.T, want int32) {
 		time.Sleep(time.Millisecond)
 	}
 }
+
+// gateStub is a message gate the tests open by hand.
+type gateStub struct {
+	mu     sync.Mutex
+	open   bool
+	opened chan struct{}
+}
+
+func newGateStub() *gateStub { return &gateStub{opened: make(chan struct{})} }
+
+func (g *gateStub) Open() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.open
+}
+
+func (g *gateStub) Opened() <-chan struct{} {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.opened
+}
+
+func (g *gateStub) setOpen() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !g.open {
+		g.open = true
+		close(g.opened)
+	}
+}
+
+// With the gate open, a message-path caller neither starts nor joins a fetch;
+// a caller without the mark loads as usual.
+func TestLocalizedStaticDataCache_GateOpenSkipsTheLoad(t *testing.T) {
+	var calls atomic.Int32
+	fetcher := func(ctx context.Context, locale types.Locale) ([]types.StaticData, error) {
+		calls.Add(1)
+		return []types.StaticData{{ID: 1, Description: types.Some("ok")}}, nil
+	}
+	c := newLocalizedStaticDataCache(t.Context(), &minimalCfg{}, log.New(nil), nil, fetcher)
+	defer c.Close()
+	gate := newGateStub()
+	gate.setOpen()
+	var flights atomic.Int32
+	restore := lru.SetFlightRegisteredHook(func() { flights.Add(1) })
+	defer restore()
+
+	_, err := c.LocalizedItem(apipolicy.WithMessage(t.Context(), gate), 1, []types.Locale{types.EnLocale})
+	if !errors.Is(err, apipolicy.ErrSkipped) {
+		t.Fatalf("err = %v, want ErrSkipped", err)
+	}
+	if calls.Load() != 0 || flights.Load() != 0 {
+		t.Fatalf("fetches = %d, flights registered = %d, want none", calls.Load(), flights.Load())
+	}
+
+	if _, err := c.LocalizedItem(t.Context(), 1, []types.Locale{types.EnLocale}); err != nil {
+		t.Fatalf("unmarked caller: %v", err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("fetches = %d, want 1", calls.Load())
+	}
+}
+
+// A message-path caller waiting on a fetch is released when the gate opens;
+// the fetch goes on and fills the cache.
+func TestLocalizedStaticDataCache_GateOpenedReleasesAWaiterAndTheFetchGoesOn(t *testing.T) {
+	release := make(chan struct{})
+	entered := make(chan struct{})
+	var once sync.Once
+	var calls atomic.Int32
+	fetcher := func(ctx context.Context, locale types.Locale) ([]types.StaticData, error) {
+		calls.Add(1)
+		once.Do(func() { close(entered) })
+		<-release
+		return []types.StaticData{{ID: 1, Description: types.Some("ok")}}, nil
+	}
+	c := newLocalizedStaticDataCache(t.Context(), &minimalCfg{}, log.New(nil), nil, fetcher)
+	defer c.Close()
+	gate := newGateStub()
+	marked := apipolicy.WithMessage(t.Context(), gate)
+
+	errc := make(chan error, 1)
+	go func() {
+		_, err := c.LocalizedItem(marked, 1, []types.Locale{types.EnLocale})
+		errc <- err
+	}()
+	<-entered
+	gate.setOpen()
+	select {
+	case err := <-errc:
+		if !errors.Is(err, apipolicy.ErrSkipped) {
+			t.Fatalf("err = %v, want ErrSkipped", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the waiter was not released by the gate opening")
+	}
+
+	close(release)
+	deadline := time.Now().Add(5 * time.Second)
+	for len(c.unloadedLocales([]types.Locale{types.EnLocale})) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the fetch did not fill the cache")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("fetches = %d, want 1", calls.Load())
+	}
+}
