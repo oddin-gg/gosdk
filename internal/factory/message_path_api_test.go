@@ -54,6 +54,7 @@ type apiCtl struct {
 	tournaments     atomic.Int32 // GET .../tournaments/<id>/info
 	summaries       atomic.Int32 // GET .../sport_events/<id>/summary
 	all             atomic.Int32 // every request except the producer catalog
+	inFlight        atomic.Int32 // requests the server has not answered yet
 	// catalog, when set, is served as the market description catalog.
 	catalog atomic.Pointer[string]
 	// failPlayers fails only the player profile endpoint with a server
@@ -101,6 +102,8 @@ func newTimedMessagePathRig(t *testing.T, tm rigTiming) *messagePathRig {
 			return
 		}
 		ctl.all.Add(1)
+		ctl.inFlight.Add(1)
+		defer ctl.inFlight.Add(-1)
 		if ctl.hanging.Load() {
 			if strings.Contains(r.URL.Path, "/summary") {
 				ctl.summaries.Add(1)
@@ -245,6 +248,28 @@ func (r *messagePathRig) buildEvent(t *testing.T, eventNum int) interface{} {
 		t.Fatalf("BuildMessage returned %T", out)
 	}
 	return oc.event
+}
+
+// settle waits until the server holds no request of the setup and the
+// breaker is closed. A flight the setup started outlives a setup message
+// that ran out of time, and its healthy answer closes the breaker whenever
+// it lands; a test that watches the breaker starts after it.
+func (r *messagePathRig) settle(t *testing.T) {
+	t.Helper()
+	waitFor(t, "the setup's requests to end", func() bool {
+		return r.ctl.inFlight.Load() == 0 && !r.api.Breaker().Open()
+	})
+}
+
+// tripped reports whether the breaker has opened since opened was taken from
+// Breaker().Opened(), even if a healthy answer has closed it again since.
+func tripped(opened <-chan struct{}) bool {
+	select {
+	case <-opened:
+		return true
+	default:
+		return false
+	}
 }
 
 // waitFor polls cond until it holds. The bound is generous on purpose: it
@@ -793,6 +818,8 @@ func TestMessagePath_AllMarketMessageTypes_HangingNameLookupIsBoundedByTheMessag
 				t.Fatal("setup: event not built from a healthy API")
 			}
 			r.ctl.descriptionDelay.Store(int64(time.Hour))
+			r.settle(t)
+			opened := r.api.Breaker().Opened()
 
 			m := oddsChangeFor(99)
 			m.Message = tc.msg()
@@ -807,7 +834,7 @@ func TestMessagePath_AllMarketMessageTypes_HangingNameLookupIsBoundedByTheMessag
 			if n := tc.markets(out); n != 1 {
 				t.Fatalf("delivered markets = %d, want 1", n)
 			}
-			if !r.api.Breaker().Open() {
+			if !tripped(opened) {
 				t.Fatal("a name lookup that waited the whole message timeout did not trip the breaker")
 			}
 		})

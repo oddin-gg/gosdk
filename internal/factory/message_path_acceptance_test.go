@@ -125,12 +125,16 @@ func TestAcceptance_CatalogSlowerThanTheTimeout_NamesComeWithTheNextMessages(t *
 	c := nameCatalog
 	r.ctl.catalog.Store(&c)
 	r.ctl.descriptionDelay.Store(int64(3 * timeout))
+	r.settle(t)
 	before := r.ctl.descriptions.Load() // the event's own description requests
+	opened := r.api.Breaker().Opened()
 
 	if name, ok := r.marketName(t, 99); ok {
 		t.Fatalf("first message has the name %q, want none: the catalog is slower than its timeout", name)
 	}
-	if !r.api.Breaker().Open() {
+	// The trip is checked on the opening, not on the state: an answer that
+	// lands after the trip closes the breaker again, as it should.
+	if !tripped(opened) {
 		t.Fatal("the message that waited its whole timeout did not trip the breaker")
 	}
 
