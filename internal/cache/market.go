@@ -382,7 +382,9 @@ func (m *MarketDescriptionCache) MarketDescriptionByID(
 		// moments ago) and a later read, or a getter that asks meanwhile,
 		// gets the fresh rows. The locales inside refreshFailedAt are not in
 		// missing, so a failing catalog is not retried per message either.
-		if lru.SkippedByGate(ctx) == nil {
+		// A message that is already cancelled reads the stale catalog too
+		// but starts no request.
+		if ctx.Err() == nil && lru.SkippedByGate(ctx) == nil {
 			m.refreshInBackground(missing)
 		}
 		return entry, nil

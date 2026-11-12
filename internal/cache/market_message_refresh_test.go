@@ -1,6 +1,8 @@
 package cache
 
 import (
+	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -35,6 +37,47 @@ func TestMarketDescriptionCache_MessageReadsAStaleCatalogAtOnce(t *testing.T) {
 		t.Fatalf("the message read took %v, it must not wait for the refresh", d)
 	}
 	waitFor(t, "the background refresh to reach the server", func() bool { return srv.bulkHits.Load() == 2 })
+}
+
+// A message that is already cancelled still reads the stale catalog, but it
+// starts no refresh and so sends no catalog request.
+func TestMarketDescriptionCache_CancelledMessageStartsNoRefresh(t *testing.T) {
+	srv := newMarketSrv(t, bulkCatalogWithStaticVariants)
+	mc, ctx := newMarketCacheForTest(t, srv)
+	mc.catalogTTL = 50 * time.Millisecond
+	locales := []types.Locale{types.EnLocale}
+	if _, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), locales); err != nil {
+		t.Fatalf("seed lookup: %v", err)
+	}
+	time.Sleep(80 * time.Millisecond)
+
+	// A refresh that wrongly started would block on the server and hold its
+	// flight, so the probe below could not become the starter of that key.
+	hold := make(chan struct{})
+	srv.hold.Store(&hold)
+	msgCtx, cancel := context.WithCancel(apipolicy.WithMessage(ctx, newGateStub(), apipolicy.MessageTimeout))
+	cancel()
+	entry, err := mc.MarketDescriptionByID(msgCtx, 9, types.None[string](), locales)
+	if err != nil || entry == nil {
+		t.Fatalf("cancelled message read = %v, %v; want the stale entry", entry, err)
+	}
+
+	probeRan := make(chan struct{})
+	key := fmt.Sprintf("%d|*|%s", mc.flightGen.Load(), types.EnLocale)
+	f := mc.sf.Go(key, func() (any, error) {
+		close(probeRan)
+		return nil, nil
+	})
+	close(hold)
+	<-f.Done()
+	select {
+	case <-probeRan:
+	default:
+		t.Fatal("a refresh flight was running for the catalog after a cancelled message read")
+	}
+	if got := srv.bulkHits.Load(); got != 1 {
+		t.Fatalf("bulk hits = %d, want 1 (the seed only)", got)
+	}
 }
 
 // Concurrent stale reads of messages start one refresh between them.
