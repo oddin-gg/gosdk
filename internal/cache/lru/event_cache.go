@@ -318,9 +318,18 @@ func (c *EventCache[K, L, T]) get(ctx context.Context, key K, locales []L, clear
 			//
 			// There is one flight per key, so no other flight admits an entry
 			// for it in the meantime; the flights that overlap across a Clear
-			// or a Purge are the ones discarded here.
+			// or a Purge are the ones discarded here. What is left is the
+			// merge base itself: `updated` carries the locales of `existing`,
+			// so if that entry expired, was evicted or was replaced while the
+			// fetch ran, admitting it would give its stale locales a fresh
+			// lifetime. The load is discarded then and the caller's retry
+			// merges onto whatever the cache holds now.
 			c.clearMu.Lock()
 			cleared := c.clearedAt[key].After(started) || c.purgedAt.After(started) || base.Err() != nil
+			if !cleared {
+				cur, curOK := c.lru.Peek(key)
+				cleared = curOK != hadExisting || (curOK && cur != existing)
+			}
 			if cleared {
 				c.clearMu.Unlock()
 				return zero, errClearedDuringLoad
