@@ -244,20 +244,25 @@ func TestFlights_ForgetDetachesARunningFlight(t *testing.T) {
 func TestFlights_SharedResultReachesEveryWaiter(t *testing.T) {
 	var sf Flights
 	release := make(chan struct{})
-	var runs atomic.Int32
+	var runs, joined atomic.Int32
 	var wg sync.WaitGroup
 	for range 5 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			v, err := sf.Do("k", func() (any, error) { runs.Add(1); <-release; return 9, nil })
+			// Go returns once the caller holds the flight, whether it started
+			// it or joined a running one; only then does the caller count.
+			f := sf.Go("k", func() (any, error) { runs.Add(1); <-release; return 9, nil })
+			joined.Add(1)
+			<-f.Done()
+			v, err := f.Result()
 			if v != 9 || err != nil {
 				t.Errorf("v=%v err=%v", v, err)
 			}
 		}()
 	}
-	waitFor(t, "one flight", func() bool { return runs.Load() == 1 })
-	time.Sleep(10 * time.Millisecond)
+	// The flight is held until every caller has joined it.
+	waitFor(t, "every caller to join the flight", func() bool { return joined.Load() == 5 })
 	close(release)
 	wg.Wait()
 	if runs.Load() != 1 {
