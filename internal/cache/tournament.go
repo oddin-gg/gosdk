@@ -50,6 +50,9 @@ type TournamentCache struct {
 	// owning manager); iconSF coalesces concurrent fetches of one icon.
 	lifetime context.Context
 	iconSF   lru.Flights
+	// iconsClosed (guarded by iconMu) makes every later icon flight store a
+	// no-op; closeIcons sets it.
+	iconsClosed bool
 }
 
 // LocalizedTournament holds tournament data; mu guards every field.
@@ -334,18 +337,34 @@ func (t *TournamentCache) TournamentIcon(ctx context.Context, id types.URN, loca
 		if err != nil {
 			return nil, err
 		}
+		if iconCommitGateHook != nil {
+			iconCommitGateHook()
+		}
 		// Store under the parent entry's clear-tombstone lock: a
 		// ClearCacheItem that landed after this fetch began must not have
 		// its icon resurrected by us — StoreSide is atomic with Clear, so
 		// there is no check-to-write window for a Clear to slip through.
 		// The callers still get the fresh value.
+		// Once the owner's lifetime ended the store is a no-op; the check
+		// and the store are one step under iconMu, which closeIcons (called
+		// by Close right after it cancelled the lifetime) takes too.
 		t.lru.StoreSide(id, fetchStarted, func() {
 			t.iconMu.Lock()
+			defer t.iconMu.Unlock()
+			if t.iconsClosed || (t.lifetime != nil && t.lifetime.Err() != nil) {
+				return
+			}
 			t.icons[id] = data.IconPath
-			t.iconMu.Unlock()
 		})
 		return data.IconPath, nil
 	})
+}
+
+// closeIcons makes every later icon flight store a no-op.
+func (t *TournamentCache) closeIcons() {
+	t.iconMu.Lock()
+	t.iconsClosed = true
+	t.iconMu.Unlock()
 }
 
 func (t *TournamentCache) loadIcon(id types.URN) (*string, bool) {

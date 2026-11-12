@@ -68,6 +68,14 @@ func (m Manager) CloseCtx(ctx context.Context) bool {
 	if m.lifeCancel != nil {
 		m.lifeCancel()
 	}
+	// An icon flight that downloaded before the cancellation must not store
+	// after Close returns.
+	if m.CompetitorCache != nil {
+		m.CompetitorCache.closeIcons()
+	}
+	if m.TournamentCache != nil {
+		m.TournamentCache.closeIcons()
+	}
 	return m.LocalizedStaticMatchStatus.CloseCtx(ctx)
 }
 

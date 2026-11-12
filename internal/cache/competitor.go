@@ -56,6 +56,9 @@ type CompetitorCache struct {
 	// owning manager); iconSF coalesces concurrent fetches of one icon.
 	lifetime context.Context
 	iconSF   lru.Flights
+	// iconGate orders the stores of icon flights against closeIcons.
+	iconGate    sync.Mutex
+	iconsClosed bool
 }
 
 // loadIcon returns (icon, true) if the URN has a recorded icon (which may
@@ -75,6 +78,31 @@ func (c *CompetitorCache) loadIcon(id types.URN) (*string, bool) {
 func (c *CompetitorCache) storeIcon(id types.URN, icon *string) {
 	c.icons.Store(id, icon)
 }
+
+// storeFlightIcon is the store of an icon flight. It is a no-op once the
+// owner's lifetime ended: the cache is quiescent after Close. The check and
+// the store are one step under iconGate, which closeIcons (called by Close
+// right after it cancelled the lifetime) takes too, so no store can follow a
+// Close that has returned.
+func (c *CompetitorCache) storeFlightIcon(id types.URN, icon *string) {
+	c.iconGate.Lock()
+	defer c.iconGate.Unlock()
+	if c.iconsClosed || (c.lifetime != nil && c.lifetime.Err() != nil) {
+		return
+	}
+	c.storeIcon(id, icon)
+}
+
+// closeIcons makes every later icon flight store a no-op.
+func (c *CompetitorCache) closeIcons() {
+	c.iconGate.Lock()
+	c.iconsClosed = true
+	c.iconGate.Unlock()
+}
+
+// iconCommitGateHook is a test-only seam invoked by an icon flight after
+// its download and before its store. Production builds leave it nil.
+var iconCommitGateHook func()
 
 func (c *CompetitorCache) deleteIcon(id types.URN) {
 	c.icons.Delete(id)
@@ -270,12 +298,15 @@ func (c *CompetitorCache) CompetitorIcon(ctx context.Context, id types.URN, loca
 			return nil, fmt.Errorf("fetch competitor icon %s/%s: %w", id.ToString(), locale, err)
 		}
 
+		if iconCommitGateHook != nil {
+			iconCommitGateHook()
+		}
 		// Store under the parent entry's clear-tombstone lock so a
 		// ClearCacheItem racing this fetch isn't undone for the icon —
 		// StoreSide is atomic with Clear, no check-to-write window.
 		// The callers still get the fresh value.
 		c.lru.StoreSide(id, fetchStarted, func() {
-			c.storeIcon(id, data.IconPath)
+			c.storeFlightIcon(id, data.IconPath)
 		})
 		return data.IconPath, nil
 	})
