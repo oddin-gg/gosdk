@@ -193,6 +193,7 @@ func (r *registrations) wait(t *testing.T, want int32) {
 func TestStartCoalesced_OneFlightWithoutWaiting(t *testing.T) {
 	var sf Flights
 	var calls atomic.Int32
+	regs := trackRegistrations(t)
 	release := make(chan struct{})
 	fn := func(ctx context.Context) (int, error) {
 		calls.Add(1)
@@ -207,7 +208,8 @@ func TestStartCoalesced_OneFlightWithoutWaiting(t *testing.T) {
 		v, _ := LoadCoalesced(t.Context(), t.Context(), &sf, "k", fn)
 		got <- v
 	}()
-	time.Sleep(50 * time.Millisecond)
+	// StartCoalesced registers nobody: the one registration is the waiter's.
+	regs.wait(t, 1)
 	close(release)
 	if v := <-got; v != 7 {
 		t.Fatalf("waiter got %d, want the flight's 7", v)
