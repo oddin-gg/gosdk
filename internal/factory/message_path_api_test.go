@@ -710,18 +710,18 @@ func TestMessagePath_MarketLookupNotFound_DoesNotOpenTheBreaker(t *testing.T) {
 
 func dynMarketSpec() *string { s := "variant=od:dynamic_outcomes:99"; return &s }
 
-// Every market-bearing message type resolves names under the message timeout
-// and gate: with a cached event and a failing description endpoint the
-// message is delivered, the failure opens the breaker, and the next message
-// makes no request.
-func TestMessagePath_AllMarketMessageTypes_WaitUnderTheMessageTimeoutAndGate(t *testing.T) {
+type marketMessageCase struct {
+	name    string
+	msg     func() types.BasicMessage
+	markets func(out any) int
+}
+
+// marketMessageCases is one message of each market-bearing type, each with a
+// dynamic market of event 99.
+func marketMessageCases() []marketMessageCase {
 	attrs := feedXML.MessageAttributes{Product: 1, EventID: "od:match:99"}
 	mkAttrs := func() feedXML.MarketAttributes { return feedXML.MarketAttributes{ID: 3, Specifiers: dynMarketSpec()} }
-	cases := []struct {
-		name    string
-		msg     func() types.BasicMessage
-		markets func(out any) int
-	}{
+	return []marketMessageCase{
 		{"BetSettlement", func() types.BasicMessage {
 			return &feedXML.BetSettlement{ProductID: 1, EventID: "od:match:99", Markets: feedXML.MarketsWrapper{
 				Markets: []*feedXML.MarketWithOutcome{feedMarket(3, *dynMarketSpec(), "1")},
@@ -737,7 +737,14 @@ func TestMessagePath_AllMarketMessageTypes_WaitUnderTheMessageTimeoutAndGate(t *
 			return &feedXML.RollbackBetCancel{MessageAttributes: attrs, Markets: []feedXML.RollbackBetCancelMarket{{MarketAttributes: mkAttrs()}}}
 		}, func(out any) int { return len(out.(rollbackBetCancelImpl).markets) }},
 	}
-	for _, tc := range cases {
+}
+
+// Every market-bearing message type resolves names under the message timeout
+// and gate: with a cached event and a failing description endpoint the
+// message is delivered, the failure opens the breaker, and the next message
+// makes no request.
+func TestMessagePath_AllMarketMessageTypes_WaitUnderTheMessageTimeoutAndGate(t *testing.T) {
+	for _, tc := range marketMessageCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newMessagePathRig(t)
 			if ev := r.buildEvent(t, 99); ev == nil {
@@ -766,6 +773,42 @@ func TestMessagePath_AllMarketMessageTypes_WaitUnderTheMessageTimeoutAndGate(t *
 			build()
 			if got := r.ctl.descriptions.Load(); got != settled {
 				t.Fatalf("a second message made %d more description request(s) while the breaker was open", got-settled)
+			}
+		})
+	}
+}
+
+// A name lookup that hangs is bounded by the message timeout for every
+// market-bearing message type: the build returns shortly after the timeout,
+// the market is delivered without a name, and the timeout trips the breaker.
+func TestMessagePath_AllMarketMessageTypes_HangingNameLookupIsBoundedByTheMessageTimeout(t *testing.T) {
+	const timeout = 200 * time.Millisecond
+	// Without the timeout the lookup would wait an hour; the slack only
+	// absorbs a loaded machine.
+	const bound = timeout + 3*time.Second
+	for _, tc := range marketMessageCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newTimedMessagePathRig(t, rigTiming{messageTimeout: timeout, breakerOpenFor: time.Minute})
+			if ev := r.buildEvent(t, 99); ev == nil {
+				t.Fatal("setup: event not built from a healthy API")
+			}
+			r.ctl.descriptionDelay.Store(int64(time.Hour))
+
+			m := oddsChangeFor(99)
+			m.Message = tc.msg()
+			start := time.Now()
+			out, err := r.factory.BuildMessage(t.Context(), m)
+			if err != nil {
+				t.Fatalf("BuildMessage: %v", err)
+			}
+			if elapsed := time.Since(start); elapsed > bound {
+				t.Fatalf("build took %v, want about the message timeout (%v)", elapsed, timeout)
+			}
+			if n := tc.markets(out); n != 1 {
+				t.Fatalf("delivered markets = %d, want 1", n)
+			}
+			if !r.api.Breaker().Open() {
+				t.Fatal("a name lookup that waited the whole message timeout did not trip the breaker")
 			}
 		})
 	}
