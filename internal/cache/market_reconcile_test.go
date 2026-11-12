@@ -1375,9 +1375,9 @@ func TestMarketDescriptionCache_EmptyOutcomesContainerNotCovered(t *testing.T) {
 }
 
 // TestMarketDescriptionCache_ReconcileSuppressedByMidFlightClear proves
-// the invalidation-race guard on reconcileBulk (Fixpoint i14: the
-// nearest existing test passed whether or not the guard existed,
-// because its response omitted nothing). A response fetched BEFORE a
+// the invalidation-race guard on reconcileBulk (a response that omits
+// nothing passes with or without the guard, so this one omits a market).
+// A response fetched BEFORE a
 // ClearCacheItem carries a pre-clear view — removals driven by it are
 // as suspect as its rows, so a market it omits must NOT be pruned; the
 // locale mark stays unset so the next read reconciles from fresh data.

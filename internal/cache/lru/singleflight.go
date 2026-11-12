@@ -2,11 +2,8 @@ package lru
 
 import (
 	"context"
-	"errors"
 	"sync/atomic"
 	"time"
-
-	"golang.org/x/sync/singleflight"
 
 	"github.com/oddin-gg/gosdk/internal/apipolicy"
 )
@@ -25,8 +22,9 @@ import (
 // (deliberate slow-loader stress tests) override this directly.
 var LoadTimeout = 60 * time.Second
 
-// LoadCoalesced runs `fn` under singleflight keyed on `sfKey`, coalescing
-// concurrent callers with identical keys into a single in-flight load.
+// LoadCoalesced runs `fn` as a flight (see Flights) keyed on `sfKey`,
+// coalescing concurrent callers with identical keys into a single in-flight
+// load.
 //
 // Cancellation semantics:
 //   - If the caller's ctx is already done, returns ctx.Err() immediately
@@ -51,12 +49,15 @@ var LoadTimeout = 60 * time.Second
 func LoadCoalesced[T any](
 	ctx context.Context,
 	lifetime context.Context,
-	sf *singleflight.Group,
+	sf *Flights,
 	sfKey string,
 	fn func(context.Context) (T, error),
 ) (T, error) {
 	var zero T
 	if err := ctx.Err(); err != nil {
+		return zero, err
+	}
+	if err := SkippedByGate(ctx); err != nil {
 		return zero, err
 	}
 	// base carries no timer/cancel of its own — building it out here is
@@ -66,66 +67,60 @@ func LoadCoalesced[T any](
 	// timer per coalesced waiter until the 60s timeout fired.
 	base := lifetime
 	if base == nil {
-		base = context.WithoutCancel(ctx)
+		// Not the caller's message mark either: what the flight loads is
+		// not the message path's.
+		base = apipolicy.WithoutGate(context.WithoutCancel(ctx))
 	}
-	// The call policy of the caller rides along (see apipolicy): flights of
-	// different policies are separate, and the load keeps its caller's.
-	//
-	// A flight runs on its STARTER's budget, and the key only tells the
-	// mode, so a caller that joined a flight can get the starter's budget
-	// running out (a deadline error) while its own budget is untouched. It
-	// then asks again once, under its own budget: it starts a new flight or
-	// joins a newer one. Only the message modes retry (a public getter's
-	// load has no per-message budget), and only a joiner: the starter's
-	// error is its own.
-	for attempt := 0; ; attempt++ {
-		var started atomic.Bool
-		ch := sf.DoChan(sfKey+apipolicy.Suffix(ctx), func() (any, error) {
-			started.Store(true)
-			loadCtx, cancel := context.WithTimeout(base, LoadTimeout)
-			defer cancel()
-			return fn(apipolicy.Carry(loadCtx, ctx))
-		})
-		FlightRegistered()
-		select {
-		case r := <-ch:
-			if r.Err != nil {
-				if attempt == 0 && !started.Load() && JoinerMayRetry(ctx, r.Err) {
-					continue
-				}
-				return zero, r.Err
-			}
-			if r.Val == nil {
-				return zero, nil
-			}
-			return r.Val.(T), nil
-		case <-ctx.Done():
-			return zero, ctx.Err()
-		}
+	// The flight does not carry the caller's message mark: it runs for
+	// whoever asks, with the getters' retries and timeouts, and each
+	// caller bounds only its own wait. A caller on the message path also
+	// stops waiting once the gate opens; the flight goes on and fills the
+	// cache for later callers.
+	f := sf.Go(sfKey, func() (any, error) {
+		loadCtx, cancel := context.WithTimeout(base, LoadTimeout)
+		defer cancel()
+		return fn(loadCtx)
+	})
+	FlightRegistered()
+	val, err := f.Await(ctx)
+	if err != nil {
+		return zero, err
 	}
+	if val == nil {
+		return zero, nil
+	}
+	return val.(T), nil
 }
 
-// JoinerMayRetry reports whether a caller that joined a flight should ask
-// again: the flight ended on a deadline (the starter's budget), while this
-// caller's own context is alive and, under a message mode, its own budget is
-// not spent. Every loader that coalesces on a flight and serves the message
-// path uses it, so the rule stays in one place.
-func JoinerMayRetry(ctx context.Context, err error) bool {
-	if !errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
-		return false
+// StartCoalesced starts the flight of key as a flight without waiting
+// for it, or does nothing more than join the one that is running. It is the
+// background refresh of a value the caller can serve stale: the flight runs
+// under `lifetime` (the owning cache's, so Close cancels it) with the same
+// LoadTimeout as LoadCoalesced, carries no message mark, and its result is
+// dropped: fn stores what it loads. No goroutine waits for it.
+func StartCoalesced[T any](
+	lifetime context.Context,
+	sf *Flights,
+	sfKey string,
+	fn func(context.Context) (T, error),
+) {
+	base := lifetime
+	if base == nil {
+		// Standalone/test use: no owner to cancel it, and no caller to inherit from.
+		base = context.Background() //nolint:contextcheck // deliberate: a background refresh has no caller context
 	}
-	if apipolicy.ModeOf(ctx) == apipolicy.Default {
-		return false
-	}
-	remaining, ok := apipolicy.Remaining(ctx)
-	return ok && remaining > 0
+	sf.Go(sfKey, func() (any, error) {
+		loadCtx, cancel := context.WithTimeout(base, LoadTimeout)
+		defer cancel()
+		return fn(loadCtx)
+	})
 }
 
 // flightHook is a test-only seam: see SetFlightRegisteredHook.
 var flightHook atomic.Pointer[func()]
 
 // FlightRegistered is called by every coalescing loader right after it
-// registered on a flight (as its starter or as a joiner), before it waits.
+// registered on a flight (as its starter or as another waiter), before it waits.
 // It does nothing in production.
 func FlightRegistered() {
 	if h := flightHook.Load(); h != nil {
@@ -135,7 +130,7 @@ func FlightRegistered() {
 
 // SetFlightRegisteredHook installs fn to be called by FlightRegistered and
 // returns the function that removes it. Tests use it to release a gated
-// flight only once a joiner is certainly parked on it, instead of sleeping
+// flight only once a waiter is certainly parked on it, instead of sleeping
 // and hoping it got there.
 func SetFlightRegisteredHook(fn func()) (restore func()) {
 	flightHook.Store(&fn)

@@ -16,7 +16,7 @@ type BetStop struct {
 // GetEventID returns the event id the payload itself carries — the
 // route/payload identity cross-check and feed-driven cache invalidation
 // both key on this accessor; its absence silently exempted bet_stop
-// from both (Codex P2).
+// from both.
 func (b BetStop) GetEventID() string {
 	return b.MessageAttributes.EventID
 }

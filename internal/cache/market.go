@@ -10,8 +10,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"golang.org/x/sync/singleflight"
-
 	"github.com/oddin-gg/gosdk/internal/api"
 	data "github.com/oddin-gg/gosdk/internal/api/xml"
 	"github.com/oddin-gg/gosdk/internal/apipolicy"
@@ -128,7 +126,7 @@ func variantKey(marketID int, variant types.Optional[string]) CompositeKey {
 //
 // Concurrent-load safety (v2.24): replaces a single global loadMu —
 // which serialized every concurrent loader regardless of key/locale —
-// with a singleflight.Group. Bulk catalog loads (including by-id misses,
+// with a lru.Flights. Bulk catalog loads (including by-id misses,
 // which resolve through the bulk endpoint) share the "*|<locale>" key;
 // dynamic-variant loads get a per-(id,variant,locale) key. Different
 // keys load in parallel; concurrent callers for the same key share a
@@ -211,16 +209,6 @@ type MarketDescriptionCache struct {
 	// once per window. First loads and bulk reads are NOT gated: they
 	// have no stale data to serve, so they must attempt and report.
 	refreshFailedAt map[types.Locale]time.Time
-	// msgRefreshFailedAt is the message path's own backoff (guarded by
-	// mu, window refreshBackoff). A refresh of the message path that
-	// failed, or ran out of its short budget, sets it; only message-mode
-	// reads honour it. Without it, once the catalog expired and the API
-	// is slow, every message's name resolution would wait its whole
-	// budget for the same refresh and then serve the stale entry, so each
-	// message would hold its session for the full budget. The budget
-	// running out does NOT set refreshFailedAt: it says the budget was
-	// short, not that the longer timeouts of a public getter fail.
-	msgRefreshFailedAt map[types.Locale]time.Time
 	// refreshBackoff is defaultRefreshBackoff, a field for tests.
 	refreshBackoff time.Duration
 
@@ -266,7 +254,7 @@ type MarketDescriptionCache struct {
 	// in-flight loads.
 	flightGen atomic.Uint64
 
-	sf singleflight.Group
+	sf lru.Flights
 }
 
 // marketTombstonePruneLen is the clearedAt size beyond which
@@ -387,6 +375,19 @@ func (m *MarketDescriptionCache) MarketDescriptionByID(
 			missing = m.expiredLocales(ctx, locales)
 			staleOnly = len(missing) > 0
 		}
+	}
+	if staleOnly && apipolicy.GateOf(ctx) != nil {
+		// A message does not wait for the refresh of a catalog it can read
+		// stale: the refresh runs in the background (unless the API failed
+		// moments ago) and a later read, or a getter that asks meanwhile,
+		// gets the fresh rows. The locales inside refreshFailedAt are not in
+		// missing, so a failing catalog is not retried per message either.
+		// A message that is already cancelled reads the stale catalog too
+		// but starts no request.
+		if ctx.Err() == nil && lru.SkippedByGate(ctx) == nil {
+			m.refreshInBackground(missing)
+		}
+		return entry, nil
 	}
 	if len(missing) > 0 {
 		if err := m.loadOne(ctx, &marketID, variant, missing); err != nil {
@@ -554,11 +555,8 @@ func (m *MarketDescriptionCache) localeDataFreshLocked(locale types.Locale) bool
 // upstream outage the warm path keeps serving the stale-but-complete
 // entry and retries the refresh at most once per refreshBackoff. Used
 // by the warm by-id path so a bulk-provenance hit re-loads once its
-// locale's catalog window lapses (see MarketDescriptionByID). A caller
-// under a message mode also skips the locales inside the message path's
-// own backoff (msgRefreshFailedAt).
+// locale's catalog window lapses (see MarketDescriptionByID).
 func (m *MarketDescriptionCache) expiredLocales(ctx context.Context, requested []types.Locale) []types.Locale {
-	msg := apipolicy.ModeOf(ctx) != apipolicy.Default
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	var expired []types.Locale
@@ -570,34 +568,9 @@ func (m *MarketDescriptionCache) expiredLocales(ctx context.Context, requested [
 			m.refreshBackoff > 0 && time.Since(failedAt) < m.refreshBackoff {
 			continue
 		}
-		if failedAt, ok := m.msgRefreshFailedAt[l]; ok && msg &&
-			m.refreshBackoff > 0 && time.Since(failedAt) < m.refreshBackoff {
-			continue
-		}
 		expired = append(expired, l)
 	}
 	return expired
-}
-
-// msgBackoffGatesColdLoad reports whether a message-mode read of a locale
-// whose catalog is not loaded must not send the catalog request: the
-// message path's own backoff (msgRefreshFailedAt) is running. Without it
-// the backoff covered only the warm, expired refresh, and a cold read (no
-// WithPreloadLocales, or after a clear) went on sending the request and
-// waiting out its budget for every message that needs names, whenever
-// the download is slower than that budget. Public getters never wait on
-// it: they use the longer timeouts and have no message to hold up.
-func (m *MarketDescriptionCache) msgBackoffGatesColdLoad(ctx context.Context, l types.Locale) bool {
-	if apipolicy.ModeOf(ctx) == apipolicy.Default {
-		return false
-	}
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	if m.localeLoadedLocked(l) {
-		return false
-	}
-	failedAt, ok := m.msgRefreshFailedAt[l]
-	return ok && m.refreshBackoff > 0 && time.Since(failedAt) < m.refreshBackoff
 }
 
 // marketCommitGateHook is a test-only seam invoked by a bulk flight
@@ -642,9 +615,6 @@ func (m *MarketDescriptionCache) loadOne(ctx context.Context, marketID *int, var
 		// the next bulk call downloaded the catalog yet again.
 		isDynamicVariant := marketID != nil && variantStr != "" && utils.IsMarketVariantWithDynamicOutcomes(variantStr)
 		loc := locale
-		if !isDynamicVariant && m.msgBackoffGatesColdLoad(ctx, loc) {
-			return fmt.Errorf("market catalog %s: %w (the message path's last catalog load failed)", loc, apipolicy.ErrSkipped)
-		}
 		for {
 			gen := m.flightGen.Load()
 			var sfKey string
@@ -654,175 +624,8 @@ func (m *MarketDescriptionCache) loadOne(ctx context.Context, marketID *int, var
 				sfKey = fmt.Sprintf("%d|*|%s", gen, locale)
 			}
 
-			_, err := lru.LoadCoalesced(ctx, m.lifetime, &m.sf, sfKey, func(loadCtx context.Context) (struct{}, error) {
-				// Stale-generation guard — see errStaleFlight for the
-				// register-vs-clear window this closes.
-				if m.flightGen.Load() != gen {
-					return struct{}{}, errStaleFlight
-				}
-				// Snapshot the flight's start BEFORE fetching: upsert and
-				// the loadedLocales mark below are suppressed if a Clear
-				// lands after this point (see lastClearAt).
-				loadStarted := time.Now()
-				// Double-check inside the critical region.
-				if !isDynamicVariant && m.localeLoaded(loc) {
-					return struct{}{}, nil
-				}
-				if !isDynamicVariant {
-					// Register this locale as in flight for the duration of
-					// the fetch+merge, so concurrent other-locale merges
-					// don't mistake its expired mark for staleness and
-					// sweep the rows this flight is writing (see
-					// loadingLocales).
-					m.mu.Lock()
-					m.loadingLocales[loc]++
-					m.mu.Unlock()
-					defer func() {
-						m.mu.Lock()
-						if m.loadingLocales[loc]--; m.loadingLocales[loc] <= 0 {
-							delete(m.loadingLocales, loc)
-						}
-						m.mu.Unlock()
-					}()
-				}
-				var (
-					descriptions []data.MarketDescription
-					err          error
-				)
-				if isDynamicVariant {
-					descriptions, err = m.apiClient.FetchMarketDescriptionsWithDynamicOutcomes(loadCtx, *marketID, variantStr, loc)
-				} else {
-					descriptions, err = m.apiClient.FetchMarketDescriptions(loadCtx, loc)
-				}
-				if err != nil {
-					// A request that was never sent (the message path skips
-					// calls to an API that just failed, or finds its shared
-					// budget already spent by earlier requests of the build)
-					// says nothing about the API: recording it would hold
-					// back the refresh of every public by-id read for the
-					// whole backoff window. The same holds for a request that
-					// was sent and ran out of the message path's short budget:
-					// that says the budget was short, not that the API fails
-					// the longer timeouts of a public getter.
-					viaMessage := apipolicy.ModeOf(loadCtx) != apipolicy.Default
-					budgetRanOut := viaMessage && errors.Is(err, context.DeadlineExceeded)
-					notSent := errors.Is(err, apipolicy.ErrSkipped) || errors.Is(err, apipolicy.ErrBudgetSpent)
-					if !isDynamicVariant && viaMessage && !notSent {
-						// The message path's own backoff (see
-						// msgRefreshFailedAt) also covers its budget
-						// running out.
-						m.mu.Lock()
-						m.msgRefreshFailedAt[loc] = time.Now()
-						m.mu.Unlock()
-					}
-					if !isDynamicVariant && !budgetRanOut && !notSent {
-						// Feed the warm-path retry backoff (see
-						// refreshFailedAt); cleared again on the next
-						// successful commit below.
-						m.mu.Lock()
-						m.refreshFailedAt[loc] = time.Now()
-						m.mu.Unlock()
-					}
-					return struct{}{}, fmt.Errorf("fetch market description %s locale %s: %w", sfKey, loc, err)
-				}
-
-				// Flight-level monotonic gate (see fetchCursor): enter the
-				// store phase only if no newer-started flight for this
-				// locale has begun committing; advancing the cursor here
-				// makes every store of any OLDER flight — including one
-				// already mid-commit — reject from now on. A superseded
-				// flight returns errStaleFlight so its callers re-register
-				// under the current generation and JOIN the winning flight
-				// (singleflight completes only after the winner's full
-				// commit, mark included). Returning success here instead
-				// let the superseded caller re-read MID-commit state — for
-				// a cleared key the winner had not yet re-created, that
-				// read reported a wrong transient ErrItemNotFound for a
-				// market that exists upstream.
-				if !isDynamicVariant {
-					m.mu.Lock()
-					superseded := m.fetchCursor[loc].After(loadStarted)
-					if !superseded && loadStarted.After(m.fetchCursor[loc]) {
-						m.fetchCursor[loc] = loadStarted
-					}
-					m.mu.Unlock()
-					if superseded {
-						return struct{}{}, errStaleFlight
-					}
-					if marketCommitGateHook != nil {
-						marketCommitGateHook(loc)
-					}
-				}
-
-				// Track every key the response carries (malformed rows
-				// included — a broken row still proves the market exists
-				// upstream) so the bulk reconcile below only removes
-				// markets genuinely absent from the fresh catalog.
-				var seen map[CompositeKey]struct{}
-				if !isDynamicVariant {
-					seen = make(map[CompositeKey]struct{}, len(descriptions))
-				}
-				for k := range descriptions {
-					if seen != nil {
-						seen[variantKey(descriptions[k].ID, types.FromPtr(descriptions[k].Variant))] = struct{}{}
-					}
-					if err := m.upsert(descriptions[k], loc, loadStarted); err != nil {
-						// A malformed catalog row must not abort the whole
-						// locale load: pre-fix, one description without an
-						// <outcomes> block failed the load AFTER partial
-						// upserts, the locale was never marked loaded, and
-						// every subsequent access refetched the catalog and
-						// failed again — the entire market-description
-						// surface went unavailable over one bad row.
-						if m.logger != nil {
-							m.logger.WithError(err).
-								WithField("market_id", descriptions[k].ID).
-								WithField("locale", string(loc)).
-								Warn("cache: skipping malformed market description")
-						}
-						continue
-					}
-				}
-				if !isDynamicVariant {
-					// The bulk response is the complete catalog for this
-					// locale: markets it no longer carries must stop being
-					// served (the base map never expires on its own, so
-					// without this an upstream removal lingered for the
-					// process lifetime).
-					m.reconcileBulk(loc, seen, loadStarted)
-				}
-
-				// Only the bulk fetch counts as fully loading the locale.
-				// A single-id dynamic-variant fetch covers exactly that key.
-				// Skipped when a Clear raced this load — marking the locale
-				// loaded with pre-clear data would make bulk reads skip the
-				// refetch the Clear asked for; the next read reloads fresh.
-				if !isDynamicVariant {
-					m.mu.Lock()
-					if !m.lastClearAt.After(loadStarted) && !m.fetchCursor[loc].After(loadStarted) {
-						// Timestamped with the fetch's START, not its
-						// completion: the freshness window must cover the
-						// age of the DATA, not of the transfer. Also
-						// suppressed when a newer-started flight owns the
-						// locale (fetchCursor) — an older mark must not
-						// regress the newer flight's.
-						m.loadedLocales[loc] = loadStarted
-						delete(m.refreshFailedAt, loc)
-						delete(m.msgRefreshFailedAt, loc)
-					}
-					// A flight superseded MID-commit must not report
-					// success either — its remaining stores were rejected
-					// per row, so its callers would re-read the winner's
-					// partial state exactly like the store-phase-entry case
-					// above. Re-check and hand them to the winner.
-					lost := m.fetchCursor[loc].After(loadStarted)
-					m.mu.Unlock()
-					if lost {
-						return struct{}{}, errStaleFlight
-					}
-				}
-				return struct{}{}, nil
-			})
+			_, err := lru.LoadCoalesced(ctx, m.lifetime, &m.sf, sfKey,
+				m.catalogFlight(gen, sfKey, loc, marketID, variantStr, isDynamicVariant))
 			if errors.Is(err, errStaleFlight) {
 				continue // re-register under the fresh generation
 			}
@@ -833,6 +636,196 @@ func (m *MarketDescriptionCache) loadOne(ctx context.Context, marketID *int, var
 		}
 	}
 	return nil
+}
+
+// lifetimeEnded reports whether the owner's lifetime was cancelled. The
+// commit steps of a catalog flight call it under m.mu: a flight whose
+// download completed just before Close would otherwise resume afterwards
+// and write into a cache that Close declared quiescent. Same close-gate as
+// lru.EventCache's admission; Close does not take m.mu, so what remains is
+// the few instructions between the check and the store, as there.
+func (m *MarketDescriptionCache) lifetimeEnded() bool {
+	return m.lifetime != nil && m.lifetime.Err() != nil
+}
+
+// catalogFlight is the body of one catalog flight: the bulk download of a
+// locale (what every non-dynamic read resolves through) or the fetch of one
+// dynamic-outcome variant. loadOne runs it under LoadCoalesced for a caller
+// that waits for it; refreshInBackground starts it for none.
+func (m *MarketDescriptionCache) catalogFlight(
+	gen uint64,
+	sfKey string,
+	loc types.Locale,
+	marketID *int,
+	variantStr string,
+	isDynamicVariant bool,
+) func(context.Context) (struct{}, error) {
+	return func(loadCtx context.Context) (struct{}, error) {
+		// Stale-generation guard — see errStaleFlight for the
+		// register-vs-clear window this closes.
+		if m.flightGen.Load() != gen {
+			return struct{}{}, errStaleFlight
+		}
+		// Snapshot the flight's start BEFORE fetching: upsert and
+		// the loadedLocales mark below are suppressed if a Clear
+		// lands after this point (see lastClearAt).
+		loadStarted := time.Now()
+		// Double-check inside the critical region.
+		if !isDynamicVariant && m.localeLoaded(loc) {
+			return struct{}{}, nil
+		}
+		if !isDynamicVariant {
+			// Register this locale as in flight for the duration of
+			// the fetch+merge, so concurrent other-locale merges
+			// don't mistake its expired mark for staleness and
+			// sweep the rows this flight is writing (see
+			// loadingLocales).
+			m.mu.Lock()
+			m.loadingLocales[loc]++
+			m.mu.Unlock()
+			defer func() {
+				m.mu.Lock()
+				if m.loadingLocales[loc]--; m.loadingLocales[loc] <= 0 {
+					delete(m.loadingLocales, loc)
+				}
+				m.mu.Unlock()
+			}()
+		}
+		var (
+			descriptions []data.MarketDescription
+			err          error
+		)
+		if isDynamicVariant {
+			descriptions, err = m.apiClient.FetchMarketDescriptionsWithDynamicOutcomes(loadCtx, *marketID, variantStr, loc)
+		} else {
+			descriptions, err = m.apiClient.FetchMarketDescriptions(loadCtx, loc)
+		}
+		if err != nil {
+			if !isDynamicVariant {
+				// Feed the warm-path retry backoff (see
+				// refreshFailedAt); cleared again on the next
+				// successful commit below.
+				m.mu.Lock()
+				m.refreshFailedAt[loc] = time.Now()
+				m.mu.Unlock()
+			}
+			return struct{}{}, fmt.Errorf("fetch market description %s locale %s: %w", sfKey, loc, err)
+		}
+
+		// Flight-level monotonic gate (see fetchCursor): enter the
+		// store phase only if no newer-started flight for this
+		// locale has begun committing; advancing the cursor here
+		// makes every store of any OLDER flight — including one
+		// already mid-commit — reject from now on. A superseded
+		// flight returns errStaleFlight so its callers re-register
+		// under the current generation and JOIN the winning flight
+		// (singleflight completes only after the winner's full
+		// commit, mark included). Returning success here instead
+		// let the superseded caller re-read MID-commit state — for
+		// a cleared key the winner had not yet re-created, that
+		// read reported a wrong transient ErrItemNotFound for a
+		// market that exists upstream.
+		if !isDynamicVariant {
+			m.mu.Lock()
+			if m.lifetimeEnded() {
+				m.mu.Unlock()
+				return struct{}{}, m.lifetime.Err()
+			}
+			superseded := m.fetchCursor[loc].After(loadStarted)
+			if !superseded && loadStarted.After(m.fetchCursor[loc]) {
+				m.fetchCursor[loc] = loadStarted
+			}
+			m.mu.Unlock()
+			if superseded {
+				return struct{}{}, errStaleFlight
+			}
+			if marketCommitGateHook != nil {
+				marketCommitGateHook(loc)
+			}
+		}
+
+		// Track every key the response carries (malformed rows
+		// included — a broken row still proves the market exists
+		// upstream) so the bulk reconcile below only removes
+		// markets genuinely absent from the fresh catalog.
+		var seen map[CompositeKey]struct{}
+		if !isDynamicVariant {
+			seen = make(map[CompositeKey]struct{}, len(descriptions))
+		}
+		for k := range descriptions {
+			if seen != nil {
+				seen[variantKey(descriptions[k].ID, types.FromPtr(descriptions[k].Variant))] = struct{}{}
+			}
+			if err := m.upsert(descriptions[k], loc, loadStarted); err != nil {
+				// A malformed catalog row must not abort the whole
+				// locale load: pre-fix, one description without an
+				// <outcomes> block failed the load AFTER partial
+				// upserts, the locale was never marked loaded, and
+				// every subsequent access refetched the catalog and
+				// failed again — the entire market-description
+				// surface went unavailable over one bad row.
+				if m.logger != nil {
+					m.logger.WithError(err).
+						WithField("market_id", descriptions[k].ID).
+						WithField("locale", string(loc)).
+						Warn("cache: skipping malformed market description")
+				}
+				continue
+			}
+		}
+		if !isDynamicVariant {
+			// The bulk response is the complete catalog for this
+			// locale: markets it no longer carries must stop being
+			// served (the base map never expires on its own, so
+			// without this an upstream removal lingered for the
+			// process lifetime).
+			m.reconcileBulk(loc, seen, loadStarted)
+		}
+
+		// Only the bulk fetch counts as fully loading the locale.
+		// A single-id dynamic-variant fetch covers exactly that key.
+		// Skipped when a Clear raced this load — marking the locale
+		// loaded with pre-clear data would make bulk reads skip the
+		// refetch the Clear asked for; the next read reloads fresh.
+		if !isDynamicVariant {
+			m.mu.Lock()
+			if !m.lifetimeEnded() && !m.lastClearAt.After(loadStarted) && !m.fetchCursor[loc].After(loadStarted) {
+				// Timestamped with the fetch's START, not its
+				// completion: the freshness window must cover the
+				// age of the DATA, not of the transfer. Also
+				// suppressed when a newer-started flight owns the
+				// locale (fetchCursor) — an older mark must not
+				// regress the newer flight's.
+				m.loadedLocales[loc] = loadStarted
+				delete(m.refreshFailedAt, loc)
+			}
+			// A flight superseded MID-commit must not report
+			// success either — its remaining stores were rejected
+			// per row, so its callers would re-read the winner's
+			// partial state exactly like the store-phase-entry case
+			// above. Re-check and hand them to the winner.
+			lost := m.fetchCursor[loc].After(loadStarted)
+			m.mu.Unlock()
+			if lost {
+				return struct{}{}, errStaleFlight
+			}
+		}
+		return struct{}{}, nil
+	}
+}
+
+// refreshInBackground starts the bulk refresh of the locales without waiting
+// for it: the flight is the one loadOne would join, under the cache's
+// lifetime with the getters' retries and timeouts, so a getter that asks meanwhile
+// shares it and a message that asked is not held up. A flight that finds
+// itself superseded is not re-registered: the flight that superseded it
+// covers the locale.
+func (m *MarketDescriptionCache) refreshInBackground(locales []types.Locale) {
+	for _, loc := range locales {
+		gen := m.flightGen.Load()
+		sfKey := fmt.Sprintf("%d|*|%s", gen, loc)
+		lru.StartCoalesced(m.lifetime, &m.sf, sfKey, m.catalogFlight(gen, sfKey, loc, nil, "", false))
+	}
 }
 
 // reconcileBulk removes, for one locale, every base entry the fresh
@@ -857,6 +850,9 @@ func (m *MarketDescriptionCache) loadOne(ctx context.Context, marketID *int, var
 func (m *MarketDescriptionCache) reconcileBulk(locale types.Locale, seen map[CompositeKey]struct{}, loadStarted time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.lifetimeEnded() {
+		return
+	}
 	// An EMPTY response carries no removal authority. response_code=OK
 	// with zero <market> rows decodes successfully (nil slice, nil
 	// error) — an upstream deploy glitch or truncated-but-well-formed
@@ -918,6 +914,12 @@ func (m *MarketDescriptionCache) upsert(description data.MarketDescription, loca
 	key := variantKey(description.ID, types.FromPtr(description.Variant))
 
 	m.mu.Lock()
+	if m.lifetimeEnded() {
+		// The owner is closed: a download that finished across Close
+		// stores nothing.
+		m.mu.Unlock()
+		return nil
+	}
 	if m.clearedAt[key].After(loadStarted) || m.purgedAt.After(loadStarted) {
 		// A Clear for THIS key (or a Purge) landed after the load
 		// started: its data may predate the invalidation. Skip only
@@ -1082,19 +1084,18 @@ func splitGroups(raw string) []string {
 
 func newMarketDescriptionCache(lifeCtx context.Context, client *api.Client, logger *log.Logger) *MarketDescriptionCache {
 	return &MarketDescriptionCache{
-		apiClient:          client,
-		logger:             logger,
-		lifetime:           lifeCtx,
-		loadedLocales:      make(map[types.Locale]time.Time),
-		loadingLocales:     make(map[types.Locale]int),
-		fetchCursor:        make(map[types.Locale]time.Time),
-		refreshFailedAt:    make(map[types.Locale]time.Time),
-		msgRefreshFailedAt: make(map[types.Locale]time.Time),
-		refreshBackoff:     defaultRefreshBackoff,
-		catalogTTL:         defaultCatalogTTL,
-		base:               make(map[CompositeKey]*LocalizedMarketDescription),
-		clearedAt:          make(map[CompositeKey]time.Time),
-		malformed:          make(map[CompositeKey]map[types.Locale]error),
+		apiClient:       client,
+		logger:          logger,
+		lifetime:        lifeCtx,
+		loadedLocales:   make(map[types.Locale]time.Time),
+		loadingLocales:  make(map[types.Locale]int),
+		fetchCursor:     make(map[types.Locale]time.Time),
+		refreshFailedAt: make(map[types.Locale]time.Time),
+		refreshBackoff:  defaultRefreshBackoff,
+		catalogTTL:      defaultCatalogTTL,
+		base:            make(map[CompositeKey]*LocalizedMarketDescription),
+		clearedAt:       make(map[CompositeKey]time.Time),
+		malformed:       make(map[CompositeKey]map[types.Locale]error),
 		variants: lru.NewTTL[CompositeKey, *LocalizedMarketDescription](
 			variantCacheSize, nil, lru.DefaultEventCacheTTL),
 	}

@@ -9,8 +9,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"golang.org/x/sync/singleflight"
-
 	"github.com/oddin-gg/gosdk/internal/api"
 	"github.com/oddin-gg/gosdk/internal/api/xml"
 	"github.com/oddin-gg/gosdk/internal/cache/lru"
@@ -80,7 +78,7 @@ type SportCache struct {
 	// flights, the mark gates read validity. Guarded by mu.
 	fetchCursor map[types.Locale]time.Time
 
-	sf singleflight.Group
+	sf lru.Flights
 }
 
 // sportTombstonePruneLen / MaxAge bound the tombstone map (see the

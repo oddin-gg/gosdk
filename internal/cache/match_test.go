@@ -272,7 +272,7 @@ func contains(s, sub string) bool {
 }
 
 // TestMatchCache_LiveOddsMapping is the regression for the
-// missing/unknown-liveodds default (Codex P2): only "not_available"
+// missing/unknown-liveodds default: only "not_available"
 // mapped to NotAvailable and EVERYTHING else — including an absent
 // attribute, a malformed value, and future enum values — defaulted to
 // Available, so consumers could enable live behavior with no confirmed

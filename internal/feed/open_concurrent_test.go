@@ -88,7 +88,7 @@ func TestClient_Open_WaiterCtxCancelled(t *testing.T) {
 }
 
 // TestClient_Open_WaiterImmuneToAttemptRollover is the regression for
-// the failure/retry rollover (Codex P2): waiter B captured attempt A's
+// the failure/retry rollover: waiter B captured attempt A's
 // done channel, A failed with E1 and closed it, and — before B woke — a
 // fresh attempt C cleared the Client's mutable openErr/opened and
 // replaced openDone. B then read C's state: a generic "did not yield a

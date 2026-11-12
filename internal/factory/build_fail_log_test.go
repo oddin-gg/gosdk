@@ -116,3 +116,84 @@ func TestBuildMessage_BuildFailureWarnsAreThrottledPerKind(t *testing.T) {
 		t.Fatalf("second match line does not carry suppressed=5\n%s", out)
 	}
 }
+
+// A failed build of the event of an unparsable message warns through the
+// same per-kind throttle as BuildMessage: one line per kind per interval,
+// carrying the number of lines held back, however many messages fail.
+func TestBuildUnparsableMessage_BuildFailureWarnsAreThrottledPerKind(t *testing.T) {
+	srv := entityFixtureServer(t)
+	defer srv.Close()
+	ef := newEntityFactory(t, srv)
+
+	sink := &syncBuffer{}
+	clk := &stepClock{t: time.Unix(1000, 0)}
+	pm := producer.NewManager(minimalCfg{}, nil, log.New(nil))
+	f := &FeedMessageFactory{
+		entityFactory:         ef,
+		producerManager:       pm,
+		oddsFeedConfiguration: minimalCfg{},
+		logger:                log.New(slog.New(slog.NewTextHandler(sink, nil))),
+		throttleNow:           clk.Now,
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	count := func(kind string) int {
+		return strings.Count(sink.String(), "feed message: build "+kind+" od:")
+	}
+	for i := range 6 {
+		f.BuildUnparsableMessage(ctx, buildFailMessage("match", 100+i))
+	}
+	for i := range 4 {
+		f.BuildUnparsableMessage(ctx, buildFailMessage("tournament", 200+i))
+	}
+	if got := count("unparsable match"); got != 1 {
+		t.Fatalf("unparsable match lines = %d, want 1\n%s", got, sink.String())
+	}
+	if got := count("unparsable tournament"); got != 1 {
+		t.Fatalf("unparsable tournament lines = %d, want 1 (own throttle per kind)\n%s", got, sink.String())
+	}
+
+	clk.Advance(61 * time.Second)
+	f.BuildUnparsableMessage(ctx, buildFailMessage("match", 300))
+	if got := count("unparsable match"); got != 2 {
+		t.Fatalf("unparsable match lines after the interval = %d, want 2\n%s", got, sink.String())
+	}
+	if !strings.Contains(sink.String(), "suppressed=5") {
+		t.Fatalf("second unparsable match line does not carry suppressed=5\n%s", sink.String())
+	}
+	// The kinds of BuildMessage are separate: its throttle was not used up.
+	_, _ = f.BuildMessage(ctx, buildFailMessage("match", 400))
+	if got := strings.Count(sink.String(), "feed message: build match od:"); got != 1 {
+		t.Fatalf("match lines = %d, want 1 (a kind of its own)\n%s", got, sink.String())
+	}
+}
+
+// The message's timer counts as fired once its deadline has passed, even if
+// the context has not reported it yet.
+func TestMessageTimerFired(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), time.Hour)
+	defer cancel()
+	if messageTimerFired(ctx) {
+		t.Fatal("a message with time left reads as expired")
+	}
+	if !messageTimerFired(laggingDeadline{Context: t.Context(), deadline: time.Now().Add(-time.Millisecond)}) {
+		t.Fatal("a passed deadline does not read as expired")
+	}
+	if messageTimerFired(t.Context()) {
+		t.Fatal("a context without a deadline reads as expired")
+	}
+	cancelled, stop := context.WithCancel(t.Context())
+	stop()
+	if messageTimerFired(cancelled) {
+		t.Fatal("a cancelled context without a deadline reads as the message timer")
+	}
+}
+
+type laggingDeadline struct {
+	context.Context
+	deadline time.Time
+}
+
+func (c laggingDeadline) Deadline() (time.Time, bool) { return c.deadline, true }

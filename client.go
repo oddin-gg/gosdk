@@ -419,6 +419,7 @@ func New(ctx context.Context, cfg Config) (*Client, error) {
 		c.producerManager,
 		c.cfgAdpt,
 		c.logger,
+		c.apiClient.Breaker(),
 	)
 
 	c.marketDescriptionManager = market.NewManager(c.cacheManager, marketDescriptionFactory, c.cfgAdpt)

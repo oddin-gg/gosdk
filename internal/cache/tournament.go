@@ -45,6 +45,14 @@ type TournamentCache struct {
 
 	iconMu sync.RWMutex
 	icons  map[types.URN]*string
+
+	// lifetime is the detach root of the icon flights (cancelled with the
+	// owning manager); iconSF coalesces concurrent fetches of one icon.
+	lifetime context.Context
+	iconSF   lru.Flights
+	// iconsClosed (guarded by iconMu) makes every later icon flight store a
+	// no-op; closeIcons sets it.
+	iconsClosed bool
 }
 
 // LocalizedTournament holds tournament data; mu guards every field.
@@ -309,31 +317,61 @@ func (t *TournamentCache) TournamentCompetitors(ctx context.Context, id types.UR
 	return v.competitorIDList(), nil
 }
 
-// TournamentIcon returns the cached icon path, fetching if needed.
+// TournamentIcon returns the cached icon path, fetching if needed. The fetch
+// is a shared flight: concurrent callers wait on one request, and a caller
+// that gives up does not cancel it, so the icon still lands in the cache for
+// the next one.
 func (t *TournamentCache) TournamentIcon(ctx context.Context, id types.URN, locale types.Locale) (*string, error) {
-	t.iconMu.RLock()
-	if v, ok := t.icons[id]; ok {
-		t.iconMu.RUnlock()
+	if v, ok := t.loadIcon(id); ok {
 		return v, nil
 	}
-	t.iconMu.RUnlock()
 
-	fetchStarted := time.Now()
-	data, err := t.apiClient.FetchTournament(ctx, id, locale)
-	if err != nil {
-		return nil, err
-	}
-	// Store under the parent entry's clear-tombstone lock: a
-	// ClearCacheItem that landed after this fetch began must not have
-	// its icon resurrected by us — StoreSide is atomic with Clear, so
-	// there is no check-to-write window for a Clear to slip through.
-	// The caller still gets the fresh value.
-	t.lru.StoreSide(id, fetchStarted, func() {
-		t.iconMu.Lock()
-		t.icons[id] = data.IconPath
-		t.iconMu.Unlock()
+	return lru.LoadCoalesced(ctx, t.lifetime, &t.iconSF, iconFlightKey(id, locale), func(loadCtx context.Context) (*string, error) {
+		// A flight that ended just before this one started has stored it.
+		if v, ok := t.loadIcon(id); ok {
+			return v, nil
+		}
+
+		fetchStarted := time.Now()
+		data, err := t.apiClient.FetchTournament(loadCtx, id, locale)
+		if err != nil {
+			return nil, err
+		}
+		if iconCommitGateHook != nil {
+			iconCommitGateHook()
+		}
+		// Store under the parent entry's clear-tombstone lock: a
+		// ClearCacheItem that landed after this fetch began must not have
+		// its icon resurrected by us — StoreSide is atomic with Clear, so
+		// there is no check-to-write window for a Clear to slip through.
+		// The callers still get the fresh value.
+		// Once the owner's lifetime ended the store is a no-op; the check
+		// and the store are one step under iconMu, which closeIcons (called
+		// by Close right after it cancelled the lifetime) takes too.
+		t.lru.StoreSide(id, fetchStarted, func() {
+			t.iconMu.Lock()
+			defer t.iconMu.Unlock()
+			if t.iconsClosed || (t.lifetime != nil && t.lifetime.Err() != nil) {
+				return
+			}
+			t.icons[id] = data.IconPath
+		})
+		return data.IconPath, nil
 	})
-	return data.IconPath, nil
+}
+
+// closeIcons makes every later icon flight store a no-op.
+func (t *TournamentCache) closeIcons() {
+	t.iconMu.Lock()
+	t.iconsClosed = true
+	t.iconMu.Unlock()
+}
+
+func (t *TournamentCache) loadIcon(id types.URN) (*string, bool) {
+	t.iconMu.RLock()
+	defer t.iconMu.RUnlock()
+	v, ok := t.icons[id]
+	return v, ok
 }
 
 // OnFeedMessage clears the cache for tournament-typed FixtureChange messages.
@@ -363,6 +401,9 @@ func (t *TournamentCache) ClearCacheItem(id types.URN) {
 	t.iconMu.Lock()
 	delete(t.icons, id)
 	t.iconMu.Unlock()
+	// See CompetitorCache.ClearCacheItem: later callers start a fresh icon
+	// fetch instead of joining one that began before the clear.
+	t.iconSF.ForgetPrefix(iconFlightPrefix(id))
 }
 
 func newTournamentCache(lifeCtx context.Context, client *api.Client, logger *log.Logger) *TournamentCache {
@@ -370,6 +411,7 @@ func newTournamentCache(lifeCtx context.Context, client *api.Client, logger *log
 		apiClient: client,
 		logger:    logger,
 		icons:     make(map[types.URN]*string),
+		lifetime:  lifeCtx,
 	}
 	tc.lru = lru.NewEventCache[types.URN, types.Locale, *LocalizedTournament](
 		lru.Config{

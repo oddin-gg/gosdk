@@ -7,8 +7,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"golang.org/x/sync/singleflight"
-
 	"github.com/oddin-gg/gosdk/internal/api"
 	data "github.com/oddin-gg/gosdk/internal/api/xml"
 	"github.com/oddin-gg/gosdk/internal/cache/lru"
@@ -52,7 +50,7 @@ type MarketVoidReasonsCache struct {
 	// A post-clear caller now uses a new key, so it starts its own fetch.
 	flightGen atomic.Uint64
 
-	sf singleflight.Group
+	sf lru.Flights
 }
 
 // MarketVoidReasons returns the cached list, fetching on first access.

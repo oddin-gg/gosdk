@@ -228,8 +228,8 @@ func TestBetCancelFixture_StartTimeIsInt64Millis(t *testing.T) {
 	}
 }
 
-// TestConsume_DrainAlreadySignalled_NoIntake pins the hard intake bound
-// (Codex P2): when the drain signal is already set, consume must exit
+// TestConsume_DrainAlreadySignalled_NoIntake pins the hard intake bound:
+// when the drain signal is already set, consume must exit
 // WITHOUT pulling queued deliveries — the per-iteration non-blocking
 // pre-check removes the select race that previously let a continuous
 // delivery stream keep winning against drainCh with no upper bound.
@@ -384,7 +384,7 @@ func TestCloseGraceful_WaitsForDeliverySettlement(t *testing.T) {
 }
 
 // TestCloseGraceful_ReportsUnsettledOnDeadline pins the honest-status
-// half of the settlement contract (Codex P1 follow-up): when the drain
+// half of the settlement contract: when the drain
 // deadline expires with a handed-over delivery still unsettled,
 // CloseGraceful must return false — the closing teardown deletes the
 // exclusive autoDelete queue and forfeits redelivery, so callers need to
@@ -428,7 +428,7 @@ func (f *fakeAMQPChannel) NotifyClose(c chan *amqp.Error) chan *amqp.Error { ret
 func (f *fakeAMQPChannel) NotifyCancel(c chan string) chan string          { return c }
 
 // TestCloseGracefulChannel_ClosesDespiteAbandonedDelivery is the
-// regression for the graceful-drain leak (3/3-reviewer Require Change):
+// regression for the graceful-drain leak:
 // on the drain DEADLINE path a delivery handed downstream is routinely
 // ABANDONED — its ack closure never runs, so unsettledN never returns to
 // 0. Pre-fix runShutdown handed the channel to a reaper that waited on

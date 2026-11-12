@@ -422,7 +422,7 @@ Every layer is testable in isolation:
 
 Two cache flavors as decided:
 
-### Per-event LRU caches (with TTL and singleflight)
+### Per-event LRU caches (with TTL and shared flights)
 
 For: `MatchCache`, `CompetitorCache`, `FixtureCache`, `TournamentCache`, `PlayersCache`.
 
@@ -431,14 +431,13 @@ package cache
 
 import (
     lru "github.com/hashicorp/golang-lru/v2/expirable"
-    "golang.org/x/sync/singleflight"
 )
 
 type Loader[K comparable, V any] func(ctx context.Context, key K, locales []types.Locale) (V, error)
 
 type EventCache[K comparable, V any] struct {
     lru    *lru.LRU[K, V]
-    sf     singleflight.Group
+    sf     Flights // shared flights; each records when it started
     loader Loader[K, V]
 }
 
@@ -447,47 +446,74 @@ func (c *EventCache[K, V]) Clear(key K)
 func (c *EventCache[K, V]) Purge()
 ```
 
-- `Get` returns the cached entry if all requested locales are present; otherwise calls `loader` (deduplicated via singleflight) and merges fetched locales into the entry.
+- `Get` returns the cached entry if all requested locales are present; otherwise calls `loader` (deduplicated as one flight per key) and merges fetched locales into the entry.
 - `Clear` is the public invalidation hook (`client.ClearMatch(urn)` etc.).
 - `Purge` is invoked on shutdown.
 - Every cache value is a struct with explicit per-locale fields (see §7). All field access is mutex-protected within the entry — no partial-locking like the current code.
 - Default capacity per cache: configurable, sensible defaults (e.g., 5000 matches, 50000 competitors). Default TTL: 12h to match current behavior.
 
-### Message-path call policy and per-policy flights
+### Message path: one timeout, shared flights, one breaker
 
 Two callers ask the API for the same entity: a public getter, which waits for
 the answer and retries, and the feed message path, which builds the event of
 every message on the session goroutine. A getter that waits for a failing API
 delays only itself; the message path doing the same delays every message behind
-it. The path therefore marks its context (`internal/apipolicy`): the API client
-makes **one attempt per request, no retries**, all requests of one message build
-(event parts, market and outcome name lookups) share **one 2 s budget** and each
-inherits what is left, a request begun after it is spent is never sent
-(`ErrBudgetSpent`), and for an event inside the failure window no request is made
-at all (`ErrSkipped`; caches still answer).
+it. The path therefore marks its context (`internal/apipolicy`) and bounds only
+what it **waits** for; it does not change any request.
 
-The failure window (10 s per event, 4096 events) opens only on a failure **of
-the API**: 5xx, 429, a transport error, a timeout after sending, a
-`SERVICE_UNAVAILABLE` envelope, an unreadable response (`api.ErrBadResponse`).
-A 404 for an event not yet in the API, other 4xx, a spent budget and local
-name-resolution errors do not. Any healthy answer of any call (the client's
-success counter, read after the failed attempt) ends it. One consequence is
-documented for clients: a cold build against a healthy API slower than about
-250 ms per request exceeds the budget and opens the window; `WithPreloadLocales`
-keeps the market catalog out of the build. Market catalogs have a backoff of
-their own (30 s) for message-mode loads, warm or cold.
+- **One timeout per message.** `BuildMessage` and `BuildUnparsableMessage` run
+  under one 2 s context (`apipolicy.MessageTimeout`, a field of the factory so
+  tests can shorten it) that every wait of the build shares: event parts,
+  icons, market and outcome names, player names. A build that ends because its
+  own timer fired, while the session is alive, trips the breaker.
+- **Flights are shared and carry no mark.** Every load is a flight: one per key,
+  run in its own goroutine under the owning cache's lifetime (so `Close` stops
+  it), with the getters' retries and timeouts and the outer `lru.LoadTimeout`.
+  A message that stops waiting leaves the flight running; it fills the cache for
+  later messages and getters. A getter that joins a flight a message started
+  gets the same answer it would get from its own.
+- **One breaker per API client** (`internal/api/breaker.go`). It opens for 10 s,
+  and again for another 10 s on every failed attempt that says the API is
+  unavailable: 5xx, 429, a transport error or a timeout after sending, a
+  `SERVICE_UNAVAILABLE` envelope, an unreadable response (`api.ErrBadResponse`),
+  a response about another resource, and a message that waited its whole timeout
+  (`Trip`). A 404, other 4xx, a cancelled context, `ErrClosed` and local errors
+  do not open it. Any healthy answer of any caller closes it. There is no
+  half-open probe: when the time ends, the next flight is the probe. Getters
+  never read it.
+- **Cache only while it is open.** A message gets what the caches hold (stale
+  catalog rows included) and nothing else: an event that is not fully cached is
+  nil, missing names are absent, and the build-failure WARN is throttled per
+  kind.
 
-The policy holds only while every loader that **coalesces calls onto a flight**
-keeps the policy apart. Flights of different policies must not share: a getter
-that retries must not hold a message behind it, and a message's single-attempt
-failure must not become a getter's answer. So the flight key carries a suffix of
-the policy (`apipolicy.Suffix`), the detached flight context carries the caller's
-policy (`apipolicy.Carry`), and invalidation that forgets flights by key covers
-every suffix (`apipolicy.Suffixes`); `lru.LoadCoalesced` and `EventCache` do this
-for their callers. A flight runs on its **starter's** budget, so a message-path
-joiner that gets the starter's deadline error without having used its own budget
-asks once more (`lru.JoinerMayRetry`); the starter never retries its own error
-and a public getter never retries.
+The rule every loader that **coalesces calls onto a flight** follows, through
+`lru.LoadCoalesced`, `lru.EventCache` and `LocalizedStaticDataCache` (not by
+calling the flight group directly):
+
+1. After the cache fast path, `lru.SkippedByGate(ctx)`: a caller with the
+   message mark returns `apipolicy.ErrSkipped` while the breaker is open,
+   without starting or joining a flight.
+2. Otherwise register on the flight (`lru.Flights`, which records each flight's
+   start) and wait with `Flight.Await(ctx)`. It ends with the flight, with the
+   caller's own context, with `ErrSkipped` once the breaker opens, and, for a
+   caller with the mark, with `lru.ErrFlightTooOld` once the flight has run for
+   the message timeout, however late the caller joined.
+3. A context without the mark (getters, flights, preloads, ticker refreshes)
+   ignores the breaker and the flight age. The flight itself runs under the
+   cache's lifetime, never under the caller's context, so the mark does not reach
+   its requests.
+
+`Clear` forgets the flight of one key (`Flights.Forget`); tombstones and the
+purge generation discard what an older flight loaded. A message that finds a
+catalog entry complete but past its age serves it and starts the refresh in the
+background (`lru.StartCoalesced`); getters keep the blocking refresh with the
+stale fallback. The market catalog backoff `refreshFailedAt` (30 s) is the
+getters' only.
+
+What a client notices is documented in the README ("When the REST API is down"):
+a healthy API slower than about 250 ms per request may deliver the first messages
+of a new match without the event, and `WithPreloadLocales` keeps the market
+catalog out of that build.
 
 ### Static-catalog caches (map + RWMutex)
 

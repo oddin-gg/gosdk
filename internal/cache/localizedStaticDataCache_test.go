@@ -18,8 +18,8 @@ import (
 )
 
 // TestLocalizedStaticDataCache_AlreadyCancelledCtxNoFetch is the
-// regression for the reviewer's low finding: an already-cancelled ctx
-// must not start any detached fetcher invocation through WithoutCancel.
+// regression for a ctx that is already cancelled: it must not start any
+// detached fetcher invocation through WithoutCancel.
 func TestLocalizedStaticDataCache_AlreadyCancelledCtxNoFetch(t *testing.T) {
 	var calls atomic.Int32
 	fetcher := func(ctx context.Context, locale types.Locale) ([]types.StaticData, error) {
@@ -178,7 +178,7 @@ func TestLocalizedStaticDataCache_LocaleCoverageValidated(t *testing.T) {
 }
 
 // TestLocalizedStaticDataCache_FirstRefreshAfterInitialDelay is the
-// regression for the Codex P2 scheduling finding: startTimer waited
+// regression for this defect: startTimer waited
 // initialDelay (24h) and then refreshed only on the FIRST TICKER FIRE
 // another tickPeriod (24h) later — data loaded near startup stayed
 // stale for ~48h instead of ~24h. The fix runs timerTick immediately
@@ -342,219 +342,168 @@ func TestLocalizedStaticDataCache_RowsWithoutDescriptionsKeepCachedDescriptions(
 	}
 }
 
-// A getter and a feed-message build asking for the same unloaded locale must
-// not share a load: a getter's fetch held open (retrying against a failing
-// API) would hold the message path behind it. The message-policy load starts
-// independently, carries the Message policy into its fetch, and returns on
-// its own.
-func TestLocalizedStaticDataCache_MessagePolicyLoadIsIndependentOfAGettersLoad(t *testing.T) {
-	var mu sync.Mutex
-	modes := map[apipolicy.Mode]int{}
-	getterHeld := make(chan struct{}, 1)
-	releaseGetter := make(chan struct{})
+// gateStub is a message gate the tests open by hand.
+type gateStub struct {
+	mu     sync.Mutex
+	open   bool
+	opened chan struct{}
+}
+
+func newGateStub() *gateStub { return &gateStub{opened: make(chan struct{})} }
+
+func (g *gateStub) Open() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.open
+}
+
+func (g *gateStub) Opened() <-chan struct{} {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.opened
+}
+
+func (g *gateStub) setOpen() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !g.open {
+		g.open = true
+		close(g.opened)
+	}
+}
+
+// With the gate open, a message-path caller neither starts nor joins a fetch;
+// a caller without the mark loads as usual.
+func TestLocalizedStaticDataCache_GateOpenSkipsTheLoad(t *testing.T) {
+	var calls atomic.Int32
 	fetcher := func(ctx context.Context, locale types.Locale) ([]types.StaticData, error) {
-		mode := apipolicy.ModeOf(ctx)
-		mu.Lock()
-		modes[mode]++
-		mu.Unlock()
-		if mode == apipolicy.Default {
-			getterHeld <- struct{}{}
-			<-releaseGetter // the getter's fetch is retrying
-		}
+		calls.Add(1)
 		return []types.StaticData{{ID: 1, Description: types.Some("ok")}}, nil
 	}
 	c := newLocalizedStaticDataCache(t.Context(), &minimalCfg{}, log.New(nil), nil, fetcher)
 	defer c.Close()
+	gate := newGateStub()
+	gate.setOpen()
+	var flights atomic.Int32
+	restore := lru.SetFlightRegisteredHook(func() { flights.Add(1) })
+	defer restore()
 
-	getterDone := make(chan error, 1)
-	go func() {
-		_, err := c.LocalizedItem(t.Context(), 1, []types.Locale{types.EnLocale})
-		getterDone <- err
-	}()
-	select {
-	case <-getterHeld:
-	case <-time.After(3 * time.Second):
-		t.Fatal("the getter's fetch did not start")
+	_, err := c.LocalizedItem(apipolicy.WithMessage(t.Context(), gate, apipolicy.MessageTimeout), 1, []types.Locale{types.EnLocale})
+	if !errors.Is(err, apipolicy.ErrSkipped) {
+		t.Fatalf("err = %v, want ErrSkipped", err)
+	}
+	if calls.Load() != 0 || flights.Load() != 0 {
+		t.Fatalf("fetches = %d, flights registered = %d, want none", calls.Load(), flights.Load())
 	}
 
-	// The message path asks for the same locale while the getter's load is
-	// still open.
-	msgCtx := apipolicy.With(t.Context(), apipolicy.Message)
-	msgDone := make(chan error, 1)
-	go func() {
-		_, err := c.LocalizedItem(msgCtx, 1, []types.Locale{types.EnLocale})
-		msgDone <- err
-	}()
-	select {
-	case err := <-msgDone:
-		if err != nil {
-			t.Fatalf("message-path load: %v", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("the message-path load waited behind the getter's open load")
+	if _, err := c.LocalizedItem(t.Context(), 1, []types.Locale{types.EnLocale}); err != nil {
+		t.Fatalf("unmarked caller: %v", err)
 	}
-	mu.Lock()
-	if modes[apipolicy.Message] != 1 || modes[apipolicy.Default] != 1 {
-		t.Fatalf("fetch policies = %v, want one Default (getter) and one Message", modes)
-	}
-	mu.Unlock()
-
-	close(releaseGetter)
-	if err := <-getterDone; err != nil {
-		t.Fatalf("getter: %v", err)
+	if calls.Load() != 1 {
+		t.Fatalf("fetches = %d, want 1", calls.Load())
 	}
 }
 
-// A message-path caller that joined a flight started by a message with little
-// budget left gets that flight's deadline error without having used its own
-// budget: it asks once more under its own. The starter keeps its own error.
-func TestLocalizedStaticDataCache_JoinerRetriesOnceWhenTheStartersBudgetRanOut(t *testing.T) {
-	regs := trackRegistrations(t)
-	var calls atomic.Int32
+// A message-path caller waiting on a fetch is released when the gate opens;
+// the fetch goes on and fills the cache.
+func TestLocalizedStaticDataCache_GateOpenedReleasesAWaiterAndTheFetchGoesOn(t *testing.T) {
+	release := make(chan struct{})
 	entered := make(chan struct{})
-	gate := make(chan struct{})
-	c := refreshTestCache(func(context.Context, types.Locale) ([]types.StaticData, error) {
-		if calls.Add(1) == 1 {
-			close(entered)
-			<-gate
-			return nil, context.DeadlineExceeded
-		}
-		return []types.StaticData{{ID: 1, Description: types.Some("one")}}, nil
-	})
-	t.Cleanup(c.Close)
-	locales := []types.Locale{types.EnLocale}
-	starterCtx := apipolicy.WithBudget(t.Context(), apipolicy.Message, time.Millisecond)
-	joinerCtx := apipolicy.With(t.Context(), apipolicy.Message)
-
-	starter := make(chan error, 1)
-	go func() { starter <- c.loadLocales(starterCtx, locales) }()
-	<-entered
-	joiner := make(chan error, 1)
-	go func() { joiner <- c.loadLocales(joinerCtx, locales) }()
-	regs.wait(t, 2)
-	close(gate)
-
-	if err := <-joiner; err != nil {
-		t.Fatalf("joiner err = %v, want success from the retry under its own budget", err)
-	}
-	if err := <-starter; !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("starter err = %v, want its own deadline error", err)
-	}
-	if got := calls.Load(); got != 2 {
-		t.Fatalf("fetches = %d, want 2 (the flight and one retry; the starter does not retry)", got)
-	}
-}
-
-// At most one retry per call: a second deadline error is returned.
-func TestLocalizedStaticDataCache_JoinerRetriesAtMostOnce(t *testing.T) {
-	regs := trackRegistrations(t)
+	var once sync.Once
 	var calls atomic.Int32
-	entered := make(chan struct{})
-	gate := make(chan struct{})
-	c := refreshTestCache(func(context.Context, types.Locale) ([]types.StaticData, error) {
-		if calls.Add(1) == 1 {
-			close(entered)
-			<-gate
-		}
-		return nil, context.DeadlineExceeded
-	})
-	t.Cleanup(c.Close)
-	locales := []types.Locale{types.EnLocale}
-	go func() { _ = c.loadLocales(apipolicy.With(t.Context(), apipolicy.Message), locales) }()
-	<-entered
-	joiner := make(chan error, 1)
-	go func() { joiner <- c.loadLocales(apipolicy.With(t.Context(), apipolicy.Message), locales) }()
-	regs.wait(t, 2)
-	close(gate)
-	if err := <-joiner; !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("err = %v, want the deadline error after the one retry", err)
-	}
-	if got := calls.Load(); got != 2 {
-		t.Fatalf("fetches = %d, want 2", got)
-	}
-}
-
-// The starter of a flight keeps its own deadline error even with budget
-// left: it must not ask again.
-func TestLocalizedStaticDataCache_StarterWithBudgetLeftDoesNotRetryItsOwnDeadline(t *testing.T) {
-	var calls atomic.Int32
-	c := refreshTestCache(func(context.Context, types.Locale) ([]types.StaticData, error) {
+	fetcher := func(ctx context.Context, locale types.Locale) ([]types.StaticData, error) {
 		calls.Add(1)
-		return nil, context.DeadlineExceeded
-	})
-	t.Cleanup(c.Close)
-	err := c.loadLocales(apipolicy.With(t.Context(), apipolicy.Message), []types.Locale{types.EnLocale})
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("err = %v, want the starter's own deadline error", err)
+		once.Do(func() { close(entered) })
+		<-release
+		return []types.StaticData{{ID: 1, Description: types.Some("ok")}}, nil
 	}
-	if got := calls.Load(); got != 1 {
-		t.Fatalf("fetches = %d, want 1", got)
+	c := newLocalizedStaticDataCache(t.Context(), &minimalCfg{}, log.New(nil), nil, fetcher)
+	defer c.Close()
+	gate := newGateStub()
+	marked := apipolicy.WithMessage(t.Context(), gate, apipolicy.MessageTimeout)
+
+	errc := make(chan error, 1)
+	go func() {
+		_, err := c.LocalizedItem(marked, 1, []types.Locale{types.EnLocale})
+		errc <- err
+	}()
+	<-entered
+	gate.setOpen()
+	select {
+	case err := <-errc:
+		if !errors.Is(err, apipolicy.ErrSkipped) {
+			t.Fatalf("err = %v, want ErrSkipped", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the waiter was not released by the gate opening")
 	}
-}
 
-// A joiner on the default policy, or one whose own budget is spent, gets the
-// flight's deadline error without a retry.
-func TestLocalizedStaticDataCache_JoinerWithoutBudgetOrOnTheDefaultPolicyDoesNotRetry(t *testing.T) {
-	cases := []struct {
-		name string
-		ctx  func(context.Context) context.Context
-	}{
-		{"own budget spent", func(c context.Context) context.Context {
-			return apipolicy.WithBudget(c, apipolicy.Message, -time.Second)
-		}},
-		{"default policy", func(c context.Context) context.Context { return c }},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			regs := trackRegistrations(t)
-			var calls atomic.Int32
-			entered := make(chan struct{})
-			gate := make(chan struct{})
-			c := refreshTestCache(func(context.Context, types.Locale) ([]types.StaticData, error) {
-				if calls.Add(1) == 1 {
-					close(entered)
-					<-gate
-				}
-				return nil, context.DeadlineExceeded
-			})
-			t.Cleanup(c.Close)
-			locales := []types.Locale{types.EnLocale}
-			go func() { _ = c.loadLocales(tc.ctx(t.Context()), locales) }()
-			<-entered
-			joiner := make(chan error, 1)
-			go func() { joiner <- c.loadLocales(tc.ctx(t.Context()), locales) }()
-			regs.wait(t, 2)
-			close(gate)
-			if err := <-joiner; !errors.Is(err, context.DeadlineExceeded) {
-				t.Fatalf("joiner err = %v, want the flight's deadline error", err)
-			}
-			if got := calls.Load(); got != 1 {
-				t.Fatalf("fetches = %d, want 1 (no retry)", got)
-			}
-		})
-	}
-}
-
-// registrations counts the loaders that registered on a flight (starters and
-// joiners alike), so a test can release a gated flight once its joiner is
-// certainly parked on it instead of sleeping and hoping it got there.
-type registrations struct{ n atomic.Int32 }
-
-func trackRegistrations(t *testing.T) *registrations {
-	t.Helper()
-	r := &registrations{}
-	t.Cleanup(lru.SetFlightRegisteredHook(func() { r.n.Add(1) }))
-	return r
-}
-
-// wait blocks until want loaders have registered.
-func (r *registrations) wait(t *testing.T, want int32) {
-	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for r.n.Load() < want {
+	close(release)
+	deadline := time.Now().Add(5 * time.Second)
+	for len(c.unloadedLocales([]types.Locale{types.EnLocale})) != 0 {
 		if time.Now().After(deadline) {
-			t.Fatalf("only %d loaders registered on the flight, want %d", r.n.Load(), want)
+			t.Fatal("the fetch did not fill the cache")
 		}
 		time.Sleep(time.Millisecond)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("fetches = %d, want 1", calls.Load())
+	}
+}
+
+// A message-path caller does not wait on a fetch that has run for longer than
+// its timeout; the fetch goes on and fills the cache.
+func TestLocalizedStaticDataCache_MessageDoesNotWaitOnAFetchOlderThanItsTimeout(t *testing.T) {
+	release := make(chan struct{})
+	entered := make(chan struct{})
+	var once sync.Once
+	var fetches atomic.Int32
+	fetcher := func(ctx context.Context, locale types.Locale) ([]types.StaticData, error) {
+		fetches.Add(1)
+		once.Do(func() { close(entered) })
+		<-release
+		return []types.StaticData{{ID: 1, Description: types.Some("ok")}}, nil
+	}
+	c := newLocalizedStaticDataCache(t.Context(), &minimalCfg{}, log.New(nil), nil, fetcher)
+	defer c.Close()
+	locales := []types.Locale{types.EnLocale}
+
+	getterErr := make(chan error, 1)
+	go func() {
+		_, err := c.LocalizedItem(t.Context(), 1, locales)
+		getterErr <- err
+	}()
+	<-entered
+
+	// The first message waits for the flight's age to reach its timeout, a
+	// later one finds it older and leaves at once. The context deadline is far
+	// away, so only the age of the fetch ends the wait.
+	const timeout = 100 * time.Millisecond
+	marked := apipolicy.WithMessage(t.Context(), newGateStub(), timeout)
+	start := time.Now()
+	for range 5 {
+		ctx, cancel := context.WithTimeout(marked, 10*time.Second)
+		_, err := c.LocalizedItem(ctx, 1, locales)
+		cancel()
+		if !errors.Is(err, lru.ErrFlightTooOld) {
+			t.Fatalf("err = %v, want ErrFlightTooOld", err)
+		}
+	}
+	// Every message ended with ErrFlightTooOld although its own deadline is
+	// ten seconds away, so only the age of the fetch ended the wait; the time
+	// bound is generous and only catches a message that sat on its deadline.
+	if d := time.Since(start); d > timeout+time.Second {
+		t.Fatalf("five messages waited %v in total, want about %v", d, timeout)
+	}
+
+	close(release)
+	if err := <-getterErr; err != nil {
+		t.Fatalf("getter: %v", err)
+	}
+	if len(c.unloadedLocales(locales)) != 0 {
+		t.Fatal("the fetch did not fill the cache")
+	}
+	if fetches.Load() != 1 {
+		t.Fatalf("fetches = %d, want 1", fetches.Load())
 	}
 }

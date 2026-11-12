@@ -8,8 +8,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"golang.org/x/sync/singleflight"
-
 	"github.com/oddin-gg/gosdk/internal/api"
 	apiXML "github.com/oddin-gg/gosdk/internal/api/xml"
 	"github.com/oddin-gg/gosdk/internal/cache/lru"
@@ -34,7 +32,7 @@ import (
 // *types.MatchStatus value with the localized status-code description
 // resolved at construction.
 //
-// Concurrent-miss safety (v2.24): MatchStatus uses a singleflight.Group
+// Concurrent-miss safety (v2.24): MatchStatus uses a lru.Flights
 // keyed on URN so N concurrent goroutines for the same id share a
 // single FetchMatchSummary round-trip. Hot under recovery and snapshot
 // where many subscriptions ask for the same event status simultaneously.
@@ -86,7 +84,7 @@ type MatchStatusCache struct {
 	// detaches future callers from all in-flight loads.
 	flightGen atomic.Uint64
 
-	sf singleflight.Group
+	sf lru.Flights
 }
 
 // clearTombstonePruneLen is the clearedAt size beyond which

@@ -51,6 +51,14 @@ type CompetitorCache struct {
 	// icons stores types.URN → *string (nil means "fetched, no icon").
 	// Use loadIcon / storeIcon / deleteIcon helpers for type-safe access.
 	icons sync.Map
+
+	// lifetime is the detach root of the icon flights (cancelled with the
+	// owning manager); iconSF coalesces concurrent fetches of one icon.
+	lifetime context.Context
+	iconSF   lru.Flights
+	// iconGate orders the stores of icon flights against closeIcons.
+	iconGate    sync.Mutex
+	iconsClosed bool
 }
 
 // loadIcon returns (icon, true) if the URN has a recorded icon (which may
@@ -70,6 +78,31 @@ func (c *CompetitorCache) loadIcon(id types.URN) (*string, bool) {
 func (c *CompetitorCache) storeIcon(id types.URN, icon *string) {
 	c.icons.Store(id, icon)
 }
+
+// storeFlightIcon is the store of an icon flight. It is a no-op once the
+// owner's lifetime ended: the cache is quiescent after Close. The check and
+// the store are one step under iconGate, which closeIcons (called by Close
+// right after it cancelled the lifetime) takes too, so no store can follow a
+// Close that has returned.
+func (c *CompetitorCache) storeFlightIcon(id types.URN, icon *string) {
+	c.iconGate.Lock()
+	defer c.iconGate.Unlock()
+	if c.iconsClosed || (c.lifetime != nil && c.lifetime.Err() != nil) {
+		return
+	}
+	c.storeIcon(id, icon)
+}
+
+// closeIcons makes every later icon flight store a no-op.
+func (c *CompetitorCache) closeIcons() {
+	c.iconGate.Lock()
+	c.iconsClosed = true
+	c.iconGate.Unlock()
+}
+
+// iconCommitGateHook is a test-only seam invoked by an icon flight after
+// its download and before its store. Production builds leave it nil.
+var iconCommitGateHook func()
 
 func (c *CompetitorCache) deleteIcon(id types.URN) {
 	c.icons.Delete(id)
@@ -244,38 +277,64 @@ func (c *CompetitorCache) reloadCompetitor(ctx context.Context, id types.URN, lo
 	return c.Competitor(ctx, id, locales)
 }
 
-// CompetitorIcon returns the icon path, fetching the competitor profile if needed.
+// CompetitorIcon returns the icon path, fetching the competitor profile if
+// needed. The fetch is a shared flight: concurrent callers wait on one
+// request, and a caller that gives up does not cancel it, so the icon still
+// lands in the cache for the next one.
 func (c *CompetitorCache) CompetitorIcon(ctx context.Context, id types.URN, locale types.Locale) (*string, error) {
 	if v, ok := c.loadIcon(id); ok {
 		return v, nil
 	}
 
-	fetchStarted := time.Now()
-	data, err := c.apiClient.FetchCompetitorProfile(ctx, id, locale)
-	if err != nil {
-		return nil, fmt.Errorf("fetch competitor icon %s/%s: %w", id.ToString(), locale, err)
-	}
+	return lru.LoadCoalesced(ctx, c.lifetime, &c.iconSF, iconFlightKey(id, locale), func(loadCtx context.Context) (*string, error) {
+		// A flight that ended just before this one started has stored it.
+		if v, ok := c.loadIcon(id); ok {
+			return v, nil
+		}
 
-	// Store under the parent entry's clear-tombstone lock so a
-	// ClearCacheItem racing this fetch isn't undone for the icon —
-	// StoreSide is atomic with Clear, no check-to-write window.
-	// The caller still gets the fresh value.
-	c.lru.StoreSide(id, fetchStarted, func() {
-		c.storeIcon(id, data.IconPath)
+		fetchStarted := time.Now()
+		data, err := c.apiClient.FetchCompetitorProfile(loadCtx, id, locale)
+		if err != nil {
+			return nil, fmt.Errorf("fetch competitor icon %s/%s: %w", id.ToString(), locale, err)
+		}
+
+		if iconCommitGateHook != nil {
+			iconCommitGateHook()
+		}
+		// Store under the parent entry's clear-tombstone lock so a
+		// ClearCacheItem racing this fetch isn't undone for the icon —
+		// StoreSide is atomic with Clear, no check-to-write window.
+		// The callers still get the fresh value.
+		c.lru.StoreSide(id, fetchStarted, func() {
+			c.storeFlightIcon(id, data.IconPath)
+		})
+		return data.IconPath, nil
 	})
-	return data.IconPath, nil
 }
+
+// iconFlightKey is the key of one icon lookup in an icon flight group; every
+// locale of an item shares the iconFlightPrefix.
+func iconFlightKey(id types.URN, locale types.Locale) string {
+	return iconFlightPrefix(id) + string(locale)
+}
+
+func iconFlightPrefix(id types.URN) string { return "icon|" + id.ToString() + "|" }
 
 // ClearCacheItem removes both the entry and its icon.
 func (c *CompetitorCache) ClearCacheItem(id types.URN) {
 	c.lru.Clear(id)
 	c.deleteIcon(id)
+	// A caller arriving after the clear must not join an icon fetch that
+	// began before it and receive the icon the clear invalidated; that
+	// fetch still ends for its own callers but stores nothing.
+	c.iconSF.ForgetPrefix(iconFlightPrefix(id))
 }
 
 func newCompetitorCache(lifeCtx context.Context, client *api.Client, logger *log.Logger) *CompetitorCache {
 	cc := &CompetitorCache{
 		apiClient: client,
 		logger:    logger,
+		lifetime:  lifeCtx,
 	}
 	cc.lru = lru.NewEventCache[types.URN, types.Locale, *LocalizedCompetitor](
 		lru.Config{

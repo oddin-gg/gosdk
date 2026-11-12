@@ -3,7 +3,6 @@ package lru
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -293,7 +292,7 @@ func TestEventCache_ContextCancellation(t *testing.T) {
 }
 
 // TestEventCache_FirstCallerCancellationDoesNotKillSharedLoad is the
-// regression for the reviewer's medium finding: pre-fix the singleflight
+// regression for the first caller's context: pre-fix the singleflight
 // load ran with the first caller's ctx, so a short-deadline first caller
 // could cancel the load out from under later waiters.
 //
@@ -373,8 +372,8 @@ func TestEventCache_FirstCallerCancellationDoesNotKillSharedLoad(t *testing.T) {
 	}
 }
 
-// TestEventCache_ConcurrentMixedLocales is the regression for the
-// reviewer's H1 finding: EventCache.Get singleflights only by entity
+// TestEventCache_ConcurrentMixedLocales is the regression for
+// mixed locales: EventCache.Get singleflights only by entity
 // key, so caller A asking for [en] and caller B asking for [ru]
 // share one in-flight load. Pre-fix the shared body used A's
 // `locales` (closure capture); B received A's [en]-only result and
@@ -458,9 +457,9 @@ func TestEventCache_ConcurrentMixedLocales(t *testing.T) {
 	}
 }
 
-// TestEventCache_AlreadyCancelledCtxNoLoad is the regression for the
-// reviewer's low finding: an already-cancelled ctx on a cold-miss
-// path must not trigger a detached loader through WithoutCancel.
+// TestEventCache_AlreadyCancelledCtxNoLoad is the regression for an
+// already-cancelled ctx on a cold-miss
+// path: it must not trigger a detached loader through WithoutCancel.
 func TestEventCache_AlreadyCancelledCtxNoLoad(t *testing.T) {
 	var calls atomic.Int32
 	loader := func(ctx context.Context, key string, locales []string, existing *localizedFoo, has bool) (*localizedFoo, error) {
@@ -494,72 +493,10 @@ func equalStrSlice(a, b []string) bool {
 	return true
 }
 
-// TestEventCache_FlightsAreSeparatePerCallPolicy: a getter (default policy,
-// retries) and the message path (one short attempt) asking for the same key
-// must not share a load — a getter waiting through retries would hold the
-// message path behind it, and the message path's single-attempt failure
-// would become the getter's answer. Each load also carries the policy of
-// the caller it belongs to, although the load itself is detached from that
-// caller's cancellation.
-func TestEventCache_FlightsAreSeparatePerCallPolicy(t *testing.T) {
-	var mu sync.Mutex
-	var modes []apipolicy.Mode
-	release := make(chan struct{})
-	loader := func(ctx context.Context, key string, locales []string, existing *localizedFoo, has bool) (*localizedFoo, error) {
-		mu.Lock()
-		modes = append(modes, apipolicy.ModeOf(ctx))
-		mu.Unlock()
-		<-release
-		e := &localizedFoo{id: key, name: map[string]string{}}
-		for _, l := range locales {
-			e.name[l] = "x"
-		}
-		return e, nil
-	}
-	c := NewEventCache[string, string, *localizedFoo](Config{Lifetime: t.Context()}, loader)
-
-	var wg sync.WaitGroup
-	for _, ctx := range []context.Context{
-		t.Context(),
-		apipolicy.With(t.Context(), apipolicy.Message),
-		apipolicy.With(t.Context(), apipolicy.MessageSkip),
-	} {
-		wg.Go(func() {
-			if _, _, err := c.Get(ctx, "k", []string{"en"}); err != nil {
-				t.Error(err)
-			}
-		})
-	}
-	// All three loads must start while none has finished.
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		mu.Lock()
-		n := len(modes)
-		mu.Unlock()
-		if n == 3 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("loads started = %d, want 3 (one flight per policy)", n)
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	close(release)
-	wg.Wait()
-
-	mu.Lock()
-	defer mu.Unlock()
-	got := map[apipolicy.Mode]int{}
-	for _, m := range modes {
-		got[m]++
-	}
-	if got[apipolicy.Default] != 1 || got[apipolicy.Message] != 1 || got[apipolicy.MessageSkip] != 1 {
-		t.Fatalf("loader contexts carried modes %v, want one of each policy", got)
-	}
-}
-
-// Callers of the SAME policy still share one load.
-func TestEventCache_SamePolicyStillCoalesces(t *testing.T) {
+// A message caller and a getter share one flight: the message caller leaves
+// at its own deadline, the flight goes on, and a getter that joined it gets
+// the flight's answer and finds the cache filled.
+func TestEventCache_MessageAndGetterShareOneFlight(t *testing.T) {
 	var calls atomic.Int32
 	release := make(chan struct{})
 	loader := func(ctx context.Context, key string, locales []string, existing *localizedFoo, has bool) (*localizedFoo, error) {
@@ -572,460 +509,41 @@ func TestEventCache_SamePolicyStillCoalesces(t *testing.T) {
 		return e, nil
 	}
 	c := NewEventCache[string, string, *localizedFoo](Config{Lifetime: t.Context()}, loader)
-	ctx := apipolicy.With(t.Context(), apipolicy.Message)
+	registered := trackRegistrations(t)
 
-	var wg sync.WaitGroup
-	for range 5 {
-		wg.Go(func() {
-			if _, _, err := c.Get(ctx, "k", []string{"en"}); err != nil {
-				t.Error(err)
-			}
-		})
-	}
-	time.Sleep(100 * time.Millisecond)
-	close(release)
-	wg.Wait()
-	if got := calls.Load(); got != 1 {
-		t.Fatalf("loader calls = %d, want 1 (single-flight stays)", got)
-	}
-}
-
-// Clear detaches future callers from a pre-clear in-flight load whatever
-// the call policy of that load was.
-func TestEventCache_ClearForgetsFlightsOfEveryPolicy(t *testing.T) {
-	var calls atomic.Int32
-	block := make(chan struct{})
-	loader := func(ctx context.Context, key string, locales []string, existing *localizedFoo, has bool) (*localizedFoo, error) {
-		if calls.Add(1) == 1 {
-			<-block // the first (pre-clear) load hangs
-		}
-		e := &localizedFoo{id: key, name: map[string]string{}}
-		for _, l := range locales {
-			e.name[l] = "x"
-		}
-		return e, nil
-	}
-	c := NewEventCache[string, string, *localizedFoo](Config{Lifetime: t.Context()}, loader)
-	ctx := apipolicy.With(t.Context(), apipolicy.Message)
-
-	first := make(chan struct{})
+	// The message caller starts the flight and leaves at its deadline.
+	msgCtx, cancel := context.WithTimeout(apipolicy.WithMessage(t.Context(), newTestGate(), apipolicy.MessageTimeout), 50*time.Millisecond)
+	defer cancel()
+	msgDone := make(chan error, 1)
 	go func() {
-		defer close(first)
-		_, _, _ = c.Get(ctx, "k", []string{"en"})
+		_, _, err := c.Get(msgCtx, "k", []string{"en"})
+		msgDone <- err
 	}()
-	for calls.Load() < 1 {
-		time.Sleep(5 * time.Millisecond)
-	}
-	c.Clear("k")
-
-	// A caller arriving after the Clear starts its own load instead of
-	// joining the pre-clear flight (which would return what the Clear
-	// just discarded).
-	done := make(chan error, 1)
-	go func() {
-		_, _, err := c.Get(ctx, "k", []string{"en"})
-		done <- err
-	}()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatal(err)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("post-Clear caller joined the pre-Clear flight of its policy")
-	}
-	if got := calls.Load(); got != 2 {
-		t.Fatalf("loader calls = %d, want 2", got)
-	}
-	close(block)
-	<-first
-}
-
-// cloningLoader merges into a CLONE of the existing entry, as the real
-// loaders do (copy-on-write), and blocks until release is closed.
-func cloningLoader(started chan<- struct{}, release <-chan struct{}) Loader[string, string, *localizedFoo] {
-	return func(ctx context.Context, key string, locales []string, existing *localizedFoo, has bool) (*localizedFoo, error) {
-		started <- struct{}{}
-		<-release
-		e := &localizedFoo{id: key, name: map[string]string{}}
-		if has {
-			existing.mu.Lock()
-			for l, v := range existing.name {
-				e.name[l] = v
-			}
-			existing.mu.Unlock()
-		}
-		for _, l := range locales {
-			e.name[l] = "x-" + l
-		}
-		return e, nil
-	}
-}
-
-// Flights of different call policies for the same key run concurrently and
-// each merges into a clone of what it saw; the one admitted second used to
-// overwrite the locales the first loaded, so a later lookup had to fetch
-// them again. The admission now merges on top of the current entry.
-func TestEventCache_ConcurrentFlightsOfDifferentPoliciesKeepEachOthersLocales(t *testing.T) {
-	started := make(chan struct{}, 8)
-	release := make(chan struct{})
-	c := NewEventCache[string, string, *localizedFoo](Config{Lifetime: t.Context()}, cloningLoader(started, release))
-
-	var wg sync.WaitGroup
-	get := func(ctx context.Context, locale string) {
-		wg.Go(func() {
-			if _, _, err := c.Get(ctx, "k", []string{locale}); err != nil {
-				t.Error(err)
-			}
-		})
-	}
-	get(t.Context(), "en")                                    // a getter
-	get(apipolicy.With(t.Context(), apipolicy.Message), "de") // the message path
-	for range 2 {
-		select {
-		case <-started:
-		case <-time.After(3 * time.Second):
-			t.Fatal("both flights must be loading concurrently")
-		}
-	}
-	close(release)
-	wg.Wait()
-
-	v, ok := c.Peek("k")
-	if !ok {
-		t.Fatal("entry missing")
-	}
-	got := map[string]bool{}
-	for _, l := range v.Locales() {
-		got[l] = true
-	}
-	if !got["en"] || !got["de"] {
-		t.Fatalf("cached locales = %v, want both en and de (one flight overwrote the other)", v.Locales())
-	}
-}
-
-// mergedFoo is the entry a copy-on-write loader builds: a clone of the
-// existing entry plus the locales asked for.
-func mergedFoo(key string, existing *localizedFoo, has bool, locales ...string) *localizedFoo {
-	e := &localizedFoo{id: key, name: map[string]string{}}
-	if has {
-		existing.mu.Lock()
-		for l, v := range existing.name {
-			e.name[l] = v
-		}
-		existing.mu.Unlock()
-	}
-	for _, l := range locales {
-		e.name[l] = "x-" + l
-	}
-	return e
-}
-
-func fooLocales(f *localizedFoo) map[string]bool {
-	out := map[string]bool{}
-	for _, l := range f.Locales() {
-		out[l] = true
-	}
-	return out
-}
-
-// Two flights of different call policies that ask for the SAME locale both
-// load, as their flight keys differ. The one admitted second finds the entry
-// the first admitted already covering what it needs: it must hand that entry
-// back, not admit its own copy over it nor load again on top of it.
-func TestEventCache_ConcurrentFlightsOfDifferentPoliciesForTheSameLocaleAdmitOneEntry(t *testing.T) {
-	var calls atomic.Int32
-	started := make(chan struct{}, 8)
-	gate := make(chan struct{})
-	loader := func(ctx context.Context, key string, locales []string, existing *localizedFoo, has bool) (*localizedFoo, error) {
-		calls.Add(1)
-		started <- struct{}{}
-		<-gate
-		return mergedFoo(key, existing, has, locales...), nil
-	}
-	c := NewEventCache[string, string, *localizedFoo](Config{Lifetime: t.Context()}, loader)
 
 	type result struct {
 		v   *localizedFoo
 		err error
 	}
-	results := make(chan result, 2)
-	get := func(ctx context.Context) {
-		go func() {
-			v, _, err := c.Get(ctx, "k", []string{"en"})
-			results <- result{v, err}
-		}()
-	}
-	get(t.Context())
-	get(apipolicy.With(t.Context(), apipolicy.Message))
-	for range 2 {
-		select {
-		case <-started:
-		case <-time.After(3 * time.Second):
-			t.Fatal("both flights must be loading concurrently")
-		}
-	}
-
-	next := func() *localizedFoo {
-		select {
-		case r := <-results:
-			if r.err != nil {
-				t.Fatal(r.err)
-			}
-			return r.v
-		case <-time.After(3 * time.Second):
-			t.Fatal("a Get did not return")
-			return nil
-		}
-	}
-	gate <- struct{}{} // the first flight loads and admits its entry
-	first := next()
-	gate <- struct{}{} // the second flight finds it admitted
-	second := next()
-
-	if second != first {
-		t.Fatal("the second flight returned an entry of its own instead of the one already admitted")
-	}
-	if cur, ok := c.Peek("k"); !ok || cur != first {
-		t.Fatal("the cache does not hold the entry the first flight admitted")
-	}
-	if got := calls.Load(); got != 2 {
-		t.Fatalf("loader calls = %d, want 2 (one per flight, none on top of the admitted entry)", got)
-	}
-	if l := fooLocales(first); len(l) != 1 || !l["en"] {
-		t.Fatalf("locales = %v, want just en", first.Locales())
-	}
-}
-
-// A cache that keeps changing under a flight cannot hold it forever: after
-// maxAdmissionMerges redone loads the flight admits what it has.
-func TestEventCache_AdmissionMergeIsBounded(t *testing.T) {
-	var c *EventCache[string, string, *localizedFoo]
-	var calls atomic.Int32
-	loader := func(ctx context.Context, key string, locales []string, existing *localizedFoo, has bool) (*localizedFoo, error) {
-		n := calls.Add(1)
-		if n <= 50 {
-			// Another flight admits a different entry while this one loads.
-			c.lru.Add(key, mergedFoo(key, existing, has, fmt.Sprintf("other-%d", n)))
-		}
-		return mergedFoo(key, existing, has, locales...), nil
-	}
-	c = NewEventCache[string, string, *localizedFoo](Config{Lifetime: t.Context()}, loader)
-
-	v, ok, err := c.Get(t.Context(), "k", []string{"en"})
-	if err != nil || !ok {
-		t.Fatalf("Get = %v, %v, %v", v, ok, err)
-	}
-	if got, want := calls.Load(), int32(maxAdmissionMerges+1); got != want {
-		t.Fatalf("loader calls = %d, want %d (the first load plus maxAdmissionMerges redone)", got, want)
-	}
-	cur, ok := c.Peek("k")
-	if !ok || cur != v {
-		t.Fatal("the flight did not admit its result once the bound was reached")
-	}
-	if !fooLocales(cur)["en"] {
-		t.Fatalf("locales = %v, want en", cur.Locales())
-	}
-}
-
-// An entry that appears between the flight's start and its admission, when
-// none existed at the start, is merged into: the load is redone on top of it
-// for the locales it lacks, and nothing it holds is lost.
-func TestEventCache_AdmissionMergesAnEntryThatAppearedDuringTheFlight(t *testing.T) {
-	var c *EventCache[string, string, *localizedFoo]
-	var calls atomic.Int32
-	sawExisting := make(chan bool, 4)
-	loader := func(ctx context.Context, key string, locales []string, existing *localizedFoo, has bool) (*localizedFoo, error) {
-		sawExisting <- has
-		if calls.Add(1) == 1 {
-			c.lru.Add(key, mergedFoo(key, nil, false, "de"))
-		}
-		return mergedFoo(key, existing, has, locales...), nil
-	}
-	c = NewEventCache[string, string, *localizedFoo](Config{Lifetime: t.Context()}, loader)
-
-	v, _, err := c.Get(t.Context(), "k", []string{"en"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := calls.Load(); got != 2 {
-		t.Fatalf("loader calls = %d, want 2 (redone on top of the entry that appeared)", got)
-	}
-	if first, second := <-sawExisting, <-sawExisting; first || !second {
-		t.Fatalf("existing seen by the loads = %v, %v; want false then true", first, second)
-	}
-	if l := fooLocales(v); !l["en"] || !l["de"] {
-		t.Fatalf("locales = %v, want en and de", v.Locales())
-	}
-}
-
-// The reverse: the entry the flight was based on is gone at admission
-// (evicted). The load is redone on the empty cache rather than admitting a
-// merge built on an entry the cache no longer holds.
-func TestEventCache_AdmissionRedoesALoadWhoseBaseWasEvicted(t *testing.T) {
-	var c *EventCache[string, string, *localizedFoo]
-	var calls atomic.Int32
-	loader := func(ctx context.Context, key string, locales []string, existing *localizedFoo, has bool) (*localizedFoo, error) {
-		if calls.Add(1) == 2 {
-			c.lru.Remove(key) // evicted while the second load runs
-		}
-		return mergedFoo(key, existing, has, locales...), nil
-	}
-	c = NewEventCache[string, string, *localizedFoo](Config{Lifetime: t.Context()}, loader)
-
-	if _, _, err := c.Get(t.Context(), "k", []string{"en"}); err != nil {
-		t.Fatal(err)
-	}
-	v, _, err := c.Get(t.Context(), "k", []string{"de"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := calls.Load(); got != 3 {
-		t.Fatalf("loader calls = %d, want 3 (the second load redone after its base was evicted)", got)
-	}
-	if l := fooLocales(v); !l["de"] || l["en"] {
-		t.Fatalf("locales = %v, want just de (en was evicted)", v.Locales())
-	}
-}
-
-// A message-path caller that joined a flight started by a message with little
-// budget left gets that flight's deadline error without having used its own
-// budget: it asks once more under its own. The starter keeps its own error.
-func TestEventCache_Get_JoinerRetriesOnceWhenTheStartersBudgetRanOut(t *testing.T) {
-	regs := trackRegistrations(t)
-	var calls atomic.Int32
-	entered := make(chan struct{})
-	gate := make(chan struct{})
-	ok := recordingLoader(&calls, false)
-	loader := func(ctx context.Context, key string, locales []string, existing *localizedFoo, has bool) (*localizedFoo, error) {
-		if calls.Load() == 0 {
-			calls.Add(1)
-			close(entered)
-			<-gate
-			return nil, context.DeadlineExceeded
-		}
-		return ok(ctx, key, locales, existing, has)
-	}
-	c := NewEventCache[string, string, *localizedFoo](Config{}, loader)
-	starterCtx := apipolicy.WithBudget(t.Context(), apipolicy.Message, time.Millisecond)
-	joinerCtx := apipolicy.With(t.Context(), apipolicy.Message)
-
-	starter := make(chan error, 1)
+	getterDone := make(chan result, 1)
+	registered.wait(t, 1)
 	go func() {
-		_, _, err := c.Get(starterCtx, "k", []string{"en"})
-		starter <- err
+		v, _, err := c.Get(t.Context(), "k", []string{"en"})
+		getterDone <- result{v, err}
 	}()
-	<-entered
-	joiner := make(chan error, 1)
-	go func() {
-		_, _, err := c.Get(joinerCtx, "k", []string{"en"})
-		joiner <- err
-	}()
-	regs.wait(t, 2)
-	close(gate)
+	registered.wait(t, 2)
 
-	if err := <-joiner; err != nil {
-		t.Fatalf("joiner err = %v, want success from the retry under its own budget", err)
+	if err := <-msgDone; !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("message caller error = %v, want its own deadline", err)
 	}
-	if err := <-starter; !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("starter err = %v, want its own deadline error", err)
-	}
-	if got := calls.Load(); got != 2 {
-		t.Fatalf("loads = %d, want 2 (the flight and one retry; the starter does not retry)", got)
-	}
-}
-
-// At most one retry per call: a second deadline error is returned.
-func TestEventCache_Get_JoinerRetriesAtMostOnce(t *testing.T) {
-	regs := trackRegistrations(t)
-	var calls atomic.Int32
-	entered := make(chan struct{})
-	gate := make(chan struct{})
-	loader := func(context.Context, string, []string, *localizedFoo, bool) (*localizedFoo, error) {
-		if calls.Add(1) == 1 {
-			close(entered)
-			<-gate
-		}
-		return nil, context.DeadlineExceeded
-	}
-	c := NewEventCache[string, string, *localizedFoo](Config{}, loader)
-	go func() { _, _, _ = c.Get(apipolicy.With(t.Context(), apipolicy.Message), "k", []string{"en"}) }()
-	<-entered
-	joiner := make(chan error, 1)
-	go func() {
-		_, _, err := c.Get(apipolicy.With(t.Context(), apipolicy.Message), "k", []string{"en"})
-		joiner <- err
-	}()
-	regs.wait(t, 2)
-	close(gate)
-	if err := <-joiner; !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("err = %v, want the deadline error after the one retry", err)
-	}
-	if got := calls.Load(); got != 2 {
-		t.Fatalf("loads = %d, want 2", got)
-	}
-}
-
-// The starter of an EventCache flight keeps its own deadline error even with
-// budget left: it must not ask again.
-func TestEventCache_Get_StarterWithBudgetLeftDoesNotRetryItsOwnDeadline(t *testing.T) {
-	var calls atomic.Int32
-	loader := func(context.Context, string, []string, *localizedFoo, bool) (*localizedFoo, error) {
-		calls.Add(1)
-		return nil, context.DeadlineExceeded
-	}
-	c := NewEventCache[string, string, *localizedFoo](Config{}, loader)
-	_, _, err := c.Get(apipolicy.With(t.Context(), apipolicy.Message), "k", []string{"en"})
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("err = %v, want the starter's own deadline error", err)
+	close(release)
+	r := <-getterDone
+	if r.err != nil || r.v == nil {
+		t.Fatalf("getter = (%v, %v), want the flight's answer", r.v, r.err)
 	}
 	if got := calls.Load(); got != 1 {
-		t.Fatalf("loads = %d, want 1", got)
+		t.Fatalf("loader calls = %d, want 1: the getter must join the message caller's flight", got)
 	}
-}
-
-// A joiner on the default policy, or one whose own budget is spent, has
-// nothing to retry with and gets the flight's deadline error.
-func TestEventCache_Get_JoinerWithoutBudgetOrOnTheDefaultPolicyDoesNotRetry(t *testing.T) {
-	cases := []struct {
-		name string
-		ctx  func(context.Context) context.Context
-	}{
-		{"own budget spent", func(c context.Context) context.Context {
-			return apipolicy.WithBudget(c, apipolicy.Message, -time.Second)
-		}},
-		{"default policy", func(c context.Context) context.Context { return c }},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			regs := trackRegistrations(t)
-			var calls atomic.Int32
-			entered := make(chan struct{})
-			gate := make(chan struct{})
-			loader := func(context.Context, string, []string, *localizedFoo, bool) (*localizedFoo, error) {
-				if calls.Add(1) == 1 {
-					close(entered)
-					<-gate
-				}
-				return nil, context.DeadlineExceeded
-			}
-			c := NewEventCache[string, string, *localizedFoo](Config{}, loader)
-			// The starter shares the joiner's flight key (same mode).
-			go func() { _, _, _ = c.Get(tc.ctx(t.Context()), "k", []string{"en"}) }()
-			<-entered
-			joiner := make(chan error, 1)
-			go func() {
-				_, _, err := c.Get(tc.ctx(t.Context()), "k", []string{"en"})
-				joiner <- err
-			}()
-			regs.wait(t, 2)
-			close(gate)
-			if err := <-joiner; !errors.Is(err, context.DeadlineExceeded) {
-				t.Fatalf("joiner err = %v, want the flight's deadline error", err)
-			}
-			if got := calls.Load(); got != 1 {
-				t.Fatalf("loads = %d, want 1 (no retry)", got)
-			}
-		})
+	if _, ok := c.Peek("k"); !ok {
+		t.Fatalf("the flight must fill the cache although the message caller left")
 	}
 }

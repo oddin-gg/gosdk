@@ -5,38 +5,41 @@ import (
 	"testing"
 )
 
-func TestModeOfDefaultsAndCarry(t *testing.T) {
+type otherKey struct{}
+
+type stubGate struct{ open bool }
+
+func (g stubGate) Open() bool            { return g.open }
+func (stubGate) Opened() <-chan struct{} { return nil }
+
+func TestGateMark(t *testing.T) {
 	ctx := context.Background()
-	if ModeOf(ctx) != Default || Suffix(ctx) != "" {
-		t.Fatal("a plain context must carry the default policy and an empty suffix")
+	if GateOf(ctx) != nil {
+		t.Fatal("a plain context carries a gate")
 	}
-	msg := With(ctx, Message)
-	if ModeOf(msg) != Message || Suffix(msg) != "|msg" {
-		t.Fatalf("Message: mode=%v suffix=%q", ModeOf(msg), Suffix(msg))
+	marked := WithMessage(ctx, stubGate{open: true}, MessageTimeout)
+	g := GateOf(marked)
+	if g == nil || !g.Open() {
+		t.Fatalf("the mark was lost or changed: %v", g)
 	}
-	skip := With(ctx, MessageSkip)
-	if ModeOf(skip) != MessageSkip || Suffix(skip) != "|skip" {
-		t.Fatalf("MessageSkip: mode=%v suffix=%q", ModeOf(skip), Suffix(skip))
+	if GateOf(WithoutGate(marked)) != nil {
+		t.Fatal("WithoutGate left the mark in place")
 	}
+}
 
-	// Carry moves the policy onto an unrelated (detached) context, and
-	// leaves a default caller's destination untouched.
-	detached := context.Background()
-	if got := ModeOf(Carry(detached, msg)); got != Message {
-		t.Fatalf("Carry did not move the policy: %v", got)
+// The mark follows the context into everything derived from it, and a
+// context derived from a stripped one does not get it back.
+func TestGateMarkIsInherited(t *testing.T) {
+	marked := WithMessage(context.Background(), stubGate{}, MessageTimeout)
+	child, cancel := context.WithCancel(marked)
+	defer cancel()
+	if GateOf(child) == nil {
+		t.Fatal("a derived context lost the mark")
 	}
-	if got := Carry(detached, ctx); got != detached {
-		t.Fatal("Carry from a default context must return dst unchanged")
+	if GateOf(context.WithoutCancel(marked)) == nil {
+		t.Fatal("a context detached from the caller's cancellation lost the mark; WithoutGate is the way to drop it")
 	}
-
-	// Every suffix is listed for invalidation.
-	seen := map[string]bool{}
-	for _, s := range Suffixes {
-		seen[s] = true
-	}
-	for _, c := range []context.Context{ctx, msg, skip} {
-		if !seen[Suffix(c)] {
-			t.Fatalf("suffix %q missing from Suffixes", Suffix(c))
-		}
+	if GateOf(context.WithValue(WithoutGate(marked), otherKey{}, 1)) != nil {
+		t.Fatal("a context derived from a stripped one has the mark again")
 	}
 }
