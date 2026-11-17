@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/oddin-gg/gosdk/internal/apipolicy"
+	"github.com/oddin-gg/gosdk/internal/cache/lru"
 	"github.com/oddin-gg/gosdk/types"
 )
 
@@ -143,12 +145,12 @@ func TestMarketDescriptionCache_NoBackgroundRefreshWhileOpenOrBackedOff(t *testi
 func TestMarketDescriptionCache_GetterJoinsTheBackgroundRefresh(t *testing.T) {
 	srv := newMarketSrv(t, bulkCatalogWithStaticVariants)
 	mc, ctx := newMarketCacheForTest(t, srv)
-	mc.catalogTTL = 50 * time.Millisecond
+	mc.catalogTTL = 300 * time.Millisecond
 	locales := []types.Locale{types.EnLocale}
 	if _, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), locales); err != nil {
 		t.Fatalf("seed lookup: %v", err)
 	}
-	time.Sleep(80 * time.Millisecond)
+	time.Sleep(400 * time.Millisecond)
 
 	hold := make(chan struct{})
 	srv.hold.Store(&hold)
@@ -163,6 +165,9 @@ func TestMarketDescriptionCache_GetterJoinsTheBackgroundRefresh(t *testing.T) {
 		err  error
 	}
 	done := make(chan result, 1)
+	var registered atomic.Int32
+	restore := lru.SetFlightRegisteredHook(func() { registered.Add(1) })
+	defer restore()
 	go func() {
 		e, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), locales)
 		if err != nil {
@@ -171,7 +176,8 @@ func TestMarketDescriptionCache_GetterJoinsTheBackgroundRefresh(t *testing.T) {
 		}
 		done <- result{name: e.Snapshot().Names[types.EnLocale]}
 	}()
-	time.Sleep(50 * time.Millisecond)
+	// The getter is parked on the refresh's flight before the response is released.
+	waitFor(t, "the getter to join the refresh's flight", func() bool { return registered.Load() == 1 })
 	close(hold)
 	r := <-done
 	if r.err != nil || r.name != "Renamed" {
