@@ -1258,7 +1258,9 @@ func (c *Client) do(ctx context.Context, method, path string, locale *types.Loca
 			// Only a status that says the service is unavailable opens the
 			// endpoint's breaker. A plain server error (500) is an answer
 			// about one resource: the loaders remember it for that key.
-			if serviceUnavailableStatus(r.StatusCode) {
+			// An envelope that says SERVICE_UNAVAILABLE does too, as on a 2xx.
+			var envelope *Error
+			if serviceUnavailableStatus(r.StatusCode) || (errors.As(retryErr, &envelope) && isServiceUnavailable(envelope.Code)) {
 				c.breaker.failure(endpointOf(path))
 			}
 			apipolicy.AttemptFailed(ctx)
