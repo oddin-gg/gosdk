@@ -9,8 +9,8 @@ type otherKey struct{}
 
 type stubGate struct{ open bool }
 
-func (g stubGate) Open() bool            { return g.open }
-func (stubGate) Opened() <-chan struct{} { return nil }
+func (g stubGate) Open(Endpoint) bool            { return g.open }
+func (stubGate) Opened(Endpoint) <-chan struct{} { return nil }
 
 func TestGateMark(t *testing.T) {
 	ctx := context.Background()
@@ -19,7 +19,7 @@ func TestGateMark(t *testing.T) {
 	}
 	marked := WithMessage(ctx, stubGate{open: true}, MessageTimeout)
 	g := GateOf(marked)
-	if g == nil || !g.Open() {
+	if g == nil || !g.Open(EndpointOther) {
 		t.Fatalf("the mark was lost or changed: %v", g)
 	}
 	if GateOf(WithoutGate(marked)) != nil {

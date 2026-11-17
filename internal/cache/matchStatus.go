@@ -8,6 +8,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/oddin-gg/gosdk/internal/apipolicy"
+
 	"github.com/oddin-gg/gosdk/internal/api"
 	apiXML "github.com/oddin-gg/gosdk/internal/api/xml"
 	"github.com/oddin-gg/gosdk/internal/cache/lru"
@@ -208,7 +210,7 @@ func (m *MatchStatusCache) MatchStatus(ctx context.Context, id types.URN) (*Loca
 	for clearRetries := 0; ; {
 		gen := m.flightGen.Load()
 		flightKey := fmt.Sprintf("%d|%s", gen, id.ToString())
-		entry, err := lru.LoadCoalesced(ctx, m.lifetime, &m.sf, flightKey, func(loadCtx context.Context) (*LocalizedMatchStatus, error) {
+		entry, err := lru.LoadCoalesced(ctx, m.lifetime, &m.sf, apipolicy.EndpointSummary, flightKey, func(loadCtx context.Context) (*LocalizedMatchStatus, error) {
 			// Stale-generation guard — see errStaleFlight for the
 			// register-vs-clear window this closes.
 			if m.flightGen.Load() != gen {

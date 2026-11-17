@@ -384,8 +384,8 @@ func (m *MarketDescriptionCache) MarketDescriptionByID(
 		// missing, so a failing catalog is not retried per message either.
 		// A message that is already cancelled reads the stale catalog too
 		// but starts no request.
-		if ctx.Err() == nil && lru.SkippedByGate(ctx) == nil {
-			m.refreshInBackground(missing)
+		if ctx.Err() == nil {
+			m.refreshInBackground(ctx, missing)
 		}
 		return entry, nil
 	}
@@ -618,13 +618,15 @@ func (m *MarketDescriptionCache) loadOne(ctx context.Context, marketID *int, var
 		for {
 			gen := m.flightGen.Load()
 			var sfKey string
+			ep := apipolicy.EndpointCatalog
 			if isDynamicVariant {
 				sfKey = fmt.Sprintf("%d|%d|%s|%s", gen, *marketID, variantStr, locale)
+				ep = apipolicy.EndpointVariant
 			} else {
 				sfKey = fmt.Sprintf("%d|*|%s", gen, locale)
 			}
 
-			_, err := lru.LoadCoalesced(ctx, m.lifetime, &m.sf, sfKey,
+			_, err := lru.LoadCoalesced(ctx, m.lifetime, &m.sf, ep, sfKey,
 				m.catalogFlight(gen, sfKey, loc, marketID, variantStr, isDynamicVariant))
 			if errors.Is(err, errStaleFlight) {
 				continue // re-register under the fresh generation
@@ -820,11 +822,16 @@ func (m *MarketDescriptionCache) catalogFlight(
 // shares it and a message that asked is not held up. A flight that finds
 // itself superseded is not re-registered: the flight that superseded it
 // covers the locale.
-func (m *MarketDescriptionCache) refreshInBackground(locales []types.Locale) {
+func (m *MarketDescriptionCache) refreshInBackground(ctx context.Context, locales []types.Locale) {
 	for _, loc := range locales {
 		gen := m.flightGen.Load()
 		sfKey := fmt.Sprintf("%d|*|%s", gen, loc)
-		lru.StartCoalesced(m.lifetime, &m.sf, sfKey, m.catalogFlight(gen, sfKey, loc, nil, "", false))
+		// Not while the catalog endpoint's breaker is open or the catalog
+		// failed moments ago: the message that asked reads the stale rows.
+		if lru.SkippedByGate(ctx, &m.sf, sfKey, apipolicy.EndpointCatalog) != nil {
+			continue
+		}
+		lru.StartCoalesced(m.lifetime, &m.sf, sfKey, m.catalogFlight(gen, sfKey, loc, nil, "", false)) //nolint:contextcheck // deliberate detach: the refresh runs under the cache lifetime, not the caller's context
 	}
 }
 

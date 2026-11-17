@@ -351,13 +351,13 @@ type gateStub struct {
 
 func newGateStub() *gateStub { return &gateStub{opened: make(chan struct{})} }
 
-func (g *gateStub) Open() bool {
+func (g *gateStub) Open(apipolicy.Endpoint) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return g.open
 }
 
-func (g *gateStub) Opened() <-chan struct{} {
+func (g *gateStub) Opened(apipolicy.Endpoint) <-chan struct{} {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return g.opened

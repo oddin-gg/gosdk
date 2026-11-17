@@ -65,8 +65,9 @@ type FeedMessageFactory struct {
 // market, outcome and player names) is bounded by it and gives up early once
 // the breaker opens. The returned function must be called when the build
 // ends. If the message's own time ran out (not the session's or the
-// caller's cancellation), the API made a message wait its whole time, and
-// it trips the breaker: the next builds then go straight to the caches
+// caller's cancellation), an endpoint made a message wait its whole time,
+// and the breakers of the endpoints it waited on are tripped: the next
+// builds then go straight to the caches for what those endpoints serve,
 // instead of each paying the same wait.
 func (f *FeedMessageFactory) startMessage(parent context.Context) (context.Context, func()) {
 	timeout := f.messageTimeout
@@ -79,7 +80,16 @@ func (f *FeedMessageFactory) startMessage(parent context.Context) (context.Conte
 	}
 	return ctx, func() {
 		if f.breaker != nil && parent.Err() == nil && messageTimerFired(ctx) {
-			f.breaker.Trip()
+			// Trip the endpoints the message was waiting on when its time
+			// ran out, not the whole API: a hung player profile must not
+			// turn the match summaries away. If no wait of a loader ended by
+			// the deadline (the time went to several short waits, or to
+			// something that is not a load), there is no endpoint to blame
+			// and nothing is tripped: the next message that waits too long
+			// on one will.
+			for _, ep := range apipolicy.TimedOut(ctx) {
+				f.breaker.Trip(ep)
+			}
 		}
 		cancel()
 	}

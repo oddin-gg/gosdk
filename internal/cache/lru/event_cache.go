@@ -66,6 +66,8 @@ type EventCache[K comparable, L comparable, T CachedEntry[L]] struct {
 	lru    *TTL[K, T]
 	sf     Flights
 	loader Loader[K, L, T]
+	// endpoint is Config.Endpoint.
+	endpoint apipolicy.Endpoint
 
 	// clearMu + clearedAt implement the Clear-vs-in-flight-load guard.
 	// A loader closure snapshots time.Now() before reading the existing
@@ -145,6 +147,11 @@ type Config struct {
 	// every in-flight loader's ctx cancels with it). Nil falls back to
 	// context.WithoutCancel(callerCtx) — fully detached.
 	Lifetime context.Context
+
+	// Endpoint is the REST endpoint the loader asks: the breaker a message
+	// build honours before it starts or joins a load. The zero value is
+	// apipolicy.EndpointOther.
+	Endpoint apipolicy.Endpoint
 }
 
 // Defaults — sized for typical SDK consumers (thousands of active events).
@@ -181,6 +188,7 @@ func NewEventCache[K comparable, L comparable, T CachedEntry[L]](
 		loader:    loader,
 		clearedAt: make(map[K]time.Time),
 		lifetime:  cfg.Lifetime,
+		endpoint:  cfg.Endpoint,
 		onAdmit:   cfg.OnAdmit,
 	}
 }
@@ -239,7 +247,7 @@ func (c *EventCache[K, L, T]) get(ctx context.Context, key K, locales []L, clear
 	}
 	// A message-path caller does not start or join a flight while the REST
 	// API is known to be failing (see SkippedByGate).
-	if err := SkippedByGate(ctx); err != nil {
+	if err := SkippedByGate(ctx, &c.sf, c.sfKey(key), c.endpoint); err != nil {
 		return zero, false, err
 	}
 
@@ -265,10 +273,11 @@ func (c *EventCache[K, L, T]) get(ctx context.Context, key K, locales []L, clear
 	// A flight carries no message mark: it runs for whoever asks, with the
 	// getters' retries and timeouts, and each caller bounds only its own
 	// wait (below).
-	flight := func() *Flight {
-		return c.sf.Go(c.sfKey(key), func() (any, error) {
+	flight := func() (*Flight, error) {
+		return c.sf.GoFor(ctx, c.sfKey(key), func(fl *Flight) (any, error) {
 			loadCtx, loadCancel := context.WithTimeout(base, LoadTimeout)
 			defer loadCancel()
+			loadCtx = apipolicy.WithAttemptFailed(loadCtx, fl.NoteAttemptFailed)
 			// Snapshot the flight's start BEFORE reading the existing entry:
 			// the pre-Add check below discards this flight's merge if a
 			// Clear lands after this point (see clearedAt field doc).
@@ -344,9 +353,12 @@ func (c *EventCache[K, L, T]) get(ctx context.Context, key K, locales []L, clear
 	}
 
 	var v T
-	f := flight()
+	f, ferr := flight()
+	if ferr != nil {
+		return zero, false, ferr
+	}
 	FlightRegistered()
-	val, err := f.Await(ctx)
+	val, err := f.Await(ctx, c.endpoint)
 	if errors.Is(err, errClearedDuringLoad) {
 		if clearRetries >= maxClearRetries {
 			// Only reachable under a sustained storm of Clears for

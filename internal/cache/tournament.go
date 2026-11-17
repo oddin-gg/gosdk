@@ -6,6 +6,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/oddin-gg/gosdk/internal/apipolicy"
+
 	"github.com/oddin-gg/gosdk/internal/api"
 	apiXML "github.com/oddin-gg/gosdk/internal/api/xml"
 	"github.com/oddin-gg/gosdk/internal/cache/lru"
@@ -326,7 +328,7 @@ func (t *TournamentCache) TournamentIcon(ctx context.Context, id types.URN, loca
 		return v, nil
 	}
 
-	return lru.LoadCoalesced(ctx, t.lifetime, &t.iconSF, iconFlightKey(id, locale), func(loadCtx context.Context) (*string, error) {
+	return lru.LoadCoalesced(ctx, t.lifetime, &t.iconSF, apipolicy.EndpointTournament, iconFlightKey(id, locale), func(loadCtx context.Context) (*string, error) {
 		// A flight that ended just before this one started has stored it.
 		if v, ok := t.loadIcon(id); ok {
 			return v, nil
@@ -416,6 +418,7 @@ func newTournamentCache(lifeCtx context.Context, client *api.Client, logger *log
 	tc.lru = lru.NewEventCache[types.URN, types.Locale, *LocalizedTournament](
 		lru.Config{
 			Lifetime: lifeCtx,
+			Endpoint: apipolicy.EndpointTournament,
 			// Evict the icon alongside the entry — LRU/TTL eviction
 			// previously left icon side-map entries behind forever.
 			OnEvict: func(key any, _ any) {

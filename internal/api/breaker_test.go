@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/oddin-gg/gosdk/internal/apipolicy"
 	"github.com/oddin-gg/gosdk/types"
 )
 
@@ -49,19 +50,19 @@ func fired(ch <-chan struct{}) bool {
 func TestBreaker_OpensForItsTimeOnly(t *testing.T) {
 	clk := newFakeClock()
 	b := newBreaker(clk.now, 10*time.Second)
-	if b.Open() {
+	if b.Open(testEP) {
 		t.Fatal("a new breaker is open")
 	}
-	b.Trip()
-	if !b.Open() {
+	b.Trip(testEP)
+	if !b.Open(testEP) {
 		t.Fatal("not open after Trip")
 	}
 	clk.advance(9 * time.Second)
-	if !b.Open() {
+	if !b.Open(testEP) {
 		t.Fatal("closed before its time ended")
 	}
 	clk.advance(time.Second)
-	if b.Open() {
+	if b.Open(testEP) {
 		t.Fatal("still open after its time ended")
 	}
 }
@@ -69,15 +70,15 @@ func TestBreaker_OpensForItsTimeOnly(t *testing.T) {
 func TestBreaker_AFailureWhileOpenExtendsTheTime(t *testing.T) {
 	clk := newFakeClock()
 	b := newBreaker(clk.now, 10*time.Second)
-	b.Trip()
+	b.Trip(testEP)
 	clk.advance(8 * time.Second)
-	b.failure()
+	b.failure(testEP)
 	clk.advance(8 * time.Second)
-	if !b.Open() {
+	if !b.Open(testEP) {
 		t.Fatal("a second failure did not keep the breaker open for another full time")
 	}
 	clk.advance(2 * time.Second)
-	if b.Open() {
+	if b.Open(testEP) {
 		t.Fatal("open beyond the extended time")
 	}
 }
@@ -90,47 +91,47 @@ func TestBreaker_OpenedFiresOncePerOpening(t *testing.T) {
 	clk := newFakeClock()
 	b := newBreaker(clk.now, 10*time.Second)
 
-	ch := b.Opened()
+	ch := b.Opened(testEP)
 	if fired(ch) {
 		t.Fatal("Opened fired on a closed breaker")
 	}
-	b.Trip()
+	b.Trip(testEP)
 	if !fired(ch) {
 		t.Fatal("the waiter was not woken by the opening")
 	}
-	b.Trip() // while open: no second close
-	if !fired(b.Opened()) {
+	b.Trip(testEP) // while open: no second close
+	if !fired(b.Opened(testEP)) {
 		t.Fatal("Opened of an open breaker must be fired")
 	}
 
-	b.success()
-	ch = b.Opened()
+	b.success(testEP)
+	ch = b.Opened(testEP)
 	if fired(ch) {
 		t.Fatal("Opened is fired after a success closed the breaker")
 	}
-	b.Trip()
+	b.Trip(testEP)
 	if !fired(ch) {
 		t.Fatal("second opening did not wake its waiter")
 	}
 
 	clk.advance(10 * time.Second)
-	if fired(b.Opened()) {
+	if fired(b.Opened(testEP)) {
 		t.Fatal("Opened is fired after the breaker expired")
 	}
-	if b.Open() {
+	if b.Open(testEP) {
 		t.Fatal("expired breaker is open")
 	}
 }
 
 func TestBreaker_SuccessClosesAnOpenBreaker(t *testing.T) {
 	b := newBreaker(newFakeClock().now, 10*time.Second)
-	b.Trip()
-	b.success()
-	if b.Open() {
+	b.Trip(testEP)
+	b.success(testEP)
+	if b.Open(testEP) {
 		t.Fatal("open after a healthy answer")
 	}
-	b.success() // on a closed breaker: nothing happens
-	if b.Open() {
+	b.success(testEP) // on a closed breaker: nothing happens
+	if b.Open(testEP) {
 		t.Fatal("a success opened the breaker")
 	}
 }
@@ -145,13 +146,13 @@ func TestBreaker_ConcurrentFailuresAndSuccesses(t *testing.T) {
 			for j := range 2000 {
 				switch (i + j) % 4 {
 				case 0:
-					b.failure()
+					b.failure(testEP)
 				case 1:
-					b.success()
+					b.success(testEP)
 				case 2:
-					_ = b.Open()
+					_ = b.Open(testEP)
 				default:
-					ch := b.Opened()
+					ch := b.Opened(testEP)
 					select {
 					case <-ch:
 					default:
@@ -161,34 +162,36 @@ func TestBreaker_ConcurrentFailuresAndSuccesses(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	b.success()
-	if b.Open() {
+	b.success(testEP)
+	if b.Open(testEP) {
 		t.Fatal("open after a final success")
 	}
-	if fired(b.Opened()) {
+	if fired(b.Opened(testEP)) {
 		t.Fatal("the channel of a closed breaker is fired")
 	}
 }
 
 func TestBreaker_ClientStartsClosed(t *testing.T) {
 	c := New(&testConfig{apiURL: "x", token: "t"})
-	if c.Breaker() == nil || c.Breaker().Open() {
+	if c.Breaker() == nil || anyOpen(c.Breaker()) {
 		t.Fatal("a new client's breaker must exist and be closed")
 	}
-	if c.breaker.openFor != breakerOpenFor {
-		t.Fatalf("open time = %v, want %v", c.breaker.openFor, breakerOpenFor)
+	if c.breaker.eps[0].openFor != breakerOpenFor {
+		t.Fatalf("open time = %v, want %v", c.breaker.eps[0].openFor, breakerOpenFor)
 	}
 }
 
-// The breaker opens on a failed attempt that says the API is unavailable:
-// 5xx, 429, a broken connection and a timeout after the request was sent.
+// The breaker opens on a failed attempt that says the endpoint is unavailable:
+// 502/503/504, 429, a broken connection and a timeout after the request was
+// sent. A plain server error (500) answered for one resource does not.
 func TestBreaker_OpensOnAPIFailures(t *testing.T) {
 	cases := []struct {
 		name    string
 		handler http.HandlerFunc
 		setup   func(c *Client)
 	}{
-		{"500", func(w http.ResponseWriter, r *http.Request) { http.Error(w, "boom", http.StatusInternalServerError) }, nil},
+		{"502", func(w http.ResponseWriter, r *http.Request) { http.Error(w, "boom", http.StatusBadGateway) }, nil},
+		{"504", func(w http.ResponseWriter, r *http.Request) { http.Error(w, "boom", http.StatusGatewayTimeout) }, nil},
 		{"503", func(w http.ResponseWriter, r *http.Request) { http.Error(w, "boom", http.StatusServiceUnavailable) }, nil},
 		{"429", func(w http.ResponseWriter, r *http.Request) { http.Error(w, "slow down", http.StatusTooManyRequests) }, nil},
 		{"connection closed", func(w http.ResponseWriter, r *http.Request) {
@@ -213,7 +216,7 @@ func TestBreaker_OpensOnAPIFailures(t *testing.T) {
 			if _, err := c.FetchSports(t.Context(), types.EnLocale); err == nil {
 				t.Fatal("expected an error")
 			}
-			if !c.Breaker().Open() {
+			if !anyOpen(c.Breaker()) {
 				t.Fatal("the breaker did not open")
 			}
 		})
@@ -234,7 +237,7 @@ func TestBreaker_OpensOnATransportErrorOfANonIdempotentMutation(t *testing.T) {
 	if ok, err := c.postEmpty(t.Context(), "/x", false); err == nil || ok {
 		t.Fatalf("ok=%v err=%v, want a failure", ok, err)
 	}
-	if !c.Breaker().Open() {
+	if !anyOpen(c.Breaker()) {
 		t.Fatal("the breaker did not open")
 	}
 }
@@ -256,7 +259,7 @@ func TestBreaker_DoesNotOpenOnTheCallersOwnOutcome(t *testing.T) {
 		if _, err := c.FetchSports(ctx, types.EnLocale); err == nil {
 			t.Fatal("expected an error")
 		}
-		if c.Breaker().Open() {
+		if anyOpen(c.Breaker()) {
 			t.Fatal("the caller's cancellation opened the breaker")
 		}
 	})
@@ -278,7 +281,7 @@ func TestBreaker_DoesNotOpenOnTheCallersOwnOutcome(t *testing.T) {
 		if _, err := c.FetchSports(ctx, types.EnLocale); err == nil {
 			t.Fatal("expected an error")
 		}
-		if c.Breaker().Open() {
+		if anyOpen(c.Breaker()) {
 			t.Fatal("the caller's cancellation of a body read opened the breaker")
 		}
 	})
@@ -300,7 +303,7 @@ func TestBreaker_DoesNotOpenOnTheCallersOwnOutcome(t *testing.T) {
 		if ok, err := c.postEmpty(ctx, "/x", true); err == nil || ok {
 			t.Fatalf("ok=%v err=%v, want a failure", ok, err)
 		}
-		if c.Breaker().Open() {
+		if anyOpen(c.Breaker()) {
 			t.Fatal("the caller's cancellation of a mutation body read opened the breaker")
 		}
 	})
@@ -314,7 +317,7 @@ func TestBreaker_DoesNotOpenOnTheCallersOwnOutcome(t *testing.T) {
 		if _, err := c.FetchSports(t.Context(), types.EnLocale); !errors.Is(err, ErrClosed) {
 			t.Fatalf("err = %v, want ErrClosed", err)
 		}
-		if c.Breaker().Open() {
+		if anyOpen(c.Breaker()) {
 			t.Fatal("a call on a closed client opened the breaker")
 		}
 	})
@@ -329,8 +332,8 @@ func TestBreaker_DoesNotOpenOnTheCallersOwnOutcome(t *testing.T) {
 		if _, err := c.FetchSports(t.Context(), types.EnLocale); err == nil {
 			t.Fatal("expected an error")
 		}
-		if hits.Load() != 1 || c.Breaker().Open() {
-			t.Fatalf("hits=%d open=%v, want one request and a closed breaker", hits.Load(), c.Breaker().Open())
+		if hits.Load() != 1 || anyOpen(c.Breaker()) {
+			t.Fatalf("hits=%d open=%v, want one request and a closed breaker", hits.Load(), anyOpen(c.Breaker()))
 		}
 	})
 }
@@ -342,9 +345,9 @@ func TestBreaker_ANotFoundAnswerDoesNotCloseIt(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := newTestClient(t, srv)
-	c.Breaker().Trip()
+	c.Breaker().Trip(apipolicy.EndpointStatic)
 	_, _ = c.FetchSports(t.Context(), types.EnLocale)
-	if !c.Breaker().Open() {
+	if !anyOpen(c.Breaker()) {
 		t.Fatal("a 404 closed the breaker")
 	}
 }
@@ -356,11 +359,11 @@ func TestBreaker_ClosedByAHealthyAnswer(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := newTestClient(t, srv)
-	c.Breaker().Trip()
+	c.Breaker().Trip(apipolicy.EndpointStatic)
 	if _, err := c.FetchSports(t.Context(), types.EnLocale); err != nil {
 		t.Fatal(err)
 	}
-	if c.Breaker().Open() {
+	if anyOpen(c.Breaker()) {
 		t.Fatal("a healthy answer did not close the breaker")
 	}
 }
@@ -409,14 +412,14 @@ func TestBreaker_ClosedByAHealthyAnswer_OnlyAfterTheBodyWasRead(t *testing.T) {
 	for _, m := range []string{truncated, invalid, trailing, stalled} {
 		for _, startOpen := range []bool{false, true} {
 			mode.Store(m)
-			c.breaker.success()
+			c.breaker.success(apipolicy.EndpointStatic)
 			if startOpen {
-				c.Breaker().Trip()
+				c.Breaker().Trip(apipolicy.EndpointStatic)
 			}
 			if _, err := c.FetchSports(t.Context(), types.EnLocale); err == nil {
 				t.Fatalf("%s body: expected an error", m)
 			}
-			if !c.Breaker().Open() {
+			if !anyOpen(c.Breaker()) {
 				t.Fatalf("%s body (start open=%v): the breaker is closed", m, startOpen)
 			}
 		}
@@ -426,7 +429,7 @@ func TestBreaker_ClosedByAHealthyAnswer_OnlyAfterTheBodyWasRead(t *testing.T) {
 	if _, err := c.FetchSports(t.Context(), types.EnLocale); err != nil {
 		t.Fatal(err)
 	}
-	if c.Breaker().Open() {
+	if anyOpen(c.Breaker()) {
 		t.Fatal("complete body: the breaker stayed open")
 	}
 }
@@ -481,32 +484,32 @@ func TestBreaker_ClosedByAHealthyAnswer_AMutationOnlyOnceItsBodyWasVerified(t *t
 	for _, m := range []string{"truncated", "oversized", "malformed", "trailing", "unavailable",
 		"bare_error_truncated", "bare_error_unavailable", "bare_error_trailing"} {
 		mode.Store(m)
-		c.breaker.success()
+		c.breaker.success(apipolicy.EndpointOther)
 		if ok, err := c.postEmpty(t.Context(), "/x", true); err == nil || ok {
 			t.Fatalf("%s body: ok=%v err=%v, want a failure", m, ok, err)
 		}
-		if !c.Breaker().Open() {
+		if !anyOpen(c.Breaker()) {
 			t.Fatalf("%s body: the breaker stayed closed", m)
 		}
 	}
 
 	for _, m := range []string{"forbidden", "not_found", "conflict", "bare_error", "no_code"} {
 		mode.Store(m)
-		c.Breaker().Trip()
+		c.Breaker().Trip(apipolicy.EndpointOther)
 		if ok, err := c.postEmpty(t.Context(), "/x", true); err == nil || ok {
 			t.Fatalf("%s envelope: ok=%v err=%v, want a rejection", m, ok, err)
 		}
-		if c.Breaker().Open() {
+		if anyOpen(c.Breaker()) {
 			t.Fatalf("%s envelope: a healthy answer left the breaker open", m)
 		}
 	}
 
 	mode.Store("ok")
-	c.Breaker().Trip()
+	c.Breaker().Trip(apipolicy.EndpointOther)
 	if ok, err := c.postEmpty(t.Context(), "/x", true); err != nil || !ok {
 		t.Fatalf("complete body: ok=%v err=%v", ok, err)
 	}
-	if c.Breaker().Open() {
+	if anyOpen(c.Breaker()) {
 		t.Fatal("complete body: the breaker stayed open")
 	}
 }
@@ -521,11 +524,12 @@ func TestBreaker_ClosedByAHealthyAnswer_OnlyHealthyAnswers(t *testing.T) {
 		body     string
 		call     func(t *testing.T, c *Client) error
 		wantOpen bool
+		ep       apipolicy.Endpoint
 	}{
-		{"envelope OK", `<producers response_code="OK"/>`, fetchProducers, false},
-		{"envelope service unavailable", `<producers response_code="SERVICE_UNAVAILABLE"/>`, fetchProducers, true},
-		{"envelope not found", `<producers response_code="NOT_FOUND"/>`, fetchProducers, false},
-		{"envelope forbidden", `<producers response_code="FORBIDDEN"/>`, fetchProducers, false},
+		{"envelope OK", `<producers response_code="OK"/>`, fetchProducers, false, apipolicy.EndpointOther},
+		{"envelope service unavailable", `<producers response_code="SERVICE_UNAVAILABLE"/>`, fetchProducers, true, apipolicy.EndpointOther},
+		{"envelope not found", `<producers response_code="NOT_FOUND"/>`, fetchProducers, false, apipolicy.EndpointOther},
+		{"envelope forbidden", `<producers response_code="FORBIDDEN"/>`, fetchProducers, false, apipolicy.EndpointOther},
 		{
 			"identity mismatch",
 			`<player_profile><player id="od:player:8" name="Q"/></player_profile>`,
@@ -534,6 +538,7 @@ func TestBreaker_ClosedByAHealthyAnswer_OnlyHealthyAnswers(t *testing.T) {
 				return err
 			},
 			true,
+			apipolicy.EndpointPlayer,
 		},
 		{
 			"identity match",
@@ -543,6 +548,7 @@ func TestBreaker_ClosedByAHealthyAnswer_OnlyHealthyAnswers(t *testing.T) {
 				return err
 			},
 			false,
+			apipolicy.EndpointPlayer,
 		},
 	}
 	for _, tc := range cases {
@@ -555,10 +561,10 @@ func TestBreaker_ClosedByAHealthyAnswer_OnlyHealthyAnswers(t *testing.T) {
 				defer srv.Close()
 				c := newTestClient(t, srv)
 				if startOpen {
-					c.Breaker().Trip()
+					c.Breaker().Trip(tc.ep)
 				}
 				_ = tc.call(t, c)
-				if got := c.Breaker().Open(); got != tc.wantOpen {
+				if got := anyOpen(c.Breaker()); got != tc.wantOpen {
 					t.Fatalf("open = %v, want %v (start open=%v)", got, tc.wantOpen, startOpen)
 				}
 			})
@@ -569,4 +575,172 @@ func TestBreaker_ClosedByAHealthyAnswer_OnlyHealthyAnswers(t *testing.T) {
 func fetchProducers(t *testing.T, c *Client) error {
 	_, err := c.FetchProducers(t.Context())
 	return err
+}
+
+// testEP is the endpoint the unit tests of the breaker itself use.
+const testEP = apipolicy.EndpointSummary
+
+// anyOpen reports whether the breaker of any endpoint is open.
+func anyOpen(b *Breaker) bool {
+	for ep := apipolicy.Endpoint(0); ep < apipolicy.EndpointCount; ep++ {
+		if b.Open(ep) {
+			return true
+		}
+	}
+	return false
+}
+
+// A plain server error is an answer about one resource: it opens no breaker,
+// whatever the endpoint, and it is told to the request's context as a failed
+// attempt so a flight can release the messages that wait on it.
+func TestBreaker_APlainServerErrorOpensNothing(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+	var attempts atomic.Int32
+	ctx := apipolicy.WithAttemptFailed(t.Context(), func() { attempts.Add(1) })
+	err := fetchSportsErr(c, ctx)
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if anyOpen(c.Breaker()) {
+		t.Fatal("a 500 opened a breaker")
+	}
+	if got := attempts.Load(); got != int32(c.maxAttempts) {
+		t.Fatalf("failed attempts reported = %d, want %d (one per attempt)", got, c.maxAttempts)
+	}
+	if !apipolicy.KeyFailure(err) {
+		t.Fatalf("a 500 is a failure of the key: %v", err)
+	}
+}
+
+func fetchSportsErr(c *Client, ctx context.Context) error {
+	_, err := c.FetchSports(ctx, types.EnLocale)
+	return err
+}
+
+// A failure opens, and a healthy answer closes, the breaker of its own
+// endpoint only.
+func TestBreaker_EndpointsAreIndependent(t *testing.T) {
+	b := newBreaker(newFakeClock().now, 10*time.Second)
+	b.Trip(apipolicy.EndpointPlayer)
+	if !b.Open(apipolicy.EndpointPlayer) {
+		t.Fatal("the tripped endpoint is closed")
+	}
+	for ep := apipolicy.Endpoint(0); ep < apipolicy.EndpointCount; ep++ {
+		if ep != apipolicy.EndpointPlayer && b.Open(ep) {
+			t.Fatalf("endpoint %v opened by a failure of the player profile", ep)
+		}
+	}
+	chOther := b.Opened(apipolicy.EndpointSummary)
+	b.success(apipolicy.EndpointSummary)
+	if !b.Open(apipolicy.EndpointPlayer) {
+		t.Fatal("a healthy answer of the summary closed the player profile's breaker")
+	}
+	if fired(chOther) {
+		t.Fatal("the summary's channel fired for the player profile's opening")
+	}
+	b.success(apipolicy.EndpointPlayer)
+	if b.Open(apipolicy.EndpointPlayer) {
+		t.Fatal("a healthy answer of the player profile did not close its breaker")
+	}
+}
+
+// The real client: a hanging endpoint stays open while other endpoints
+// answer healthily.
+func TestBreaker_AHealthyEndpointDoesNotCloseAHangingOne(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/players/") {
+			<-r.Context().Done()
+			return
+		}
+		_, _ = io.WriteString(w, breakerSportsXML)
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+	c.maxAttempts = 1
+	c.httpClient.Timeout = 100 * time.Millisecond
+	if _, err := c.FetchPlayerProfile(t.Context(), "od:player:1", types.EnLocale); err == nil {
+		t.Fatal("expected a timeout")
+	}
+	if !c.Breaker().Open(apipolicy.EndpointPlayer) {
+		t.Fatal("the hanging player profile did not open its breaker")
+	}
+	for range 3 {
+		if _, err := c.FetchSports(t.Context(), types.EnLocale); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !c.Breaker().Open(apipolicy.EndpointPlayer) {
+		t.Fatal("healthy answers of another endpoint closed the player profile's breaker")
+	}
+	if c.Breaker().Open(apipolicy.EndpointStatic) {
+		t.Fatal("the sports breaker is open")
+	}
+}
+
+func TestEndpointOf(t *testing.T) {
+	cases := map[string]apipolicy.Endpoint{
+		"/sports/en/sport_events/od:match:1/summary":         apipolicy.EndpointSummary,
+		"/sports/en/sport_events/od:match:1/fixture":         apipolicy.EndpointFixture,
+		"/sports/en/competitors/od:competitor:1/profile":     apipolicy.EndpointCompetitor,
+		"/sports/en/players/od:player:1/profile":             apipolicy.EndpointPlayer,
+		"/sports/en/tournaments/od:tournament:1/info":        apipolicy.EndpointTournament,
+		"/descriptions/en/markets":                           apipolicy.EndpointCatalog,
+		"/descriptions/en/markets/1/variants/od:dyn:1":       apipolicy.EndpointVariant,
+		"/descriptions/en/match_status":                      apipolicy.EndpointStatic,
+		"/descriptions/void_reasons":                         apipolicy.EndpointStatic,
+		"/sports/en/sports":                                  apipolicy.EndpointStatic,
+		"/sports/en/sports/od:sport:1/tournaments":           apipolicy.EndpointStatic,
+		"/descriptions/producers":                            apipolicy.EndpointOther,
+		"/users/whoami":                                      apipolicy.EndpointOther,
+		"/sports/en/schedules/pre/schedule?start=0&limit=10": apipolicy.EndpointOther,
+		"/x": apipolicy.EndpointOther,
+	}
+	for path, want := range cases {
+		if got := endpointOf(path); got != want {
+			t.Errorf("endpointOf(%q) = %v, want %v", path, got, want)
+		}
+	}
+}
+
+// Every fetch the loaders make maps to the endpoint they name when they gate
+// the load (see the Endpoint of each cache).
+func TestEndpointOf_MatchesTheFetchPaths(t *testing.T) {
+	var got []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, r.URL.Path)
+		http.Error(w, "x", http.StatusNotFound)
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv)
+	ctx := t.Context()
+	id := types.URN{Prefix: "od", Type: "match", ID: 1}
+	_, _ = c.FetchMatchSummary(ctx, id, types.EnLocale)
+	_, _ = c.FetchFixture(ctx, id, types.EnLocale)
+	_, _ = c.FetchCompetitorProfile(ctx, id, types.EnLocale)
+	_, _ = c.FetchPlayerProfile(ctx, "od:player:1", types.EnLocale)
+	_, _ = c.FetchTournament(ctx, id, types.EnLocale)
+	_, _ = c.FetchMarketDescriptions(ctx, types.EnLocale)
+	_, _ = c.FetchMarketDescriptionsWithDynamicOutcomes(ctx, 1, "variant=od:dynamic_outcomes:1", types.EnLocale)
+	_, _ = c.FetchMatchStatusDescriptions(ctx, types.EnLocale)
+	_, _ = c.FetchMarketVoidReasons(ctx)
+	_, _ = c.FetchSports(ctx, types.EnLocale)
+	_, _ = c.FetchTournaments(ctx, id, types.EnLocale)
+	want := []apipolicy.Endpoint{
+		apipolicy.EndpointSummary, apipolicy.EndpointFixture, apipolicy.EndpointCompetitor,
+		apipolicy.EndpointPlayer, apipolicy.EndpointTournament, apipolicy.EndpointCatalog,
+		apipolicy.EndpointVariant, apipolicy.EndpointStatic, apipolicy.EndpointStatic,
+		apipolicy.EndpointStatic, apipolicy.EndpointStatic,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("requests = %v", got)
+	}
+	for i := range want {
+		if ep := endpointOf(strings.TrimPrefix(got[i], "/v1")); ep != want[i] {
+			t.Errorf("request %s maps to %v, want %v", got[i], ep, want[i])
+		}
+	}
 }

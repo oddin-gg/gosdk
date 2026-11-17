@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/oddin-gg/gosdk/internal/apipolicy"
 	feedXML "github.com/oddin-gg/gosdk/internal/feed/xml"
 	"github.com/oddin-gg/gosdk/types"
 )
@@ -77,13 +78,13 @@ func TestAcceptance_HangingAPI_OneTimeoutNotOnePerMessage(t *testing.T) {
 	if got := r.ctl.all.Load(); got > 2 {
 		t.Fatalf("API requests = %d, want at most 2", got)
 	}
-	if !r.api.Breaker().Open() {
+	if !anyOpen(r.api.Breaker()) {
 		t.Fatal("breaker closed after a message waited its whole timeout")
 	}
 
 	// Once the breaker's time has passed, the next message is the probe: it
 	// pays at most one more timeout, and the others go on without waiting.
-	waitFor(t, "the breaker to close", func() bool { return !r.api.Breaker().Open() })
+	waitFor(t, "the breaker to close", func() bool { return !anyOpen(r.api.Breaker()) })
 	if elapsed := wave(2000); elapsed > bound {
 		t.Fatalf("a second wave of 50 messages took %v, want at most one more timeout (%v)", elapsed, timeout)
 	}
@@ -127,7 +128,7 @@ func TestAcceptance_CatalogSlowerThanTheTimeout_NamesComeWithTheNextMessages(t *
 	r.ctl.descriptionDelay.Store(int64(3 * timeout))
 	r.settle(t)
 	before := r.ctl.descriptions.Load() // the event's own description requests
-	opened := r.api.Breaker().Opened()
+	opened := r.openings(apipolicy.EndpointCatalog)
 
 	if name, ok := r.marketName(t, 99); ok {
 		t.Fatalf("first message has the name %q, want none: the catalog is slower than its timeout", name)

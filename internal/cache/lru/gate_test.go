@@ -20,13 +20,13 @@ type testGate struct {
 
 func newTestGate() *testGate { return &testGate{opened: make(chan struct{})} }
 
-func (g *testGate) Open() bool {
+func (g *testGate) Open(apipolicy.Endpoint) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return g.open
 }
 
-func (g *testGate) Opened() <-chan struct{} {
+func (g *testGate) Opened(apipolicy.Endpoint) <-chan struct{} {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return g.opened
@@ -75,7 +75,7 @@ func TestLoadCoalesced_GateOpenSkipsWithoutStartingOrJoiningAFlight(t *testing.T
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_, _ = LoadCoalesced(t.Context(), t.Context(), &sf, "k", func(context.Context) (int, error) {
+		_, _ = LoadCoalesced(t.Context(), t.Context(), &sf, apipolicy.EndpointOther, "k", func(context.Context) (int, error) {
 			loads.Add(1)
 			close(started)
 			<-release
@@ -87,7 +87,7 @@ func TestLoadCoalesced_GateOpenSkipsWithoutStartingOrJoiningAFlight(t *testing.T
 
 	gate.setOpen()
 	marked := apipolicy.WithMessage(t.Context(), gate, apipolicy.MessageTimeout)
-	_, err := LoadCoalesced(marked, t.Context(), &sf, "k", func(context.Context) (int, error) {
+	_, err := LoadCoalesced(marked, t.Context(), &sf, apipolicy.EndpointOther, "k", func(context.Context) (int, error) {
 		loads.Add(1)
 		return 2, nil
 	})
@@ -102,7 +102,7 @@ func TestLoadCoalesced_GateOpenSkipsWithoutStartingOrJoiningAFlight(t *testing.T
 	}
 
 	// A key nobody flies on: skipped without a load as well.
-	_, err = LoadCoalesced(marked, t.Context(), &sf, "other", func(context.Context) (int, error) {
+	_, err = LoadCoalesced(marked, t.Context(), &sf, apipolicy.EndpointOther, "other", func(context.Context) (int, error) {
 		loads.Add(1)
 		return 3, nil
 	})
@@ -130,7 +130,7 @@ func TestLoadCoalesced_GateOpenedReleasesAWaiterAndTheFlightGoesOn(t *testing.T)
 
 	errc := make(chan error, 1)
 	go func() {
-		_, err := LoadCoalesced(marked, t.Context(), &sf, "k", load)
+		_, err := LoadCoalesced(marked, t.Context(), &sf, apipolicy.EndpointOther, "k", load)
 		errc <- err
 	}()
 	<-entered
@@ -153,7 +153,7 @@ func TestLoadCoalesced_GateOpenedReleasesAWaiterAndTheFlightGoesOn(t *testing.T)
 	// The flight still runs to its end after its waiter left.
 	close(release)
 	waitFor(t, "the flight to complete", func() bool { return stored.Load() == 7 })
-	got, err := LoadCoalesced(t.Context(), t.Context(), &sf, "k", func(context.Context) (int, error) { return 7, nil })
+	got, err := LoadCoalesced(t.Context(), t.Context(), &sf, apipolicy.EndpointOther, "k", func(context.Context) (int, error) { return 7, nil })
 	if err != nil || got != 7 {
 		t.Fatalf("got=%d err=%v, want 7", got, err)
 	}
@@ -166,13 +166,13 @@ func TestLoadCoalesced_UnmarkedCallerIgnoresTheGate(t *testing.T) {
 	gate := newTestGate()
 	gate.setOpen()
 
-	got, err := LoadCoalesced(t.Context(), t.Context(), &sf, "k", func(context.Context) (int, error) { return 5, nil })
+	got, err := LoadCoalesced(t.Context(), t.Context(), &sf, apipolicy.EndpointOther, "k", func(context.Context) (int, error) { return 5, nil })
 	if err != nil || got != 5 {
 		t.Fatalf("unmarked: got=%d err=%v", got, err)
 	}
 
 	closed := newTestGate()
-	got, err = LoadCoalesced(apipolicy.WithMessage(t.Context(), closed, apipolicy.MessageTimeout), t.Context(), &sf, "k2", func(context.Context) (int, error) { return 6, nil })
+	got, err = LoadCoalesced(apipolicy.WithMessage(t.Context(), closed, apipolicy.MessageTimeout), t.Context(), &sf, apipolicy.EndpointOther, "k2", func(context.Context) (int, error) { return 6, nil })
 	if err != nil || got != 6 {
 		t.Fatalf("marked, gate closed: got=%d err=%v", got, err)
 	}
@@ -185,7 +185,7 @@ func TestLoadCoalesced_TheFlightDoesNotCarryTheGate(t *testing.T) {
 	gate := newTestGate()
 	marked := apipolicy.WithMessage(t.Context(), gate, apipolicy.MessageTimeout)
 	var sawGate atomic.Bool
-	_, err := LoadCoalesced(marked, nil, &sf, "k", func(loadCtx context.Context) (int, error) {
+	_, err := LoadCoalesced(marked, nil, &sf, apipolicy.EndpointOther, "k", func(loadCtx context.Context) (int, error) {
 		sawGate.Store(apipolicy.GateOf(loadCtx) != nil)
 		return 1, nil
 	})

@@ -6,6 +6,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/oddin-gg/gosdk/internal/apipolicy"
+
 	"golang.org/x/sync/errgroup"
 
 	"github.com/oddin-gg/gosdk/internal/api"
@@ -286,7 +288,7 @@ func (c *CompetitorCache) CompetitorIcon(ctx context.Context, id types.URN, loca
 		return v, nil
 	}
 
-	return lru.LoadCoalesced(ctx, c.lifetime, &c.iconSF, iconFlightKey(id, locale), func(loadCtx context.Context) (*string, error) {
+	return lru.LoadCoalesced(ctx, c.lifetime, &c.iconSF, apipolicy.EndpointCompetitor, iconFlightKey(id, locale), func(loadCtx context.Context) (*string, error) {
 		// A flight that ended just before this one started has stored it.
 		if v, ok := c.loadIcon(id); ok {
 			return v, nil
@@ -339,6 +341,7 @@ func newCompetitorCache(lifeCtx context.Context, client *api.Client, logger *log
 	cc.lru = lru.NewEventCache[types.URN, types.Locale, *LocalizedCompetitor](
 		lru.Config{
 			Lifetime: lifeCtx,
+			Endpoint: apipolicy.EndpointCompetitor,
 			// Evict the icon alongside the entry. Icons are populated on
 			// every loader call but were previously removed only by the
 			// explicit ClearCacheItem — LRU/TTL eviction left them behind

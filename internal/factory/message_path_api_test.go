@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -57,11 +58,29 @@ type apiCtl struct {
 	inFlight        atomic.Int32 // requests the server has not answered yet
 	// catalog, when set, is served as the market description catalog.
 	catalog atomic.Pointer[string]
-	// failPlayers fails only the player profile endpoint with a server
-	// error; notFoundPlayers answers it with 404 (a healthy API).
+	// notFoundPlayers answers the player profile with 404 (a healthy API).
+	// plain500 makes the failing switches answer 500, a server error about
+	// the one request; by default they answer 503, which says the service
+	// cannot serve.
+	plain500 atomic.Bool
+	// badSummary lists the match ids (as in the URN) whose summary answers
+	// 500 while everything else is healthy.
+	badSummary sync.Map
+	// hangPath, when set, holds the requests whose path contains it until
+	// the test ends (one endpoint that hangs while the others answer).
+	hangPath atomic.Pointer[string]
+	// failPlayers fails only the player profile endpoint (see failStatus).
 	failPlayers     atomic.Bool
 	notFoundPlayers atomic.Bool
 	players         atomic.Int32 // GET .../players/<id>/profile
+}
+
+// failStatus is the status of a failing switch: 503 unless plain500.
+func (c *apiCtl) failStatus() int {
+	if c.plain500.Load() {
+		return http.StatusInternalServerError
+	}
+	return http.StatusServiceUnavailable
 }
 
 type messagePathRig struct {
@@ -104,6 +123,21 @@ func newTimedMessagePathRig(t *testing.T, tm rigTiming) *messagePathRig {
 		ctl.all.Add(1)
 		ctl.inFlight.Add(1)
 		defer ctl.inFlight.Add(-1)
+		if sub := ctl.hangPath.Load(); sub != nil && strings.Contains(r.URL.Path, *sub) {
+			select {
+			case <-ctl.release:
+			case <-r.Context().Done():
+			}
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/summary") {
+			parts := strings.Split(r.URL.Path, "/")
+			if _, bad := ctl.badSummary.Load(parts[len(parts)-2]); bad {
+				ctl.summaries.Add(1)
+				http.Error(w, "<error/>", http.StatusInternalServerError)
+				return
+			}
+		}
 		if ctl.hanging.Load() {
 			if strings.Contains(r.URL.Path, "/summary") {
 				ctl.summaries.Add(1)
@@ -144,9 +178,14 @@ func newTimedMessagePathRig(t *testing.T, tm rigTiming) *messagePathRig {
 		if isDescription {
 			ctl.descriptions.Add(1)
 			if ctl.failDescriptions.Load() || ctl.failing.Load() {
-				http.Error(w, "<error/>", http.StatusInternalServerError)
+				http.Error(w, "<error/>", ctl.failStatus())
 				return
 			}
+		}
+		if isDescription && strings.Contains(r.URL.Path, "/variants/") {
+			w.Header().Set("Content-Type", "application/xml")
+			_, _ = io.WriteString(w, nameCatalog)
+			return
 		}
 		if isDescription {
 			if c := ctl.catalog.Load(); c != nil && strings.HasSuffix(r.URL.Path, "/markets") {
@@ -158,7 +197,7 @@ func newTimedMessagePathRig(t *testing.T, tm rigTiming) *messagePathRig {
 		if strings.Contains(r.URL.Path, "/players/") {
 			ctl.players.Add(1)
 			if ctl.failPlayers.Load() {
-				http.Error(w, "<error/>", http.StatusInternalServerError)
+				http.Error(w, "<error/>", ctl.failStatus())
 				return
 			}
 			if ctl.notFoundPlayers.Load() {
@@ -171,7 +210,7 @@ func newTimedMessagePathRig(t *testing.T, tm rigTiming) *messagePathRig {
 			ctl.tournaments.Add(1)
 		}
 		if ctl.failing.Load() || (isTournament && ctl.failTournaments.Load()) {
-			http.Error(w, "<error/>", http.StatusInternalServerError)
+			http.Error(w, "<error/>", ctl.failStatus())
 			return
 		}
 		// The fixtures describe match 99; the API client rejects a reply
@@ -257,19 +296,30 @@ func (r *messagePathRig) buildEvent(t *testing.T, eventNum int) interface{} {
 func (r *messagePathRig) settle(t *testing.T) {
 	t.Helper()
 	waitFor(t, "the setup's requests to end", func() bool {
-		return r.ctl.inFlight.Load() == 0 && !r.api.Breaker().Open()
+		return r.ctl.inFlight.Load() == 0 && !anyOpen(r.api.Breaker())
 	})
 }
 
 // tripped reports whether the breaker has opened since opened was taken from
-// Breaker().Opened(), even if a healthy answer has closed it again since.
-func tripped(opened <-chan struct{}) bool {
-	select {
-	case <-opened:
-		return true
-	default:
-		return false
+// Breaker().Opened(ep), even if a healthy answer has closed it again since.
+func tripped(opened []<-chan struct{}) bool {
+	for _, ch := range opened {
+		select {
+		case <-ch:
+			return true
+		default:
+		}
 	}
+	return false
+}
+
+// openings takes the channels that fire when the breaker of one of eps opens.
+func (r *messagePathRig) openings(eps ...apipolicy.Endpoint) []<-chan struct{} {
+	chs := make([]<-chan struct{}, 0, len(eps))
+	for _, ep := range eps {
+		chs = append(chs, r.api.Breaker().Opened(ep))
+	}
+	return chs
 }
 
 // waitFor polls cond until it holds. The bound is generous on purpose: it
@@ -291,7 +341,7 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 func TestMessagePath_GettersStillRetryAndIgnoreTheBreaker(t *testing.T) {
 	r := newMessagePathRig(t)
 	r.ctl.failing.Store(true)
-	r.api.Breaker().Trip()
+	tripAll(r.api.Breaker())
 
 	id := types.URN{Prefix: "od", Type: "match", ID: 99}
 	if _, err := r.ef.BuildMatch(t.Context(), id, []types.Locale{types.EnLocale}, nil); err == nil {
@@ -310,7 +360,7 @@ func TestMessagePath_BreakerOpenStillServesCachedEvents(t *testing.T) {
 		t.Fatal("setup: event not built from a healthy API")
 	}
 	r.ctl.failing.Store(true)
-	r.api.Breaker().Trip()
+	tripAll(r.api.Breaker())
 	before := r.ctl.all.Load()
 	if ev := r.buildEvent(t, 99); ev == nil {
 		t.Fatal("cached event refused while the breaker is open")
@@ -345,7 +395,7 @@ func TestMessagePath_CancelledContextDoesNotOpenTheBreaker(t *testing.T) {
 			if oc.event != nil {
 				t.Fatal("event built on a dead context; the build was not attempted as expected")
 			}
-			if r.api.Breaker().Open() {
+			if anyOpen(r.api.Breaker()) {
 				t.Fatal("breaker open after a build on a dead context")
 			}
 		})
@@ -370,7 +420,7 @@ func TestMessagePath_SessionCancelWhileWaitingDoesNotOpenTheBreaker(t *testing.T
 	if out.(oddsChangeImpl).event != nil {
 		t.Fatal("event built from a hanging API")
 	}
-	if r.api.Breaker().Open() {
+	if anyOpen(r.api.Breaker()) {
 		t.Fatal("breaker open after the session cancelled the wait")
 	}
 }
@@ -383,28 +433,32 @@ func TestMessagePath_ClosedClientDoesNotOpenTheBreaker(t *testing.T) {
 	if ev := r.buildEvent(t, 99); ev != nil {
 		t.Fatalf("event = %v, want nil from a closed client", ev)
 	}
-	if r.api.Breaker().Open() {
+	if anyOpen(r.api.Breaker()) {
 		t.Fatal("breaker open after a closed-client failure")
 	}
 }
 
 // An API that degrades into truncated bodies still answers 2xx headers.
-// Those are not healthy answers: they must not close the breaker, or every
-// message would pay its wait again while the API stays degraded.
+// Those are not healthy answers: they must not close the endpoint's breaker,
+// or every message would pay its wait again while the API stays degraded.
 func TestMessagePath_AnswerWithATruncatedBodyDoesNotCloseTheBreaker(t *testing.T) {
 	r := newMessagePathRig(t)
 	r.ctl.failing.Store(true)
 	r.buildEvent(t, 99)
-	if !r.api.Breaker().Open() {
+	if !anyOpen(r.api.Breaker()) {
 		t.Fatal("setup: breaker closed after a failing build")
 	}
 
+	summary := func() error {
+		_, err := r.api.FetchMatchSummary(t.Context(), types.URN{Prefix: "od", Type: "match", ID: 99}, types.EnLocale)
+		return err
+	}
 	r.ctl.failing.Store(false)
 	r.ctl.truncating.Store(true)
-	if _, err := r.api.FetchSports(t.Context(), types.EnLocale); err == nil {
-		t.Fatal("FetchSports succeeded on a truncated body")
+	if err := summary(); err == nil {
+		t.Fatal("FetchMatchSummary succeeded on a truncated body")
 	}
-	if !r.api.Breaker().Open() {
+	if !r.api.Breaker().Open(apipolicy.EndpointSummary) {
 		t.Fatal("a truncated answer closed the breaker")
 	}
 	if ev := r.buildEvent(t, 100); ev != nil {
@@ -413,10 +467,10 @@ func TestMessagePath_AnswerWithATruncatedBodyDoesNotCloseTheBreaker(t *testing.T
 
 	// A complete answer does close it.
 	r.ctl.truncating.Store(false)
-	if _, err := r.api.FetchSports(t.Context(), types.EnLocale); err != nil {
-		t.Fatalf("FetchSports: %v", err)
+	if err := summary(); err != nil {
+		t.Fatalf("FetchMatchSummary: %v", err)
 	}
-	if r.api.Breaker().Open() {
+	if r.api.Breaker().Open(apipolicy.EndpointSummary) {
 		t.Fatal("breaker still open once the API answered completely")
 	}
 	waitFor(t, "the event to build once the breaker closed", func() bool { return r.buildEvent(t, 100) != nil })
@@ -433,7 +487,7 @@ func TestMessagePath_NotFoundEventDoesNotOpenTheBreaker(t *testing.T) {
 			t.Fatalf("event = %v, want nil for an event the API does not know", ev)
 		}
 	}
-	if r.api.Breaker().Open() {
+	if anyOpen(r.api.Breaker()) {
 		t.Fatal("breaker open after a 404")
 	}
 	if got := r.ctl.summaries.Load(); got != 3 {
@@ -463,7 +517,7 @@ func TestMessagePath_TournamentRoutedMessage_BreakerOpensAndSkips(t *testing.T) 
 			t.Fatalf("event = %v, want nil", ev)
 		}
 	}
-	if !r.api.Breaker().Open() {
+	if !anyOpen(r.api.Breaker()) {
 		t.Fatal("breaker closed after a failing tournament build")
 	}
 	// One flight's attempts at most: the 19 messages after the first were
@@ -474,8 +528,8 @@ func TestMessagePath_TournamentRoutedMessage_BreakerOpensAndSkips(t *testing.T) 
 }
 
 // BuildUnparsableMessage builds the event on the same path: a failing match
-// opens the breaker, and the tournament build after it is skipped without a
-// request.
+// opens the breaker of the match summary, and the tournament builds are
+// bounded by the breaker of their own endpoint.
 func TestMessagePath_UnparsableMessages_BreakerOpensAndSkips(t *testing.T) {
 	r := newMessagePathRig(t)
 	r.ctl.failing.Store(true)
@@ -488,14 +542,14 @@ func TestMessagePath_UnparsableMessages_BreakerOpensAndSkips(t *testing.T) {
 			t.Fatal("nil unparsable message")
 		}
 	}
-	if !r.api.Breaker().Open() {
+	if !anyOpen(r.api.Breaker()) {
 		t.Fatal("breaker closed after a failing unparsable build")
 	}
 	if got := r.ctl.summaries.Load(); got > 3 {
 		t.Fatalf("match summary requests = %d, want at most 3 (one flight)", got)
 	}
-	if got := r.ctl.tournaments.Load(); got != 0 {
-		t.Fatalf("tournament requests = %d, want none: the breaker was open", got)
+	if got := r.ctl.tournaments.Load(); got > 3 {
+		t.Fatalf("tournament requests = %d, want at most 3 (one flight)", got)
 	}
 }
 
@@ -529,7 +583,7 @@ func TestMessagePath_MarketNameResolution_WaitsUnderTheMessageTimeoutAndGate(t *
 		if len(out.(oddsChangeImpl).markets) != 1 {
 			t.Fatalf("markets = %d, want the message delivered with its market", len(out.(oddsChangeImpl).markets))
 		}
-		if !r.api.Breaker().Open() {
+		if !anyOpen(r.api.Breaker()) {
 			t.Fatal("breaker closed after a failed name lookup")
 		}
 	})
@@ -554,13 +608,14 @@ func TestMessagePath_MarketNameResolution_WaitsUnderTheMessageTimeoutAndGate(t *
 		if _, ok := mk[0].Name(types.EnLocale).Get(); ok {
 			t.Fatal("market has a name although its lookup never answered")
 		}
-		if !r.api.Breaker().Open() {
+		if !anyOpen(r.api.Breaker()) {
 			t.Fatal("a name lookup that waited the whole message timeout did not trip the breaker")
 		}
 	})
 
-	// Everything failing, event uncached: the event build opens the breaker;
-	// the market lookups after it are skipped without a request.
+	// Everything failing, event uncached: the event build opens the breaker
+	// of the match summary and the lookup of the market's variant opens its
+	// own, which is one flight's requests, not one per lookup.
 	t.Run("API down", func(t *testing.T) {
 		r := newMessagePathRig(t)
 		r.ctl.failing.Store(true)
@@ -571,8 +626,8 @@ func TestMessagePath_MarketNameResolution_WaitsUnderTheMessageTimeoutAndGate(t *
 		if out.(oddsChangeImpl).event != nil {
 			t.Fatal("event built from a failing API")
 		}
-		if got := r.ctl.descriptions.Load(); got != 0 {
-			t.Fatalf("description requests = %d, want none after the event build opened the breaker", got)
+		if got := r.ctl.descriptions.Load(); got > 3 {
+			t.Fatalf("description requests = %d, want at most 3 (one flight)", got)
 		}
 	})
 
@@ -582,7 +637,7 @@ func TestMessagePath_MarketNameResolution_WaitsUnderTheMessageTimeoutAndGate(t *
 		if ev := r.buildEvent(t, 99); ev == nil {
 			t.Fatal("setup: event not built from a healthy API")
 		}
-		r.api.Breaker().Trip()
+		tripAll(r.api.Breaker())
 		before := r.ctl.all.Load()
 		for range 5 {
 			if _, err := r.factory.BuildMessage(t.Context(), oddsChangeWithDynamicMarket(99)); err != nil {
@@ -598,7 +653,7 @@ func TestMessagePath_MarketNameResolution_WaitsUnderTheMessageTimeoutAndGate(t *
 // Market and outcome name lookups swallow API failures (a missing name must
 // not fail the message). A failed lookup reaches the breaker where it
 // happens, so the next messages skip the API, and the first healthy answer
-// anywhere closes it.
+// of the same endpoint closes it.
 func TestMessagePath_MarketLookupFailure_OpensTheBreaker(t *testing.T) {
 	r := newMessagePathRig(t)
 	if ev := r.buildEvent(t, 99); ev == nil {
@@ -612,7 +667,7 @@ func TestMessagePath_MarketLookupFailure_OpensTheBreaker(t *testing.T) {
 	if r.ctl.descriptions.Load() < 1 {
 		t.Fatal("the first message made no description request")
 	}
-	if !r.api.Breaker().Open() {
+	if !anyOpen(r.api.Breaker()) {
 		t.Fatal("breaker closed after a failed market lookup")
 	}
 
@@ -629,12 +684,18 @@ func TestMessagePath_MarketLookupFailure_OpensTheBreaker(t *testing.T) {
 		t.Fatalf("description requests grew from %d to %d while the breaker was open", settled, got)
 	}
 
-	// A healthy answer from any caller closes it: the next message tries again.
-	// (A direct client call: a cached getter would make no request.)
+	// A healthy answer of the same endpoint closes it: the next message tries
+	// again. (A direct client call: a cached getter would make no request.)
+	// A healthy answer of another endpoint does not.
+	r.ctl.failDescriptions.Store(false)
 	if _, err := r.api.FetchSports(t.Context(), types.EnLocale); err != nil {
 		t.Fatal(err)
 	}
-	if r.api.Breaker().Open() {
+	if !r.api.Breaker().Open(apipolicy.EndpointVariant) {
+		t.Fatal("a healthy answer of another endpoint closed the variant breaker")
+	}
+	_, _ = r.api.FetchMarketDescriptionsWithDynamicOutcomes(t.Context(), 3, "variant=od:dynamic_outcomes:99", types.EnLocale)
+	if r.api.Breaker().Open(apipolicy.EndpointVariant) {
 		t.Fatal("breaker still open after a healthy answer")
 	}
 	if _, err := r.factory.BuildMessage(t.Context(), oddsChangeWithDynamicMarket(99)); err != nil {
@@ -686,7 +747,7 @@ func TestMessagePath_PlayerPropsNameLookup(t *testing.T) {
 		if r.ctl.players.Load() < 1 {
 			t.Fatal("the first message made no player request")
 		}
-		if !r.api.Breaker().Open() {
+		if !anyOpen(r.api.Breaker()) {
 			t.Fatal("breaker closed after a failed player lookup")
 		}
 		waitFor(t, "the lookup's attempts to end", func() bool { return r.ctl.players.Load() >= 3 })
@@ -711,7 +772,7 @@ func TestMessagePath_PlayerPropsNameLookup(t *testing.T) {
 		if r.ctl.players.Load() == before {
 			t.Fatal("no player request was made")
 		}
-		if r.api.Breaker().Open() {
+		if anyOpen(r.api.Breaker()) {
 			t.Fatal("breaker open after a player not-found")
 		}
 	})
@@ -728,7 +789,7 @@ func TestMessagePath_MarketLookupNotFound_DoesNotOpenTheBreaker(t *testing.T) {
 	if _, err := r.factory.BuildMessage(t.Context(), oddsChangeWithDynamicMarket(99)); err != nil {
 		t.Fatal(err)
 	}
-	if r.api.Breaker().Open() {
+	if anyOpen(r.api.Breaker()) {
 		t.Fatal("breaker open after a not-found lookup")
 	}
 }
@@ -790,7 +851,7 @@ func TestMessagePath_AllMarketMessageTypes_WaitUnderTheMessageTimeoutAndGate(t *
 			if n := tc.markets(out); n != 1 {
 				t.Fatalf("delivered markets = %d, want 1", n)
 			}
-			if !r.api.Breaker().Open() {
+			if !anyOpen(r.api.Breaker()) {
 				t.Fatal("breaker closed after a failed market lookup")
 			}
 			waitFor(t, "the lookup's attempts to end", func() bool { return r.ctl.descriptions.Load() >= 3 })
@@ -819,7 +880,7 @@ func TestMessagePath_AllMarketMessageTypes_HangingNameLookupIsBoundedByTheMessag
 			}
 			r.ctl.descriptionDelay.Store(int64(time.Hour))
 			r.settle(t)
-			opened := r.api.Breaker().Opened()
+			opened := r.openings(apipolicy.EndpointCatalog, apipolicy.EndpointVariant)
 
 			m := oddsChangeFor(99)
 			m.Message = tc.msg()
@@ -843,7 +904,8 @@ func TestMessagePath_AllMarketMessageTypes_HangingNameLookupIsBoundedByTheMessag
 
 // An event the API answers with 404 (not in REST yet) says nothing about the
 // description API: the message's market names still resolve. A failure that
-// says the API is unavailable makes no further request.
+// says the match summary is unavailable does not stop the descriptions
+// either: they are another endpoint, asked once.
 func TestMessagePath_EventNotFound_NamesStillResolve(t *testing.T) {
 	t.Run("event 404, descriptions healthy", func(t *testing.T) {
 		r := newMessagePathRig(t)
@@ -865,8 +927,25 @@ func TestMessagePath_EventNotFound_NamesStillResolve(t *testing.T) {
 		if _, err := r.factory.BuildMessage(t.Context(), oddsChangeWithDynamicMarket(99)); err != nil {
 			t.Fatal(err)
 		}
-		if got := r.ctl.descriptions.Load(); got != 0 {
-			t.Fatalf("description requests = %d, want none after an unavailable API", got)
+		if got := r.ctl.descriptions.Load(); got > 3 {
+			t.Fatalf("description requests = %d, want at most 3 (one flight)", got)
 		}
 	})
+}
+
+// anyOpen reports whether the breaker of any endpoint is open.
+func anyOpen(b *api.Breaker) bool {
+	for ep := apipolicy.Endpoint(0); ep < apipolicy.EndpointCount; ep++ {
+		if b.Open(ep) {
+			return true
+		}
+	}
+	return false
+}
+
+// tripAll opens the breaker of every endpoint.
+func tripAll(b *api.Breaker) {
+	for ep := apipolicy.Endpoint(0); ep < apipolicy.EndpointCount; ep++ {
+		b.Trip(ep)
+	}
 }

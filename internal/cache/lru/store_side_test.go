@@ -7,6 +7,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/oddin-gg/gosdk/internal/apipolicy"
 )
 
 type sideEntry struct{ locales []string }
@@ -126,7 +128,7 @@ func TestLoadCoalesced_LifetimeCancelAbortsDetachedLoad(t *testing.T) {
 		// load itself kept running detached for up to LoadTimeout.
 		callerCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 		defer cancel()
-		_, _ = LoadCoalesced(callerCtx, lifetime, &sf, "k", func(loadCtx context.Context) (int, error) {
+		_, _ = LoadCoalesced(callerCtx, lifetime, &sf, apipolicy.EndpointOther, "k", func(loadCtx context.Context) (int, error) {
 			close(started)
 			select {
 			case <-loadCtx.Done():

@@ -6,6 +6,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/oddin-gg/gosdk/internal/apipolicy"
+
 	"github.com/oddin-gg/gosdk/internal/cache/lru"
 	"github.com/oddin-gg/gosdk/internal/config"
 	log "github.com/oddin-gg/gosdk/internal/log"
@@ -156,14 +158,14 @@ func (l *LocalizedStaticDataCache) loadLocales(ctx context.Context, locales []ty
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := lru.SkippedByGate(ctx); err != nil {
+		if err := lru.SkippedByGate(ctx, &l.sf, string(locale), apipolicy.EndpointStatic); err != nil {
 			return err
 		}
 		loc := locale
 		// The flight carries no message mark: it runs for whoever asks, and
 		// each caller bounds only its wait.
-		flight := func() *lru.Flight { //nolint:contextcheck // deliberate detach: the flight runs under the cache lifetime, not the caller's context
-			return l.sf.Go(string(loc), func() (interface{}, error) {
+		flight := func() (*lru.Flight, error) {
+			return l.sf.GoFor(ctx, string(loc), func(fl *lru.Flight) (interface{}, error) { //nolint:contextcheck // deliberate detach: the flight runs under the cache lifetime, not the caller's context
 				// Double-check inside the critical region.
 				l.mux.RLock()
 				_, alreadyLoaded := l.loadedLocales[loc]
@@ -176,7 +178,7 @@ func (l *LocalizedStaticDataCache) loadLocales(ctx context.Context, locales []ty
 				// closure, so coalesced waiters don't each retain a timer.
 				fetchCtx, cancel := context.WithTimeout(l.lifeCtx, lru.LoadTimeout)
 				defer cancel()
-				data, err := l.fetcher(fetchCtx, loc)
+				data, err := l.fetcher(apipolicy.WithAttemptFailed(fetchCtx, fl.NoteAttemptFailed), loc)
 				if err != nil {
 					return nil, err
 				}
@@ -210,9 +212,12 @@ func (l *LocalizedStaticDataCache) loadLocales(ctx context.Context, locales []ty
 				return nil, nil
 			})
 		}
-		f := flight()
+		f, err := flight()
+		if err != nil {
+			return err
+		}
 		lru.FlightRegistered()
-		if _, err := f.Await(ctx); err != nil {
+		if _, err := f.Await(ctx, apipolicy.EndpointStatic); err != nil {
 			return err
 		}
 	}

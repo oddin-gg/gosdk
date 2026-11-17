@@ -19,6 +19,7 @@ import (
 	"github.com/cenkalti/backoff/v5"
 
 	data "github.com/oddin-gg/gosdk/internal/api/xml"
+	"github.com/oddin-gg/gosdk/internal/apipolicy"
 	"github.com/oddin-gg/gosdk/internal/config"
 	"github.com/oddin-gg/gosdk/internal/sdkerr"
 	"github.com/oddin-gg/gosdk/internal/utils"
@@ -137,12 +138,12 @@ type Client struct {
 	lifeCancel context.CancelFunc
 	inflight   sync.WaitGroup
 
-	// breaker is fed by every attempt's outcome (see Breaker). Nothing in
-	// the client reads it.
+	// breaker is fed by every attempt's outcome, per endpoint (see Breaker).
+	// Nothing in the client reads it.
 	breaker *Breaker
 }
 
-// Breaker returns the client's breaker of the REST API's availability.
+// Breaker returns the client's breakers of the REST API's availability, one per endpoint.
 func (c *Client) Breaker() *Breaker { return c.breaker }
 
 // ErrClosed is returned by request methods invoked after Close. It
@@ -784,12 +785,12 @@ func (c *Client) fetchDataValidated(ctx context.Context, path string, entity int
 		}
 	}
 	if answered {
-		c.breaker.success()
+		c.breaker.success(endpointOf(path))
 	} else if c.callerAlive(ctx) {
 		// A body cut off, malformed or about another resource, or a
 		// service-unavailable envelope. Not when the caller gave up: its
 		// cancellation can cut a body short without the API being at fault.
-		c.breaker.failure()
+		c.breaker.failure(endpointOf(path))
 	}
 	c.emit(pc, callErr) // streaming capture: emit AFTER body has flowed through tee
 	if callErr != nil {
@@ -853,7 +854,7 @@ func (c *Client) doNoBody(ctx context.Context, method, path string, idempotent b
 			slog.String("error", readErr.Error()),
 		)
 		err := fmt.Errorf("api: %s %s: 2xx response body unreadable, acceptance unverified: %w", method, path, readErr)
-		c.noteUnanswered(ctx)
+		c.noteUnanswered(ctx, path)
 		c.emit(pc, err)
 		return false, err
 	}
@@ -870,7 +871,7 @@ func (c *Client) doNoBody(ctx context.Context, method, path string, idempotent b
 	// acceptance, reported as an error.
 	if len(body) > maxErrorBodyBytes {
 		err := fmt.Errorf("api: %s %s: 2xx response body exceeds %d bytes, rejection envelope could not be verified", method, path, maxErrorBodyBytes)
-		c.noteUnanswered(ctx)
+		c.noteUnanswered(ctx, path)
 		c.emit(pc, err)
 		return false, err
 	}
@@ -889,15 +890,15 @@ func (c *Client) doNoBody(ctx context.Context, method, path string, idempotent b
 		// body decoded is stated by the classifier, not inferred from the
 		// code: a decoded rejection may carry no code at all.
 		if understood && !isServiceUnavailable(apiErr.Code) {
-			c.breaker.success()
+			c.breaker.success(endpointOf(path))
 		} else {
-			c.noteUnanswered(ctx)
+			c.noteUnanswered(ctx, path)
 		}
 		c.emit(pc, apiErr)
 		return false, fmt.Errorf("api: %s %s: %w", method, path, apiErr)
 	}
 	// The body was read in full and verified: the API accepted the request.
-	c.breaker.success()
+	c.breaker.success(endpointOf(path))
 	c.emit(pc, nil)
 	return true, nil
 }
@@ -906,9 +907,9 @@ func (c *Client) doNoBody(ctx context.Context, method, path string, idempotent b
 // unreadable, too large, unverifiable, or a service-unavailable envelope)
 // against the breaker. Not when the caller gave up: its cancellation can cut
 // a body short without the API being at fault.
-func (c *Client) noteUnanswered(ctx context.Context) {
+func (c *Client) noteUnanswered(ctx context.Context, path string) {
 	if c.callerAlive(ctx) {
-		c.breaker.failure()
+		c.breaker.failure(endpointOf(path))
 	}
 }
 
@@ -926,6 +927,17 @@ func (c *Client) callerAlive(ctx context.Context) bool {
 // 2xx response.
 func isServiceUnavailable(c types.ResponseCode) bool {
 	return c == types.ServiceUnavailableResponseCode
+}
+
+// serviceUnavailableStatus reports whether an HTTP status says the service
+// (or the gateway in front of it) cannot serve right now, as opposed to a
+// server error about one request.
+func serviceUnavailableStatus(status int) bool {
+	switch status {
+	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	}
+	return false
 }
 
 // isSuccessResponseCode reports whether a <response> envelope code means
@@ -1158,7 +1170,8 @@ func (c *Client) do(ctx context.Context, method, path string, locale *types.Loca
 			// failing (a refused or reset connection, http.Client.Timeout),
 			// not a caller that gave up.
 			if c.lifeCtx.Err() == nil {
-				c.breaker.failure()
+				c.breaker.failure(endpointOf(path))
+				apipolicy.AttemptFailed(ctx)
 			}
 			if !idempotent {
 				// A transport error does NOT prove the server never
@@ -1221,7 +1234,8 @@ func (c *Client) do(ctx context.Context, method, path string, locale *types.Loca
 			_ = r.Body.Close()
 			retryErr := c.toAPIError(method, path, r.StatusCode, parserBytes)
 			c.emitEventReqResp(req, r.StatusCode, latency, attempts, reqBody, reqTruncated, eventBytes, truncated, locale, retryErr)
-			c.breaker.failure()
+			c.breaker.failure(endpointOf(path))
+			apipolicy.AttemptFailed(ctx)
 			return nil, retryErr
 		case r.StatusCode >= 400 && r.StatusCode < 500:
 			// Client error — read the body ONCE; reuse for both the
@@ -1241,7 +1255,13 @@ func (c *Client) do(ctx context.Context, method, path string, locale *types.Loca
 			_ = r.Body.Close()
 			retryErr := c.toAPIError(method, path, r.StatusCode, parserBytes)
 			c.emitEventReqResp(req, r.StatusCode, latency, attempts, reqBody, reqTruncated, eventBytes, truncated, locale, retryErr)
-			c.breaker.failure()
+			// Only a status that says the service is unavailable opens the
+			// endpoint's breaker. A plain server error (500) is an answer
+			// about one resource: the loaders remember it for that key.
+			if serviceUnavailableStatus(r.StatusCode) {
+				c.breaker.failure(endpointOf(path))
+			}
+			apipolicy.AttemptFailed(ctx)
 			if !idempotent {
 				// Server may have processed the request — re-issuing
 				// would re-execute. Treat 5xx as terminal.

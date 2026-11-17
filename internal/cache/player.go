@@ -8,6 +8,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/oddin-gg/gosdk/internal/apipolicy"
+
 	"golang.org/x/sync/errgroup"
 
 	"github.com/oddin-gg/gosdk/internal/api"
@@ -223,7 +225,7 @@ func (c *PlayersCache) GetPlayers(ctx context.Context, ids []PlayerCacheKey) (ma
 func (c *PlayersCache) loadPlayer(ctx context.Context, key PlayerCacheKey) (types.Player, error) {
 	for {
 		gen := c.flightGen.Load()
-		p, err := lru.LoadCoalesced(ctx, c.lifetime, &c.loadGroup, c.flightKey(gen, key), func(loadCtx context.Context) (types.Player, error) {
+		p, err := lru.LoadCoalesced(ctx, c.lifetime, &c.loadGroup, apipolicy.EndpointPlayer, c.flightKey(gen, key), func(loadCtx context.Context) (types.Player, error) {
 			// Stale-generation guard — see errStaleFlight for the
 			// register-vs-clear window this closes.
 			if c.flightGen.Load() != gen {

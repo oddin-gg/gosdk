@@ -344,7 +344,7 @@ func WithInitialSnapshotTime(d time.Duration) Option {
 // API is down" in the README), while the loads themselves run on with this
 // timeout and the getters' retries and fill the caches for later messages. A
 // request that times out after it was sent counts as a failure of the API and
-// opens the client's breaker for 10 s. A cold event build makes several
+// opens the breaker of its endpoint for 10 s. A cold event build makes several
 // sequential requests (summary, tournament, competitors, fixture, market
 // catalog per locale), so with an API that answers each in more than roughly
 // 250 ms the first messages of a new match may be delivered with a nil event

@@ -6,6 +6,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/oddin-gg/gosdk/internal/apipolicy"
+
 	"github.com/oddin-gg/gosdk/internal/api"
 	"github.com/oddin-gg/gosdk/internal/cache/lru"
 	feedXML "github.com/oddin-gg/gosdk/internal/feed/xml"
@@ -192,7 +194,7 @@ func newFixtureCache(lifeCtx context.Context, client *api.Client) *FixtureCache 
 		return entry, nil
 	}
 	fc.lru = lru.NewEventCache[types.URN, types.Locale, *LocalizedFixture](
-		lru.Config{Lifetime: lifeCtx}, loader,
+		lru.Config{Lifetime: lifeCtx, Endpoint: apipolicy.EndpointFixture}, loader,
 	)
 	return fc
 }

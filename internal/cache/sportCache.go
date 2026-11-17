@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/oddin-gg/gosdk/internal/apipolicy"
+
 	"github.com/oddin-gg/gosdk/internal/api"
 	"github.com/oddin-gg/gosdk/internal/api/xml"
 	"github.com/oddin-gg/gosdk/internal/cache/lru"
@@ -282,7 +284,7 @@ func (s *SportCache) SportTournaments(ctx context.Context, sportID types.URN, lo
 		// "tournaments" segment plus the sport id can never collide with
 		// it, since a locale never contains '|'.
 		flightKey := fmt.Sprintf("%d|tournaments|%s|%s", gen, sportID.ToString(), locale)
-		ids, err := lru.LoadCoalesced(ctx, s.lifetime, &s.sf, flightKey, func(loadCtx context.Context) ([]types.URN, error) {
+		ids, err := lru.LoadCoalesced(ctx, s.lifetime, &s.sf, apipolicy.EndpointStatic, flightKey, func(loadCtx context.Context) ([]types.URN, error) {
 			// Stale-generation guard — see errStaleFlight for the
 			// register-vs-clear window this closes.
 			if s.flightGen.Load() != gen {
@@ -413,7 +415,7 @@ func (s *SportCache) ensureLocalesLoaded(ctx context.Context, locales []types.Lo
 		for {
 			gen := s.flightGen.Load()
 			flightKey := fmt.Sprintf("%d|%s", gen, loc)
-			_, err := lru.LoadCoalesced(ctx, s.lifetime, &s.sf, flightKey, func(loadCtx context.Context) (struct{}, error) {
+			_, err := lru.LoadCoalesced(ctx, s.lifetime, &s.sf, apipolicy.EndpointStatic, flightKey, func(loadCtx context.Context) (struct{}, error) {
 				// Stale-generation guard — see errStaleFlight for the
 				// register-vs-clear window this closes.
 				if s.flightGen.Load() != gen {

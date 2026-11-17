@@ -127,7 +127,7 @@ func TestLoadCoalesced_MessagesDoNotWaitOnAFlightOlderThanTheirTimeout(t *testin
 
 	getter := make(chan int, 1)
 	go func() {
-		v, _ := LoadCoalesced(t.Context(), t.Context(), &sf, "k", fn)
+		v, _ := LoadCoalesced(t.Context(), t.Context(), &sf, apipolicy.EndpointOther, "k", fn)
 		getter <- v
 	}()
 	waitFor(t, "the flight to start", func() bool { return calls.Load() == 1 })
@@ -135,7 +135,7 @@ func TestLoadCoalesced_MessagesDoNotWaitOnAFlightOlderThanTheirTimeout(t *testin
 	start := time.Now()
 	for range 10 {
 		ctx, cancel := context.WithTimeout(apipolicy.WithMessage(t.Context(), gate, messageWait), 10*time.Second)
-		_, err := LoadCoalesced(ctx, t.Context(), &sf, "k", fn)
+		_, err := LoadCoalesced(ctx, t.Context(), &sf, apipolicy.EndpointOther, "k", fn)
 		cancel()
 		if !errors.Is(err, ErrFlightTooOld) {
 			t.Fatalf("err = %v, want ErrFlightTooOld", err)
@@ -165,7 +165,7 @@ func TestFlight_AwaitReturnsTheResultOfAYoungFlight(t *testing.T) {
 		return 3, nil
 	})
 	ctx := apipolicy.WithMessage(t.Context(), newTestGate(), time.Second)
-	if v, err := f.Await(ctx); err != nil || v != 3 {
+	if v, err := f.Await(ctx, apipolicy.EndpointOther); err != nil || v != 3 {
 		t.Fatalf("v=%v err=%v, want 3", v, err)
 	}
 }
@@ -183,7 +183,7 @@ func TestFlight_AwaitPrefersTheCallersOwnExpiry(t *testing.T) {
 	ctx, cancel := context.WithTimeout(apipolicy.WithMessage(t.Context(), newTestGate(), messageWait), time.Nanosecond)
 	defer cancel()
 	<-ctx.Done()
-	if _, err := f.Await(ctx); !errors.Is(err, context.DeadlineExceeded) {
+	if _, err := f.Await(ctx, apipolicy.EndpointOther); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err = %v, want DeadlineExceeded", err)
 	}
 }
@@ -207,7 +207,7 @@ func TestFlight_AwaitCountsAPassedDeadlineAsTheCallersOwnExpiry(t *testing.T) {
 
 	base := apipolicy.WithMessage(t.Context(), newTestGate(), messageWait)
 	ctx := laggingCtx{Context: base, deadline: time.Now().Add(-time.Millisecond)}
-	if _, err := f.Await(ctx); !errors.Is(err, context.DeadlineExceeded) {
+	if _, err := f.Await(ctx, apipolicy.EndpointOther); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err = %v, want DeadlineExceeded", err)
 	}
 }
@@ -229,7 +229,7 @@ func TestFlights_ForgetDetachesARunningFlight(t *testing.T) {
 	// The forgotten flight ends while its replacement still runs: it must
 	// not remove the replacement's slot.
 	close(releaseFirst)
-	if v, _ := first.Await(t.Context()); v != 1 {
+	if v, _ := first.Await(t.Context(), apipolicy.EndpointOther); v != 1 {
 		t.Fatalf("the forgotten flight lost its result: %v", v)
 	}
 	third := sf.Go("k", func() (any, error) { runs.Add(1); return 3, nil })

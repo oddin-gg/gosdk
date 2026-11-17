@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"fmt"
+	"net/http"
 
 	"github.com/oddin-gg/gosdk/types"
 )
@@ -77,3 +78,14 @@ func (e *badResponseError) Unwrap() error        { return e.err }
 func (e *badResponseError) Is(target error) bool { return target == ErrBadResponse }
 
 func badResponse(err error) error { return &badResponseError{err: err} }
+
+// KeyFailure reports that the API answered about the resource and the answer
+// was a failure of that resource's request, other than "not found" (see
+// apipolicy.KeyFailure).
+func (e *Error) KeyFailure() bool {
+	return e.Status != http.StatusNotFound && e.Code != types.NotFoundResponseCode
+}
+
+// KeyFailure: a response that could not be read or understood is a failure of
+// the request of that resource (see apipolicy.KeyFailure).
+func (e *badResponseError) KeyFailure() bool { return true }

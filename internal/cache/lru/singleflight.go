@@ -50,6 +50,7 @@ func LoadCoalesced[T any](
 	ctx context.Context,
 	lifetime context.Context,
 	sf *Flights,
+	ep apipolicy.Endpoint,
 	sfKey string,
 	fn func(context.Context) (T, error),
 ) (T, error) {
@@ -57,7 +58,7 @@ func LoadCoalesced[T any](
 	if err := ctx.Err(); err != nil {
 		return zero, err
 	}
-	if err := SkippedByGate(ctx); err != nil {
+	if err := SkippedByGate(ctx, sf, sfKey, ep); err != nil {
 		return zero, err
 	}
 	// base carries no timer/cancel of its own — building it out here is
@@ -76,13 +77,16 @@ func LoadCoalesced[T any](
 	// caller bounds only its own wait. A caller on the message path also
 	// stops waiting once the gate opens; the flight goes on and fills the
 	// cache for later callers.
-	f := sf.Go(sfKey, func() (any, error) {
+	f, err := sf.GoFor(ctx, sfKey, func(f *Flight) (any, error) {
 		loadCtx, cancel := context.WithTimeout(base, LoadTimeout)
 		defer cancel()
-		return fn(loadCtx)
+		return fn(apipolicy.WithAttemptFailed(loadCtx, f.NoteAttemptFailed))
 	})
+	if err != nil {
+		return zero, err
+	}
 	FlightRegistered()
-	val, err := f.Await(ctx)
+	val, err := f.Await(ctx, ep)
 	if err != nil {
 		return zero, err
 	}

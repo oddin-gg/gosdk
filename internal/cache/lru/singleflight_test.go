@@ -7,13 +7,15 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/oddin-gg/gosdk/internal/apipolicy"
 )
 
 // TestLoadCoalesced_Basic exercises the happy path: fn runs once,
 // returns a value, caller receives it.
 func TestLoadCoalesced_Basic(t *testing.T) {
 	var sf Flights
-	got, err := LoadCoalesced(t.Context(), nil, &sf, "k", func(ctx context.Context) (int, error) {
+	got, err := LoadCoalesced(t.Context(), nil, &sf, apipolicy.EndpointOther, "k", func(ctx context.Context) (int, error) {
 		return 42, nil
 	})
 	if err != nil {
@@ -28,7 +30,7 @@ func TestLoadCoalesced_Basic(t *testing.T) {
 func TestLoadCoalesced_ErrorPropagates(t *testing.T) {
 	var sf Flights
 	wantErr := errors.New("boom")
-	_, err := LoadCoalesced(t.Context(), nil, &sf, "k", func(ctx context.Context) (int, error) {
+	_, err := LoadCoalesced(t.Context(), nil, &sf, apipolicy.EndpointOther, "k", func(ctx context.Context) (int, error) {
 		return 0, wantErr
 	})
 	if !errors.Is(err, wantErr) {
@@ -44,7 +46,7 @@ func TestLoadCoalesced_AlreadyCancelledCtxNoFetch(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
-	_, err := LoadCoalesced(ctx, nil, &sf, "k", func(ctx context.Context) (int, error) {
+	_, err := LoadCoalesced(ctx, nil, &sf, apipolicy.EndpointOther, "k", func(ctx context.Context) (int, error) {
 		calls.Add(1)
 		return 1, nil
 	})
@@ -92,7 +94,7 @@ func TestLoadCoalesced_FirstCallerCancellationDoesNotKillSharedLoad(t *testing.T
 	go func() {
 		ctxA, cancel := context.WithTimeout(t.Context(), 30*time.Millisecond)
 		defer cancel()
-		v, err := LoadCoalesced(ctxA, nil, &sf, "k", fn)
+		v, err := LoadCoalesced(ctxA, nil, &sf, apipolicy.EndpointOther, "k", fn)
 		aDone <- result{v, err}
 	}()
 
@@ -102,7 +104,7 @@ func TestLoadCoalesced_FirstCallerCancellationDoesNotKillSharedLoad(t *testing.T
 	go func() {
 		ctxB, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 		defer cancel()
-		v, err := LoadCoalesced(ctxB, nil, &sf, "k", fn)
+		v, err := LoadCoalesced(ctxB, nil, &sf, apipolicy.EndpointOther, "k", fn)
 		bDone <- result{v, err}
 	}()
 
@@ -144,7 +146,7 @@ func TestLoadCoalesced_SecondCallerCtxBoundedWait(t *testing.T) {
 	// otherwise let B become the owner and satisfy the assertions
 	// without ever being a concurrent waiter.
 	go func() {
-		_, _ = LoadCoalesced(t.Context(), nil, &sf, "k", fn)
+		_, _ = LoadCoalesced(t.Context(), nil, &sf, apipolicy.EndpointOther, "k", fn)
 	}()
 	<-started
 
@@ -154,7 +156,7 @@ func TestLoadCoalesced_SecondCallerCtxBoundedWait(t *testing.T) {
 	ctxB, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
 	defer cancel()
 	start := time.Now()
-	_, err := LoadCoalesced(ctxB, nil, &sf, "k", fn)
+	_, err := LoadCoalesced(ctxB, nil, &sf, apipolicy.EndpointOther, "k", fn)
 	elapsed := time.Since(start)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("err = %v, want DeadlineExceeded", err)
@@ -205,7 +207,7 @@ func TestStartCoalesced_OneFlightWithoutWaiting(t *testing.T) {
 	}
 	got := make(chan int, 1)
 	go func() {
-		v, _ := LoadCoalesced(t.Context(), t.Context(), &sf, "k", fn)
+		v, _ := LoadCoalesced(t.Context(), t.Context(), &sf, apipolicy.EndpointOther, "k", fn)
 		got <- v
 	}()
 	// StartCoalesced registers nobody: the one registration is the waiter's.
