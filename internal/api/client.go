@@ -907,6 +907,16 @@ func (c *Client) doNoBody(ctx context.Context, method, path string, idempotent b
 // unreadable, too large, unverifiable, or a service-unavailable envelope)
 // against the breaker. Not when the caller gave up: its cancellation can cut
 // a body short without the API being at fault.
+// noteUnreadableErrorBody counts an error body that stalled or was cut off
+// (a read error, not the end of the body) like any unreadable body: against
+// the endpoint's breaker, unless the caller gave up, which can cut a body short
+// without the API being at fault.
+func (c *Client) noteUnreadableErrorBody(ctx context.Context, path string, readErr error) {
+	if readErr != nil {
+		c.noteUnanswered(ctx, path)
+	}
+}
+
 func (c *Client) noteUnanswered(ctx context.Context, path string) {
 	if c.callerAlive(ctx) {
 		c.breaker.failure(endpointOf(path))
@@ -1171,7 +1181,6 @@ func (c *Client) do(ctx context.Context, method, path string, locale *types.Loca
 			// not a caller that gave up.
 			if c.lifeCtx.Err() == nil {
 				c.breaker.failure(endpointOf(path))
-				apipolicy.AttemptFailed(ctx)
 			}
 			if !idempotent {
 				// A transport error does NOT prove the server never
@@ -1184,6 +1193,10 @@ func (c *Client) do(ctx context.Context, method, path string, locale *types.Loca
 				// side effect — same policy as the 5xx branch below.
 				c.emitEvent(req, 0, time.Since(started), attempts, locale, reqBody, reqTruncated, err)
 				return nil, backoff.Permanent(fmt.Errorf("api: %s %s attempt=%d: %w", method, path, attempts, err))
+			}
+			if c.lifeCtx.Err() == nil {
+				// A retry follows: tell the flight this attempt failed.
+				apipolicy.AttemptFailed(ctx)
 			}
 			c.logger.Debug("api: request failed, will retry",
 				slog.String("method", method),
@@ -1230,7 +1243,7 @@ func (c *Client) do(ctx context.Context, method, path string, locale *types.Loca
 			// Retry-After header is deliberately not mapped onto
 			// backoff/v5's RetryAfterError, which carries no cause and
 			// would degrade the terminal error on exhaustion.
-			parserBytes, eventBytes, truncated := c.readErrorBody(r)
+			parserBytes, eventBytes, truncated, _ := c.readErrorBody(r)
 			_ = r.Body.Close()
 			retryErr := c.toAPIError(method, path, r.StatusCode, parserBytes)
 			c.emitEventReqResp(req, r.StatusCode, latency, attempts, reqBody, reqTruncated, eventBytes, truncated, locale, retryErr)
@@ -1240,10 +1253,11 @@ func (c *Client) do(ctx context.Context, method, path string, locale *types.Loca
 		case r.StatusCode >= 400 && r.StatusCode < 500:
 			// Client error — read the body ONCE; reuse for both the
 			// structured-error decode and the APIEvent capture.
-			parserBytes, eventBytes, truncated := c.readErrorBody(r)
+			parserBytes, eventBytes, truncated, readErr := c.readErrorBody(r)
 			err := c.toAPIError(method, path, r.StatusCode, parserBytes)
 			_ = r.Body.Close()
 			c.emitEventReqResp(req, r.StatusCode, latency, attempts, reqBody, reqTruncated, eventBytes, truncated, locale, err)
+			c.noteUnreadableErrorBody(ctx, path, readErr)
 			return nil, backoff.Permanent(err)
 		default:
 			// Server error or unexpected status. Body read once and
@@ -1251,7 +1265,7 @@ func (c *Client) do(ctx context.Context, method, path string, locale *types.Loca
 			// included the status code, dropping the server's error
 			// envelope (`<error><message>...</message></error>`)
 			// entirely while 4xx surfaced it.
-			parserBytes, eventBytes, truncated := c.readErrorBody(r)
+			parserBytes, eventBytes, truncated, readErr := c.readErrorBody(r)
 			_ = r.Body.Close()
 			retryErr := c.toAPIError(method, path, r.StatusCode, parserBytes)
 			c.emitEventReqResp(req, r.StatusCode, latency, attempts, reqBody, reqTruncated, eventBytes, truncated, locale, retryErr)
@@ -1260,15 +1274,17 @@ func (c *Client) do(ctx context.Context, method, path string, locale *types.Loca
 			// about one resource: the loaders remember it for that key.
 			// An envelope that says SERVICE_UNAVAILABLE does too, as on a 2xx.
 			var envelope *Error
+			c.noteUnreadableErrorBody(ctx, path, readErr)
 			if serviceUnavailableStatus(r.StatusCode) || (errors.As(retryErr, &envelope) && isServiceUnavailable(envelope.Code)) {
 				c.breaker.failure(endpointOf(path))
 			}
-			apipolicy.AttemptFailed(ctx)
 			if !idempotent {
 				// Server may have processed the request — re-issuing
-				// would re-execute. Treat 5xx as terminal.
+				// would re-execute. Treat 5xx as terminal: no retry follows,
+				// so no failed attempt is reported.
 				return nil, backoff.Permanent(retryErr)
 			}
+			apipolicy.AttemptFailed(ctx)
 			return nil, retryErr
 		}
 	}
@@ -1331,16 +1347,17 @@ func (b *cancelOnClose) Close() error {
 // empty stream — losing the server's error message.
 //
 // Streaming isn't needed here — error bodies are always small.
-func (c *Client) readErrorBody(r *http.Response) (parserBytes []byte, eventBytes []byte, truncated bool) {
+func (c *Client) readErrorBody(r *http.Response) (parserBytes []byte, eventBytes []byte, truncated bool, readErr error) {
 	if r.Body == nil {
-		return nil, nil, false
+		return nil, nil, false, nil
 	}
 	// Read ONE byte past the internal cap so an oversized body is
 	// detectable: reading exactly maxErrorBodyBytes made a 3 MiB body
 	// with a 2 MiB configured event limit report Truncated=false (only
 	// 1 MiB was retained, and the configured-limit comparison alone
 	// couldn't see the internal-cap overflow).
-	body, readErr := io.ReadAll(io.LimitReader(r.Body, maxErrorBodyBytes+1))
+	var body []byte
+	body, readErr = io.ReadAll(io.LimitReader(r.Body, maxErrorBodyBytes+1))
 	if readErr != nil {
 		// Keep whatever arrived — a partial envelope may still decode,
 		// and the capture retains diagnostic value either way.
@@ -1359,7 +1376,7 @@ func (c *Client) readErrorBody(r *http.Response) (parserBytes []byte, eventBytes
 	capture := c.capture
 	c.mu.RUnlock()
 	if capture.Emit == nil || !capture.ResponseBody || capture.BodyLimit <= 0 {
-		return parserBytes, nil, false
+		return parserBytes, nil, false, readErr
 	}
 	limit := capture.BodyLimit
 	truncated = internalOverflow || len(body) > limit
@@ -1370,7 +1387,7 @@ func (c *Client) readErrorBody(r *http.Response) (parserBytes []byte, eventBytes
 	eventBytes = make([]byte, capLen)
 	copy(eventBytes, body[:capLen])
 	eventBytes = c.redactCapture(eventBytes, truncated)
-	return parserBytes, eventBytes, truncated
+	return parserBytes, eventBytes, truncated, readErr
 }
 
 // capBuf is the io.Writer used inside the response-capture TeeReader.
