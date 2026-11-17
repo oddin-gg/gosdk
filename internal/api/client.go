@@ -1258,6 +1258,13 @@ func (c *Client) do(ctx context.Context, method, path string, locale *types.Loca
 			_ = r.Body.Close()
 			c.emitEventReqResp(req, r.StatusCode, latency, attempts, reqBody, reqTruncated, eventBytes, truncated, locale, err)
 			c.noteUnreadableErrorBody(ctx, path, readErr)
+			// Any other 4xx is an answer about the request and leaves the
+			// breaker alone; an envelope that says SERVICE_UNAVAILABLE says
+			// the service cannot serve, whatever the status.
+			var envelope *Error
+			if errors.As(err, &envelope) && isServiceUnavailable(envelope.Code) {
+				c.breaker.failure(endpointOf(path))
+			}
 			return nil, backoff.Permanent(err)
 		default:
 			// Server error or unexpected status. Body read once and

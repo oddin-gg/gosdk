@@ -38,18 +38,23 @@ func TestKeyFailure_Classification(t *testing.T) {
 }
 
 // A non-2xx answer whose envelope says SERVICE_UNAVAILABLE opens the
-// endpoint's breaker like the same envelope on a 2xx does; a plain 500 does not.
+// endpoint's breaker like the same envelope on a 2xx does; a plain 500 or a
+// 4xx with another code does not.
 func TestBreaker_ANon2xxServiceUnavailableEnvelopeOpensIt(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		body string
-		want bool
+		name   string
+		status int
+		body   string
+		want   bool
 	}{
-		{"service unavailable envelope", `<response response_code="SERVICE_UNAVAILABLE"/>`, true},
-		{"plain 500", `<error/>`, false},
+		{"service unavailable envelope", http.StatusInternalServerError, `<response response_code="SERVICE_UNAVAILABLE"/>`, true},
+		{"plain 500", http.StatusInternalServerError, `<error/>`, false},
+		{"400 with service unavailable envelope", http.StatusBadRequest, `<response response_code="SERVICE_UNAVAILABLE"/>`, true},
+		{"403 with service unavailable envelope", http.StatusForbidden, `<response response_code="SERVICE_UNAVAILABLE"/>`, true},
+		{"400 with another code", http.StatusBadRequest, `<response response_code="BAD_REQUEST"/>`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			srv := newBodyServer(tc.body, http.StatusInternalServerError)
+			srv := newBodyServer(tc.body, tc.status)
 			defer srv.Close()
 			c := newTestClient(t, srv)
 			c.maxAttempts = 1
