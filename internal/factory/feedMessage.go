@@ -97,14 +97,20 @@ func (f *FeedMessageFactory) startMessage(parent context.Context) (context.Conte
 
 // messageTimerFired reports whether the message's own timer ran out. The
 // deadline is compared as well as the context's error because the context
-// only reports it once its timer has run, which can lag behind a wait that
-// ended at the same instant.
+// only reports it once its own timer has run, which can lag behind a wait that
+// ended at the same instant. The error is read after the deadline check: the
+// timer may fire between the two, and a context that ended by its deadline is
+// the timer having fired whichever of the two sees it first.
 func messageTimerFired(ctx context.Context) bool {
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return true
 	}
 	dl, ok := ctx.Deadline()
-	return ok && ctx.Err() == nil && !time.Now().Before(dl)
+	if !ok || time.Now().Before(dl) {
+		return false
+	}
+	err := ctx.Err()
+	return err == nil || errors.Is(err, context.DeadlineExceeded)
 }
 
 // buildFailWarnInterval bounds each build-failure warn kind to one line
