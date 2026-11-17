@@ -93,12 +93,17 @@ func TestFailureMemory_OnlyAnswersOfTheAPIAreRemembered(t *testing.T) {
 		if got == nil {
 			t.Fatalf("%s: no error", name)
 		}
-		// Let the flight finish; a getter's follow-up proves it is gone.
-		if _, err := LoadCoalesced(t.Context(), t.Context(), &sf, apipolicy.EndpointSummary, name, func(context.Context) (int, error) { return 1, nil }); err != nil {
-			t.Fatalf("%s: %v", name, err)
-		}
+		// The flight noted its outcome before the call returned.
 		if sf.Remembered(name) {
 			t.Fatalf("%s: remembered", name)
+		}
+		ran := false
+		_, got = LoadCoalesced(marked, t.Context(), &sf, apipolicy.EndpointSummary, name, func(context.Context) (int, error) {
+			ran = true
+			return 1, nil
+		})
+		if errors.Is(got, apipolicy.ErrSkipped) || !ran {
+			t.Fatalf("%s: second call skipped (err %v, ran %v)", name, got, ran)
 		}
 	}
 }
