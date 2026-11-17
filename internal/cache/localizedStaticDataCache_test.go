@@ -507,3 +507,62 @@ func TestLocalizedStaticDataCache_MessageDoesNotWaitOnAFetchOlderThanItsTimeout(
 		t.Fatalf("fetches = %d, want 1", fetches.Load())
 	}
 }
+
+// answeredFailure is an error that says the API answered for the key and failed.
+type answeredFailure struct{}
+
+func (answeredFailure) Error() string    { return "answered: 500" }
+func (answeredFailure) KeyFailure() bool { return true }
+
+// A fetch whose first attempt failed releases the message that waits on it
+// before the fetch ends; the fetch goes on.
+func TestLocalizedStaticDataCache_AMessageIsReleasedAtTheFirstFailedAttempt(t *testing.T) {
+	release := make(chan struct{})
+	fetcher := func(ctx context.Context, locale types.Locale) ([]types.StaticData, error) {
+		apipolicy.AttemptFailed(ctx) // the first attempt failed, a retry follows
+		<-release
+		return []types.StaticData{{ID: 1, Description: types.Some("ok")}}, nil
+	}
+	c := newLocalizedStaticDataCache(t.Context(), &minimalCfg{}, log.New(nil), nil, fetcher)
+	defer c.Close()
+	defer close(release)
+
+	marked := apipolicy.WithMessage(t.Context(), newGateStub(), time.Minute)
+	_, err := c.LocalizedItem(marked, 1, []types.Locale{types.EnLocale})
+	if !errors.Is(err, apipolicy.ErrSkipped) {
+		t.Fatalf("err = %v, want ErrSkipped before the fetch ends", err)
+	}
+}
+
+// A fetch that failed with an answer of the API is remembered: the next
+// message-path call is skipped without a fetch, a getter still fetches.
+func TestLocalizedStaticDataCache_AFailedKeyIsRememberedForMessages(t *testing.T) {
+	var calls atomic.Int32
+	fetcher := func(ctx context.Context, locale types.Locale) ([]types.StaticData, error) {
+		if calls.Add(1) == 1 {
+			return nil, answeredFailure{}
+		}
+		return []types.StaticData{{ID: 1, Description: types.Some("ok")}}, nil
+	}
+	c := newLocalizedStaticDataCache(t.Context(), &minimalCfg{}, log.New(nil), nil, fetcher)
+	defer c.Close()
+	marked := apipolicy.WithMessage(t.Context(), newGateStub(), time.Minute)
+	locales := []types.Locale{types.EnLocale}
+
+	if _, err := c.LocalizedItem(marked, 1, locales); !errors.Is(err, answeredFailure{}) {
+		t.Fatalf("first call: err = %v, want the fetch's error", err)
+	}
+	waitFor(t, "the failure to be remembered", func() bool { return c.sf.Remembered(string(types.EnLocale)) })
+	if _, err := c.LocalizedItem(marked, 1, locales); !errors.Is(err, apipolicy.ErrSkipped) {
+		t.Fatalf("second call: err = %v, want ErrSkipped", err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("fetches = %d, want 1: the skipped call must not fetch", calls.Load())
+	}
+	if _, err := c.LocalizedItem(t.Context(), 1, locales); err != nil {
+		t.Fatalf("unmarked call: %v", err)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("fetches = %d, want 2: a getter is not skipped", calls.Load())
+	}
+}
