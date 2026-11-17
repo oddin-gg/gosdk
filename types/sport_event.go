@@ -114,6 +114,12 @@ type Scoreboard struct {
 	ElapsedTime       Optional[int]
 	RemainingGameTime Optional[int]
 
+	// ClockRunning reports whether the in-game clock runs: true while it
+	// runs, false while it stands (a pause within a period, between
+	// periods, before the start, after the end). Absent means unknown and
+	// is NOT the same as not running.
+	ClockRunning Optional[bool]
+
 	HomePoints Optional[int]
 	AwayPoints Optional[int]
 
