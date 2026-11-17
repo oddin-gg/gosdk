@@ -88,6 +88,7 @@ type messagePathRig struct {
 	api     *api.Client
 	ef      *EntityFactory
 	factory *FeedMessageFactory
+	cm      *cache.Manager
 }
 
 // Timing of a rig. The message timeout and the breaker's time are short so
@@ -255,7 +256,7 @@ func newTimedMessagePathRig(t *testing.T, tm rigTiming) *messagePathRig {
 	mf := NewMarketFactory(NewMarketDataFactory(cfg, mdf), []types.Locale{types.EnLocale}, true, log.New(nil))
 	f := NewFeedMessageFactory(ef, mf, pm, cfg, log.New(nil), apiClient.Breaker())
 	f.messageTimeout = tm.messageTimeout
-	return &messagePathRig{ctl: ctl, api: apiClient, ef: ef, factory: f}
+	return &messagePathRig{ctl: ctl, api: apiClient, ef: ef, factory: f, cm: cm}
 }
 
 func oddsChangeFor(eventNum int) *types.FeedMessage {

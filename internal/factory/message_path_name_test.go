@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/oddin-gg/gosdk/internal/apipolicy"
+	"github.com/oddin-gg/gosdk/internal/cache"
 	feedXML "github.com/oddin-gg/gosdk/internal/feed/xml"
 	"github.com/oddin-gg/gosdk/types"
 )
@@ -70,4 +71,52 @@ func TestMessagePath_PlayerPropsName_IsAbsentWhenTheLookupGaveNoAnswer(t *testin
 			t.Fatalf("name = %q (%v), want the raw value for a player the API does not know", got, ok)
 		}
 	})
+}
+
+// A player lookup that is already older than a message waits is not waited
+// for: the message gets ErrFlightTooOld from it, and the market comes without
+// its name, not with the raw player id.
+func TestMessagePath_PlayerPropsName_IsAbsentWhenTheLookupIsOlderThanTheMessageTimeout(t *testing.T) {
+	const timeout = 150 * time.Millisecond
+	r := newTimedMessagePathRig(t, rigTiming{messageTimeout: timeout, breakerOpenFor: time.Minute})
+	c := playerPropsCatalog
+	r.ctl.catalog.Store(&c)
+	if ev := r.buildEvent(t, 99); ev == nil {
+		t.Fatal("setup: event not built from a healthy API")
+	}
+	// Load the catalog with a props market whose specifier is no player.
+	m := oddsChangeFor(99)
+	m.Message.(*feedXML.OddsChange).Odds.Markets = []*feedXML.MarketWithOutcome{
+		feedMarket(7, "player=od:competitor:1", "1"),
+	}
+	if _, err := r.factory.BuildMessage(t.Context(), m); err != nil {
+		t.Fatal(err)
+	}
+	r.settle(t)
+
+	hang := "/players/"
+	r.ctl.hangPath.Store(&hang)
+	// A getter holds the player's flight, which hangs.
+	go func() {
+		_, _ = r.cm.PlayersCache.GetPlayer(t.Context(), cache.PlayerCacheKey{PlayerID: "od:player:301", Locale: types.EnLocale})
+	}()
+	waitFor(t, "the player request to reach the server", func() bool { return r.ctl.players.Load() >= 1 })
+	// The flight is now older than a message waits.
+	time.Sleep(2 * timeout)
+
+	start := time.Now()
+	out, err := r.factory.BuildMessage(t.Context(), oddsChangeWithPlayerProps(99))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(start); elapsed > timeout {
+		t.Fatalf("the message waited %v on a lookup that is older than its timeout %v", elapsed, timeout)
+	}
+	mk := out.(oddsChangeImpl).markets
+	if len(mk) != 1 {
+		t.Fatalf("markets = %d, want 1", len(mk))
+	}
+	if got, ok := mk[0].Name(types.EnLocale).Get(); ok {
+		t.Fatalf("name = %q, want none: the lookup was older than the message timeout", got)
+	}
 }
