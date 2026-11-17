@@ -452,7 +452,7 @@ func (c *EventCache[K, V]) Purge()
 - Every cache value is a struct with explicit per-locale fields (see §7). All field access is mutex-protected within the entry — no partial-locking like the current code.
 - Default capacity per cache: configurable, sensible defaults (e.g., 5000 matches, 50000 competitors). Default TTL: 12h to match current behavior.
 
-### Message path: one timeout, shared flights, one breaker
+### Message path: one timeout, shared flights, a breaker per endpoint
 
 Two callers ask the API for the same entity: a public getter, which waits for
 the answer and retries, and the feed message path, which builds the event of
@@ -465,22 +465,40 @@ what it **waits** for; it does not change any request.
   under one 2 s context (`apipolicy.MessageTimeout`, a field of the factory so
   tests can shorten it) that every wait of the build shares: event parts,
   icons, market and outcome names, player names. A build that ends because its
-  own timer fired, while the session is alive, trips the breaker.
+  own timer fired, while the session is alive, trips the breakers of the
+  endpoints its waits ended on (`apipolicy.NoteTimedOut`, recorded by
+  `Flight.Await`); if no wait of a loader ended by the deadline there is no
+  endpoint to blame and nothing is tripped.
 - **Flights are shared and carry no mark.** Every load is a flight: one per key,
   run in its own goroutine under the owning cache's lifetime (so `Close` stops
   it), with the getters' retries and timeouts and the outer `lru.LoadTimeout`.
   A message that stops waiting leaves the flight running; it fills the cache for
   later messages and getters. A getter that joins a flight a message started
   gets the same answer it would get from its own.
-- **One breaker per API client** (`internal/api/breaker.go`). It opens for 10 s,
-  and again for another 10 s on every failed attempt that says the API is
-  unavailable: 5xx, 429, a transport error or a timeout after sending, a
-  `SERVICE_UNAVAILABLE` envelope, an unreadable response (`api.ErrBadResponse`),
-  a response about another resource, and a message that waited its whole timeout
-  (`Trip`). A 404, other 4xx, a cancelled context, `ErrClosed` and local errors
-  do not open it. Any healthy answer of any caller closes it. There is no
-  half-open probe: when the time ends, the next flight is the probe. Getters
-  never read it.
+- **One breaker per endpoint** (`internal/api/breaker.go`). The endpoints are
+  the resource kinds of `apipolicy.Endpoint` (match summary, fixture, competitor
+  profile, player profile, tournament info, market descriptions, variant
+  descriptions, static descriptions, other); the client derives the endpoint of
+  a request from its path, and each loader names the endpoint it asks. A breaker
+  opens for 10 s, and again for another 10 s on every failed attempt that costs
+  time or shows an outage: a transport error or a timeout after sending, 429,
+  502/503/504, a `SERVICE_UNAVAILABLE` envelope, an unreadable response
+  (`api.ErrBadResponse`), a response about another resource, and a message that
+  waited its whole timeout on the endpoint (`Trip`). A plain server error (500
+  and the like), a 404, other 4xx, a cancelled context, `ErrClosed` and local
+  errors do not open it. A healthy answer closes only the breaker of its own
+  endpoint. There is no half-open probe: when the time ends, the next flight is
+  the probe. Getters never read it.
+- **A failing key is remembered per key.** When a flight ends with an answer of
+  the API that is a failure of the key (`apipolicy.KeyFailure`: a server error,
+  an unreadable or misdirected body, a rejection other than not-found), the
+  flight group remembers the key for 10 s (at most 4096 keys, oldest dropped);
+  a message-path caller for it gets `ErrSkipped` without starting or joining a
+  flight. A success of the key forgets it. Getters ignore the memory. The
+  flights of a key that a message started also tell their waiters at the first
+  failed attempt of the request (`apipolicy.WithAttemptFailed`, called by the
+  client for each failed attempt that is going to be retried): a message waiter
+  is released with `ErrSkipped` at once and the flight retries on for the cache.
 - **Cache only while it is open.** A message gets what the caches hold (stale
   catalog rows included) and nothing else: an event that is not fully cached is
   nil, missing names are absent, and the build-failure WARN is throttled per
@@ -490,14 +508,18 @@ The rule every loader that **coalesces calls onto a flight** follows, through
 `lru.LoadCoalesced`, `lru.EventCache` and `LocalizedStaticDataCache` (not by
 calling the flight group directly):
 
-1. After the cache fast path, `lru.SkippedByGate(ctx)`: a caller with the
-   message mark returns `apipolicy.ErrSkipped` while the breaker is open,
-   without starting or joining a flight.
+1. After the cache fast path, `lru.SkippedByGate(ctx, group, key, endpoint)`: a
+   caller with the message mark returns `apipolicy.ErrSkipped` while the
+   endpoint's breaker is open or the key failed moments ago, without starting or
+   joining a flight.
 2. Otherwise register on the flight (`lru.Flights`, which records each flight's
-   start) and wait with `Flight.Await(ctx)`. It ends with the flight, with the
-   caller's own context, with `ErrSkipped` once the breaker opens, and, for a
-   caller with the mark, with `lru.ErrFlightTooOld` once the flight has run for
-   the message timeout, however late the caller joined.
+   start) and wait with `Flight.Await(ctx, endpoint)`. It ends with the flight,
+   with the caller's own context, with `ErrSkipped` once the endpoint's breaker
+   opens or the flight's first attempt has failed, and, for a caller with the
+   mark, with `lru.ErrFlightTooOld` once the flight has run for the message
+   timeout, however late the caller joined (the flight-age rule is what covers
+   a key that has no failed attempt to report: a request that hangs). A wait
+   that ends because the message's own time ran out records its endpoint.
 3. A context without the mark (getters, flights, preloads, ticker refreshes)
    ignores the breaker and the flight age. The flight itself runs under the
    cache's lifetime, never under the caller's context, so the mark does not reach

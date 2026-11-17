@@ -240,21 +240,37 @@ when one endpoint hangs while others answer, each message that needs it waits
 at most one timeout counted from the start of that load, not one timeout of
 its own.
 
-**One breaker for the client.** A failure **of the API** opens a breaker for
-10 seconds: a 5xx, a 429, a transport error, a timeout after the request was
-sent, a `SERVICE_UNAVAILABLE` envelope, a response that cannot be read, or a
-message that waited its whole 2 s for the API. It does not open on a 404 for
-an event that is not in the API yet, any other 4xx, a cancelled context or a
-closed client. Any healthy API answer, to any call and getters included, closes
-it at once; otherwise it closes after the 10 seconds, and the next message that
-needs the API starts the load that tells whether the API is back. Only the
-message path looks at the breaker; getters never do (their answers still
-close it).
+**One breaker per endpoint.** The client keeps a breaker for each kind of
+resource the message path loads: match summary, fixture, competitor profile,
+player profile, tournament info, market descriptions, variant descriptions and
+the static descriptions (sports, match status, void reasons). A breaker opens
+for 10 seconds on a failure that costs time or shows an outage: a transport
+error, a timeout after the request was sent, a 429, a 502, 503 or 504, a
+`SERVICE_UNAVAILABLE` envelope, a response that cannot be read, or a message
+that waited its whole 2 s on that endpoint (the endpoint the message was
+waiting on, not the others). It does not open on a plain server error (such as
+a 500) for one resource, a 404 for an event that is not in the API yet, any
+other 4xx, a cancelled context or a closed client. A healthy answer closes the
+breaker of its own endpoint at once; healthy answers of other endpoints do
+not. Otherwise it closes after the 10 seconds, and the next message that needs
+the endpoint starts the load that tells whether it is back. Only the message
+path looks at the breakers; getters never do (their answers still feed them).
 
-While the breaker is open the message path asks the caches only. A message
-that is waiting on a load when the breaker opens stops waiting at once. An
-event that is fully cached is delivered with its event; any other event, and
-any market or outcome name that is not cached, comes without. Cached market
+**One failing key is remembered, not the whole client.** When the request of
+one key (one match, one player, ...) is answered with an error, a message does
+not ask for that key again for 10 seconds, and a message that waits on the
+load stops waiting at the first failed attempt instead of sitting through its
+retries. The load goes on retrying in the background and fills the cache if it
+succeeds; getters are never held back by it, and a successful load forgets the
+key. The other keys of the client, and the other messages of that match, are
+not affected.
+
+While the breaker of an endpoint is open the message path asks the caches
+only for what that endpoint serves. A message that is waiting on a load from
+it when the breaker opens stops waiting at once. An event that is fully cached
+is delivered with its event; any other event, and any market or outcome name
+that is not cached, comes without (a player-props market whose player lookup
+was skipped or timed out has no name, not the raw player id). Cached market
 catalog rows are served, stale ones included.
 
 **A stale catalog is served while it refreshes.** When the market catalog of
