@@ -100,7 +100,7 @@ func TestMessagePath_PlayerPropsName_IsAbsentWhenTheLookupIsOlderThanTheMessageT
 	go func() {
 		_, _ = r.cm.PlayersCache.GetPlayer(t.Context(), cache.PlayerCacheKey{PlayerID: "od:player:301", Locale: types.EnLocale})
 	}()
-	waitFor(t, "the player request to reach the server", func() bool { return r.ctl.players.Load() >= 1 })
+	waitFor(t, "the player request to enter the hold", func() bool { return r.ctl.hung.Load() >= 1 })
 	// The flight is now older than a message waits.
 	time.Sleep(2 * timeout)
 

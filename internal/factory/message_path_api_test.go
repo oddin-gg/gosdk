@@ -69,6 +69,8 @@ type apiCtl struct {
 	// hangPath, when set, holds the requests whose path contains it until
 	// the test ends (one endpoint that hangs while the others answer).
 	hangPath atomic.Pointer[string]
+	// hung counts the requests that entered the hangPath hold.
+	hung atomic.Int32
 	// failPlayers fails only the player profile endpoint (see failStatus).
 	failPlayers     atomic.Bool
 	notFoundPlayers atomic.Bool
@@ -125,6 +127,7 @@ func newTimedMessagePathRig(t *testing.T, tm rigTiming) *messagePathRig {
 		ctl.inFlight.Add(1)
 		defer ctl.inFlight.Add(-1)
 		if sub := ctl.hangPath.Load(); sub != nil && strings.Contains(r.URL.Path, *sub) {
+			ctl.hung.Add(1)
 			select {
 			case <-ctl.release:
 			case <-r.Context().Done():
