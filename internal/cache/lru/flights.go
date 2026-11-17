@@ -2,6 +2,7 @@ package lru
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"strings"
 	"sync"
@@ -60,8 +61,10 @@ const maxRememberedFailures = 4096
 type Flights struct {
 	mu sync.Mutex
 	m  map[string]*Flight
-	// failed maps a key to the time its last flight failed.
-	failed map[string]time.Time
+	// failed maps the digest of a key to the time its last flight failed. A
+	// digest, not the key: keys can be long (a variant taken from a feed
+	// message), and the bound on the entries must bound the bytes too.
+	failed map[[sha256.Size]byte]time.Time
 }
 
 // Flight is one running or finished load of a Flights group.
@@ -146,17 +149,18 @@ func (g *Flights) goWith(skipRemembered bool, key string, fn func(*Flight) (any,
 // else (a cancellation, a timeout, an outage the breaker covers) leaves it as
 // it was.
 func (g *Flights) noteOutcomeLocked(key string, err error) {
+	d := sha256.Sum256([]byte(key))
 	switch {
 	case err == nil:
-		delete(g.failed, key)
+		delete(g.failed, d)
 	case apipolicy.KeyFailure(err):
 		now := time.Now()
 		if g.failed == nil {
-			g.failed = make(map[string]time.Time)
+			g.failed = make(map[[sha256.Size]byte]time.Time)
 		}
-		if _, ok := g.failed[key]; !ok && len(g.failed) >= maxRememberedFailures {
+		if _, ok := g.failed[d]; !ok && len(g.failed) >= maxRememberedFailures {
 			// Full: drop what has expired, and the oldest if that frees nothing.
-			var oldest string
+			var oldest [sha256.Size]byte
 			var oldestAt time.Time
 			for k, at := range g.failed {
 				if now.Sub(at) >= failureMemoryFor() {
@@ -169,7 +173,7 @@ func (g *Flights) noteOutcomeLocked(key string, err error) {
 				delete(g.failed, oldest)
 			}
 		}
-		g.failed[key] = now
+		g.failed[d] = now
 	}
 }
 
@@ -182,12 +186,13 @@ func (g *Flights) Remembered(key string) bool {
 }
 
 func (g *Flights) rememberedLocked(key string) bool {
-	at, ok := g.failed[key]
+	d := sha256.Sum256([]byte(key))
+	at, ok := g.failed[d]
 	if !ok {
 		return false
 	}
 	if time.Since(at) >= failureMemoryFor() {
-		delete(g.failed, key)
+		delete(g.failed, d)
 		return false
 	}
 	return true

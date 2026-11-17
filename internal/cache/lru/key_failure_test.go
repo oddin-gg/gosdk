@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -247,5 +249,32 @@ func TestFlights_GoForRefusesAMarkedCallerForARememberedKeyAtTheStart(t *testing
 	<-f.Done()
 	if v, _ := f.Result(); v != 1 {
 		t.Fatalf("getter flight result = %v", v)
+	}
+}
+
+// The memory holds a digest of the key, not the key: a very long key (a
+// variant taken from a feed message) costs the same as a short one, and is
+// still remembered and forgotten correctly.
+func TestFailureMemory_AVeryLongKeyCostsOnlyItsDigest(t *testing.T) {
+	var sf Flights
+	long := strings.Repeat("x", 1<<20)
+	sf.mu.Lock()
+	sf.noteOutcomeLocked(long, answeredErr{})
+	size := reflect.TypeOf(sf.failed).Key().Size()
+	sf.mu.Unlock()
+	if size > 32 {
+		t.Fatalf("a remembered key is stored as %d bytes, want a fixed-size digest", size)
+	}
+	if !sf.Remembered(long) {
+		t.Fatal("the long key was not remembered")
+	}
+	if sf.Remembered(long + "y") {
+		t.Fatal("a different long key was reported as remembered")
+	}
+	sf.mu.Lock()
+	sf.noteOutcomeLocked(long, nil)
+	sf.mu.Unlock()
+	if sf.Remembered(long) {
+		t.Fatal("a success did not forget the long key")
 	}
 }
