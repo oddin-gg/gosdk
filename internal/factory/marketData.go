@@ -2,11 +2,14 @@ package factory
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
 
+	"github.com/oddin-gg/gosdk/internal/apipolicy"
 	"github.com/oddin-gg/gosdk/internal/cache"
+	"github.com/oddin-gg/gosdk/internal/cache/lru"
 	"github.com/oddin-gg/gosdk/internal/config"
 	"github.com/oddin-gg/gosdk/types"
 )
@@ -258,7 +261,15 @@ func (m *marketDataImpl) makeMarketName(ctx context.Context, marketDescription *
 
 		// handle props markets
 		if isPropsMarket {
-			if name, ok := m.getPropsName(ctx, value, locale); ok {
+			name, ok, unavailable := m.getPropsName(ctx, value, locale)
+			if unavailable {
+				// The player's name is not there for this message (the
+				// lookup was skipped or timed out): the name of the market
+				// comes without it, not with the raw player URN in its
+				// place, which would read as a complete name.
+				return nil, nil
+			}
+			if ok {
 				value = name
 			}
 		}
@@ -271,11 +282,16 @@ func (m *marketDataImpl) makeMarketName(ctx context.Context, marketDescription *
 
 // getPropsName resolves a player-props specifier value (a player URN)
 // to the player's localized name. Callers gate on the market carrying
-// the player_props group.
-func (m *marketDataImpl) getPropsName(ctx context.Context, entityID string, locale types.Locale) (string, bool) {
+// the player_props group. unavailable reports a lookup that did not give an
+// answer for this message (skipped while the API fails, a wait that ran out,
+// a cancelled message): the market has no name in that locale. A specifier
+// that is not a player, and a lookup the API answered with an error (a
+// player that does not exist), keep the raw value (ok false, unavailable
+// false).
+func (m *marketDataImpl) getPropsName(ctx context.Context, entityID string, locale types.Locale) (name string, ok, unavailable bool) {
 	urn, err := types.ParseURN(entityID)
 	if err != nil {
-		return "", false
+		return "", false, false
 	}
 
 	//nolint:gocritic // for simpler extension
@@ -291,9 +307,19 @@ func (m *marketDataImpl) getPropsName(ctx context.Context, entityID string, loca
 		if err != nil {
 			// Swallowed like the other name lookups: a missing player name
 			// must not fail the message.
-			return "", false
+			return "", false, lookupGaveNoAnswer(err)
 		}
-		return player.Name, true
+		return player.Name, true, false
 	}
-	return "", false
+	return "", false, false
+}
+
+// lookupGaveNoAnswer reports whether a failed name lookup says nothing about
+// the entity: the message path skipped it, stopped waiting for it, or was
+// cancelled. An answer of the API (not found, a server error) is not one.
+func lookupGaveNoAnswer(err error) bool {
+	return errors.Is(err, apipolicy.ErrSkipped) ||
+		errors.Is(err, lru.ErrFlightTooOld) ||
+		errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, context.Canceled)
 }
