@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync/atomic"
@@ -196,5 +197,37 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 			t.Fatalf("timed out waiting for %s", what)
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// A message that joins the background refresh of a stale catalog is released
+// at the first failed attempt of its request, not at the end of the retries.
+func TestMarketDescriptionCache_AMessageJoiningTheBackgroundRefreshIsReleasedAtTheFirstFailedAttempt(t *testing.T) {
+	srv := newMarketSrv(t, bulkCatalogWithStaticVariants)
+	mc, ctx := newMarketCacheForTest(t, srv)
+	mc.catalogTTL = 300 * time.Millisecond
+	locales := []types.Locale{types.EnLocale}
+	if _, err := mc.MarketDescriptionByID(ctx, 9, types.None[string](), locales); err != nil {
+		t.Fatalf("seed lookup: %v", err)
+	}
+	time.Sleep(400 * time.Millisecond)
+
+	srv.fail500.Store(true)
+	marked := apipolicy.WithMessage(ctx, newGateStub(), apipolicy.MessageTimeout)
+	// The stale read starts the refresh in the background and returns.
+	if _, err := mc.MarketDescriptionByID(marked, 9, types.None[string](), locales); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the background refresh to reach the server", func() bool { return srv.bulkHits.Load() == 2 })
+
+	// A market the cache does not hold joins the refresh's flight.
+	start := time.Now()
+	_, err := mc.MarketDescriptionByID(marked, 12345, types.None[string](), locales)
+	if !errors.Is(err, apipolicy.ErrSkipped) {
+		t.Fatalf("err = %v, want ErrSkipped at the first failed attempt", err)
+	}
+	// The flight's next attempt comes after a backoff of at least 350 ms.
+	if elapsed := time.Since(start); elapsed > 300*time.Millisecond {
+		t.Fatalf("the message waited %v, it must not sit through the retries", elapsed)
 	}
 }

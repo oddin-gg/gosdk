@@ -41,6 +41,8 @@ type marketSrv struct {
 	variantHits atomic.Int64
 	// hold, when set, makes a bulk request wait until it is closed.
 	hold atomic.Pointer[chan struct{}]
+	// fail500 answers the bulk catalog with a plain server error.
+	fail500 atomic.Bool
 }
 
 func newMarketSrv(t *testing.T, body string) *marketSrv {
@@ -52,6 +54,10 @@ func newMarketSrv(t *testing.T, body string) *marketSrv {
 			s.variantHits.Add(1)
 		} else if strings.Contains(r.URL.Path, "/markets") {
 			s.bulkHits.Add(1)
+			if s.fail500.Load() {
+				http.Error(w, "<error/>", http.StatusInternalServerError)
+				return
+			}
 			if h := s.hold.Load(); h != nil {
 				select {
 				case <-*h:

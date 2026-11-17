@@ -113,10 +113,12 @@ func StartCoalesced[T any](
 		// Standalone/test use: no owner to cancel it, and no caller to inherit from.
 		base = context.Background() //nolint:contextcheck // deliberate: a background refresh has no caller context
 	}
-	sf.Go(sfKey, func() (any, error) {
+	sf.GoWith(sfKey, func(f *Flight) (any, error) {
 		loadCtx, cancel := context.WithTimeout(base, LoadTimeout)
 		defer cancel()
-		return fn(loadCtx)
+		// A message that joins this flight is released at its first failed
+		// attempt, as with LoadCoalesced.
+		return fn(apipolicy.WithAttemptFailed(loadCtx, f.NoteAttemptFailed))
 	})
 }
 
