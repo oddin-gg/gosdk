@@ -37,7 +37,7 @@ const (
 	schemaRepo = "oddin-gg/oddsfeedschema"
 	// defaultSchemaRef is the oddsfeedschema version the models are
 	// checked against: a release tag or a commit, never a branch.
-	defaultSchemaRef = "3ee80196b2930b9345d83181a68ea2be61a216ca"
+	defaultSchemaRef = "v1.2.0"
 	fetchTimeout     = 60 * time.Second
 )
 
