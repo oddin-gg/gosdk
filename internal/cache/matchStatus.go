@@ -360,6 +360,8 @@ func (m *MatchStatusCache) refreshOrInsertFeedItem(id types.URN, data *feedXML.S
 	if data.Scoreboard != nil {
 		sb := makeFeedScoreboard(data.Scoreboard)
 		result.scoreboard = &sb
+	} else {
+		result.scoreboard = withoutClockFlag(result.scoreboard)
 	}
 	if data.Statistics != nil {
 		s := makeFeedStatistics(data.Statistics)
@@ -448,10 +450,25 @@ func (m *MatchStatusCache) refreshOrInsertAPIItem(id types.URN, data apiXML.Spor
 	if data.Scoreboard != nil {
 		sb := makeAPIScoreboard(data.Scoreboard)
 		result.scoreboard = &sb
+	} else {
+		result.scoreboard = withoutClockFlag(result.scoreboard)
 	}
 
 	m.entries.Add(id, result)
 	return nil
+}
+
+// withoutClockFlag returns the kept scoreboard of a status that carried
+// none, with ClockRunning unset: goals and times keep their last known
+// value, but a missing scoreboard says nothing about the clock now. The
+// previous value may be shared with earlier snapshots, so it is copied.
+func withoutClockFlag(sb *types.Scoreboard) *types.Scoreboard {
+	if sb == nil {
+		return nil
+	}
+	c := *sb
+	c.ClockRunning = types.Optional[bool]{}
+	return &c
 }
 
 // --- mapping helpers ---
