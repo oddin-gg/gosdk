@@ -132,11 +132,14 @@ func (g *Flights) goWith(skipRemembered bool, key string, fn func(*Flight) (any,
 	go func() {
 		defer func() {
 			g.mu.Lock()
-			// A Forget may have replaced the flight of this key meanwhile.
+			// A Forget may have detached this flight and a replacement may
+			// be running or may have ended. The outcome of a detached flight
+			// is not the key's: it must neither remember nor forget what the
+			// replacement says.
 			if g.m[key] == f {
 				delete(g.m, key)
+				g.noteOutcomeLocked(key, f.err)
 			}
-			g.noteOutcomeLocked(key, f.err)
 			g.mu.Unlock()
 			close(f.done)
 		}()

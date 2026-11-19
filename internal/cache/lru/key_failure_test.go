@@ -2,6 +2,7 @@ package lru
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"reflect"
@@ -67,14 +68,62 @@ func TestFailureMemory_AMessageIsSkippedForAKeyThatFailedMomentsAgo(t *testing.T
 	}
 }
 
-// The memory lasts for its time only.
+// The memory lasts for its time only. The remembered time is moved back
+// instead of waiting for it.
 func TestFailureMemory_Expires(t *testing.T) {
-	defer SetFailureMemory(80 * time.Millisecond)()
 	var sf Flights
 	marked := apipolicy.WithMessage(t.Context(), newTestGate(), apipolicy.MessageTimeout)
 	_, _ = LoadCoalesced(marked, t.Context(), &sf, apipolicy.EndpointSummary, "k", failingLoad(errAnswered))
 	waitFor(t, "the failure to be remembered", func() bool { return sf.Remembered("k") })
-	waitFor(t, "the memory to expire", func() bool { return !sf.Remembered("k") })
+
+	digest := sha256.Sum256([]byte("k"))
+	setRememberedAt := func(at time.Time) {
+		sf.mu.Lock()
+		defer sf.mu.Unlock()
+		sf.failed[digest] = at
+	}
+	setRememberedAt(time.Now().Add(-failureMemoryFor() + time.Minute))
+	if !sf.Remembered("k") {
+		t.Fatal("forgotten before its time ended")
+	}
+	setRememberedAt(time.Now().Add(-failureMemoryFor() - time.Second))
+	if sf.Remembered("k") {
+		t.Fatal("still remembered after its time ended")
+	}
+}
+
+// A flight that Forget detached does not touch the failure memory of the
+// flight that replaced it, whichever of the two ends last.
+func TestFailureMemory_ADetachedFlightDoesNotOverwriteItsReplacement(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		detachedErr error
+		newErr      error
+		want        bool // remembered once both have ended
+	}{
+		{"replacement fails, detached succeeds", nil, errAnswered, true},
+		{"replacement succeeds, detached fails", errAnswered, nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var sf Flights
+			endA := make(chan struct{})
+			endB := make(chan struct{})
+			a := sf.GoWith("k", func(*Flight) (any, error) { <-endA; return nil, tc.detachedErr })
+			sf.Forget("k")
+			b := sf.GoWith("k", func(*Flight) (any, error) { <-endB; return nil, tc.newErr })
+			if a == b {
+				t.Fatal("the replacement joined the detached flight")
+			}
+			// The replacement ends first, then the detached flight.
+			close(endB)
+			<-b.Done()
+			close(endA)
+			<-a.Done()
+			if got := sf.Remembered("k"); got != tc.want {
+				t.Fatalf("remembered = %v, want %v", got, tc.want)
+			}
+		})
+	}
 }
 
 // Only an answer of the API for the key is remembered: a cancellation, a
