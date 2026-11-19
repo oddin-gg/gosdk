@@ -347,7 +347,7 @@ func TestDecode_RejectsOversizedPayload(t *testing.T) {
 }
 
 // TestEventMessages_AllCarryGetEventID is the table regression for the
-// identity/invalidation gap (Codex P2): BetStop, BetCancel, and
+// identity/invalidation gap: BetStop, BetCancel, and
 // BetSettlement carry event ids but lacked the GetEventID accessor —
 // route/payload identity mismatches bypassed validation for those
 // kinds, and valid bet-stop/cancel/settlement traffic skipped ALL

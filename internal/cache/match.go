@@ -6,6 +6,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/oddin-gg/gosdk/internal/apipolicy"
+
 	"github.com/oddin-gg/gosdk/internal/api"
 	apiXML "github.com/oddin-gg/gosdk/internal/api/xml"
 	"github.com/oddin-gg/gosdk/internal/cache/lru"
@@ -197,7 +199,7 @@ func (m *MatchCache) ClearCacheItem(id types.URN) { m.lru.Clear(id) }
 func newMatchCache(lifeCtx context.Context, client *api.Client, logger *log.Logger) *MatchCache {
 	mc := &MatchCache{apiClient: client, logger: logger}
 	mc.lru = lru.NewEventCache[types.URN, types.Locale, *LocalizedMatch](
-		lru.Config{Lifetime: lifeCtx},
+		lru.Config{Lifetime: lifeCtx, Endpoint: apipolicy.EndpointSummary},
 		func(
 			ctx context.Context,
 			id types.URN,

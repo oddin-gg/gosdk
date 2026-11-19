@@ -2,19 +2,10 @@ package factory
 
 import (
 	"context"
-	"errors"
-	"net"
-	"net/http"
-	"net/url"
 	"strings"
-	"sync"
 
-	"github.com/oddin-gg/gosdk/internal/api"
-	"github.com/oddin-gg/gosdk/internal/apipolicy"
-	"github.com/oddin-gg/gosdk/internal/cache"
 	feedXML "github.com/oddin-gg/gosdk/internal/feed/xml"
 	log "github.com/oddin-gg/gosdk/internal/log"
-	"github.com/oddin-gg/gosdk/internal/sdkerr"
 	"github.com/oddin-gg/gosdk/types"
 )
 
@@ -221,7 +212,6 @@ func resolveMarketName(ctx context.Context, md types.MarketData, locale types.Lo
 	}
 	name, err := md.MarketName(ctx, locale)
 	if err != nil {
-		reportNameFailure(ctx, err)
 		return "", false
 	}
 	if name == nil {
@@ -236,89 +226,12 @@ func resolveOutcomeName(ctx context.Context, md types.MarketData, outcomeID stri
 	}
 	name, err := md.OutcomeName(ctx, outcomeID, locale)
 	if err != nil {
-		reportNameFailure(ctx, err)
 		return "", false
 	}
 	if name == nil {
 		return "", false
 	}
 	return *name, true
-}
-
-// nameFailureKey keys the sink a message build puts on its context to learn
-// that market or outcome name resolution failed against the API: the
-// resolvers swallow the error (a missing name must not fail the message), so
-// without it the failure would leave no trace and every following message of
-// the event would pay for the same failing lookup.
-type nameFailureKey struct{}
-
-type nameFailures struct {
-	mu  sync.Mutex
-	err error
-}
-
-func withNameFailures(ctx context.Context) (context.Context, *nameFailures) {
-	nf := &nameFailures{}
-	return context.WithValue(ctx, nameFailureKey{}, nf), nf
-}
-
-func (nf *nameFailures) first() error {
-	nf.mu.Lock()
-	defer nf.mu.Unlock()
-	return nf.err
-}
-
-// saysAPIUnavailable reports whether err says the API is unavailable. The
-// classification is positive: only a failure that comes from the API call
-// counts. That is a transport or network failure, a timeout after the
-// request was sent, a server failure (5xx), a rate limit (429), a 2xx
-// envelope saying the service is unavailable, and a response that could not
-// be read or understood (api.ErrBadResponse). Everything else is local and
-// says nothing about the API: a skipped request (the event is already in the
-// failure window), one refused for a spent budget (never sent), the caller's
-// cancellation or a closed client (shutdown), an entity the API reports as
-// absent, an answer of a healthy API (a 404 for an event not in REST yet, a
-// 200 whose envelope says NOT_FOUND), and an error of the local name
-// resolution over a healthy catalog (an unsupported outcome type, say).
-// One classification for the lookups of names and for the build of an
-// event, so the two open the failure window on the same errors.
-func saysAPIUnavailable(err error) bool {
-	if err == nil {
-		return false
-	}
-	if errors.Is(err, apipolicy.ErrSkipped) || errors.Is(err, apipolicy.ErrBudgetSpent) || errors.Is(err, sdkerr.ErrClosed) ||
-		errors.Is(err, context.Canceled) || errors.Is(err, cache.ErrItemNotFoundInCache) {
-		return false
-	}
-	var apiErr *api.Error
-	if errors.As(err, &apiErr) {
-		switch {
-		case apiErr.Status >= 200 && apiErr.Status < 300:
-			return apiErr.Code != "" && api.ServerUnavailableCode(apiErr.Code)
-		default:
-			return apiErr.Status >= 500 || apiErr.Status == http.StatusTooManyRequests
-		}
-	}
-	if errors.Is(err, api.ErrBadResponse) || errors.Is(err, context.DeadlineExceeded) {
-		return true
-	}
-	var netErr net.Error
-	var urlErr *url.Error
-	return errors.As(err, &netErr) || errors.As(err, &urlErr)
-}
-
-// reportNameFailure records err in ctx's sink when it says something about
-// the API being unavailable (see saysAPIUnavailable).
-func reportNameFailure(ctx context.Context, err error) {
-	nf, ok := ctx.Value(nameFailureKey{}).(*nameFailures)
-	if !ok || !saysAPIUnavailable(err) {
-		return
-	}
-	nf.mu.Lock()
-	if nf.err == nil {
-		nf.err = err
-	}
-	nf.mu.Unlock()
 }
 
 // NewMarketFactory ...

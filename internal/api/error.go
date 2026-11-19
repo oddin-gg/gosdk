@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"fmt"
+	"net/http"
 
 	"github.com/oddin-gg/gosdk/types"
 )
@@ -77,3 +78,22 @@ func (e *badResponseError) Unwrap() error        { return e.err }
 func (e *badResponseError) Is(target error) bool { return target == ErrBadResponse }
 
 func badResponse(err error) error { return &badResponseError{err: err} }
+
+// IsKeyFailure reports whether err says that the API answered for one
+// resource and the answer was a failure of that resource's request, which
+// makes the key not worth asking again for a moment: a server error, an
+// unreadable or misdirected body, a rejection. A transport error, a
+// cancellation or a timeout is not one (it says nothing about the key, and
+// the endpoint's breaker covers an outage), nor is a resource that does not
+// exist (it may appear). It is a function, not a method of Error, so that
+// the exported API of the module does not grow.
+func IsKeyFailure(err error) bool {
+	if errors.Is(err, ErrBadResponse) {
+		return true
+	}
+	var e *Error
+	if errors.As(err, &e) {
+		return e.Status != http.StatusNotFound && e.Code != types.NotFoundResponseCode
+	}
+	return false
+}

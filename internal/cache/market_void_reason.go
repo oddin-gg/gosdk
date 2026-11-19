@@ -7,7 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"golang.org/x/sync/singleflight"
+	"github.com/oddin-gg/gosdk/internal/apipolicy"
 
 	"github.com/oddin-gg/gosdk/internal/api"
 	data "github.com/oddin-gg/gosdk/internal/api/xml"
@@ -52,7 +52,7 @@ type MarketVoidReasonsCache struct {
 	// A post-clear caller now uses a new key, so it starts its own fetch.
 	flightGen atomic.Uint64
 
-	sf singleflight.Group
+	sf lru.Flights
 }
 
 // MarketVoidReasons returns the cached list, fetching on first access.
@@ -67,7 +67,7 @@ func (m *MarketVoidReasonsCache) MarketVoidReasons(ctx context.Context) ([]data.
 
 	flightKey := fmt.Sprintf("void_reasons|%d", m.flightGen.Load())
 
-	return lru.LoadCoalesced(ctx, m.lifetime, &m.sf, flightKey, func(loadCtx context.Context) ([]data.MarketVoidReasons, error) {
+	return lru.LoadCoalesced(ctx, m.lifetime, &m.sf, apipolicy.EndpointStatic, flightKey, func(loadCtx context.Context) ([]data.MarketVoidReasons, error) {
 		// Re-check under the flight — a peer may have loaded already.
 		m.mu.RLock()
 		if m.loaded {

@@ -47,13 +47,13 @@ func TestValidateConfig_BoundedOptions(t *testing.T) {
 		{"port too high", WithMessagingPort(70000)},
 		{"port negative", WithMessagingPort(-1)},
 		{"prefetch negative", WithAMQPPrefetch(-1)},
-		// uint16 wrap (Codex P2): AMQP basic.qos carries prefetch as
+		// uint16 wrap: AMQP basic.qos carries prefetch as
 		// uint16 — 65536 wrapped to protocol 0 = UNLIMITED prefetch
 		// (backpressure silently disabled), 65537 wrapped to 1.
 		{"prefetch wraps to unlimited", WithAMQPPrefetch(65536)},
 		{"prefetch wraps to one", WithAMQPPrefetch(65537)},
 		// Extreme accepted buffer values previously panicked/OOMed only
-		// AFTER broker setup (Codex P3) — bound them up front.
+		// AFTER broker setup — bound them up front.
 		{"subscription buffer beyond practical max", WithSubscriptionBuffer(1<<20 + 1)},
 		{"subscription buffer negative", WithSubscriptionBuffer(-1)},
 		{"api body limit negative", WithAPICallBodyLimit(-1)},
@@ -63,7 +63,7 @@ func TestValidateConfig_BoundedOptions(t *testing.T) {
 		{"empty exchange name", WithExchangeName("")},
 		{"empty replay exchange name", WithReplayExchangeName("")},
 		{"empty sport id prefix", WithSportIDPrefix("")},
-		// Malformed sport-id prefixes (Codex P2): the prefix is
+		// Malformed sport-id prefixes: the prefix is
 		// concatenated with a numeric segment and parsed as a URN on
 		// every feed delivery — a shape that can't yield a valid URN
 		// makes ordinary deliveries silently unparsable (ACKed under
@@ -74,7 +74,7 @@ func TestValidateConfig_BoundedOptions(t *testing.T) {
 		{"sport prefix empty component", WithSportIDPrefix("od::")},
 		{"sport prefix too many components", WithSportIDPrefix("od:sport:x:")},
 		{"sport prefix url-reserved chars", WithSportIDPrefix("od/x:sport:")},
-		// Negative node ids (Codex P3) become routing keys like
+		// Negative node ids become routing keys like
 		// "snapshot_complete.-1" and negative node_id query params.
 		{"negative node id", WithNodeID(-1)},
 	}

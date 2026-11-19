@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"golang.org/x/sync/singleflight"
+	"github.com/oddin-gg/gosdk/internal/apipolicy"
 )
 
 type sideEntry struct{ locales []string }
@@ -118,7 +118,7 @@ func TestStoreSide_AtomicWithClear(t *testing.T) {
 // (Manager.Close / client teardown) must cancel the in-flight load
 // instead of letting it run to LoadTimeout.
 func TestLoadCoalesced_LifetimeCancelAbortsDetachedLoad(t *testing.T) {
-	var sf singleflight.Group
+	var sf Flights
 	lifetime, lifetimeCancel := context.WithCancel(context.Background())
 
 	loadCtxErr := make(chan error, 1)
@@ -128,7 +128,7 @@ func TestLoadCoalesced_LifetimeCancelAbortsDetachedLoad(t *testing.T) {
 		// load itself kept running detached for up to LoadTimeout.
 		callerCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 		defer cancel()
-		_, _ = LoadCoalesced(callerCtx, lifetime, &sf, "k", func(loadCtx context.Context) (int, error) {
+		_, _ = LoadCoalesced(callerCtx, lifetime, &sf, apipolicy.EndpointOther, "k", func(loadCtx context.Context) (int, error) {
 			close(started)
 			select {
 			case <-loadCtx.Done():
