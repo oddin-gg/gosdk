@@ -63,7 +63,8 @@ type apiCtl struct {
 	// the one request; by default they drop the connection without an answer.
 	plain500 atomic.Bool
 	// badSummary lists the match ids (as in the URN) whose summary answers
-	// 500 while everything else is healthy.
+	// 500 while everything else is healthy. A value that is a
+	// func(http.ResponseWriter, *http.Request) answers instead.
 	badSummary sync.Map
 	// hangPath, when set, holds the requests whose path contains it until
 	// the test ends (one endpoint that hangs while the others answer).
@@ -140,8 +141,12 @@ func newTimedMessagePathRig(t *testing.T, tm rigTiming) *messagePathRig {
 		}
 		if strings.HasSuffix(r.URL.Path, "/summary") {
 			parts := strings.Split(r.URL.Path, "/")
-			if _, bad := ctl.badSummary.Load(parts[len(parts)-2]); bad {
+			if v, bad := ctl.badSummary.Load(parts[len(parts)-2]); bad {
 				ctl.summaries.Add(1)
+				if answer, ok := v.(func(http.ResponseWriter, *http.Request)); ok {
+					answer(w, r)
+					return
+				}
 				http.Error(w, "<error/>", http.StatusInternalServerError)
 				return
 			}

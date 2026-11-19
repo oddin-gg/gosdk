@@ -2,6 +2,8 @@ package factory
 
 import (
 	"fmt"
+	"net/http"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -42,6 +44,77 @@ func TestMessagePath_OneKeyWithAServerError_DoesNotHoldBackOtherMatches(t *testi
 			t.Fatalf("round %d: new match %d came without its event: one bad match must not hold back the others", round, id)
 		}
 		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// One key whose summary is answered, completely, with something that is not a
+// summary of that match is a failure of that key, whatever it says: a 502,
+// 503 or 504, a SERVICE_UNAVAILABLE envelope, a body that cannot be decoded,
+// a summary of another match. The breaker of the summary endpoint stays
+// closed, every healthy new match is built with its event, and the bad key is
+// remembered. Only the absence of an answer closes an endpoint.
+func TestMessagePath_OneKeyAnsweringBadly_DoesNotHoldBackOtherMatches(t *testing.T) {
+	status := func(code int, body string) func(http.ResponseWriter, *http.Request) {
+		return func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/xml")
+			w.WriteHeader(code)
+			_, _ = w.Write([]byte(body))
+		}
+	}
+	cases := []struct {
+		name     string
+		answer   func(http.ResponseWriter, *http.Request)
+		requests int32 // requests of the flight: the 5xx are retried
+	}{
+		{"503", status(http.StatusServiceUnavailable, "<error/>"), 3},
+		{"504", status(http.StatusGatewayTimeout, "<error/>"), 3},
+		{"502", status(http.StatusBadGateway, "<error/>"), 3},
+		{"service unavailable envelope", status(http.StatusInternalServerError, `<response response_code="SERVICE_UNAVAILABLE"/>`), 3},
+		{"undecodable body", status(http.StatusOK, "<?xml version=\"1.0\"?><match_summary><sport_event id=\"od:match:1000\">\x01</sport_event></match_summary>"), 1},
+		// The fixture describes match 99, which is not what was asked for.
+		{"response about another match", status(http.StatusOK, matchSummaryXML), 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newMessagePathRig(t) // memory: the default 10 s, far longer than the test
+			const badID = 1000
+			var asked atomic.Int32 // requests for the bad match
+			r.ctl.badSummary.Store(types.URN{Prefix: "od", Type: "match", ID: badID}.ToString(),
+				func(w http.ResponseWriter, req *http.Request) {
+					asked.Add(1)
+					tc.answer(w, req)
+				})
+
+			if ev := r.buildEvent(t, badID); ev != nil {
+				t.Fatal("the bad match has an event")
+			}
+			for i := range 5 {
+				if r.api.Breaker().Open(apipolicy.EndpointSummary) {
+					t.Fatalf("before new match %d: the bad answer opened the summary breaker", i)
+				}
+				if ev := r.buildEvent(t, 2000+i); ev == nil {
+					t.Fatalf("new match %d came without its event: one bad match must not hold back the others", 2000+i)
+				}
+			}
+			// The flight's own attempts end, and the key is remembered: its
+			// messages make no request any more.
+			waitFor(t, "the flight's attempts to end", func() bool { return asked.Load() >= tc.requests })
+			settled := asked.Load()
+			waitFor(t, "the failure to be remembered", func() bool {
+				start := time.Now()
+				r.buildEvent(t, badID)
+				return time.Since(start) < 100*time.Millisecond && asked.Load() == settled
+			})
+			for range 10 {
+				r.buildEvent(t, badID)
+			}
+			if got := asked.Load(); got != settled {
+				t.Fatalf("requests for the bad match grew from %d to %d while the key was remembered", settled, got)
+			}
+			if anyOpen(r.api.Breaker()) {
+				t.Fatal("a breaker is open")
+			}
+		})
 	}
 }
 
