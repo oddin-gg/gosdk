@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"github.com/oddin-gg/gosdk/internal/api"
 	"log/slog"
 	"strings"
 	"sync"
@@ -12,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/oddin-gg/gosdk/internal/api"
 	"github.com/oddin-gg/gosdk/internal/apipolicy"
 	"github.com/oddin-gg/gosdk/internal/cache/lru"
 	log "github.com/oddin-gg/gosdk/internal/log"
