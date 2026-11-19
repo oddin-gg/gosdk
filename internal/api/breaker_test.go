@@ -181,18 +181,15 @@ func TestBreaker_ClientStartsClosed(t *testing.T) {
 	}
 }
 
-// The breaker opens on a failed attempt that says the endpoint is unavailable:
-// 502/503/504, 429, a broken connection and a timeout after the request was
-// sent. A plain server error (500) answered for one resource does not.
+// The breaker opens on the absence of an answer: 429, a broken connection and
+// a timeout after the request was sent. A response that arrived complete (500,
+// 502, 503, 504, ...) is an answer about one resource and does not.
 func TestBreaker_OpensOnAPIFailures(t *testing.T) {
 	cases := []struct {
 		name    string
 		handler http.HandlerFunc
 		setup   func(c *Client)
 	}{
-		{"502", func(w http.ResponseWriter, r *http.Request) { http.Error(w, "boom", http.StatusBadGateway) }, nil},
-		{"504", func(w http.ResponseWriter, r *http.Request) { http.Error(w, "boom", http.StatusGatewayTimeout) }, nil},
-		{"503", func(w http.ResponseWriter, r *http.Request) { http.Error(w, "boom", http.StatusServiceUnavailable) }, nil},
 		{"429", func(w http.ResponseWriter, r *http.Request) { http.Error(w, "slow down", http.StatusTooManyRequests) }, nil},
 		{"connection closed", func(w http.ResponseWriter, r *http.Request) {
 			conn, _, err := w.(http.Hijacker).Hijack()
@@ -285,28 +282,6 @@ func TestBreaker_DoesNotOpenOnTheCallersOwnOutcome(t *testing.T) {
 			t.Fatal("the caller's cancellation of a body read opened the breaker")
 		}
 	})
-	t.Run("caller cancels a stalled mutation body", func(t *testing.T) {
-		started := make(chan struct{})
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-			_, _ = io.WriteString(w, `<?xml version="1.0"?><response response_code="O`)
-			w.(http.Flusher).Flush()
-			close(started)
-			<-r.Context().Done()
-		}))
-		defer srv.Close()
-		c := newTestClient(t, srv)
-		c.maxAttempts = 1
-		c.httpClient.Timeout = 30 * time.Second
-		ctx, cancel := context.WithCancel(t.Context())
-		go func() { <-started; cancel() }()
-		if ok, err := c.postEmpty(ctx, "/x", true); err == nil || ok {
-			t.Fatalf("ok=%v err=%v, want a failure", ok, err)
-		}
-		if anyOpen(c.Breaker()) {
-			t.Fatal("the caller's cancellation of a mutation body read opened the breaker")
-		}
-	})
 	t.Run("closed client", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			_, _ = io.WriteString(w, breakerSportsXML)
@@ -369,8 +344,10 @@ func TestBreaker_ClosedByAHealthyAnswer(t *testing.T) {
 }
 
 // A 2xx closes the breaker only once its body has been read in full and
-// decoded: headers followed by a truncated, invalid or stalled body are the
-// signs of a degraded API and open it instead.
+// decoded. Headers followed by a body the transport cut off or that stalled
+// are the absence of an answer and open it; a body that arrived complete but
+// cannot be decoded is an answer about one resource: it neither opens a
+// closed breaker nor closes an open one.
 func TestBreaker_ClosedByAHealthyAnswer_OnlyAfterTheBodyWasRead(t *testing.T) {
 	const (
 		complete  = "complete"
@@ -409,7 +386,8 @@ func TestBreaker_ClosedByAHealthyAnswer_OnlyAfterTheBodyWasRead(t *testing.T) {
 	c.maxAttempts = 1
 	c.httpClient.Timeout = 300 * time.Millisecond
 
-	for _, m := range []string{truncated, invalid, trailing, stalled} {
+	for _, m := range []string{truncated, stalled, invalid, trailing} {
+		wantOpenFromClosed := m == truncated || m == stalled
 		for _, startOpen := range []bool{false, true} {
 			mode.Store(m)
 			c.breaker.success(apipolicy.EndpointStatic)
@@ -419,8 +397,8 @@ func TestBreaker_ClosedByAHealthyAnswer_OnlyAfterTheBodyWasRead(t *testing.T) {
 			if _, err := c.FetchSports(t.Context(), types.EnLocale); err == nil {
 				t.Fatalf("%s body: expected an error", m)
 			}
-			if !anyOpen(c.Breaker()) {
-				t.Fatalf("%s body (start open=%v): the breaker is closed", m, startOpen)
+			if want := wantOpenFromClosed || startOpen; anyOpen(c.Breaker()) != want {
+				t.Fatalf("%s body (start open=%v): open = %v, want %v", m, startOpen, !want, want)
 			}
 		}
 	}
@@ -434,11 +412,9 @@ func TestBreaker_ClosedByAHealthyAnswer_OnlyAfterTheBodyWasRead(t *testing.T) {
 	}
 }
 
-// The same holds for a call that does not decode an entity: a POST whose 2xx
-// body cannot be read, is too large, cannot be verified or says the service is
-// unavailable opens a closed breaker, while a verified body, accepted or a
-// decoded rejection about the resource, closes an open one.
-func TestBreaker_ClosedByAHealthyAnswer_AMutationOnlyOnceItsBodyWasVerified(t *testing.T) {
+// A mutation's body does not feed the breaker at all: whatever a POST answers,
+// the breaker is left as it was.
+func TestBreaker_AMutationBodyLeavesTheBreakerAlone(t *testing.T) {
 	var mode atomic.Value
 	mode.Store("ok")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -482,54 +458,39 @@ func TestBreaker_ClosedByAHealthyAnswer_AMutationOnlyOnceItsBodyWasVerified(t *t
 	c.maxAttempts = 1
 
 	for _, m := range []string{"truncated", "oversized", "malformed", "trailing", "unavailable",
-		"bare_error_truncated", "bare_error_unavailable", "bare_error_trailing"} {
-		mode.Store(m)
-		c.breaker.success(apipolicy.EndpointOther)
-		if ok, err := c.postEmpty(t.Context(), "/x", true); err == nil || ok {
-			t.Fatalf("%s body: ok=%v err=%v, want a failure", m, ok, err)
+		"bare_error_truncated", "bare_error_unavailable", "bare_error_trailing",
+		"forbidden", "not_found", "conflict", "bare_error", "no_code", "ok"} {
+		for _, startOpen := range []bool{false, true} {
+			mode.Store(m)
+			c.breaker.success(apipolicy.EndpointOther)
+			if startOpen {
+				c.Breaker().Trip(apipolicy.EndpointOther)
+			}
+			_, _ = c.postEmpty(t.Context(), "/x", true)
+			if got := anyOpen(c.Breaker()); got != startOpen {
+				t.Fatalf("%s body (start open=%v): open = %v", m, startOpen, got)
+			}
 		}
-		if !anyOpen(c.Breaker()) {
-			t.Fatalf("%s body: the breaker stayed closed", m)
-		}
-	}
-
-	for _, m := range []string{"forbidden", "not_found", "conflict", "bare_error", "no_code"} {
-		mode.Store(m)
-		c.Breaker().Trip(apipolicy.EndpointOther)
-		if ok, err := c.postEmpty(t.Context(), "/x", true); err == nil || ok {
-			t.Fatalf("%s envelope: ok=%v err=%v, want a rejection", m, ok, err)
-		}
-		if anyOpen(c.Breaker()) {
-			t.Fatalf("%s envelope: a healthy answer left the breaker open", m)
-		}
-	}
-
-	mode.Store("ok")
-	c.Breaker().Trip(apipolicy.EndpointOther)
-	if ok, err := c.postEmpty(t.Context(), "/x", true); err != nil || !ok {
-		t.Fatalf("complete body: ok=%v err=%v", ok, err)
-	}
-	if anyOpen(c.Breaker()) {
-		t.Fatal("complete body: the breaker stayed open")
 	}
 }
 
 // Only a healthy answer closes the breaker: a 200 whose envelope says the
-// service is unavailable, or whose document is about another resource, is the
-// failing API (it opens), while an envelope about the resource itself (not
-// found, forbidden) is an answer of a healthy one (it closes).
+// service is unavailable, or whose document is about another resource, does
+// not (and does not open it either: it is an answer about one resource),
+// while an envelope about the resource itself (not found, forbidden) is an
+// answer of a healthy API (it closes).
 func TestBreaker_ClosedByAHealthyAnswer_OnlyHealthyAnswers(t *testing.T) {
 	cases := []struct {
-		name     string
-		body     string
-		call     func(t *testing.T, c *Client) error
-		wantOpen bool
-		ep       apipolicy.Endpoint
+		name   string
+		body   string
+		call   func(t *testing.T, c *Client) error
+		closes bool
+		ep     apipolicy.Endpoint
 	}{
-		{"envelope OK", `<producers response_code="OK"/>`, fetchProducers, false, apipolicy.EndpointOther},
-		{"envelope service unavailable", `<producers response_code="SERVICE_UNAVAILABLE"/>`, fetchProducers, true, apipolicy.EndpointOther},
-		{"envelope not found", `<producers response_code="NOT_FOUND"/>`, fetchProducers, false, apipolicy.EndpointOther},
-		{"envelope forbidden", `<producers response_code="FORBIDDEN"/>`, fetchProducers, false, apipolicy.EndpointOther},
+		{"envelope OK", `<producers response_code="OK"/>`, fetchProducers, true, apipolicy.EndpointOther},
+		{"envelope service unavailable", `<producers response_code="SERVICE_UNAVAILABLE"/>`, fetchProducers, false, apipolicy.EndpointOther},
+		{"envelope not found", `<producers response_code="NOT_FOUND"/>`, fetchProducers, true, apipolicy.EndpointOther},
+		{"envelope forbidden", `<producers response_code="FORBIDDEN"/>`, fetchProducers, true, apipolicy.EndpointOther},
 		{
 			"identity mismatch",
 			`<player_profile><player id="od:player:8" name="Q"/></player_profile>`,
@@ -537,7 +498,7 @@ func TestBreaker_ClosedByAHealthyAnswer_OnlyHealthyAnswers(t *testing.T) {
 				_, err := c.FetchPlayerProfile(t.Context(), "od:player:9", types.EnLocale)
 				return err
 			},
-			true,
+			false,
 			apipolicy.EndpointPlayer,
 		},
 		{
@@ -547,7 +508,7 @@ func TestBreaker_ClosedByAHealthyAnswer_OnlyHealthyAnswers(t *testing.T) {
 				_, err := c.FetchPlayerProfile(t.Context(), "od:player:9", types.EnLocale)
 				return err
 			},
-			false,
+			true,
 			apipolicy.EndpointPlayer,
 		},
 	}
@@ -564,8 +525,8 @@ func TestBreaker_ClosedByAHealthyAnswer_OnlyHealthyAnswers(t *testing.T) {
 					c.Breaker().Trip(tc.ep)
 				}
 				_ = tc.call(t, c)
-				if got := anyOpen(c.Breaker()); got != tc.wantOpen {
-					t.Fatalf("open = %v, want %v (start open=%v)", got, tc.wantOpen, startOpen)
+				if want := startOpen && !tc.closes; anyOpen(c.Breaker()) != want {
+					t.Fatalf("open = %v, want %v (start open=%v)", !want, want, startOpen)
 				}
 			})
 		}

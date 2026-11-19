@@ -14,14 +14,15 @@ import (
 // enough that the first build after it is the probe of whether it is back.
 const breakerOpenFor = 10 * time.Second
 
-// Breaker remembers, per endpoint, that the REST API failed moments ago in a
-// way that costs time or shows an outage: a transport error, a request that
-// timed out, a rate limit, 502/503/504, a service-unavailable envelope, a
-// body that was cut off. A plain server error of one resource (a fast 500)
-// does not open it: that is a failure of the key, which the loaders remember
-// themselves, and it says nothing about what other resources of the endpoint
-// will do. The message path also trips an endpoint when a message waited its
-// whole time on it.
+// Breaker remembers, per endpoint, that the REST API gave no answer moments
+// ago: a transport error, a request that timed out, a rate limit, a body
+// that the transport cut off. A response that arrived complete is an answer
+// about ONE resource, whatever it says (a 500, 502, 503 or 504, a
+// service-unavailable envelope, a body that cannot be decoded, a document
+// about another resource, a 4xx): it never opens the breaker, since it says
+// nothing about what other resources of the endpoint will do. The loaders
+// remember such an answer for its key themselves. The message path also trips
+// an endpoint when a message waited its whole time on it.
 //
 // The endpoints are the resource kinds of apipolicy.Endpoint. A healthy
 // answer closes only its own endpoint's breaker, so one endpoint that hangs

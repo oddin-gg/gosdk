@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"fmt"
-	"github.com/oddin-gg/gosdk/internal/apipolicy"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -37,21 +36,22 @@ func TestKeyFailure_Classification(t *testing.T) {
 	}
 }
 
-// A non-2xx answer whose envelope says SERVICE_UNAVAILABLE opens the
-// endpoint's breaker like the same envelope on a 2xx does; a plain 500 or a
-// 4xx with another code does not.
-func TestBreaker_ANon2xxServiceUnavailableEnvelopeOpensIt(t *testing.T) {
+// A response that arrived complete is an answer about one resource, whatever
+// its status or envelope says: it opens no breaker.
+func TestBreaker_ACompleteAnswerOpensNothing(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		status int
 		body   string
-		want   bool
 	}{
-		{"service unavailable envelope", http.StatusInternalServerError, `<response response_code="SERVICE_UNAVAILABLE"/>`, true},
-		{"plain 500", http.StatusInternalServerError, `<error/>`, false},
-		{"400 with service unavailable envelope", http.StatusBadRequest, `<response response_code="SERVICE_UNAVAILABLE"/>`, true},
-		{"403 with service unavailable envelope", http.StatusForbidden, `<response response_code="SERVICE_UNAVAILABLE"/>`, true},
-		{"400 with another code", http.StatusBadRequest, `<response response_code="BAD_REQUEST"/>`, false},
+		{"service unavailable envelope on 500", http.StatusInternalServerError, `<response response_code="SERVICE_UNAVAILABLE"/>`},
+		{"plain 500", http.StatusInternalServerError, `<error/>`},
+		{"502", http.StatusBadGateway, `<error/>`},
+		{"503", http.StatusServiceUnavailable, `<error/>`},
+		{"504", http.StatusGatewayTimeout, `<error/>`},
+		{"400 with service unavailable envelope", http.StatusBadRequest, `<response response_code="SERVICE_UNAVAILABLE"/>`},
+		{"403 with service unavailable envelope", http.StatusForbidden, `<response response_code="SERVICE_UNAVAILABLE"/>`},
+		{"400 with another code", http.StatusBadRequest, `<response response_code="BAD_REQUEST"/>`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := newBodyServer(tc.body, tc.status)
@@ -61,8 +61,8 @@ func TestBreaker_ANon2xxServiceUnavailableEnvelopeOpensIt(t *testing.T) {
 			if _, err := c.FetchSports(t.Context(), types.EnLocale); err == nil {
 				t.Fatal("expected an error")
 			}
-			if got := c.Breaker().Open(apipolicy.EndpointStatic); got != tc.want {
-				t.Fatalf("open = %v, want %v", got, tc.want)
+			if anyOpen(c.Breaker()) {
+				t.Fatal("a complete answer opened a breaker")
 			}
 		})
 	}

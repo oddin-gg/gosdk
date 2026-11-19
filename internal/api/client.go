@@ -67,6 +67,22 @@ func (b *byteLimitReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// readErrTracker remembers the first read error of the body that was not its
+// end, which is how a body the transport cut off differs from one that
+// arrived whole and is malformed.
+type readErrTracker struct {
+	r   io.Reader
+	err error
+}
+
+func (t *readErrTracker) Read(p []byte) (int, error) {
+	n, err := t.r.Read(p)
+	if err != nil && err != io.EOF && t.err == nil {
+		t.err = err
+	}
+	return n, err
+}
+
 // Observer ...
 type Observer interface {
 	OnAPIResponse(apiResponse Response)
@@ -753,10 +769,16 @@ func (c *Client) fetchDataValidated(ctx context.Context, path string, entity int
 	// emitted Err=nil — indistinguishable from success on the
 	// observability stream while the caller received an error.
 	var callErr error
-	// answered: the body arrived whole and decoded, and the envelope is a
-	// healthy API's answer (see isServiceUnavailable).
-	answered := false
-	dec := xml.NewDecoder(&byteLimitReader{r: resp.Body, left: maxSuccessBodyBytes})
+	// good: the body arrived whole and decoded, the envelope is a healthy
+	// API's answer (see isServiceUnavailable) and the document is about the
+	// requested resource. Only a good answer closes the endpoint's breaker.
+	// Nothing in the body feeds the breaker as a failure: a response that
+	// arrived complete is an answer about ONE resource, whatever it says, and
+	// the caller's loader remembers it for that key. Only the absence of an
+	// answer is the endpoint's: see noteUnanswered.
+	good := false
+	body := &readErrTracker{r: resp.Body}
+	dec := xml.NewDecoder(&byteLimitReader{r: body, left: maxSuccessBodyBytes})
 	if decodeErr := dec.Decode(entity); decodeErr != nil {
 		callErr = badResponse(fmt.Errorf("api: decode %s: %w", path, decodeErr))
 	} else if eofErr := utils.EnsureXMLEOF(dec); eofErr != nil {
@@ -765,12 +787,12 @@ func (c *Client) fetchDataValidated(ctx context.Context, path string, entity int
 		// and observer dispatch.
 		callErr = badResponse(fmt.Errorf("api: decode %s: %w", path, eofErr))
 	} else {
-		answered = true
+		good = true
 		if rwc, ok := entity.(ResponseWithCode); ok && rwc.Code() != types.OkResponseCode {
 			callErr = &Error{Method: http.MethodGet, Path: path, Status: resp.StatusCode, Code: rwc.Code()}
 			// An envelope that says the service cannot serve right now is
 			// not an answer of a healthy API.
-			answered = !isServiceUnavailable(rwc.Code())
+			good = !isServiceUnavailable(rwc.Code())
 		}
 	}
 	if callErr == nil && validate != nil {
@@ -779,18 +801,15 @@ func (c *Client) fetchDataValidated(ctx context.Context, path string, entity int
 		// reaching any cache-populating observer below.
 		if verr := validate(); verr != nil {
 			callErr = badResponse(fmt.Errorf("api: %s: response identity: %w", path, verr))
-			// A response about another resource says the routing is
-			// broken, not that the API is healthy.
-			answered = false
+			good = false
 		}
 	}
-	if answered {
+	switch {
+	case body.err != nil:
+		// The transport cut the body off: no answer arrived.
+		c.noteUnanswered(ctx, path)
+	case good:
 		c.breaker.success(endpointOf(path))
-	} else if c.callerAlive(ctx) {
-		// A body cut off, malformed or about another resource, or a
-		// service-unavailable envelope. Not when the caller gave up: its
-		// cancellation can cut a body short without the API being at fault.
-		c.breaker.failure(endpointOf(path))
 	}
 	c.emit(pc, callErr) // streaming capture: emit AFTER body has flowed through tee
 	if callErr != nil {
@@ -854,7 +873,6 @@ func (c *Client) doNoBody(ctx context.Context, method, path string, idempotent b
 			slog.String("error", readErr.Error()),
 		)
 		err := fmt.Errorf("api: %s %s: 2xx response body unreadable, acceptance unverified: %w", method, path, readErr)
-		c.noteUnanswered(ctx, path)
 		c.emit(pc, err)
 		return false, err
 	}
@@ -871,7 +889,6 @@ func (c *Client) doNoBody(ctx context.Context, method, path string, idempotent b
 	// acceptance, reported as an error.
 	if len(body) > maxErrorBodyBytes {
 		err := fmt.Errorf("api: %s %s: 2xx response body exceeds %d bytes, rejection envelope could not be verified", method, path, maxErrorBodyBytes)
-		c.noteUnanswered(ctx, path)
 		c.emit(pc, err)
 		return false, err
 	}
@@ -882,44 +899,30 @@ func (c *Client) doNoBody(ctx context.Context, method, path string, idempotent b
 	// is some other payload and stays accepted; a body that does not
 	// fully decode (truncated, malformed, or with trailing documents) is
 	// UNVERIFIED and fails.
-	if apiErr, ok, understood := c.classifyMutationBody(method, path, resp.StatusCode, body); !ok {
-		// A decoded envelope about the resource (FORBIDDEN, NOT_FOUND,
-		// CONFLICT, ...) is a healthy API's answer, like a decoded
-		// non-OK envelope on a fetch; a body that did not decode or an
-		// envelope saying the service is unavailable is not. Whether the
-		// body decoded is stated by the classifier, not inferred from the
-		// code: a decoded rejection may carry no code at all.
-		if understood && !isServiceUnavailable(apiErr.Code) {
-			c.breaker.success(endpointOf(path))
-		} else {
-			c.noteUnanswered(ctx, path)
-		}
+	if apiErr, ok := c.classifyMutationBody(method, path, resp.StatusCode, body); !ok {
 		c.emit(pc, apiErr)
 		return false, fmt.Errorf("api: %s %s: %w", method, path, apiErr)
 	}
 	// The body was read in full and verified: the API accepted the request.
-	c.breaker.success(endpointOf(path))
 	c.emit(pc, nil)
 	return true, nil
 }
 
-// noteUnanswered counts a response the API did not answer properly (its body
-// unreadable, too large, unverifiable, or a service-unavailable envelope)
-// against the breaker. Not when the caller gave up: its cancellation can cut
-// a body short without the API being at fault.
-// noteUnreadableErrorBody counts an error body that stalled or was cut off
-// (a read error, not the end of the body) like any unreadable body: against
-// the endpoint's breaker, unless the caller gave up, which can cut a body short
-// without the API being at fault.
-func (c *Client) noteUnreadableErrorBody(ctx context.Context, path string, readErr error) {
-	if readErr != nil {
-		c.noteUnanswered(ctx, path)
-	}
-}
-
+// noteUnanswered counts the absence of an answer (a body the transport cut
+// off or that stalled) against the endpoint's breaker. Not when the caller
+// gave up: its cancellation can cut a body short without the API being at
+// fault.
 func (c *Client) noteUnanswered(ctx context.Context, path string) {
 	if c.callerAlive(ctx) {
 		c.breaker.failure(endpointOf(path))
+	}
+}
+
+// noteUnreadableErrorBody counts an error body that stalled or was cut off
+// (a read error, not the end of the body) as the absence of an answer.
+func (c *Client) noteUnreadableErrorBody(ctx context.Context, path string, readErr error) {
+	if readErr != nil {
+		c.noteUnanswered(ctx, path)
 	}
 }
 
@@ -933,21 +936,10 @@ func (c *Client) callerAlive(ctx context.Context) bool {
 // server cannot serve right now (SERVICE_UNAVAILABLE), as opposed to an
 // answer about the resource (NOT_FOUND, FORBIDDEN, BAD_REQUEST, CONFLICT,
 // NOT_IMPLEMENTED, ...) that only a healthy API gives. One decision for the
-// breaker and for the code that classifies a decoded non-OK envelope on a
-// 2xx response.
+// breaker (it does not count as a good answer) and for the code that
+// classifies a decoded non-OK envelope on a 2xx response.
 func isServiceUnavailable(c types.ResponseCode) bool {
 	return c == types.ServiceUnavailableResponseCode
-}
-
-// serviceUnavailableStatus reports whether an HTTP status says the service
-// (or the gateway in front of it) cannot serve right now, as opposed to a
-// server error about one request.
-func serviceUnavailableStatus(status int) bool {
-	switch status {
-	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
-		return true
-	}
-	return false
 }
 
 // isSuccessResponseCode reports whether a <response> envelope code means
@@ -962,15 +954,11 @@ func isSuccessResponseCode(c types.ResponseCode) bool {
 }
 
 // classifyMutationBody decides whether a 2xx mutation body represents an
-// accepted operation. Returns (nil, true, true) on acceptance; on a
-// rejection (*Error, false, understood). understood is true when the body
-// was a complete, decoded document (so the rejection is the API's answer,
-// whatever code it carries) and false for a truncated, malformed or
-// trailing-content body whose meaning is unknown. See the caller for the
-// policy.
-func (c *Client) classifyMutationBody(method, path string, status int, body []byte) (*Error, bool, bool) {
+// accepted operation. Returns (nil, true) on acceptance; (*Error, false)
+// on rejection or an unverifiable body. See the caller for the policy.
+func (c *Client) classifyMutationBody(method, path string, status int, body []byte) (*Error, bool) {
 	if len(bytes.TrimSpace(body)) == 0 {
-		return nil, true, true // empty 202/204 / empty OK
+		return nil, true // empty 202/204 / empty OK
 	}
 	// Attempt to decode as the <response> envelope. data.Error pins
 	// XMLName to "response", so Decode errors when the root is anything
@@ -983,11 +971,11 @@ func (c *Client) classifyMutationBody(method, path string, status int, body []by
 		// cannot trust the classification.
 		if eofErr := utils.EnsureXMLEOF(dec); eofErr != nil {
 			return &Error{Method: method, Path: path, Status: status,
-				Message: "2xx <response> envelope with trailing content; acceptance unverified"}, false, false
+				Message: "2xx <response> envelope with trailing content; acceptance unverified"}, false
 		}
 		code := types.ResponseCode(env.Code)
 		if isSuccessResponseCode(code) {
-			return nil, true, true
+			return nil, true
 		}
 		// Empty or non-success code on a <response> root → rejection.
 		return &Error{
@@ -996,7 +984,7 @@ func (c *Client) classifyMutationBody(method, path string, status int, body []by
 			Status:  status,
 			Code:    code,
 			Message: string(c.redactSensitive([]byte(env.Message))),
-		}, false, true
+		}, false
 	}
 	// A bare <error>…</error> root is the API's OTHER defined error shape
 	// (see xml.ErrorBody). A 2xx carrying it means the mutation was NOT
@@ -1007,28 +995,23 @@ func (c *Client) classifyMutationBody(method, path string, status int, body []by
 	// handles stayed pending until their (up to 6h) timeout.
 	if root, ok := xmlRootLocal(body); ok && root == "error" {
 		var env data.ErrorBody
-		// A truncated or malformed <error>, or one followed by another
-		// document, is a rejection whose content cannot be trusted: it is not
-		// an answer of a healthy API. xml.Unmarshal alone would stop after the
-		// first element, so the end of the body is checked explicitly.
-		edec := xml.NewDecoder(bytes.NewReader(body))
-		decoded := edec.Decode(&env) == nil && utils.EnsureXMLEOF(edec) == nil
+		_ = xml.Unmarshal(body, &env) // best-effort; message is diagnostic
 		return &Error{
 			Method:  method,
 			Path:    path,
 			Status:  status,
 			Code:    types.ResponseCode(env.Code),
 			Message: string(c.redactSensitive([]byte(env.Message))),
-		}, false, decoded
+		}, false
 	}
 	// Not a <response>/<error> root. If the body is otherwise well-formed
 	// XML it is some other success payload; if it does not parse at all it
 	// is a truncated/malformed body whose acceptance cannot be verified.
 	if wellFormedXML(body) {
-		return nil, true, true
+		return nil, true
 	}
 	return &Error{Method: method, Path: path, Status: status,
-		Message: "2xx body is malformed/truncated; acceptance unverified"}, false, false
+		Message: "2xx body is malformed/truncated; acceptance unverified"}, false
 }
 
 // xmlRootLocal returns the local name of the first XML start element in
@@ -1258,13 +1241,9 @@ func (c *Client) do(ctx context.Context, method, path string, locale *types.Loca
 			_ = r.Body.Close()
 			c.emitEventReqResp(req, r.StatusCode, latency, attempts, reqBody, reqTruncated, eventBytes, truncated, locale, err)
 			c.noteUnreadableErrorBody(ctx, path, readErr)
-			// Any other 4xx is an answer about the request and leaves the
-			// breaker alone; an envelope that says SERVICE_UNAVAILABLE says
-			// the service cannot serve, whatever the status.
-			var envelope *Error
-			if errors.As(err, &envelope) && isServiceUnavailable(envelope.Code) {
-				c.breaker.failure(endpointOf(path))
-			}
+			// A 4xx is an answer about the request, whatever its envelope
+			// says: it leaves the breaker alone, and the loaders remember it
+			// for the key.
 			return nil, backoff.Permanent(err)
 		default:
 			// Server error or unexpected status. Body read once and
@@ -1276,15 +1255,11 @@ func (c *Client) do(ctx context.Context, method, path string, locale *types.Loca
 			_ = r.Body.Close()
 			retryErr := c.toAPIError(method, path, r.StatusCode, parserBytes)
 			c.emitEventReqResp(req, r.StatusCode, latency, attempts, reqBody, reqTruncated, eventBytes, truncated, locale, retryErr)
-			// Only a status that says the service is unavailable opens the
-			// endpoint's breaker. A plain server error (500) is an answer
-			// about one resource: the loaders remember it for that key.
-			// An envelope that says SERVICE_UNAVAILABLE does too, as on a 2xx.
-			var envelope *Error
+			// A server error, 502/503/504 and a SERVICE_UNAVAILABLE envelope
+			// included, is an answer about one resource: it leaves the
+			// breaker alone, and the loaders remember it for the key. Only a
+			// body that was cut off is the absence of an answer.
 			c.noteUnreadableErrorBody(ctx, path, readErr)
-			if serviceUnavailableStatus(r.StatusCode) || (errors.As(retryErr, &envelope) && isServiceUnavailable(envelope.Code)) {
-				c.breaker.failure(endpointOf(path))
-			}
 			if !idempotent {
 				// Server may have processed the request — re-issuing
 				// would re-execute. Treat 5xx as terminal: no retry follows,

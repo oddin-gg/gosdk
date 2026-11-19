@@ -60,8 +60,7 @@ type apiCtl struct {
 	catalog atomic.Pointer[string]
 	// notFoundPlayers answers the player profile with 404 (a healthy API).
 	// plain500 makes the failing switches answer 500, a server error about
-	// the one request; by default they answer 503, which says the service
-	// cannot serve.
+	// the one request; by default they drop the connection without an answer.
 	plain500 atomic.Bool
 	// badSummary lists the match ids (as in the URN) whose summary answers
 	// 500 while everything else is healthy.
@@ -71,18 +70,23 @@ type apiCtl struct {
 	hangPath atomic.Pointer[string]
 	// hung counts the requests that entered the hangPath hold.
 	hung atomic.Int32
-	// failPlayers fails only the player profile endpoint (see failStatus).
+	// failPlayers fails only the player profile endpoint (see fail).
 	failPlayers     atomic.Bool
 	notFoundPlayers atomic.Bool
 	players         atomic.Int32 // GET .../players/<id>/profile
 }
 
-// failStatus is the status of a failing switch: 503 unless plain500.
-func (c *apiCtl) failStatus() int {
+// fail is the failure of a failing switch: the connection is dropped without
+// an answer (an outage, which opens the endpoint's breaker), or, with
+// plain500, a 500 answer about the one request.
+func (c *apiCtl) fail(w http.ResponseWriter) {
 	if c.plain500.Load() {
-		return http.StatusInternalServerError
+		http.Error(w, "<error/>", http.StatusInternalServerError)
+		return
 	}
-	return http.StatusServiceUnavailable
+	if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {
+		_ = conn.Close()
+	}
 }
 
 type messagePathRig struct {
@@ -182,7 +186,7 @@ func newTimedMessagePathRig(t *testing.T, tm rigTiming) *messagePathRig {
 		if isDescription {
 			ctl.descriptions.Add(1)
 			if ctl.failDescriptions.Load() || ctl.failing.Load() {
-				http.Error(w, "<error/>", ctl.failStatus())
+				ctl.fail(w)
 				return
 			}
 		}
@@ -201,7 +205,7 @@ func newTimedMessagePathRig(t *testing.T, tm rigTiming) *messagePathRig {
 		if strings.Contains(r.URL.Path, "/players/") {
 			ctl.players.Add(1)
 			if ctl.failPlayers.Load() {
-				http.Error(w, "<error/>", ctl.failStatus())
+				ctl.fail(w)
 				return
 			}
 			if ctl.notFoundPlayers.Load() {
@@ -214,7 +218,7 @@ func newTimedMessagePathRig(t *testing.T, tm rigTiming) *messagePathRig {
 			ctl.tournaments.Add(1)
 		}
 		if ctl.failing.Load() || (isTournament && ctl.failTournaments.Load()) {
-			http.Error(w, "<error/>", ctl.failStatus())
+			ctl.fail(w)
 			return
 		}
 		// The fixtures describe match 99; the API client rejects a reply
@@ -243,7 +247,7 @@ func newTimedMessagePathRig(t *testing.T, tm rigTiming) *messagePathRig {
 	apiClient.SetHTTPClient(&http.Client{
 		Transport: &rewriteHTTPClient{
 			target: srv.URL,
-			base:   &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
+			base:   &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, DisableKeepAlives: true},
 		},
 		Timeout: 10 * time.Second,
 	})
