@@ -20,9 +20,13 @@ import (
 // that drifts. TestMain downloads the repository archive once per test
 // binary and the tests read schema/ from it.
 //
-//   - ODDSFEEDSCHEMA_REF pins a branch, tag or commit (default: main —
-//     so a schema change upstream fails the next gosdk build, which is
-//     the point of the check).
+//   - ODDSFEEDSCHEMA_REF overrides the schema version for one run: a
+//     branch, tag or commit. The default is the immutable ref
+//     defaultSchemaRef below, not main, so a schema change upstream
+//     cannot turn this repository's build red on its own. A newer
+//     schema is taken by a deliberate bump of that one constant, in
+//     the change that updates the Go models to match. Try upcoming
+//     schema work with ODDSFEEDSCHEMA_REF=main (or a branch).
 //   - ODDSFEEDSCHEMA_DIR points at a local checkout instead; nothing is
 //     downloaded. Use it offline or to try a schema branch.
 //
@@ -30,8 +34,10 @@ import (
 // as GitHub Actions sets it), so a broken download cannot pass as green.
 
 const (
-	schemaRepo       = "oddin-gg/oddsfeedschema"
-	defaultSchemaRef = "main"
+	schemaRepo = "oddin-gg/oddsfeedschema"
+	// defaultSchemaRef is the oddsfeedschema version the models are
+	// checked against: a release tag or a commit, never a branch.
+	defaultSchemaRef = "v1.2.0"
 	fetchTimeout     = 60 * time.Second
 )
 

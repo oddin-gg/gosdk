@@ -124,6 +124,9 @@ type Scoreboard struct {
 	HomePoints        *int `xml:"home_points,attr,omitempty"`
 	AwayPoints        *int `xml:"away_points,attr,omitempty"`
 	RemainingGameTime *int `xml:"remaining_game_time,attr,omitempty"`
+	// ClockRunning is the optional clock_running attribute: true the
+	// in-game clock runs, false it stands, absent (nil) unknown.
+	ClockRunning *bool `xml:"clock_running,attr,omitempty"`
 
 	// RushCricketScoreboard
 	HomeRuns          *int  `xml:"home_runs,attr,omitempty"`

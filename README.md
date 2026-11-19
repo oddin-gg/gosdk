@@ -414,8 +414,13 @@ The XML models in `internal/feed/xml` and `internal/api/xml` are written
 by hand. `internal/schemacheck` keeps them honest against the
 [oddsfeedschema](https://github.com/oddin-gg/oddsfeedschema) XSDs, which
 stay the single source of truth: the test downloads the schema from
-GitHub at test time (ref `main` by default, `ODDSFEEDSCHEMA_REF` to pin
-a branch, tag or commit, `ODDSFEEDSCHEMA_DIR` to use a local checkout).
+GitHub at test time. It is pinned to one immutable version
+(`defaultSchemaRef` in `internal/schemacheck/source_test.go`, a release
+tag or commit), so a schema change upstream cannot turn this build red
+on its own; a newer schema is taken by a deliberate bump of that
+constant in the change that updates the models. `ODDSFEEDSCHEMA_REF`
+overrides the version for one run (for example `main`, to try upcoming
+schema work) and `ODDSFEEDSCHEMA_DIR` uses a local checkout.
 Every attribute and element the schema declares must have a Go field and
 every Go tag must exist in the schema. Known deviations live in a ledger
 in the test with the reason for each; a new deviation, or a ledger entry
