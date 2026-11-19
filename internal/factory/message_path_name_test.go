@@ -64,6 +64,24 @@ func TestMessagePath_PlayerPropsName_IsAbsentWhenTheLookupGaveNoAnswer(t *testin
 		}
 	})
 
+	t.Run("a 403 gives no name on the first message and on the next", func(t *testing.T) {
+		r := setup(t, rigTiming{messageTimeout: apipolicy.MessageTimeout, breakerOpenFor: time.Minute})
+		r.ctl.forbidPlayers.Store(true)
+		if got, ok := name(t, r); ok {
+			t.Fatalf("first message: name = %q, want none: the player's profile is refused", got)
+		}
+		// The key is remembered now: the next messages skip the lookup.
+		requests := r.ctl.players.Load()
+		for i := range 3 {
+			if got, ok := name(t, r); ok {
+				t.Fatalf("message %d after it: name = %q, want none", i+2, got)
+			}
+		}
+		if got := r.ctl.players.Load(); got != requests {
+			t.Fatalf("player requests grew from %d to %d: the next messages must skip the remembered key", requests, got)
+		}
+	})
+
 	t.Run("not found keeps the raw value", func(t *testing.T) {
 		r := setup(t, rigTiming{messageTimeout: apipolicy.MessageTimeout, breakerOpenFor: time.Minute})
 		r.ctl.notFoundPlayers.Store(true)

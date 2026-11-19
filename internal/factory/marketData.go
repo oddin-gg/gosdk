@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/oddin-gg/gosdk/internal/api"
 	"github.com/oddin-gg/gosdk/internal/apipolicy"
 	"github.com/oddin-gg/gosdk/internal/cache"
 	"github.com/oddin-gg/gosdk/internal/cache/lru"
@@ -283,11 +284,12 @@ func (m *marketDataImpl) makeMarketName(ctx context.Context, marketDescription *
 // getPropsName resolves a player-props specifier value (a player URN)
 // to the player's localized name. Callers gate on the market carrying
 // the player_props group. unavailable reports a lookup that did not give an
-// answer for this message (skipped while the API fails, a wait that ran out,
-// a cancelled message): the market has no name in that locale. A specifier
-// that is not a player, and a lookup the API answered with an error (a
-// player that does not exist), keep the raw value (ok false, unavailable
-// false).
+// usable answer for this message (skipped, a wait that ran out, a cancelled
+// message, or an answer of the API that is a failure of the key, such as a
+// server error or a 403): the market has no name in that locale, the same on
+// the message that waited for the lookup and on the ones that skip the key
+// afterwards. A specifier that is not a player, and a player the API does
+// not know (404), keep the raw value (ok false, unavailable false).
 func (m *marketDataImpl) getPropsName(ctx context.Context, entityID string, locale types.Locale) (name string, ok, unavailable bool) {
 	urn, err := types.ParseURN(entityID)
 	if err != nil {
@@ -314,12 +316,15 @@ func (m *marketDataImpl) getPropsName(ctx context.Context, entityID string, loca
 	return "", false, false
 }
 
-// lookupGaveNoAnswer reports whether a failed name lookup says nothing about
-// the entity: the message path skipped it, stopped waiting for it, or was
-// cancelled. An answer of the API (not found, a server error) is not one.
+// lookupGaveNoAnswer reports whether a failed name lookup gave no usable
+// answer on the message path: it was skipped, the message stopped waiting for
+// it or was cancelled, or the API answered with a failure of the key (see
+// api.IsKeyFailure), which later messages skip for a while. An answer that
+// the entity does not exist (404) is not one.
 func lookupGaveNoAnswer(err error) bool {
 	return errors.Is(err, apipolicy.ErrSkipped) ||
 		errors.Is(err, lru.ErrFlightTooOld) ||
 		errors.Is(err, context.DeadlineExceeded) ||
-		errors.Is(err, context.Canceled)
+		errors.Is(err, context.Canceled) ||
+		api.IsKeyFailure(err)
 }

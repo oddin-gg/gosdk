@@ -74,7 +74,10 @@ type apiCtl struct {
 	// failPlayers fails only the player profile endpoint (see fail).
 	failPlayers     atomic.Bool
 	notFoundPlayers atomic.Bool
-	players         atomic.Int32 // GET .../players/<id>/profile
+	// forbidPlayers answers the player profile with 403 (an answer that is a
+	// failure of the key, not a missing player).
+	forbidPlayers atomic.Bool
+	players       atomic.Int32 // GET .../players/<id>/profile
 }
 
 // fail is the failure of a failing switch: the connection is dropped without
@@ -211,6 +214,10 @@ func newTimedMessagePathRig(t *testing.T, tm rigTiming) *messagePathRig {
 			ctl.players.Add(1)
 			if ctl.failPlayers.Load() {
 				ctl.fail(w)
+				return
+			}
+			if ctl.forbidPlayers.Load() {
+				http.Error(w, "<error/>", http.StatusForbidden)
 				return
 			}
 			if ctl.notFoundPlayers.Load() {
