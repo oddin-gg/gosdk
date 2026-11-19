@@ -611,7 +611,7 @@ func TestBreaker_APlainServerErrorOpensNothing(t *testing.T) {
 	if got := attempts.Load(); got != int32(c.maxAttempts) {
 		t.Fatalf("failed attempts reported = %d, want %d (one per attempt)", got, c.maxAttempts)
 	}
-	if !apipolicy.KeyFailure(err) {
+	if !IsKeyFailure(err) {
 		t.Fatalf("a 500 is a failure of the key: %v", err)
 	}
 }

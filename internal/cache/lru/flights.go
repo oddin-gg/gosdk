@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/oddin-gg/gosdk/internal/api"
 	"github.com/oddin-gg/gosdk/internal/apipolicy"
 )
 
@@ -19,7 +20,7 @@ import (
 var ErrFlightTooOld = errors.New("lru: skipped, the load has been running for longer than a message waits")
 
 // defaultFailureMemory is how long a group remembers that the load of a key
-// failed with an answer of the API (see apipolicy.KeyFailure), so that the
+// failed with an answer of the API (see api.IsKeyFailure), so that the
 // message path does not start or join a flight for that key again meanwhile.
 // It is the time the endpoint breakers stay open.
 const defaultFailureMemory = 10 * time.Second
@@ -51,7 +52,7 @@ const maxRememberedFailures = 4096
 // no longer than what is left of it, not a timeout each.
 //
 // The group also remembers, for 10 s, the keys whose flight ended
-// with an answer of the API that was a failure (see apipolicy.KeyFailure):
+// with an answer of the API that was a failure (see api.IsKeyFailure):
 // the message path asks Remembered before it starts or joins a flight, and a
 // success of the key forgets it. Getters never read the memory.
 //
@@ -153,7 +154,7 @@ func (g *Flights) noteOutcomeLocked(key string, err error) {
 	switch {
 	case err == nil:
 		delete(g.failed, d)
-	case apipolicy.KeyFailure(err):
+	case api.IsKeyFailure(err):
 		now := time.Now()
 		if g.failed == nil {
 			g.failed = make(map[[sha256.Size]byte]time.Time)

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"github.com/oddin-gg/gosdk/internal/api"
 	"log/slog"
 	"strings"
 	"sync"
@@ -508,11 +509,8 @@ func TestLocalizedStaticDataCache_MessageDoesNotWaitOnAFetchOlderThanItsTimeout(
 	}
 }
 
-// answeredFailure is an error that says the API answered for the key and failed.
-type answeredFailure struct{}
-
-func (answeredFailure) Error() string    { return "answered: 500" }
-func (answeredFailure) KeyFailure() bool { return true }
+// errAnswered is an error that says the API answered for the key and failed.
+var errAnswered = &api.Error{Status: 500}
 
 // A fetch whose first attempt failed releases the message that waits on it
 // before the fetch ends; the fetch goes on.
@@ -540,7 +538,7 @@ func TestLocalizedStaticDataCache_AFailedKeyIsRememberedForMessages(t *testing.T
 	var calls atomic.Int32
 	fetcher := func(ctx context.Context, locale types.Locale) ([]types.StaticData, error) {
 		if calls.Add(1) == 1 {
-			return nil, answeredFailure{}
+			return nil, errAnswered
 		}
 		return []types.StaticData{{ID: 1, Description: types.Some("ok")}}, nil
 	}
@@ -549,7 +547,7 @@ func TestLocalizedStaticDataCache_AFailedKeyIsRememberedForMessages(t *testing.T
 	marked := apipolicy.WithMessage(t.Context(), newGateStub(), time.Minute)
 	locales := []types.Locale{types.EnLocale}
 
-	if _, err := c.LocalizedItem(marked, 1, locales); !errors.Is(err, answeredFailure{}) {
+	if _, err := c.LocalizedItem(marked, 1, locales); !errors.Is(err, errAnswered) {
 		t.Fatalf("first call: err = %v, want the fetch's error", err)
 	}
 	waitFor(t, "the failure to be remembered", func() bool { return c.sf.Remembered(string(types.EnLocale)) })

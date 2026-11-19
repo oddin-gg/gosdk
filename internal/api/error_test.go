@@ -3,12 +3,12 @@ package api
 import (
 	"context"
 	"fmt"
+	"github.com/oddin-gg/gosdk/internal/apipolicy"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
-	"github.com/oddin-gg/gosdk/internal/apipolicy"
 	"github.com/oddin-gg/gosdk/types"
 )
 
@@ -31,8 +31,8 @@ func TestKeyFailure_Classification(t *testing.T) {
 		{"plain", fmt.Errorf("connection refused"), false},
 	}
 	for _, tc := range cases {
-		if got := apipolicy.KeyFailure(tc.err); got != tc.want {
-			t.Errorf("%s: KeyFailure = %v, want %v", tc.name, got, tc.want)
+		if got := IsKeyFailure(tc.err); got != tc.want {
+			t.Errorf("%s: IsKeyFailure = %v, want %v", tc.name, got, tc.want)
 		}
 	}
 }

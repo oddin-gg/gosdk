@@ -195,15 +195,3 @@ func AttemptFailed(ctx context.Context) {
 		fn()
 	}
 }
-
-// KeyFailure reports whether err says that the API answered for the key and
-// the answer was a failure, which makes the key not worth asking again for a
-// moment: a server error, an unreadable or misdirected body, a rejection.
-// A transport error, a cancellation or a timeout is not one (it says nothing
-// about the key, and the endpoint's breaker covers an outage), nor is a
-// resource that does not exist (it may appear). The error types of the API
-// client implement the method it looks for.
-func KeyFailure(err error) bool {
-	var kf interface{ KeyFailure() bool }
-	return errors.As(err, &kf) && kf.KeyFailure()
-}

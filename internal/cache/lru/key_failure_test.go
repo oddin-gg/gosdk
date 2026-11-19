@@ -10,15 +10,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/oddin-gg/gosdk/internal/api"
 	"github.com/oddin-gg/gosdk/internal/apipolicy"
 )
 
-// answeredErr is an error that says the API answered for the key and failed,
-// as the API client's errors do (see apipolicy.KeyFailure).
-type answeredErr struct{}
-
-func (answeredErr) Error() string    { return "answered: 500" }
-func (answeredErr) KeyFailure() bool { return true }
+// errAnswered is an error that says the API answered for the key and failed,
+// as the API client's errors do (see api.IsKeyFailure).
+var errAnswered = &api.Error{Status: 500}
 
 func failingLoad(err error) func(context.Context) (int, error) {
 	return func(context.Context) (int, error) { return 0, err }
@@ -33,8 +31,8 @@ func TestFailureMemory_AMessageIsSkippedForAKeyThatFailedMomentsAgo(t *testing.T
 	marked := apipolicy.WithMessage(t.Context(), gate, apipolicy.MessageTimeout)
 	flights, _ := countFlights(t)
 
-	_, err := LoadCoalesced(marked, t.Context(), &sf, apipolicy.EndpointSummary, "k", failingLoad(fmt.Errorf("wrapped: %w", answeredErr{})))
-	if !errors.Is(err, answeredErr{}) {
+	_, err := LoadCoalesced(marked, t.Context(), &sf, apipolicy.EndpointSummary, "k", failingLoad(fmt.Errorf("wrapped: %w", errAnswered)))
+	if !errors.Is(err, errAnswered) {
 		t.Fatalf("first load: err = %v, want the answer's error", err)
 	}
 	// The flight ends after its waiter was handed the result; wait until the
@@ -74,7 +72,7 @@ func TestFailureMemory_Expires(t *testing.T) {
 	defer SetFailureMemory(80 * time.Millisecond)()
 	var sf Flights
 	marked := apipolicy.WithMessage(t.Context(), newTestGate(), apipolicy.MessageTimeout)
-	_, _ = LoadCoalesced(marked, t.Context(), &sf, apipolicy.EndpointSummary, "k", failingLoad(answeredErr{}))
+	_, _ = LoadCoalesced(marked, t.Context(), &sf, apipolicy.EndpointSummary, "k", failingLoad(errAnswered))
 	waitFor(t, "the failure to be remembered", func() bool { return sf.Remembered("k") })
 	waitFor(t, "the memory to expire", func() bool { return !sf.Remembered("k") })
 }
@@ -113,7 +111,7 @@ func TestFailureMemory_IsBounded(t *testing.T) {
 	var sf Flights
 	for i := range maxRememberedFailures + 500 {
 		sf.mu.Lock()
-		sf.noteOutcomeLocked(fmt.Sprintf("k%d", i), answeredErr{})
+		sf.noteOutcomeLocked(fmt.Sprintf("k%d", i), errAnswered)
 		sf.mu.Unlock()
 	}
 	sf.mu.Lock()
@@ -233,7 +231,7 @@ func (g *endpointGate) Opened(apipolicy.Endpoint) <-chan struct{} { return nil }
 func TestFlights_GoForRefusesAMarkedCallerForARememberedKeyAtTheStart(t *testing.T) {
 	var sf Flights
 	marked := apipolicy.WithMessage(t.Context(), newTestGate(), apipolicy.MessageTimeout)
-	f := sf.GoWith("k", func(*Flight) (any, error) { return nil, answeredErr{} })
+	f := sf.GoWith("k", func(*Flight) (any, error) { return nil, errAnswered })
 	<-f.Done()
 	waitFor(t, "the failure to be remembered", func() bool { return sf.Remembered("k") })
 
@@ -264,7 +262,7 @@ func TestFailureMemory_AVeryLongKeyCostsOnlyItsDigest(t *testing.T) {
 	var sf Flights
 	long := strings.Repeat("x", 1<<20)
 	sf.mu.Lock()
-	sf.noteOutcomeLocked(long, answeredErr{})
+	sf.noteOutcomeLocked(long, errAnswered)
 	size := reflect.TypeOf(sf.failed).Key().Size()
 	sf.mu.Unlock()
 	if size > 32 {
