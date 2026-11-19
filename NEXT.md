@@ -480,17 +480,23 @@ what it **waits** for; it does not change any request.
   profile, player profile, tournament info, market descriptions, variant
   descriptions, static descriptions, other); the client derives the endpoint of
   a request from its path, and each loader names the endpoint it asks. A breaker
-  opens for 10 s, and again for another 10 s on every failed attempt that costs
-  time or shows an outage: a transport error or a timeout after sending, 429,
-  502/503/504, a `SERVICE_UNAVAILABLE` envelope, an unreadable response
-  (`api.ErrBadResponse`), a response about another resource, and a message that
-  waited its whole timeout on the endpoint (`Trip`). A plain server error (500
-  and the like), a 404, other 4xx, a cancelled context, `ErrClosed` and local
-  errors do not open it. A healthy answer closes only the breaker of its own
+  opens for 10 s, and again for another 10 s on every failed attempt that is
+  the absence of an answer: a transport error or a timeout after sending, a
+  429 (a rate limit refuses to answer for the whole client), a body that the
+  transport cut off (a read error that is not the caller's own cancellation),
+  and a message that waited its whole timeout on the endpoint (`Trip`). **An
+  answer is about one resource; only a missing answer closes the endpoint.** A
+  response that arrived complete never opens it, whatever it says: a 500, 502,
+  503 or 504, a `SERVICE_UNAVAILABLE` envelope (on a 2xx or an error status), a
+  body that cannot be decoded (`api.ErrBadResponse`), a response about another
+  resource, a 404, any other 4xx. Those are failures of the key, which the
+  loaders remember (below). A cancelled context, `ErrClosed` and local errors do
+  not open it either. Request mutations (recovery, replay) do not feed it with
+  their bodies. A healthy answer closes only the breaker of its own
   endpoint. There is no half-open probe: when the time ends, the next flight is
   the probe. Getters never read it.
 - **A failing key is remembered per key.** When a flight ends with an answer of
-  the API that is a failure of the key (`apipolicy.KeyFailure`: a server error,
+  the API that is a failure of the key (`api.IsKeyFailure`: a server error,
   an unreadable or misdirected body, a rejection other than not-found), the
   flight group remembers the key for 10 s (at most 4096 keys, oldest dropped);
   a message-path caller for it gets `ErrSkipped` without starting or joining a
@@ -529,8 +535,9 @@ calling the flight group directly):
 purge generation discard what an older flight loaded. A message that finds a
 catalog entry complete but past its age serves it and starts the refresh in the
 background (`lru.StartCoalesced`); getters keep the blocking refresh with the
-stale fallback. The market catalog backoff `refreshFailedAt` (30 s) is the
-getters' only.
+stale fallback. The market catalog backoff `refreshFailedAt` (30 s) holds for
+messages too: a locale inside it is not counted as expired (`expiredLocales`),
+so a failing refresh is not retried per message either.
 
 What a client notices is documented in the README ("When the REST API is down"):
 a healthy API slower than about 250 ms per request may deliver the first messages

@@ -244,21 +244,25 @@ its own.
 resource the message path loads: match summary, fixture, competitor profile,
 player profile, tournament info, market descriptions, variant descriptions and
 the static descriptions (sports, match status, void reasons). A breaker opens
-for 10 seconds on a failure that costs time or shows an outage: a transport
-error, a timeout after the request was sent, a 429, a 502, 503 or 504, a
-`SERVICE_UNAVAILABLE` envelope, a response that cannot be read, or a message
-that waited its whole 2 s on that endpoint (the endpoint the message was
-waiting on, not the others). It does not open on a plain server error (such as
-a 500) for one resource, a 404 for an event that is not in the API yet, any
-other 4xx, a cancelled context or a closed client. A healthy answer closes the
-breaker of its own endpoint at once; healthy answers of other endpoints do
-not. Otherwise it closes after the 10 seconds, and the next message that needs
-the endpoint starts the load that tells whether it is back. Only the message
-path looks at the breakers; getters never do (their answers still feed them).
+for 10 seconds when the API gives no answer: a transport error, a timeout after
+the request was sent, a response body that the transport cut off, a 429 (a
+rate limit refuses to answer for the whole client), or a message that waited
+its whole 2 s on that endpoint (the endpoint the message was waiting on, not
+the others). An answer is about one resource, so only a missing answer closes
+the endpoint: a response that arrived complete never opens it, whatever it says
+(a 500, 502, 503 or 504, a `SERVICE_UNAVAILABLE` envelope, a body that cannot be
+decoded, a response about another resource, a 404 for an event that is not in
+the API yet, any other 4xx). Nor does a cancelled context or a closed client. A
+healthy answer closes the breaker of its own endpoint at once; healthy answers
+of other endpoints do not. Otherwise it closes after the 10 seconds, and the
+next message that needs the endpoint starts the load that tells whether it is
+back. Only the message path looks at the breakers; getters never do (their
+answers still feed them).
 
 **One failing key is remembered, not the whole client.** When the request of
-one key (one match, one player, ...) is answered with an error, a message does
-not ask for that key again for 10 seconds, and a message that waits on the
+one key (one match, one player, ...) is answered with an error (any of the
+answers listed above except a 404), a message does not ask for that key again
+for 10 seconds, and a message that waits on the
 load stops waiting at the first failed attempt instead of sitting through its
 retries. The load goes on retrying in the background and fills the cache if it
 succeeds; getters are never held back by it, and a successful load forgets the
