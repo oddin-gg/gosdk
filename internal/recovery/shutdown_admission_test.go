@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/oddin-gg/gosdk/internal/api"
 	"github.com/oddin-gg/gosdk/internal/producer"
 	"github.com/oddin-gg/gosdk/types"
@@ -109,7 +111,7 @@ func TestManager_OnSnapshotCompleteReceived_ClosedManagerRejectsAck(t *testing.T
 		t.Fatalf("Open: %v", err)
 	}
 	// Open manager, unknown producer: nothing to complete, safe to ack.
-	if err := mgr.OnSnapshotCompleteReceived(t.Context(), 9999, 1, types.AllMessageInterest); err != nil {
+	if err := mgr.OnSnapshotCompleteReceived(t.Context(), uuid.New(), 9999, 1, types.AllMessageInterest); err != nil {
 		t.Fatalf("unknown producer on open manager = %v, want nil (safe ack)", err)
 	}
 
@@ -117,7 +119,7 @@ func TestManager_OnSnapshotCompleteReceived_ClosedManagerRejectsAck(t *testing.T
 
 	// Closed manager: the actor map is reset — a completion for ANY
 	// producer (known or not) must not be reported as admitted.
-	if err := mgr.OnSnapshotCompleteReceived(t.Context(), 1, 2, types.AllMessageInterest); !errors.Is(err, ErrManagerClosed) {
+	if err := mgr.OnSnapshotCompleteReceived(t.Context(), uuid.New(), 1, 2, types.AllMessageInterest); !errors.Is(err, ErrManagerClosed) {
 		t.Fatalf("completion on closed manager = %v, want ErrManagerClosed", err)
 	}
 }

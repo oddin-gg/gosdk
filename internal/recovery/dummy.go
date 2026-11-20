@@ -26,8 +26,15 @@ func (d DummyManager) OnAliveReceived(producerID int, timestamp types.MessageTim
 }
 
 // OnSnapshotCompleteReceived ...
-func (d DummyManager) OnSnapshotCompleteReceived(ctx context.Context, producerID int, requestID int, messageInterest types.MessageInterest) error {
+func (d DummyManager) OnSnapshotCompleteReceived(ctx context.Context, session uuid.UUID, producerID int, requestID int, messageInterest types.MessageInterest) error {
 	return nil
+}
+
+// OnMessageProcessed ...
+func (d DummyManager) OnMessageProcessed(uuid.UUID, int, time.Time, Stamp, int) {}
+
+// OnSessionAlive ...
+func (d DummyManager) OnSessionAlive(uuid.UUID, int, time.Time, Stamp, bool, types.MessageInterest) {
 }
 
 // OnRecoveryMessageReceived ...
