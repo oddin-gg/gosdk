@@ -40,7 +40,7 @@ func (*lossRecordingProcessor) OnMessageProcessingStarted(uuid.UUID, int, time.T
 func (*lossRecordingProcessor) OnMessageProcessingEnded(uuid.UUID, int, time.Time)     {}
 func (*lossRecordingProcessor) OnAliveReceived(int, types.MessageTimestamp, bool, types.MessageInterest) {
 }
-func (*lossRecordingProcessor) OnSnapshotCompleteReceived(context.Context, int, int, types.MessageInterest) error {
+func (*lossRecordingProcessor) OnSnapshotCompleteReceived(context.Context, uuid.UUID, int, int, types.MessageInterest) error {
 	return nil
 }
 

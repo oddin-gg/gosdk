@@ -1,0 +1,246 @@
+package recovery
+
+import (
+	"slices"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/oddin-gg/gosdk/types"
+)
+
+func TestSessionRegistry_RecordHoldsInterestAndProducersOfInterest(t *testing.T) {
+	m, _ := openedManagerWithActors(t, 1, 2, 3)
+
+	// The fixture catalog: 1 is live, 2 is prematch, 3 has both scopes.
+	for _, tc := range []struct {
+		interest types.MessageInterest
+		want     []int
+	}{
+		{types.LiveOnlyMessageInterest, []int{1, 3}},
+		{types.PrematchOnlyMessageInterest, []int{2, 3}},
+		{types.AllMessageInterest, []int{1, 2, 3}},
+	} {
+		id := uuid.New()
+		m.OnClientSessionOpened(id, tc.interest)
+		rec, ok := m.sessionFactsOf(id)
+		if !ok {
+			t.Fatalf("%s: session not registered", tc.interest)
+		}
+		if rec.id != id || rec.interest != tc.interest {
+			t.Fatalf("%s: record = %+v", tc.interest, rec)
+		}
+		if !slices.Equal(rec.producers, tc.want) {
+			t.Fatalf("%s: producers = %v, want %v", tc.interest, rec.producers, tc.want)
+		}
+		if !rec.takesSnapshotComplete {
+			t.Fatalf("%s: a session alone takes snapshot_complete", tc.interest)
+		}
+	}
+}
+
+// The alive-only interest has no lane: it is not registered, takes no
+// snapshot_complete and keeps no facts, so it holds no recovery. That is the
+// SDK's own alive session and a client's alive-only subscription alike.
+func TestSessionRegistry_AliveOnlyHasNoLane(t *testing.T) {
+	m, _ := openedManagerWithActors(t, 1)
+	id := uuid.New()
+	m.OnClientSessionOpened(id, types.SystemAliveOnly)
+
+	if _, ok := m.sessionFactsOf(id); ok {
+		t.Fatal("an alive-only session was registered")
+	}
+	if len(m.clientSessions) != 0 {
+		t.Fatalf("registry = %v, want empty", m.clientSessions)
+	}
+	if takesSnapshotComplete(types.SystemAliveOnly, nil) {
+		t.Fatal("an alive-only session takes no snapshot_complete")
+	}
+	m.OnMessageProcessed(id, 1, time.Now(), systemClock{}.now(), 0)
+	m.OnSessionAlive(id, 1, time.Now(), systemClock{}.now(), true, types.SystemAliveOnly)
+	if _, ok := m.sessionFactsOf(id); ok {
+		t.Fatal("a fact registered an alive-only session")
+	}
+	if m.clientSessionsCanComplete(1) {
+		t.Fatal("an alive-only session must not count as a place a replay can reach")
+	}
+}
+
+// A low-priority session next to a high-priority one does not take
+// snapshot_complete (it would see each completion twice); alone it does. The
+// answer follows the sessions that are open, in whatever order they came.
+func TestSessionRegistry_LowPriorityNextToHighDoesNotTakeSnapshotComplete(t *testing.T) {
+	takes := func(m *Manager, id uuid.UUID) bool {
+		t.Helper()
+		rec, ok := m.sessionFactsOf(id)
+		if !ok {
+			t.Fatalf("session %s not registered", id)
+		}
+		return rec.takesSnapshotComplete
+	}
+	m, _ := openedManagerWithActors(t, 1)
+	low, hi, all := uuid.New(), uuid.New(), uuid.New()
+
+	m.OnClientSessionOpened(low, types.LowPriorityOnlyMessageInterest)
+	if !takes(m, low) {
+		t.Fatal("a low-priority session alone takes snapshot_complete")
+	}
+	m.OnClientSessionOpened(hi, types.HiPriorityOnlyMessageInterest)
+	if takes(m, low) {
+		t.Fatal("a low-priority session next to a high-priority one must not take snapshot_complete")
+	}
+	if !takes(m, hi) {
+		t.Fatal("the high-priority session takes snapshot_complete")
+	}
+	m.OnClientSessionOpened(all, types.AllMessageInterest)
+	if !takes(m, all) || takes(m, low) {
+		t.Fatalf("an unrelated session changed the rule: all=%v low=%v", takes(m, all), takes(m, low))
+	}
+	m.OnFeedSessionGone(hi)
+	if !takes(m, low) {
+		t.Fatal("the low-priority session takes snapshot_complete again once the high-priority one is gone")
+	}
+}
+
+func TestTakesSnapshotComplete_Rule(t *testing.T) {
+	lo, hi, live := types.LowPriorityOnlyMessageInterest, types.HiPriorityOnlyMessageInterest, types.LiveOnlyMessageInterest
+	for _, tc := range []struct {
+		name     string
+		interest types.MessageInterest
+		all      []types.MessageInterest
+		want     bool
+	}{
+		{"low alone", lo, []types.MessageInterest{lo}, true},
+		{"low next to hi", lo, []types.MessageInterest{lo, hi}, false},
+		{"hi next to low", hi, []types.MessageInterest{lo, hi}, true},
+		{"low next to live", lo, []types.MessageInterest{lo, live}, true},
+		{"alive-only", types.SystemAliveOnly, []types.MessageInterest{hi}, false},
+	} {
+		if got := takesSnapshotComplete(tc.interest, tc.all); got != tc.want {
+			t.Errorf("%s: %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// What a session reports is kept per session and per producer, with the ids,
+// the request id and the stamps it came with; the later fact replaces the
+// earlier of the same producer, and another session's are its own.
+func TestSessionRegistry_KeepsFactsPerSessionAndProducer(t *testing.T) {
+	m, _ := openedManagerWithActors(t, 1, 3)
+	clk := newFakeClock()
+	m.clk = clk
+	a, b := uuid.New(), uuid.New()
+	m.OnClientSessionOpened(a, types.AllMessageInterest)
+	m.OnClientSessionOpened(b, types.AllMessageInterest)
+
+	gen1, gen2 := time.Unix(1_700_000_000, 0), time.Unix(1_700_000_005, 0)
+	taken1 := clk.now()
+	clk.advance(time.Second)
+	taken2 := clk.now()
+
+	m.OnMessageProcessed(a, 1, gen1, taken1, 0)
+	m.OnMessageProcessed(a, 1, gen2, taken2, 55)
+	m.OnMessageProcessed(a, 3, gen1, taken1, 0)
+
+	ra, _ := m.sessionFactsOf(a)
+	f := ra.processed[1]
+	if !f.generatedAt.Equal(gen2) || f.taken != taken2 || f.requestID != 55 || f.count != 2 {
+		t.Fatalf("session a, producer 1 = %+v, want the second message (count 2)", f)
+	}
+	if f3 := ra.processed[3]; !f3.generatedAt.Equal(gen1) || f3.count != 1 {
+		t.Fatalf("session a, producer 3 = %+v", f3)
+	}
+	if !ra.processed[1].taken.wall.After(taken1.wall) || ra.processed[1].taken.mono <= taken1.mono {
+		t.Fatal("the later fact must carry the later stamp")
+	}
+	if rb, _ := m.sessionFactsOf(b); len(rb.processed) != 0 {
+		t.Fatalf("session b has facts of session a: %+v", rb.processed)
+	}
+
+	m.OnSessionAlive(b, 3, gen2, taken2, true, types.AllMessageInterest)
+	rb, _ := m.sessionFactsOf(b)
+	if al := rb.alive[3]; !al.generatedAt.Equal(gen2) || al.taken != taken2 || !al.subscribed {
+		t.Fatalf("session b alive = %+v", al)
+	}
+	if ra2, _ := m.sessionFactsOf(a); len(ra2.alive) != 0 {
+		t.Fatalf("session a has an alive of session b: %+v", ra2.alive)
+	}
+}
+
+// A snapshot_complete admitted to the actor is recorded for its session at
+// the manager's clock; one that is not admitted is not, since the broker
+// will hand it over again.
+func TestSessionRegistry_SnapshotCompleteRecordedOnlyWhenAdmitted(t *testing.T) {
+	m, _ := openedManagerWithActors(t, 3)
+	clk := newFakeClock()
+	m.clk = clk
+	id := uuid.New()
+	m.OnClientSessionOpened(id, types.LiveOnlyMessageInterest)
+
+	if err := m.OnSnapshotCompleteReceived(t.Context(), id, 3, 77, types.LiveOnlyMessageInterest); err != nil {
+		t.Fatal(err)
+	}
+	rec, _ := m.sessionFactsOf(id)
+	f, ok := rec.snapshotComplete[3]
+	if !ok || f.requestID != 77 || f.at != clk.now() {
+		t.Fatalf("snapshot complete = %+v (ok=%v), want request 77 at the fake clock's reading", f, ok)
+	}
+
+	m.Close()
+	if err := m.OnSnapshotCompleteReceived(t.Context(), id, 3, 78, types.LiveOnlyMessageInterest); err == nil {
+		t.Fatal("a closed manager admitted a snapshot_complete")
+	}
+	rec, _ = m.sessionFactsOf(id)
+	if rec.snapshotComplete[3].requestID != 77 {
+		t.Fatalf("a completion that was not admitted was recorded: %+v", rec.snapshotComplete[3])
+	}
+}
+
+// Registration comes before the first delivery's facts and removal after the
+// last of them; a fact that arrives after the session is gone is dropped and
+// does not bring it back.
+func TestSessionRegistry_FactAfterRemovalIsDropped(t *testing.T) {
+	m, _ := openedManagerWithActors(t, 1)
+	id := uuid.New()
+
+	// Before it is registered a fact has nowhere to go.
+	m.OnMessageProcessed(id, 1, time.Now(), systemClock{}.now(), 0)
+	if _, ok := m.sessionFactsOf(id); ok {
+		t.Fatal("a fact registered a session")
+	}
+
+	m.OnClientSessionOpened(id, types.AllMessageInterest)
+	m.OnMessageProcessed(id, 1, time.Now(), systemClock{}.now(), 0)
+	if rec, ok := m.sessionFactsOf(id); !ok || rec.processed[1].count != 1 {
+		t.Fatalf("record = %+v (ok=%v), want one processed fact", rec, ok)
+	}
+
+	m.OnFeedSessionGone(id)
+	m.OnMessageProcessed(id, 1, time.Now(), systemClock{}.now(), 0)
+	m.OnSessionAlive(id, 1, time.Now(), systemClock{}.now(), true, types.AllMessageInterest)
+	if _, ok := m.sessionFactsOf(id); ok {
+		t.Fatal("a late fact brought a removed session back")
+	}
+	if len(m.clientSessions) != 0 {
+		t.Fatalf("registry = %v, want empty", m.clientSessions)
+	}
+}
+
+// The registry is the one the deadline guards read: what they answer is
+// unchanged by the facts the records now keep.
+func TestSessionRegistry_DerivedViewsUnchanged(t *testing.T) {
+	m, _ := openedManagerWithActors(t, 1, 2, 3)
+	live := uuid.New()
+	m.OnClientSessionOpened(live, types.LiveOnlyMessageInterest)
+	if !m.clientSessionsCanComplete(1) || m.clientSessionsCanComplete(2) || m.clientSessionsCanComplete(3) {
+		t.Fatal("completable producers changed with the record")
+	}
+	m.OnMessageProcessingStarted(live, 1, time.Now().Add(-time.Hour))
+	if !m.clientProcessingStalled(1, time.Now(), time.Minute) {
+		t.Fatal("a stalled live session must hold the deadline of a live producer")
+	}
+	if m.clientProcessingStalled(2, time.Now(), time.Minute) {
+		t.Fatal("a stalled live session must not hold the deadline of a prematch producer")
+	}
+}
