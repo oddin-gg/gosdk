@@ -495,6 +495,14 @@ what it **waits** for; it does not change any request.
   their bodies. A healthy answer closes only the breaker of its own
   endpoint. There is no half-open probe: when the time ends, the next flight is
   the probe. Getters never read it.
+  The cost of the rule is a full outage that answers fast (every request gets a
+  complete 502 or 503): no breaker opens, so each key a message needs that is
+  not remembered as failed starts a flight of up to `defaultMaxAttempts` (3)
+  attempts. N new keys give about 3N requests, and each such message waits one
+  round trip (its first failed attempt) before it goes on without the data. The
+  per-key memory keeps a key from being asked again for 10 s. Opening the
+  breaker when several distinct keys of one endpoint fail inside one window
+  would cap this; it is not done here.
 - **A failing key is remembered per key.** When a flight ends with an answer of
   the API that is a failure of the key (`api.IsKeyFailure`: a server error,
   an unreadable or misdirected body, a rejection other than not-found), the

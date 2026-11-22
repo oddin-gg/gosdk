@@ -259,6 +259,15 @@ next message that needs the endpoint starts the load that tells whether it is
 back. Only the message path looks at the breakers; getters never do (their
 answers still feed them).
 
+The price of this rule is an outage that answers fast. When the API, or a
+gateway in front of it, returns a complete 502 or 503 to every request, no
+breaker opens. Each key that a message needs and that has not failed in the
+last 10 seconds then starts its own load, and the load makes up to 3 attempts:
+N new keys give about 3N requests to an API that is already failing, and each
+such message waits for one round trip before it goes on without the data. An
+outage that gives no answer at all (timeouts, refused connections) still opens
+the breaker.
+
 **One failing key is remembered, not the whole client.** When the request of
 one key (one match, one player, ...) is answered with an error (any of the
 answers listed above except a 404), a message does not ask for that key again
