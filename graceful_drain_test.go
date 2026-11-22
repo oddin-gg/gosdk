@@ -60,7 +60,7 @@ func newDrainTestSubscription(fake *drainFakeSession, buffered int, budget time.
 }
 
 // TestSubscriptionClose_GracefulDrainsToConsumer pins the NEXT.md §8
-// graceful contract (Codex P1): Close(ctx) holds Done() open until the
+// graceful contract: Close(ctx) holds Done() open until the
 // consumer has read every admitted message; Err() is nil; the session
 // was closed via the GRACEFUL path.
 func TestSubscriptionClose_GracefulDrainsToConsumer(t *testing.T) {
@@ -231,7 +231,7 @@ func TestSubscribeAfterClose_ErrAlreadyClosed(t *testing.T) {
 
 // stuckSession simulates a session whose loop cannot finish draining:
 // RespCh stays open and CloseGraceful/Close return without closing it,
-// leaving the pump alive — the shape behind the Codex P1 deadline race.
+// leaving the pump alive — the shape behind the deadline race.
 type stuckSession struct {
 	respCh chan sessionEnvelope
 }
@@ -246,7 +246,7 @@ func (f *stuckSession) Open(context.Context, []string, *types.MessageInterest, b
 	return nil
 }
 
-// TestSubscriptionClose_Deadline_NoDeliveryAfterDone pins the Codex P1
+// TestSubscriptionClose_Deadline_NoDeliveryAfterDone pins the
 // deadline race: with the pump still LIVE and blocked in a buffer send,
 // the deadline path must stop and join the pump BEFORE discarding —
 // otherwise the pump could slip its in-flight message into the slot
@@ -342,7 +342,7 @@ func TestSubscription_GracefulDeadline_NeverNilErrWithUnreadAckedMessage(t *test
 }
 
 // TestSubscription_GracefulClose_UnsettledDeliveryNeverNilErr is the
-// regression for the empty-buffer half of the deadline race (Codex P1):
+// regression for the empty-buffer half of the deadline race:
 // at pump-join time the public buffer can be EMPTY — the consumer read
 // everything that was admitted — while the feed/session layer still
 // holds an UNSETTLED delivery (the pump abandoned an undelivered,

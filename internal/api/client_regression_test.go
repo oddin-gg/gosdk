@@ -464,7 +464,7 @@ func TestClient_APIEventErr_StripsQueryString(t *testing.T) {
 }
 
 // TestClient_APIEventErr_RedactsTokenFromErrorBody pins the token half
-// of finding 5, extended by the at-source redaction (Codex P2): a
+// of finding 5, extended by the at-source redaction: a
 // token echoed in a server error message is replaced with [REDACTED]
 // both in the event's Err text AND in the caller-facing
 // APIError.Message — the caller-facing error travels into consumer
@@ -884,7 +884,7 @@ func TestClient_FetchReplaySetContent(t *testing.T) {
 }
 
 // TestClient_APIEvents_LocaleSnapshotPerAttempt pins snapshot ownership
-// on APIEvent.Locale (Codex P3): all retry attempts of one call shared
+// on APIEvent.Locale: all retry attempts of one call shared
 // a single *types.Locale pointee, so a consumer mutating attempt 1's
 // event Locale while the call backed off changed what later attempts'
 // events (and already-delivered historical events) reported — an
@@ -933,7 +933,7 @@ func TestClient_APIEvents_LocaleSnapshotPerAttempt(t *testing.T) {
 }
 
 // TestClient_DoNoBody_NonOK2xxEnvelopeIsError is the regression for the
-// blind 2xx drain (Codex P2): recovery and replay mutations can answer
+// blind 2xx drain: recovery and replay mutations can answer
 // HTTP 200 with a REJECTION envelope such as
 // `<response response_code="FORBIDDEN">…</response>`. doNoBody drained
 // the body without looking and returned success — recovery handed the
@@ -951,7 +951,7 @@ func TestClient_DoNoBody_NonOK2xxEnvelopeIsError(t *testing.T) {
 		{"forbidden envelope on 200", http.StatusOK, `<response response_code="FORBIDDEN"><message>not allowed</message></response>`, false, types.ResponseCode("FORBIDDEN")},
 		{"ok envelope on 200", http.StatusOK, `<response response_code="OK"/>`, true, ""},
 		{"created envelope on 200", http.StatusOK, `<response response_code="CREATED"/>`, true, ""},
-		// ACCEPTED is a recognized success code (Codex P2) — was rejected.
+		// ACCEPTED is a recognized success code — was rejected.
 		{"accepted envelope on 200", http.StatusOK, `<response response_code="ACCEPTED"/>`, true, ""},
 		{"accepted envelope on 202", http.StatusAccepted, `<response response_code="ACCEPTED"/>`, true, ""},
 		{"empty 202", http.StatusAccepted, "", true, ""},
@@ -963,7 +963,7 @@ func TestClient_DoNoBody_NonOK2xxEnvelopeIsError(t *testing.T) {
 		{"error root on 200", http.StatusOK, `<error><message>rejected</message></error>`, false, ""},
 		{"error root on 202", http.StatusAccepted, `<error><message>nope</message></error>`, false, ""},
 		// A <response> root MUST carry a recognized success code — a
-		// missing code is not implicit success (Codex P2).
+		// missing code is not implicit success.
 		{"missing code on 200", http.StatusOK, `<response/>`, false, ""},
 		{"unknown code on 200", http.StatusOK, `<response response_code="WAT"/>`, false, types.ResponseCode("WAT")},
 		// Truncated / malformed <response> must NOT fall through as success.

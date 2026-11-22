@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"golang.org/x/sync/singleflight"
+	"github.com/oddin-gg/gosdk/internal/apipolicy"
 
 	"github.com/oddin-gg/gosdk/internal/api"
 	apiXML "github.com/oddin-gg/gosdk/internal/api/xml"
@@ -34,7 +34,7 @@ import (
 // *types.MatchStatus value with the localized status-code description
 // resolved at construction.
 //
-// Concurrent-miss safety (v2.24): MatchStatus uses a singleflight.Group
+// Concurrent-miss safety (v2.24): MatchStatus uses a lru.Flights
 // keyed on URN so N concurrent goroutines for the same id share a
 // single FetchMatchSummary round-trip. Hot under recovery and snapshot
 // where many subscriptions ask for the same event status simultaneously.
@@ -86,7 +86,7 @@ type MatchStatusCache struct {
 	// detaches future callers from all in-flight loads.
 	flightGen atomic.Uint64
 
-	sf singleflight.Group
+	sf lru.Flights
 }
 
 // clearTombstonePruneLen is the clearedAt size beyond which
@@ -210,7 +210,7 @@ func (m *MatchStatusCache) MatchStatus(ctx context.Context, id types.URN) (*Loca
 	for clearRetries := 0; ; {
 		gen := m.flightGen.Load()
 		flightKey := fmt.Sprintf("%d|%s", gen, id.ToString())
-		entry, err := lru.LoadCoalesced(ctx, m.lifetime, &m.sf, flightKey, func(loadCtx context.Context) (*LocalizedMatchStatus, error) {
+		entry, err := lru.LoadCoalesced(ctx, m.lifetime, &m.sf, apipolicy.EndpointSummary, flightKey, func(loadCtx context.Context) (*LocalizedMatchStatus, error) {
 			// Stale-generation guard — see errStaleFlight for the
 			// register-vs-clear window this closes.
 			if m.flightGen.Load() != gen {

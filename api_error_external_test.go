@@ -71,7 +71,7 @@ func TestConsumer_ClassifiesAPIErrorWithErrorsAs(t *testing.T) {
 // TestConsumer_ClassifiesCacheSentinelsWithErrorsIs proves (from an
 // external package) that the "definitive absence" outcome on catalog
 // lookups is classifiable with errors.Is on gosdk.ErrItemNotFound —
-// Codex P2: internal wrap sites promised errors.Is classification, but
+// Internal wrap sites promised errors.Is classification, but
 // the sentinel lived in internal/cache, which consumers cannot import,
 // so external modules had to parse error strings to distinguish "API
 // said no such item" from a retryable API/network failure.

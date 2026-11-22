@@ -226,7 +226,7 @@ func TestActor_OnAlive_UserSessionUpdatesTimestamp(t *testing.T) {
 }
 
 // TestActor_EnqueueAlive_SystemNotOverwrittenByUser is the regression for
-// the cross-interest alive-coalescing loss (3/3-reviewer Require Change):
+// the cross-interest alive-coalescing loss:
 // user sessions bind the system-alive routing key, so a broker alive fans
 // out to the system session AND every user session near-simultaneously.
 // Only SystemAliveOnly alives drive the recovery state machine
@@ -1382,7 +1382,7 @@ func TestActor_TimestampForRecovery(t *testing.T) {
 }
 
 // TestActor_OnRecoverEvent_CoalescesIdenticalPending is the regression
-// for recovery fan-out (Codex P2): repeated submissions of the SAME
+// for recovery fan-out: repeated submissions of the SAME
 // (event, kind) while one is already in flight must return the existing
 // handle — pre-fix every call created a fresh handle + map entry +
 // detached POST goroutine with no bound (the 256-slot inbox bounds
@@ -1462,7 +1462,7 @@ func TestActor_OnRecoverEvent_BoundedPendingAdmission(t *testing.T) {
 }
 
 // TestActor_ProducerDown_CancelsInflightRecoveryPOSTs is the regression
-// for the concurrency-cap bypass (Codex P2): failAllEventRecoveries
+// for the concurrency-cap bypass: failAllEventRecoveries
 // cleared the pending map (freeing all admission slots) but left the
 // detached recovery POSTs running, so a producer-down/flap freed 128
 // slots while 128 POSTs were still in flight — the documented per-

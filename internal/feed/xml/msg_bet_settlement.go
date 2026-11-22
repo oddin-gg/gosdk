@@ -19,7 +19,7 @@ type BetSettlement struct {
 // GetEventID returns the event id the payload itself carries — the
 // route/payload identity cross-check and feed-driven cache invalidation
 // both key on this accessor; its absence silently exempted
-// bet_settlement from both (Codex P2).
+// bet_settlement from both.
 func (b BetSettlement) GetEventID() string {
 	return b.EventID
 }

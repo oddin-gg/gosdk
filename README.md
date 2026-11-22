@@ -224,36 +224,81 @@ is off, so an unexpected `None` later has a findable cause.
 
 Building the event of a feed message may need the REST API (a match, its
 tournament, competitors and fixture that are not cached yet). That happens on
-the session goroutine, so it never waits for a failing API the way a public
-getter does: one attempt per request, no retries, and the whole build shares
-one 2 s budget (each request gets what is left of it); market and outcome
-name resolution during the build is covered by the same budget.
+the session goroutine, so a message never waits for the API longer than **2 s
+in total**: the whole build, including market and outcome name resolution,
+waits under that one timeout. When it runs out the message is delivered with
+what the caches have, a nil event or nameless markets. The public entity reads
+(`Client.Match`, ...) are not affected; they wait for the API and retry.
 
-Only a failure **of the API** opens the event's failure window: a 5xx, a 429,
-a transport error, a timeout after the request was sent, a
-`SERVICE_UNAVAILABLE` envelope, or a response that cannot be read. A failed
-event build or market/outcome name lookup of that kind delivers the message
-at once with a nil event or nameless markets, and messages for the same
-event then skip the API for up to 10 seconds; the first successful API
-response of any call ends that at once. These do **not** open the window: a
-404 for an event that is not in the API yet (the message is delivered with a
-nil event, but names still resolve and the next message tries again), any
-other 4xx, a request that was never sent because the 2 s budget was already
-spent, and local name-resolution errors over a healthy catalog. Market name
-catalogs have a window of their own: after a catalog download for a message
-failed or ran out of its budget, messages for the next 30 seconds send no
-catalog request and resolve no names for that locale (a stale catalog keeps
-serving its names). The public entity reads (`Client.Match`, ...) keep their
-retries and are not affected.
+**The requests keep going.** A load a message started is shared with everyone
+who needs the same entity and runs with the getters' retries and timeouts,
+detached from the message that started it. A message stops waiting for it
+after its own 2 s, or sooner (see below), but the load carries on and fills
+the cache, so later messages and getters find the entity there. A load that
+has already run longer than the message timeout is not waited for at all:
+when one endpoint hangs while others answer, each message that needs it waits
+at most one timeout counted from the start of that load, not one timeout of
+its own.
 
-**A healthy but slow API counts too.** A cold event build is several
-sequential requests (the summary, the tournament, each competitor, the
-fixture, and the market catalog for every locale) that share the one 2 s
-budget, and a timeout after a request was sent is a failure of the API. With
-requests slower than roughly 250 ms the first messages of a new match
-therefore arrive with a nil event and no market names, and open the window,
-where a public getter would return the complete event, late. Add `WithPreloadLocales(...)` so the
-market catalog is loaded up front and does not take part in that build.
+**One breaker per endpoint.** The client keeps a breaker for each kind of
+resource the message path loads: match summary, fixture, competitor profile,
+player profile, tournament info, market descriptions, variant descriptions and
+the static descriptions (sports, match status, void reasons). A breaker opens
+for 10 seconds when the API gives no answer: a transport error, a timeout after
+the request was sent, a response body that the transport cut off, a 429 (a
+rate limit refuses to answer for the whole client), or a message that waited
+its whole 2 s on that endpoint (the endpoint the message was waiting on, not
+the others). An answer is about one resource, so only a missing answer closes
+the endpoint: a response that arrived complete never opens it, whatever it says
+(a 500, 502, 503 or 504, a `SERVICE_UNAVAILABLE` envelope, a body that cannot be
+decoded, a response about another resource, a 404 for an event that is not in
+the API yet, any other 4xx). Nor does a cancelled context or a closed client. A
+healthy answer closes the breaker of its own endpoint at once; healthy answers
+of other endpoints do not. Otherwise it closes after the 10 seconds, and the
+next message that needs the endpoint starts the load that tells whether it is
+back. Only the message path looks at the breakers; getters never do (their
+answers still feed them).
+
+The price of this rule is an outage that answers fast. When the API, or a
+gateway in front of it, returns a complete 502 or 503 to every request, no
+breaker opens. Each key that a message needs and that has not failed in the
+last 10 seconds then starts its own load, and the load makes up to 3 attempts:
+N new keys give about 3N requests to an API that is already failing, and each
+such message waits for one round trip before it goes on without the data. An
+outage that gives no answer at all (timeouts, refused connections) still opens
+the breaker.
+
+**One failing key is remembered, not the whole client.** When the request of
+one key (one match, one player, ...) is answered with an error (any of the
+answers listed above except a 404), a message does not ask for that key again
+for 10 seconds, and a message that waits on the
+load stops waiting at the first failed attempt instead of sitting through its
+retries. The load goes on retrying in the background and fills the cache if it
+succeeds; getters are never held back by it, and a successful load forgets the
+key. The other keys of the client, and the other messages of that match, are
+not affected.
+
+While the breaker of an endpoint is open the message path asks the caches
+only for what that endpoint serves. A message that is waiting on a load from
+it when the breaker opens stops waiting at once. An event that is fully cached
+is delivered with its event; any other event, and any market or outcome name
+that is not cached, comes without (a player-props market whose player lookup
+was skipped or timed out has no name, not the raw player id). Cached market
+catalog rows are served, stale ones included.
+
+**A stale catalog is served while it refreshes.** When the market catalog of
+a locale has passed its 12 hour age, a message reads the old rows at once and
+the refresh runs in the background (without it, or after a clear, a message
+waits at most its 2 s for the first download). Renamed markets appear one
+download later. Public reads keep waiting for the refresh.
+
+**A healthy but slow API.** A cold event build is several sequential requests
+(the summary, the tournament, each competitor, the fixture, and the market
+catalog for every locale). With requests slower than roughly 250 ms the first
+messages of a new match may therefore come without the event; the loads go
+on, and the later messages of that match carry it with no extra wait. Add
+`WithPreloadLocales(...)` so the market catalog is loaded up front and does not
+take part in that build.
 
 ### Delivery guarantees
 

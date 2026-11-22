@@ -8,8 +8,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/oddin-gg/gosdk/internal/apipolicy"
+
 	"golang.org/x/sync/errgroup"
-	"golang.org/x/sync/singleflight"
 
 	"github.com/oddin-gg/gosdk/internal/api"
 	"github.com/oddin-gg/gosdk/internal/cache/lru"
@@ -59,7 +60,7 @@ type PlayersCache struct {
 	// every key, so unrelated player IDs / locales couldn't load
 	// concurrently — a 4-locale preload of N players ran 4N
 	// sequential HTTP calls instead of N parallel batches.
-	loadGroup singleflight.Group
+	loadGroup lru.Flights
 
 	// clearMu + clearedIDsAt + purgedAt: the clear-vs-in-flight-load
 	// tombstone (same invariant as lru.EventCache). A loader snapshots
@@ -224,7 +225,7 @@ func (c *PlayersCache) GetPlayers(ctx context.Context, ids []PlayerCacheKey) (ma
 func (c *PlayersCache) loadPlayer(ctx context.Context, key PlayerCacheKey) (types.Player, error) {
 	for {
 		gen := c.flightGen.Load()
-		p, err := lru.LoadCoalesced(ctx, c.lifetime, &c.loadGroup, c.flightKey(gen, key), func(loadCtx context.Context) (types.Player, error) {
+		p, err := lru.LoadCoalesced(ctx, c.lifetime, &c.loadGroup, apipolicy.EndpointPlayer, c.flightKey(gen, key), func(loadCtx context.Context) (types.Player, error) {
 			// Stale-generation guard — see errStaleFlight for the
 			// register-vs-clear window this closes.
 			if c.flightGen.Load() != gen {

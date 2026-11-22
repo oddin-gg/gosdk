@@ -733,7 +733,7 @@ func TestSportCache_OutOfOrderRefreshKeepsNewest(t *testing.T) {
 }
 
 // TestSportCache_TournamentCommitCannotResurrectRemovedSport pins the
-// stub-creation guard (Fixpoint i11): a tournament fetch that STARTED
+// stub-creation guard: a tournament fetch that STARTED
 // before a catalog refresh removed its sport must not re-create the
 // sport as a nameless stub when it commits afterwards — the stub
 // pinned an obsolete tournament list and flipped Sport() from
@@ -844,7 +844,7 @@ func TestSportCache_IconPathSurvivesIconlessLocale(t *testing.T) {
 }
 
 // TestSportCache_ReconcileSuppressedByMidFlightClear mirrors the
-// market cache's guard proof (Fixpoint i14): a catalog response
+// market cache's guard proof: a catalog response
 // fetched BEFORE a Clear must not prune sports it omits, and the
 // locale mark stays unset so the next read reconciles fresh.
 func TestSportCache_ReconcileSuppressedByMidFlightClear(t *testing.T) {

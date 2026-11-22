@@ -244,7 +244,7 @@ func TestMarketDescriptionCache_ClearItemInvalidatesBulkView(t *testing.T) {
 }
 
 // TestSportCache_MalformedRowDoesNotPartiallyCommit is the regression
-// for catalog partial commits (Codex P2): a response whose EARLIER rows
+// for catalog partial commits: a response whose EARLIER rows
 // are valid but which fails to parse mid-way must commit NOTHING —
 // pre-fix each row was committed as it parsed, and the retry's
 // authoritative response merged on top of the partial commit, leaving

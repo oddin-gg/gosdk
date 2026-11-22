@@ -158,9 +158,9 @@ func TestPlayersCache_SingleCallBatchLoadsInParallel(t *testing.T) {
 }
 
 // TestPlayersCache_BatchBoundEnforced pins the playerLoadConcurrency
-// limit itself (Fixpoint i20: the four-key batch test never reached
-// the limit of eight, so removing SetLimit left the suite green, and
-// its only parallelism proof was a wall-clock ceiling). Twelve keys —
+// limit itself (a four-key batch never reaches the limit of eight, so
+// removing SetLimit would leave a wall-clock ceiling as the only
+// parallelism proof). Twelve keys —
 // more than the limit — are loaded in one call against a fixture that
 // tracks concurrent in-flight requests with an atomic active/peak
 // counter: the peak must show real overlap AND must never exceed the
@@ -214,8 +214,8 @@ func TestPlayersCache_BatchBoundEnforced(t *testing.T) {
 }
 
 // TestPlayersCache_BatchWith404KeepsClassification pins the error
-// contract of the errgroup fan-out with a FAILING key in the batch
-// (Fixpoint run-2 medium): the by-id 404 must surface as
+// contract of the errgroup fan-out with a FAILING key in the batch:
+// the by-id 404 must surface as
 // ErrItemNotFoundInCache with the APIError in the chain — never a
 // sibling's context.Canceled from the group cancellation. The
 // classification depends on errgroup recording the first returned
@@ -299,7 +299,7 @@ func TestPlayersCache_DuplicateKeyDeduplicated(t *testing.T) {
 }
 
 // TestPlayersCache_ClearStorm_NeverLeaksStaleFlightOrDiverges is the
-// regression for the register-vs-clear split-flight window (Codex P2):
+// regression for the register-vs-clear split-flight window:
 // a getter reads flightGen, a Purge/Clear advances it and records its
 // tombstone, and only THEN does the getter register its singleflight —
 // pre-fix that old-generation flight ran to completion invisible to the
