@@ -30,7 +30,7 @@ func TestTournamentCache_ReferenceIDsDecode(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tc := newTournamentCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	tc := newTournamentCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 	id := types.URN{Prefix: "od", Type: "tournament", ID: 7}
 
 	entry, err := tc.Tournament(t.Context(), id, []types.Locale{types.EnLocale})
@@ -71,7 +71,7 @@ func TestBuildTournament_ReferenceIDsSurfaceOnSnapshot(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tc := newTournamentCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	tc := newTournamentCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 	id := types.URN{Prefix: "od", Type: "tournament", ID: 7}
 	sportID := types.URN{Prefix: "od", Type: "sport", ID: 1}
 
@@ -111,7 +111,7 @@ func TestBuildTournament_EmptyReferenceIDsBlockProjectsEmptyMap(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tc := newTournamentCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	tc := newTournamentCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 	id := types.URN{Prefix: "od", Type: "tournament", ID: 7}
 	sportID := types.URN{Prefix: "od", Type: "sport", ID: 1}
 

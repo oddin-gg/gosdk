@@ -47,7 +47,7 @@ func TestPlayersCache_ClearDuringLoad_NotResurrected(t *testing.T) {
 <player_profile><player id="od:player:1" name="P" full_name="PF"/></player_profile>`
 	}, entered, gate)
 
-	c := newPlayersCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	c := newPlayersCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 	key := PlayerCacheKey{PlayerID: "od:player:1", Locale: types.EnLocale}
 
 	done := make(chan error, 1)
@@ -90,7 +90,7 @@ func TestMarketDescriptionCache_ClearDuringLoad_NotResurrected(t *testing.T) {
 </market_descriptions>`
 	}, entered, gate)
 
-	mc := newMarketDescriptionCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	mc := newMarketDescriptionCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 
 	done := make(chan error, 1)
 	go func() {
@@ -139,7 +139,7 @@ func TestMatchStatusCache_ClearDuringLoad_NotResurrected(t *testing.T) {
 </match_summary>`, urn)
 	}, entered, gate)
 
-	msc := newMatchStatusCache(t.Context(), newAPIClientForTest(t, srv), &fakeCacheCfg{}, log.New(nil))
+	msc := newMatchStatusCache(testLife(t), newAPIClientForTest(t, srv), &fakeCacheCfg{}, log.New(nil))
 	id := types.URN{Prefix: "od", Type: "match", ID: 9}
 
 	done := make(chan error, 1)
@@ -204,7 +204,7 @@ func TestMatchStatusCache_ClearDuringLoad_TransientNotNotFound(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	msc := newMatchStatusCache(t.Context(), newAPIClientForTest(t, srv), &fakeCacheCfg{}, log.New(nil))
+	msc := newMatchStatusCache(testLife(t), newAPIClientForTest(t, srv), &fakeCacheCfg{}, log.New(nil))
 	id := types.URN{Prefix: "od", Type: "match", ID: 13}
 
 	done := make(chan error, 1)
@@ -268,7 +268,7 @@ func TestMatchStatusCache_ForeignFetch_ClearNotBypassed(t *testing.T) {
 	}, entered, gate)
 
 	apiClient := newAPIClientForTest(t, srv)
-	msc := newMatchStatusCache(t.Context(), apiClient, &fakeCacheCfg{}, log.New(nil))
+	msc := newMatchStatusCache(testLife(t), apiClient, &fakeCacheCfg{}, log.New(nil))
 	id := types.URN{Prefix: "od", Type: "match", ID: 11}
 
 	// Foreign fetch: call the API client directly (as the match cache
@@ -308,7 +308,7 @@ func TestMatchStatusCache_ClearIsolatedPerKey(t *testing.T) {
 </match_summary>`, urn)
 	}, entered, gate)
 
-	msc := newMatchStatusCache(t.Context(), newAPIClientForTest(t, srv), &fakeCacheCfg{}, log.New(nil))
+	msc := newMatchStatusCache(testLife(t), newAPIClientForTest(t, srv), &fakeCacheCfg{}, log.New(nil))
 	idA := types.URN{Prefix: "od", Type: "match", ID: 21}
 	idB := types.URN{Prefix: "od", Type: "match", ID: 999}
 
@@ -346,7 +346,7 @@ func TestMarketDescriptionCache_ClearIsolatedPerRow(t *testing.T) {
 </market_descriptions>`
 	}, entered, gate)
 
-	mc := newMarketDescriptionCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	mc := newMarketDescriptionCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 
 	type res struct {
 		out map[CompositeKey]*LocalizedMarketDescription
@@ -398,7 +398,7 @@ func TestPlayersCache_DuplicateKeys(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := newPlayersCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	c := newPlayersCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 	key := PlayerCacheKey{PlayerID: "od:player:5", Locale: types.EnLocale}
 
 	out, err := c.GetPlayers(context.Background(), []PlayerCacheKey{key, key})
@@ -427,7 +427,7 @@ func TestPlayersCache_PostClearCallerDoesNotJoinOldFlight(t *testing.T) {
 <player_profile><player id="od:player:2" name="P" full_name="PF"/></player_profile>`
 	}, entered, gate)
 
-	c := newPlayersCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	c := newPlayersCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 	key := PlayerCacheKey{PlayerID: "od:player:2", Locale: types.EnLocale}
 
 	pre := make(chan error, 1)
@@ -469,7 +469,7 @@ func TestMatchStatusCache_PostClearCallerDoesNotJoinOldFlight(t *testing.T) {
 </match_summary>`, urn)
 	}, entered, gate)
 
-	msc := newMatchStatusCache(t.Context(), newAPIClientForTest(t, srv), &fakeCacheCfg{}, log.New(nil))
+	msc := newMatchStatusCache(testLife(t), newAPIClientForTest(t, srv), &fakeCacheCfg{}, log.New(nil))
 	id := types.URN{Prefix: "od", Type: "match", ID: 31}
 
 	pre := make(chan error, 1)
@@ -507,7 +507,7 @@ func TestMarketDescriptionCache_PostClearCallerDoesNotJoinOldFlight(t *testing.T
 </market_descriptions>`
 	}, entered, gate)
 
-	mc := newMarketDescriptionCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	mc := newMarketDescriptionCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 
 	pre := make(chan error, 1)
 	go func() {
@@ -548,7 +548,7 @@ func TestSportCache_ClearDuringLoad_NotResurrected(t *testing.T) {
 </sports>`
 	}, entered, gate)
 
-	sc := newSportDataCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	sc := newSportDataCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 	sport1 := types.URN{Prefix: "od", Type: "sport", ID: 1}
 	sport2 := types.URN{Prefix: "od", Type: "sport", ID: 2}
 
@@ -600,7 +600,7 @@ func TestSportCache_PostClearCallerDoesNotJoinOldFlight(t *testing.T) {
 <sports><sport id="od:sport:1" name="Football" abbreviation="FB"/></sports>`
 	}, entered, gate)
 
-	sc := newSportDataCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	sc := newSportDataCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 	sport1 := types.URN{Prefix: "od", Type: "sport", ID: 1}
 
 	pre := make(chan error, 1)
@@ -634,7 +634,7 @@ func TestSportCache_TournamentFetchDoesNotResurrectClearedSport(t *testing.T) {
 <sport_tournaments><sport id="od:sport:1" name="Football"/><tournaments><tournament id="od:tournament:5" name="T"><sport id="od:sport:1" name="Football"/></tournament></tournaments></sport_tournaments>`
 	}, entered, gate)
 
-	sc := newSportDataCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	sc := newSportDataCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 	sport1 := types.URN{Prefix: "od", Type: "sport", ID: 1}
 
 	done := make(chan error, 1)
@@ -672,7 +672,7 @@ func TestLocalizedStaticDataCache_RefreshDeletesAbsentEntries(t *testing.T) {
 		}
 		return []types.StaticData{{ID: 1, Description: types.Some("one-v2")}}, nil
 	}
-	c := newLocalizedStaticDataCache(t.Context(), &fakeCacheCfg{}, log.New(nil), nil, fetcher)
+	c := newLocalizedStaticDataCache(testLife(t), &fakeCacheCfg{}, log.New(nil), nil, fetcher)
 	defer c.Close()
 
 	// Initial load: both ids present.
@@ -715,7 +715,7 @@ func TestTournamentCache_IconNotResurrectedByInFlightFetch(t *testing.T) {
 </tournament_info>`
 	}, entered, gate)
 
-	tc := newTournamentCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	tc := newTournamentCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 	id := types.URN{Prefix: "od", Type: "tournament", ID: 7}
 
 	done := make(chan error, 1)
@@ -769,7 +769,7 @@ func TestCompetitorCache_IconNotResurrectedByInFlightFetch(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	cc := newCompetitorCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	cc := newCompetitorCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 	id := types.URN{Prefix: "od", Type: "competitor", ID: 3}
 
 	// The loader path: Competitor() fetches the profile and writes the

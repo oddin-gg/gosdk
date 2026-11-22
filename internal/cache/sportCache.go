@@ -33,9 +33,9 @@ import (
 type SportCache struct {
 	apiClient *api.Client
 	logger    *log.Logger
-	// lifetime is the detach root for singleflight catalog loads —
-	// cancelled by Manager.Close so no fetch outlives the owner.
-	lifetime context.Context
+	// life is the lifetime of the owning manager: the detach root of the
+	// flights and the owner of every commit (see lru.Lifetime).
+	life *lru.Lifetime
 
 	mu sync.RWMutex
 	// loadedLocales records WHEN each locale's sport catalog was last
@@ -284,7 +284,7 @@ func (s *SportCache) SportTournaments(ctx context.Context, sportID types.URN, lo
 		// "tournaments" segment plus the sport id can never collide with
 		// it, since a locale never contains '|'.
 		flightKey := fmt.Sprintf("%d|tournaments|%s|%s", gen, sportID.ToString(), locale)
-		ids, err := lru.LoadCoalesced(ctx, s.lifetime, &s.sf, apipolicy.EndpointStatic, flightKey, func(loadCtx context.Context) ([]types.URN, error) {
+		ids, err := lru.LoadCoalesced(ctx, s.life.Context(), &s.sf, apipolicy.EndpointStatic, flightKey, func(loadCtx context.Context) ([]types.URN, error) {
 			// Stale-generation guard — see errStaleFlight for the
 			// register-vs-clear window this closes.
 			if s.flightGen.Load() != gen {
@@ -332,9 +332,11 @@ func (s *SportCache) SportTournaments(ctx context.Context, sportID types.URN, lo
 			// views. The caller still gets the freshly fetched list even
 			// when the commit is suppressed or rejected as out-of-order —
 			// it is what THIS fetch observed upstream.
-			if entry := s.ensureSportEntry(sportID, locale, loadStarted); entry != nil {
-				entry.replaceTournaments(tournamentIDs, loadStarted)
-			}
+			s.life.Commit(func() {
+				if entry := s.ensureSportEntry(sportID, locale, loadStarted); entry != nil {
+					entry.replaceTournaments(tournamentIDs, loadStarted)
+				}
+			})
 			return tournamentIDs, nil
 		})
 		if errors.Is(err, errStaleFlight) {
@@ -415,7 +417,7 @@ func (s *SportCache) ensureLocalesLoaded(ctx context.Context, locales []types.Lo
 		for {
 			gen := s.flightGen.Load()
 			flightKey := fmt.Sprintf("%d|%s", gen, loc)
-			_, err := lru.LoadCoalesced(ctx, s.lifetime, &s.sf, apipolicy.EndpointStatic, flightKey, func(loadCtx context.Context) (struct{}, error) {
+			_, err := lru.LoadCoalesced(ctx, s.life.Context(), &s.sf, apipolicy.EndpointStatic, flightKey, func(loadCtx context.Context) (struct{}, error) {
 				// Stale-generation guard — see errStaleFlight for the
 				// register-vs-clear window this closes.
 				if s.flightGen.Load() != gen {
@@ -460,12 +462,18 @@ func (s *SportCache) ensureLocalesLoaded(ctx context.Context, locales []types.Lo
 				// only after its full commit) — returning success let them
 				// re-read mid-commit state and transiently report
 				// not-found for sports that exist upstream.
+				// Every store of the flight is a commit of the owner's
+				// lifetime (s.life): after Close it stores nothing.
+				if !s.life.Enter() {
+					return struct{}{}, s.life.Err()
+				}
 				s.mu.Lock()
 				superseded := s.fetchCursor[loc].After(loadStarted)
 				if !superseded && loadStarted.After(s.fetchCursor[loc]) {
 					s.fetchCursor[loc] = loadStarted
 				}
 				s.mu.Unlock()
+				s.life.Leave()
 				if superseded {
 					return struct{}{}, errStaleFlight
 				}
@@ -541,6 +549,10 @@ func (s *SportCache) localeLoadedLocked(locale types.Locale) bool {
 // Stamped with the fetch's START, not its completion: the freshness
 // window must cover the age of the DATA, not of the transfer.
 func (s *SportCache) markLocaleLoaded(locale types.Locale, loadStarted time.Time) {
+	if !s.life.Enter() {
+		return
+	}
+	defer s.life.Leave()
 	s.mu.Lock()
 	if !s.lastClearAt.After(loadStarted) && !s.fetchCursor[locale].After(loadStarted) {
 		// Also suppressed when a newer-started flight owns the locale
@@ -551,6 +563,10 @@ func (s *SportCache) markLocaleLoaded(locale types.Locale, loadStarted time.Time
 }
 
 func (s *SportCache) upsertSport(id types.URN, locale types.Locale, sport *xml.Sport, loadStarted time.Time) error {
+	if !s.life.Enter() {
+		return nil
+	}
+	defer s.life.Leave()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.storeSuppressedLocked(id, loadStarted) {
@@ -635,6 +651,10 @@ func (s *SportCache) reconcileCatalog(locale types.Locale, fresh []types.URN, lo
 	for _, id := range fresh {
 		seen[id] = struct{}{}
 	}
+	if !s.life.Enter() {
+		return
+	}
+	defer s.life.Leave()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// An EMPTY response carries no removal authority — response_code=OK
@@ -709,11 +729,11 @@ func (s *SportCache) Purge() {
 	s.mu.Unlock()
 }
 
-func newSportDataCache(lifeCtx context.Context, client *api.Client, logger *log.Logger) *SportCache {
+func newSportDataCache(life *lru.Lifetime, client *api.Client, logger *log.Logger) *SportCache {
 	return &SportCache{
 		apiClient:     client,
 		logger:        logger,
-		lifetime:      lifeCtx,
+		life:          life,
 		loadedLocales: make(map[types.Locale]time.Time),
 		catalogTTL:    defaultCatalogTTL,
 		sports:        make(map[types.URN]*LocalizedSport),

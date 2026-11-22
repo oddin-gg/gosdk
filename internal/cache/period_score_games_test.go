@@ -48,7 +48,7 @@ func TestBuildMatchStatus_PeriodScoreGames(t *testing.T) {
 
 	apiC := newAPIClientForTest(t, srv)
 	cfg := &minimalCfg{apiURL: srv.URL, token: "tok"}
-	c := newMatchStatusCache(t.Context(), apiC, cfg, log.New(nil))
+	c := newMatchStatusCache(testLife(t), apiC, cfg, log.New(nil))
 
 	urn, _ := types.ParseURN("od:match:9")
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
@@ -127,7 +127,7 @@ func TestOnFeedMessage_PeriodScoreGames(t *testing.T) {
 
 	apiC := newAPIClientForTest(t, srv)
 	cfg := &minimalCfg{apiURL: srv.URL, token: "tok"}
-	c := newMatchStatusCache(t.Context(), apiC, cfg, log.New(nil))
+	c := newMatchStatusCache(testLife(t), apiC, cfg, log.New(nil))
 
 	urn, _ := types.ParseURN("od:match:11")
 	c.OnFeedMessage(*urn, &types.FeedMessage{

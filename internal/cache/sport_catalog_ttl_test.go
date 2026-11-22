@@ -80,7 +80,7 @@ var (
 // stayed invisible to a long-running consumer until it restarted.
 func TestSportCache_CatalogRefetchedAfterTTL(t *testing.T) {
 	srv := newSportSrv(t, oneSportCatalog, noTournaments)
-	sc := newSportDataCache(t.Context(), newAPIClientForTest(t, srv.Server), log.New(nil))
+	sc := newSportDataCache(testLife(t), newAPIClientForTest(t, srv.Server), log.New(nil))
 	sc.catalogTTL = 50 * time.Millisecond
 
 	ids, err := sc.Sports(t.Context(), []types.Locale{types.EnLocale})
@@ -111,7 +111,7 @@ func TestSportCache_CatalogRefetchedAfterTTL(t *testing.T) {
 // costs one download per TTL, not one per read.
 func TestSportCache_CatalogNotRefetchedWithinTTL(t *testing.T) {
 	srv := newSportSrv(t, oneSportCatalog, noTournaments)
-	sc := newSportDataCache(t.Context(), newAPIClientForTest(t, srv.Server), log.New(nil))
+	sc := newSportDataCache(testLife(t), newAPIClientForTest(t, srv.Server), log.New(nil))
 	sc.catalogTTL = time.Hour
 
 	for i := range 5 {
@@ -131,7 +131,7 @@ func TestSportCache_CatalogNotRefetchedWithinTTL(t *testing.T) {
 // on its tournament fetch.
 func TestSportCache_RemovedSportReconciled(t *testing.T) {
 	srv := newSportSrv(t, twoSportCatalog, noTournaments)
-	sc := newSportDataCache(t.Context(), newAPIClientForTest(t, srv.Server), log.New(nil))
+	sc := newSportDataCache(testLife(t), newAPIClientForTest(t, srv.Server), log.New(nil))
 	sc.catalogTTL = 50 * time.Millisecond
 
 	ids, err := sc.Sports(t.Context(), []types.Locale{types.EnLocale})
@@ -164,7 +164,7 @@ func TestSportCache_RemovedSportReconciled(t *testing.T) {
 // sport for a full catalogTTL).
 func TestSportCache_EmptyResponseDoesNotWipeCatalog(t *testing.T) {
 	srv := newSportSrv(t, twoSportCatalog, noTournaments)
-	sc := newSportDataCache(t.Context(), newAPIClientForTest(t, srv.Server), log.New(nil))
+	sc := newSportDataCache(testLife(t), newAPIClientForTest(t, srv.Server), log.New(nil))
 	sc.catalogTTL = 50 * time.Millisecond
 
 	if _, err := sc.Sports(t.Context(), []types.Locale{types.EnLocale}); err != nil {
@@ -228,7 +228,7 @@ func TestSportCache_StalePreClearFlightLoses(t *testing.T) {
 		_, _ = io.WriteString(w, *body.Load())
 	}))
 	t.Cleanup(srv.Close)
-	sc := newSportDataCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	sc := newSportDataCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 	sc.catalogTTL = 50 * time.Millisecond
 
 	if _, err := sc.Sports(t.Context(), []types.Locale{types.EnLocale}); err != nil {
@@ -325,7 +325,7 @@ func TestSportCache_SupersededFlightJoinsWinner(t *testing.T) {
 	}
 	t.Cleanup(func() { sportCommitGateHook = nil })
 
-	sc := newSportDataCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	sc := newSportDataCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 	sc.catalogTTL = 50 * time.Millisecond
 
 	if _, err := sc.Sports(t.Context(), []types.Locale{types.EnLocale}); err != nil {
@@ -416,7 +416,7 @@ func TestSportCache_MidCommitSupersededFlightJoinsWinner(t *testing.T) {
 	}
 	t.Cleanup(func() { sportCommitGateHook = nil })
 
-	sc := newSportDataCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	sc := newSportDataCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 	sc.catalogTTL = 50 * time.Millisecond
 
 	hookSeq.Store(-1) // seed flight passes the gate (Add → 0)
@@ -496,7 +496,7 @@ func TestSportCache_ReconcilePerLocale(t *testing.T) {
 		_, _ = io.WriteString(w, twoSportCatalog) // en: sports 1 and 2
 	}))
 	t.Cleanup(srv.Close)
-	sc := newSportDataCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	sc := newSportDataCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 
 	if _, err := sc.Sports(t.Context(), []types.Locale{types.EnLocale}); err != nil {
 		t.Fatalf("en Sports: %v", err)
@@ -520,7 +520,7 @@ func TestSportCache_ReconcilePerLocale(t *testing.T) {
 // added upstream (a new weekly league) never appeared.
 func TestSportCache_TournamentsRefetchedAfterTTL(t *testing.T) {
 	srv := newSportSrv(t, oneSportCatalog, oneTournament)
-	sc := newSportDataCache(t.Context(), newAPIClientForTest(t, srv.Server), log.New(nil))
+	sc := newSportDataCache(testLife(t), newAPIClientForTest(t, srv.Server), log.New(nil))
 	sc.catalogTTL = 50 * time.Millisecond
 
 	got, err := sc.SportTournaments(t.Context(), sportOne, types.EnLocale)
@@ -552,7 +552,7 @@ func TestSportCache_TournamentsRefetchedAfterTTL(t *testing.T) {
 // than re-fetched on every call.
 func TestSportCache_TournamentsNotRefetchedWithinTTL(t *testing.T) {
 	srv := newSportSrv(t, oneSportCatalog, noTournaments)
-	sc := newSportDataCache(t.Context(), newAPIClientForTest(t, srv.Server), log.New(nil))
+	sc := newSportDataCache(testLife(t), newAPIClientForTest(t, srv.Server), log.New(nil))
 	sc.catalogTTL = time.Hour
 
 	for i := range 5 {
@@ -577,7 +577,7 @@ func TestSportCache_TournamentsNotRefetchedWithinTTL(t *testing.T) {
 // linger in SportTournaments/Sports views forever.
 func TestSportCache_TournamentsReplacedNotMerged(t *testing.T) {
 	srv := newSportSrv(t, oneSportCatalog, twoTournaments)
-	sc := newSportDataCache(t.Context(), newAPIClientForTest(t, srv.Server), log.New(nil))
+	sc := newSportDataCache(testLife(t), newAPIClientForTest(t, srv.Server), log.New(nil))
 	sc.catalogTTL = 50 * time.Millisecond
 
 	got, err := sc.SportTournaments(t.Context(), sportOne, types.EnLocale)
@@ -613,7 +613,7 @@ func TestSportCache_TournamentsReplacedNotMerged(t *testing.T) {
 // marks, independent of the TTL window.
 func TestSportCache_ClearStillForcesRefetch(t *testing.T) {
 	srv := newSportSrv(t, twoSportCatalog, noTournaments)
-	sc := newSportDataCache(t.Context(), newAPIClientForTest(t, srv.Server), log.New(nil))
+	sc := newSportDataCache(testLife(t), newAPIClientForTest(t, srv.Server), log.New(nil))
 	sc.catalogTTL = time.Hour // clear must win regardless of freshness
 
 	if _, err := sc.Sports(t.Context(), []types.Locale{types.EnLocale}); err != nil {
@@ -705,7 +705,7 @@ func TestSportCache_OutOfOrderRefreshKeepsNewest(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	sc := newSportDataCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	sc := newSportDataCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -766,7 +766,7 @@ func TestSportCache_TournamentCommitCannotResurrectRemovedSport(t *testing.T) {
 		_, _ = io.WriteString(w, *sportsBody.Load())
 	}))
 	t.Cleanup(srv.Close)
-	sc := newSportDataCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	sc := newSportDataCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 	sc.catalogTTL = 50 * time.Millisecond
 
 	if _, err := sc.Sports(t.Context(), []types.Locale{types.EnLocale}); err != nil {
@@ -824,7 +824,7 @@ func TestSportCache_IconPathSurvivesIconlessLocale(t *testing.T) {
 		_, _ = io.WriteString(w, oneSportCatalog) // de: no icon_path attribute
 	}))
 	t.Cleanup(srv.Close)
-	sc := newSportDataCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	sc := newSportDataCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 
 	if _, err := sc.Sports(t.Context(), []types.Locale{types.EnLocale}); err != nil {
 		t.Fatalf("en Sports: %v", err)
@@ -870,7 +870,7 @@ func TestSportCache_ReconcileSuppressedByMidFlightClear(t *testing.T) {
 		_, _ = io.WriteString(w, *body.Load())
 	}))
 	t.Cleanup(srv.Close)
-	sc := newSportDataCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	sc := newSportDataCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 	sc.catalogTTL = 50 * time.Millisecond
 
 	if _, err := sc.Sports(t.Context(), []types.Locale{types.EnLocale}); err != nil {
@@ -919,7 +919,7 @@ func TestSportCache_ReconcileSuppressedByMidFlightClear(t *testing.T) {
 // moment issues its own FetchTournaments.
 func TestSportCache_ConcurrentRefreshCoalesced(t *testing.T) {
 	srv := newSportSrv(t, oneSportCatalog, oneTournament)
-	sc := newSportDataCache(t.Context(), newAPIClientForTest(t, srv.Server), log.New(nil))
+	sc := newSportDataCache(testLife(t), newAPIClientForTest(t, srv.Server), log.New(nil))
 
 	const callers = 12
 	var wg sync.WaitGroup

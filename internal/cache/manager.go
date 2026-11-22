@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/oddin-gg/gosdk/internal/api"
+	"github.com/oddin-gg/gosdk/internal/cache/lru"
 	"github.com/oddin-gg/gosdk/internal/config"
 	log "github.com/oddin-gg/gosdk/internal/log"
 	"github.com/oddin-gg/gosdk/types"
@@ -23,12 +24,13 @@ type Manager struct {
 	logger                     *log.Logger
 	MarketVoidReasonsCache     *MarketVoidReasonsCache
 
-	// lifeCancel tears down the manager-wide lifetime ctx that every
-	// cache uses as the detach root for its singleflight loads. Close
-	// fires it so no detached fetch (including construction-time
-	// preloads) outlives the manager — NEXT.md §8: failed construction
+	// life is the one lifetime owner of every cache: its context is the
+	// detach root of their singleflight loads, and every store commits
+	// inside it. Close ends it, so no detached fetch (including
+	// construction-time preloads) outlives the manager and no cache
+	// changes once Close has returned — NEXT.md §8: failed construction
 	// must not leave background work running.
-	lifeCancel context.CancelFunc
+	life *lru.Lifetime
 }
 
 // OnFeedMessageReceived ...
@@ -63,19 +65,11 @@ func (m Manager) Close() {
 // published, every later Close timing out). Reports whether the join
 // completed.
 func (m Manager) CloseCtx(ctx context.Context) bool {
-	// Cancel the shared lifetime FIRST: in-flight detached loads abort
-	// (their HTTP requests are cancelled) before per-cache teardown.
-	if m.lifeCancel != nil {
-		m.lifeCancel()
-	}
-	// An icon flight that downloaded before the cancellation must not store
-	// after Close returns.
-	if m.CompetitorCache != nil {
-		m.CompetitorCache.closeIcons()
-	}
-	if m.TournamentCache != nil {
-		m.TournamentCache.closeIcons()
-	}
+	// End the shared lifetime FIRST: in-flight detached loads abort (their
+	// HTTP requests are cancelled), and every commit that is running has
+	// finished when End returns; a flight that ends later stores nothing.
+	// End waits for no flight, only for those in-memory commits.
+	m.life.End()
 	return m.LocalizedStaticMatchStatus.CloseCtx(ctx)
 }
 
@@ -92,20 +86,20 @@ func (m Manager) CloseCtx(ctx context.Context) bool {
 // configured default) that static-catalog caches should fetch eagerly
 // and keep refreshed.
 func NewManager(ctx context.Context, client *api.Client, oddsFeedConfiguration config.Config, logger *log.Logger, preloadLocales []types.Locale) *Manager {
-	lifeCtx, lifeCancel := context.WithCancel(context.WithoutCancel(ctx))
+	life := lru.NewLifetime(ctx)
 	manager := &Manager{
-		MarketDescriptionCache: newMarketDescriptionCache(lifeCtx, client, logger),
-		CompetitorCache:        newCompetitorCache(lifeCtx, client, logger),
-		SportDataCache:         newSportDataCache(lifeCtx, client, logger),
-		FixtureCache:           newFixtureCache(lifeCtx, client),
-		TournamentCache:        newTournamentCache(lifeCtx, client, logger),
-		MatchCache:             newMatchCache(lifeCtx, client, logger),
-		MatchStatusCache:       newMatchStatusCache(lifeCtx, client, oddsFeedConfiguration, logger),
-		MarketVoidReasonsCache: newMarketVoidReasonsCache(lifeCtx, client),
-		PlayersCache:           newPlayersCache(lifeCtx, client, logger),
-		lifeCancel:             lifeCancel,
+		MarketDescriptionCache: newMarketDescriptionCache(life, client, logger),
+		CompetitorCache:        newCompetitorCache(life, client, logger),
+		SportDataCache:         newSportDataCache(life, client, logger),
+		FixtureCache:           newFixtureCache(life, client),
+		TournamentCache:        newTournamentCache(life, client, logger),
+		MatchCache:             newMatchCache(life, client, logger),
+		MatchStatusCache:       newMatchStatusCache(life, client, oddsFeedConfiguration, logger),
+		MarketVoidReasonsCache: newMarketVoidReasonsCache(life, client),
+		PlayersCache:           newPlayersCache(life, client, logger),
+		life:                   life,
 
-		LocalizedStaticMatchStatus: newLocalizedStaticDataCache(lifeCtx, oddsFeedConfiguration, logger, preloadLocales, func(ctx context.Context, locale types.Locale) ([]types.StaticData, error) {
+		LocalizedStaticMatchStatus: newLocalizedStaticDataCache(life, oddsFeedConfiguration, logger, preloadLocales, func(ctx context.Context, locale types.Locale) ([]types.StaticData, error) { //nolint:contextcheck // deliberate detach: the refresh runs under the cache lifetime, not a caller's context
 			data, err := client.FetchMatchStatusDescriptions(ctx, locale)
 			if err != nil {
 				return nil, err

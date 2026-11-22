@@ -36,7 +36,7 @@ func TestCompetitorCache_FailedLoadDoesNotOrphanIcon(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	cc := newCompetitorCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	cc := newCompetitorCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 	id := types.URN{Prefix: "od", Type: "competitor", ID: 9}
 
 	// en succeeds (and stages the icon); ru 500s — the load fails, the
@@ -65,7 +65,7 @@ func TestCompetitorCache_SuccessfulLoadCommitsIcon(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	cc := newCompetitorCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	cc := newCompetitorCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 	id := types.URN{Prefix: "od", Type: "competitor", ID: 10}
 
 	if _, err := cc.Competitor(t.Context(), id, []types.Locale{types.EnLocale}); err != nil {
@@ -95,7 +95,7 @@ func TestTournamentCache_FailedLoadDoesNotOrphanIcon(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	tc := newTournamentCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	tc := newTournamentCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 	id := types.URN{Prefix: "od", Type: "tournament", ID: 11}
 
 	if _, err := tc.Tournament(t.Context(), id, []types.Locale{types.EnLocale, types.RuLocale}); err == nil {
@@ -129,7 +129,7 @@ func TestLocalizedStaticDataCache_CloseCancelsInFlightFetch(t *testing.T) {
 		}
 		return nil, context.Cause(ctx)
 	}
-	c := newLocalizedStaticDataCache(t.Context(), &fakeCacheCfg{}, log.New(nil), nil, fetcher)
+	c := newLocalizedStaticDataCache(testLife(t), &fakeCacheCfg{}, log.New(nil), nil, fetcher)
 
 	go func() {
 		// Short-deadline caller: it stops WAITING quickly, but the shared
@@ -159,7 +159,7 @@ func TestLocalizedStaticDataCache_CloseCancelsInFlightFetch(t *testing.T) {
 // raced on the field. Now sync.Once-guarded; the race detector is the
 // assertion here.
 func TestLocalizedStaticDataCache_ConcurrentCloseIsSafe(t *testing.T) {
-	c := newLocalizedStaticDataCache(t.Context(), &fakeCacheCfg{}, log.New(nil), nil,
+	c := newLocalizedStaticDataCache(testLife(t), &fakeCacheCfg{}, log.New(nil), nil,
 		func(context.Context, types.Locale) ([]types.StaticData, error) { return nil, nil })
 
 	var wg sync.WaitGroup

@@ -51,9 +51,9 @@ type MatchStatusCache struct {
 	apiClient             *api.Client
 	logger                *log.Logger
 	oddsFeedConfiguration config.Config
-	// lifetime is the detach root for singleflight summary loads —
-	// cancelled by Manager.Close so no fetch outlives the owner.
-	lifetime context.Context
+	// life is the lifetime of the owning manager: the detach root of the
+	// flights and the owner of every commit (see lru.Lifetime).
+	life *lru.Lifetime
 
 	// mu serializes the copy-on-write merges in refreshOrInsert* (the
 	// LRU itself is thread-safe, but snapshot+merge+store must be
@@ -210,7 +210,7 @@ func (m *MatchStatusCache) MatchStatus(ctx context.Context, id types.URN) (*Loca
 	for clearRetries := 0; ; {
 		gen := m.flightGen.Load()
 		flightKey := fmt.Sprintf("%d|%s", gen, id.ToString())
-		entry, err := lru.LoadCoalesced(ctx, m.lifetime, &m.sf, apipolicy.EndpointSummary, flightKey, func(loadCtx context.Context) (*LocalizedMatchStatus, error) {
+		entry, err := lru.LoadCoalesced(ctx, m.life.Context(), &m.sf, apipolicy.EndpointSummary, flightKey, func(loadCtx context.Context) (*LocalizedMatchStatus, error) {
 			// Stale-generation guard — see errStaleFlight for the
 			// register-vs-clear window this closes.
 			if m.flightGen.Load() != gen {
@@ -302,6 +302,10 @@ func (m *MatchStatusCache) refreshOrInsertFeedItem(id types.URN, data *feedXML.S
 	// concurrent feed messages for the same id could each clone the
 	// same prev, apply different fields, and race on the store —
 	// silently dropping one update.
+	if !m.life.Enter() {
+		return
+	}
+	defer m.life.Leave()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -384,6 +388,10 @@ func (m *MatchStatusCache) refreshOrInsertAPIItem(id types.URN, data apiXML.Spor
 	// Hold the write lock across the snapshot+merge+store so a concurrent
 	// feed-side refresh for the same id can't lose updates (see
 	// refreshOrInsertFeedItem for the same reasoning).
+	if !m.life.Enter() {
+		return nil
+	}
+	defer m.life.Leave()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -682,10 +690,10 @@ func (m *MatchStatusCache) fromAPI(status apiXML.SportEventStatusType) types.Eve
 	}
 }
 
-func newMatchStatusCache(lifeCtx context.Context, client *api.Client, oddsFeedConfiguration config.Config, logger *log.Logger) *MatchStatusCache {
+func newMatchStatusCache(life *lru.Lifetime, client *api.Client, oddsFeedConfiguration config.Config, logger *log.Logger) *MatchStatusCache {
 	c := &MatchStatusCache{
 		apiClient:             client,
-		lifetime:              lifeCtx,
+		life:                  life,
 		oddsFeedConfiguration: oddsFeedConfiguration,
 		logger:                logger,
 		entries: lru.NewTTL[types.URN, *LocalizedMatchStatus](

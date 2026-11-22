@@ -72,7 +72,7 @@ func newIconFixtures(t *testing.T) []*iconFixture {
 	}
 
 	csrv, cf := newServer(iconCompetitorXML)
-	cc := newCompetitorCache(t.Context(), newAPIClientForTest(t, csrv), log.New(nil))
+	cc := newCompetitorCache(testLife(t), newAPIClientForTest(t, csrv), log.New(nil))
 	cid := types.URN{Prefix: "od", Type: "competitor", ID: 3}
 	cf.name, cf.want = "competitor", "/icons/c3.png"
 	cf.icon = func(ctx context.Context) (*string, error) { return cc.CompetitorIcon(ctx, cid, types.EnLocale) }
@@ -80,7 +80,7 @@ func newIconFixtures(t *testing.T) []*iconFixture {
 	cf.clear = func() { cc.ClearCacheItem(cid) }
 
 	tsrv, tf := newServer(iconTournamentXML)
-	tc := newTournamentCache(t.Context(), newAPIClientForTest(t, tsrv), log.New(nil))
+	tc := newTournamentCache(testLife(t), newAPIClientForTest(t, tsrv), log.New(nil))
 	tid := types.URN{Prefix: "od", Type: "tournament", ID: 7}
 	tf.name, tf.want = "tournament", "/icons/t7.png"
 	tf.icon = func(ctx context.Context) (*string, error) { return tc.TournamentIcon(ctx, tid, types.EnLocale) }
@@ -214,13 +214,13 @@ func TestIconLookup_ACallerAfterAClearDoesNotJoinThePreClearFetch(t *testing.T) 
 		icon         func(t *testing.T, srv *httptest.Server) (get func(context.Context) (*string, error), forget func())
 	}{
 		{"competitor", competitorFmt, func(t *testing.T, srv *httptest.Server) (func(context.Context) (*string, error), func()) {
-			cc := newCompetitorCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+			cc := newCompetitorCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 			id := types.URN{Prefix: "od", Type: "competitor", ID: 3}
 			return func(ctx context.Context) (*string, error) { return cc.CompetitorIcon(ctx, id, types.EnLocale) },
 				func() { cc.ClearCacheItem(id) }
 		}},
 		{"tournament", tournamentFmt, func(t *testing.T, srv *httptest.Server) (func(context.Context) (*string, error), func()) {
-			tc := newTournamentCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+			tc := newTournamentCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 			id := types.URN{Prefix: "od", Type: "tournament", ID: 7}
 			return func(ctx context.Context) (*string, error) { return tc.TournamentIcon(ctx, id, types.EnLocale) },
 				func() { tc.ClearCacheItem(id) }

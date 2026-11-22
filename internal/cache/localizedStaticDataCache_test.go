@@ -28,7 +28,7 @@ func TestLocalizedStaticDataCache_AlreadyCancelledCtxNoFetch(t *testing.T) {
 		return []types.StaticData{{ID: 1, Description: types.Some("ok")}}, nil
 	}
 	cfg := &minimalCfg{}
-	c := newLocalizedStaticDataCache(t.Context(), cfg, log.New(nil), nil, fetcher)
+	c := newLocalizedStaticDataCache(testLife(t), cfg, log.New(nil), nil, fetcher)
 	defer c.Close()
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -64,7 +64,7 @@ func TestLocalizedStaticDataCache_CtxCancelledMidIterationStopsFetches(t *testin
 		return nil, nil
 	}
 	cfg := &minimalCfg{}
-	c := newLocalizedStaticDataCache(t.Context(), cfg, log.New(nil), nil, fetcher)
+	c := newLocalizedStaticDataCache(testLife(t), cfg, log.New(nil), nil, fetcher)
 	defer c.Close()
 	defer close(released)
 
@@ -102,7 +102,7 @@ func TestLocalizedStaticDataCache_PrimaryLocaleIsRequestedNotDefault(t *testing.
 	fetcher := func(ctx context.Context, locale types.Locale) ([]types.StaticData, error) {
 		return []types.StaticData{{ID: 1, Description: types.Some("desc-" + string(locale))}}, nil
 	}
-	c := newLocalizedStaticDataCache(t.Context(), &minimalCfg{}, log.New(nil), nil, fetcher)
+	c := newLocalizedStaticDataCache(testLife(t), &minimalCfg{}, log.New(nil), nil, fetcher)
 	defer c.Close()
 
 	// Non-default primary: Description must carry the de value.
@@ -147,7 +147,7 @@ func TestLocalizedStaticDataCache_LocaleCoverageValidated(t *testing.T) {
 		}
 		return nil, nil // the de catalog omits id 1 entirely
 	}
-	c := newLocalizedStaticDataCache(t.Context(), &minimalCfg{}, log.New(nil), nil, fetcher)
+	c := newLocalizedStaticDataCache(testLife(t), &minimalCfg{}, log.New(nil), nil, fetcher)
 	defer c.Close()
 
 	got, err := c.LocalizedItem(t.Context(), 1, []types.Locale{types.EnLocale, types.DeLocale})
@@ -199,15 +199,14 @@ func TestLocalizedStaticDataCache_FirstRefreshAfterInitialDelay(t *testing.T) {
 		return []types.StaticData{{ID: 1, Description: types.Some("ok")}}, nil
 	}
 
-	lifeCtx, cancel := context.WithCancel(context.Background())
+	life := lru.NewLifetime(context.Background())
 	c := &LocalizedStaticDataCache{
 		oddsFeedConfiguration: &minimalCfg{},
 		fetcher:               fetcher,
 		locales:               []types.Locale{types.EnLocale},
 		internalCache:         make(map[int]map[types.Locale]string),
 		loadedLocales:         make(map[types.Locale]struct{}),
-		lifeCtx:               lifeCtx,
-		closeFn:               cancel,
+		life:                  life,
 		timerDone:             make(chan struct{}),
 		refreshInitialDelay:   50 * time.Millisecond,
 		refreshTickPeriod:     time.Hour,
@@ -237,15 +236,14 @@ func TestLocalizedStaticDataCache_FirstRefreshAfterInitialDelay(t *testing.T) {
 // refreshTestCache builds a cache whose refresh timer is not started, so a
 // test drives timerTick itself.
 func refreshTestCache(fetcher func(ctx context.Context, locale types.Locale) ([]types.StaticData, error)) *LocalizedStaticDataCache {
-	lifeCtx, cancel := context.WithCancel(context.Background())
+	life := lru.NewLifetime(context.Background())
 	return &LocalizedStaticDataCache{
 		oddsFeedConfiguration: &minimalCfg{},
 		fetcher:               fetcher,
 		locales:               []types.Locale{types.EnLocale},
 		internalCache:         make(map[int]map[types.Locale]string),
 		loadedLocales:         make(map[types.Locale]struct{}),
-		lifeCtx:               lifeCtx,
-		closeFn:               cancel,
+		life:                  life,
 		logger:                log.New(nil),
 	}
 }
@@ -381,7 +379,7 @@ func TestLocalizedStaticDataCache_GateOpenSkipsTheLoad(t *testing.T) {
 		calls.Add(1)
 		return []types.StaticData{{ID: 1, Description: types.Some("ok")}}, nil
 	}
-	c := newLocalizedStaticDataCache(t.Context(), &minimalCfg{}, log.New(nil), nil, fetcher)
+	c := newLocalizedStaticDataCache(testLife(t), &minimalCfg{}, log.New(nil), nil, fetcher)
 	defer c.Close()
 	gate := newGateStub()
 	gate.setOpen()
@@ -418,7 +416,7 @@ func TestLocalizedStaticDataCache_GateOpenedReleasesAWaiterAndTheFetchGoesOn(t *
 		<-release
 		return []types.StaticData{{ID: 1, Description: types.Some("ok")}}, nil
 	}
-	c := newLocalizedStaticDataCache(t.Context(), &minimalCfg{}, log.New(nil), nil, fetcher)
+	c := newLocalizedStaticDataCache(testLife(t), &minimalCfg{}, log.New(nil), nil, fetcher)
 	defer c.Close()
 	gate := newGateStub()
 	marked := apipolicy.WithMessage(t.Context(), gate, apipolicy.MessageTimeout)
@@ -465,7 +463,7 @@ func TestLocalizedStaticDataCache_MessageDoesNotWaitOnAFetchOlderThanItsTimeout(
 		<-release
 		return []types.StaticData{{ID: 1, Description: types.Some("ok")}}, nil
 	}
-	c := newLocalizedStaticDataCache(t.Context(), &minimalCfg{}, log.New(nil), nil, fetcher)
+	c := newLocalizedStaticDataCache(testLife(t), &minimalCfg{}, log.New(nil), nil, fetcher)
 	defer c.Close()
 	locales := []types.Locale{types.EnLocale}
 
@@ -521,7 +519,7 @@ func TestLocalizedStaticDataCache_AMessageIsReleasedAtTheFirstFailedAttempt(t *t
 		<-release
 		return []types.StaticData{{ID: 1, Description: types.Some("ok")}}, nil
 	}
-	c := newLocalizedStaticDataCache(t.Context(), &minimalCfg{}, log.New(nil), nil, fetcher)
+	c := newLocalizedStaticDataCache(testLife(t), &minimalCfg{}, log.New(nil), nil, fetcher)
 	defer c.Close()
 	defer close(release)
 
@@ -542,7 +540,7 @@ func TestLocalizedStaticDataCache_AFailedKeyIsRememberedForMessages(t *testing.T
 		}
 		return []types.StaticData{{ID: 1, Description: types.Some("ok")}}, nil
 	}
-	c := newLocalizedStaticDataCache(t.Context(), &minimalCfg{}, log.New(nil), nil, fetcher)
+	c := newLocalizedStaticDataCache(testLife(t), &minimalCfg{}, log.New(nil), nil, fetcher)
 	defer c.Close()
 	marked := apipolicy.WithMessage(t.Context(), newGateStub(), time.Minute)
 	locales := []types.Locale{types.EnLocale}

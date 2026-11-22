@@ -77,7 +77,7 @@ func (s *marketSrv) serve(body string) { s.body.Store(&body) }
 
 func newMarketCacheForTest(t *testing.T, s *marketSrv) (*MarketDescriptionCache, context.Context) {
 	t.Helper()
-	mc := newMarketDescriptionCache(t.Context(), newAPIClientForTest(t, s.Server), log.New(nil))
+	mc := newMarketDescriptionCache(testLife(t), newAPIClientForTest(t, s.Server), log.New(nil))
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	t.Cleanup(cancel)
 	return mc, ctx

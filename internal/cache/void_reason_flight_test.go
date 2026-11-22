@@ -37,7 +37,7 @@ func TestVoidReasons_ClearDuringFlight_NextCallRefetches(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	vc := newMarketVoidReasonsCache(t.Context(), newAPIClientForTest(t, srv))
+	vc := newMarketVoidReasonsCache(testLife(t), newAPIClientForTest(t, srv))
 
 	// Caller A starts the cold fetch and blocks inside it.
 	aResult := make(chan []string, 1)

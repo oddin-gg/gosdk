@@ -107,7 +107,7 @@ func TestMatchCache_FetchesAndPopulates(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	mc := newMatchCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	mc := newMatchCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 
@@ -156,7 +156,7 @@ func TestMatchCache_MultiLocaleFillIn(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	mc := newMatchCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	mc := newMatchCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 	ctx := t.Context()
 
 	// First call: en only.
@@ -201,7 +201,7 @@ func TestMatchCache_ClearForcesRefetch(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	mc := newMatchCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	mc := newMatchCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 	ctx := t.Context()
 
 	if _, err := mc.Match(ctx, *urn, []types.Locale{types.EnLocale}); err != nil {
@@ -244,7 +244,7 @@ func TestMatchCache_ReferenceIDsDecode(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	mc := newMatchCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	mc := newMatchCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 	entry, err := mc.Match(t.Context(), *urn, []types.Locale{types.EnLocale})
 	if err != nil {
 		t.Fatalf("Match: %v", err)
@@ -312,7 +312,7 @@ func TestMatchCache_LiveOddsMapping(t *testing.T) {
 			_, _ = io.WriteString(w, body)
 		}))
 
-		mc := newMatchCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+		mc := newMatchCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 		got, err := mc.Match(t.Context(), *urn, []types.Locale{types.EnLocale})
 		if err != nil {
 			srv.Close()

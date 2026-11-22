@@ -134,7 +134,7 @@ func (f *FixtureCache) ClearCacheItem(id types.URN) {
 	f.lru.Clear(id)
 }
 
-func newFixtureCache(lifeCtx context.Context, client *api.Client) *FixtureCache {
+func newFixtureCache(life *lru.Lifetime, client *api.Client) *FixtureCache {
 	fc := &FixtureCache{apiClient: client}
 	loader := func(
 		ctx context.Context,
@@ -194,7 +194,7 @@ func newFixtureCache(lifeCtx context.Context, client *api.Client) *FixtureCache 
 		return entry, nil
 	}
 	fc.lru = lru.NewEventCache[types.URN, types.Locale, *LocalizedFixture](
-		lru.Config{Lifetime: lifeCtx, Endpoint: apipolicy.EndpointFixture}, loader,
+		lru.Config{Lifetime: life, Endpoint: apipolicy.EndpointFixture}, loader,
 	)
 	return fc
 }

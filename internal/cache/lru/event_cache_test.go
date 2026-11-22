@@ -508,7 +508,7 @@ func TestEventCache_MessageAndGetterShareOneFlight(t *testing.T) {
 		}
 		return e, nil
 	}
-	c := NewEventCache[string, string, *localizedFoo](Config{Lifetime: t.Context()}, loader)
+	c := NewEventCache[string, string, *localizedFoo](Config{Lifetime: NewLifetime(t.Context())}, loader)
 	registered := trackRegistrations(t)
 
 	// The message caller starts the flight and leaves at its deadline.

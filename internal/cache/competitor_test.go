@@ -216,7 +216,7 @@ func TestCompetitorCache_IconStore_ConcurrentDistinctURLs(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cc := newCompetitorCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	cc := newCompetitorCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 
 	var wg sync.WaitGroup
 	wg.Add(urns)

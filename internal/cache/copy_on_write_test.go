@@ -38,7 +38,7 @@ func TestMatchCache_FailedMultiLocaleLoadDoesNotMutateLiveEntry(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	mc := newMatchCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	mc := newMatchCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 	id, _ := types.ParseURN(matchURN)
 
 	// Populate [en] — admitted.

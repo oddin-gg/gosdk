@@ -54,13 +54,11 @@ type CompetitorCache struct {
 	// Use loadIcon / storeIcon / deleteIcon helpers for type-safe access.
 	icons sync.Map
 
-	// lifetime is the detach root of the icon flights (cancelled with the
-	// owning manager); iconSF coalesces concurrent fetches of one icon.
-	lifetime context.Context
-	iconSF   lru.Flights
-	// iconGate orders the stores of icon flights against closeIcons.
-	iconGate    sync.Mutex
-	iconsClosed bool
+	// life is the lifetime of the owning manager: the detach root of the
+	// icon flights and the owner of their commits. iconSF coalesces
+	// concurrent fetches of one icon.
+	life   *lru.Lifetime
+	iconSF lru.Flights
 }
 
 // loadIcon returns (icon, true) if the URN has a recorded icon (which may
@@ -79,27 +77,6 @@ func (c *CompetitorCache) loadIcon(id types.URN) (*string, bool) {
 
 func (c *CompetitorCache) storeIcon(id types.URN, icon *string) {
 	c.icons.Store(id, icon)
-}
-
-// storeFlightIcon is the store of an icon flight. It is a no-op once the
-// owner's lifetime ended: the cache is quiescent after Close. The check and
-// the store are one step under iconGate, which closeIcons (called by Close
-// right after it cancelled the lifetime) takes too, so no store can follow a
-// Close that has returned.
-func (c *CompetitorCache) storeFlightIcon(id types.URN, icon *string) {
-	c.iconGate.Lock()
-	defer c.iconGate.Unlock()
-	if c.iconsClosed || (c.lifetime != nil && c.lifetime.Err() != nil) {
-		return
-	}
-	c.storeIcon(id, icon)
-}
-
-// closeIcons makes every later icon flight store a no-op.
-func (c *CompetitorCache) closeIcons() {
-	c.iconGate.Lock()
-	c.iconsClosed = true
-	c.iconGate.Unlock()
 }
 
 // iconCommitGateHook is a test-only seam invoked by an icon flight after
@@ -288,7 +265,7 @@ func (c *CompetitorCache) CompetitorIcon(ctx context.Context, id types.URN, loca
 		return v, nil
 	}
 
-	return lru.LoadCoalesced(ctx, c.lifetime, &c.iconSF, apipolicy.EndpointCompetitor, iconFlightKey(id, locale), func(loadCtx context.Context) (*string, error) {
+	return lru.LoadCoalesced(ctx, c.life.Context(), &c.iconSF, apipolicy.EndpointCompetitor, iconFlightKey(id, locale), func(loadCtx context.Context) (*string, error) {
 		// A flight that ended just before this one started has stored it.
 		if v, ok := c.loadIcon(id); ok {
 			return v, nil
@@ -306,9 +283,10 @@ func (c *CompetitorCache) CompetitorIcon(ctx context.Context, id types.URN, loca
 		// Store under the parent entry's clear-tombstone lock so a
 		// ClearCacheItem racing this fetch isn't undone for the icon —
 		// StoreSide is atomic with Clear, no check-to-write window.
-		// The callers still get the fresh value.
+		// The callers still get the fresh value. StoreSide is a commit of
+		// the owner's lifetime too: after Close it stores nothing.
 		c.lru.StoreSide(id, fetchStarted, func() {
-			c.storeFlightIcon(id, data.IconPath)
+			c.storeIcon(id, data.IconPath)
 		})
 		return data.IconPath, nil
 	})
@@ -332,15 +310,15 @@ func (c *CompetitorCache) ClearCacheItem(id types.URN) {
 	c.iconSF.ForgetPrefix(iconFlightPrefix(id))
 }
 
-func newCompetitorCache(lifeCtx context.Context, client *api.Client, logger *log.Logger) *CompetitorCache {
+func newCompetitorCache(life *lru.Lifetime, client *api.Client, logger *log.Logger) *CompetitorCache {
 	cc := &CompetitorCache{
 		apiClient: client,
 		logger:    logger,
-		lifetime:  lifeCtx,
+		life:      life,
 	}
 	cc.lru = lru.NewEventCache[types.URN, types.Locale, *LocalizedCompetitor](
 		lru.Config{
-			Lifetime: lifeCtx,
+			Lifetime: life,
 			Endpoint: apipolicy.EndpointCompetitor,
 			// Evict the icon alongside the entry. Icons are populated on
 			// every loader call but were previously removed only by the
