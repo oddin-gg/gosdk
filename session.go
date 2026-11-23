@@ -38,8 +38,9 @@ var errFeedMessageDecode = errors.New("gosdk: feed message decode failed")
 // the subscription buffer.
 //
 // settled, when set, is the session's fact that the delivery is finished
-// with: the pump runs it once the ack has settled, so what the recovery
-// manager records as processed is what the broker has let go of. It is set
+// with: the pump runs it once the ack has run, so what the recovery manager
+// records as processed is a message the client holds and whose ack has run
+// (an ack error is logged and the fact is posted all the same). It is set
 // on the same final envelope as ack, and only for a message handed to the
 // client.
 type sessionEnvelope struct {
@@ -145,8 +146,8 @@ type recoveryMessageProcessor interface {
 	OnRecoveryMessageReceived(producerID int, requestID int)
 	OnMessageProcessingEnded(sessionID uuid.UUID, producerID int, timestamp time.Time)
 	// OnMessageProcessed reports that the session has finished with a
-	// message of the producer and the broker has been told: it is run by
-	// the pump when the delivery's ack has settled. generatedAt is the
+	// message of the producer: the client holds it and its ack has run. It
+	// is run by the pump when the delivery's ack has settled. generatedAt is the
 	// message's timestamp by the producer's clock, taken the instant the
 	// session began processing it (both clock readings: its age includes
 	// the time it waited in the broker's queue), requestID the recovery it

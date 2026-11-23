@@ -12,8 +12,14 @@ import (
 // sessionRecord is what the manager knows of one session of the client: who
 // it is, what it receives, and the last fact it reported per producer.
 //
+// The record is a view of the last facts, not a checkpoint: processed and
+// alive keep the LAST fact per producer, whatever its timestamp. The
+// checkpoint (the running maximum of live messages and subscribed alives)
+// is derived by the recovery actor from the posted facts, not read from this
+// record.
+//
 // A session reports from its own goroutines (the facts about a message are
-// posted when the broker has been told the message is settled), so the
+// posted when the delivery is settled), so the
 // facts are kept per session and per producer, not merged: what the feed
 // has handled is a per-session truth, and a producer is only as far as its
 // slowest session.
@@ -31,7 +37,7 @@ type sessionRecord struct {
 }
 
 // processedFact is the last message of a producer a session has finished
-// with: handed over to the client and acknowledged to the broker.
+// with: handed over to the client, its ack run.
 type processedFact struct {
 	generatedAt time.Time
 	// taken is when the session began processing the message, both
@@ -124,9 +130,9 @@ func cloneMap[K comparable, V any](in map[K]V) map[K]V {
 }
 
 // OnMessageProcessed records that the session has finished with a message of
-// the producer: the client has it and the broker has been told. It is
-// posted when the delivery is acknowledged, so what it records is what the
-// broker has let go of, not what the session has merely read.
+// the producer: the client holds it and its ack has run (an ack that failed
+// is logged, and the fact is posted all the same). It is posted when the
+// delivery is settled, not when the session has merely read it.
 //
 // generatedAt is the message's timestamp by the producer's clock, taken is
 // when the session began processing it, and requestID the recovery it
