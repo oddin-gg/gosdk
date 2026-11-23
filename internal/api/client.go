@@ -14,7 +14,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/cenkalti/backoff/v5"
@@ -64,6 +63,22 @@ func (b *byteLimitReader) Read(p []byte) (int, error) {
 	b.left -= int64(n)
 	if b.left < 0 {
 		return n, fmt.Errorf("api: response body exceeds %d-byte cap", maxSuccessBodyBytes)
+	}
+	return n, err
+}
+
+// readErrTracker remembers the first read error of the body that was not its
+// end, which is how a body the transport cut off differs from one that
+// arrived whole and is malformed.
+type readErrTracker struct {
+	r   io.Reader
+	err error
+}
+
+func (t *readErrTracker) Read(p []byte) (int, error) {
+	n, err := t.r.Read(p)
+	if err != nil && err != io.EOF && t.err == nil {
+		t.err = err
 	}
 	return n, err
 }
@@ -139,28 +154,13 @@ type Client struct {
 	lifeCancel context.CancelFunc
 	inflight   sync.WaitGroup
 
-	// successCount counts healthy responses of any endpoint: a 2xx whose
-	// body was then read in full (and, for an entity, decoded), that passed
-	// the identity check of its resource and whose envelope is not a
-	// service-unavailable answer (see ServerUnavailableCode). The status
-	// line alone does not count, since an API that degrades into slow or
-	// truncated bodies still answers headers, and counting those would void
-	// a consumer's memory of the failure on every request that then fails
-	// on its body; nor does a 200 whose envelope says the service is
-	// unavailable. An envelope about the resource (not found, forbidden)
-	// does count: the API answered. A consumer that remembers a failure
-	// together with the value read AFTER the failed attempt (an earlier call
-	// of the same build may have succeeded meanwhile, and that success
-	// predates the failure) can tell that the API has answered since: see
-	// SuccessCount.
-	successCount atomic.Uint64
+	// breaker is fed by every attempt's outcome, per endpoint (see Breaker).
+	// Nothing in the client reads it.
+	breaker *Breaker
 }
 
-// SuccessCount returns a counter that advances on every healthy response
-// of any endpoint (see successCount). The feed message path uses it to
-// drop everything it remembers about a failing API as soon as the API
-// answers again, whichever call that was.
-func (c *Client) SuccessCount() uint64 { return c.successCount.Load() }
+// Breaker returns the client's breakers of the REST API's availability, one per endpoint.
+func (c *Client) Breaker() *Breaker { return c.breaker }
 
 // ErrClosed is returned by request methods invoked after Close. It
 // WRAPS the shared closed-client sentinel (sdkerr.ErrClosed ==
@@ -193,6 +193,7 @@ func NewWithLogger(cfg config.Config, logger *slog.Logger, timeout time.Duration
 		observers:   make([]Observer, 0),
 		lifeCtx:     lifeCtx,
 		lifeCancel:  lifeCancel,
+		breaker:     newBreaker(time.Now, breakerOpenFor),
 	}
 }
 
@@ -768,10 +769,16 @@ func (c *Client) fetchDataValidated(ctx context.Context, path string, entity int
 	// emitted Err=nil — indistinguishable from success on the
 	// observability stream while the caller received an error.
 	var callErr error
-	// answered: the body arrived whole and decoded, and the envelope is a
-	// healthy API's answer (see ServerUnavailableCode).
-	answered := false
-	dec := xml.NewDecoder(&byteLimitReader{r: resp.Body, left: maxSuccessBodyBytes})
+	// good: the body arrived whole and decoded, the envelope is a healthy
+	// API's answer (see isServiceUnavailable) and the document is about the
+	// requested resource. Only a good answer closes the endpoint's breaker.
+	// Nothing in the body feeds the breaker as a failure: a response that
+	// arrived complete is an answer about ONE resource, whatever it says, and
+	// the caller's loader remembers it for that key. Only the absence of an
+	// answer is the endpoint's: see noteUnanswered.
+	good := false
+	body := &readErrTracker{r: resp.Body}
+	dec := xml.NewDecoder(&byteLimitReader{r: body, left: maxSuccessBodyBytes})
 	if decodeErr := dec.Decode(entity); decodeErr != nil {
 		callErr = badResponse(fmt.Errorf("api: decode %s: %w", path, decodeErr))
 	} else if eofErr := utils.EnsureXMLEOF(dec); eofErr != nil {
@@ -780,12 +787,12 @@ func (c *Client) fetchDataValidated(ctx context.Context, path string, entity int
 		// and observer dispatch.
 		callErr = badResponse(fmt.Errorf("api: decode %s: %w", path, eofErr))
 	} else {
-		answered = true
+		good = true
 		if rwc, ok := entity.(ResponseWithCode); ok && rwc.Code() != types.OkResponseCode {
 			callErr = &Error{Method: http.MethodGet, Path: path, Status: resp.StatusCode, Code: rwc.Code()}
 			// An envelope that says the service cannot serve right now is
 			// not an answer of a healthy API.
-			answered = !ServerUnavailableCode(rwc.Code())
+			good = !isServiceUnavailable(rwc.Code())
 		}
 	}
 	if callErr == nil && validate != nil {
@@ -794,14 +801,15 @@ func (c *Client) fetchDataValidated(ctx context.Context, path string, entity int
 		// reaching any cache-populating observer below.
 		if verr := validate(); verr != nil {
 			callErr = badResponse(fmt.Errorf("api: %s: response identity: %w", path, verr))
-			// A response about another resource says the routing is
-			// broken, not that the API is healthy.
-			answered = false
+			good = false
 		}
 	}
-	if answered {
-		// Counted here, not when the headers arrive (see successCount).
-		c.successCount.Add(1)
+	switch {
+	case body.err != nil:
+		// The transport cut the body off: no answer arrived.
+		c.noteUnanswered(ctx, path)
+	case good:
+		c.breaker.success(endpointOf(path))
 	}
 	c.emit(pc, callErr) // streaming capture: emit AFTER body has flowed through tee
 	if callErr != nil {
@@ -896,19 +904,41 @@ func (c *Client) doNoBody(ctx context.Context, method, path string, idempotent b
 		return false, fmt.Errorf("api: %s %s: %w", method, path, apiErr)
 	}
 	// The body was read in full and verified: the API accepted the request.
-	// Counted here, not when the headers arrive (see successCount).
-	c.successCount.Add(1)
 	c.emit(pc, nil)
 	return true, nil
 }
 
-// ServerUnavailableCode reports whether an envelope response_code says the
+// noteUnanswered counts the absence of an answer (a body the transport cut
+// off or that stalled) against the endpoint's breaker. Not when the caller
+// gave up: its cancellation can cut a body short without the API being at
+// fault.
+func (c *Client) noteUnanswered(ctx context.Context, path string) {
+	if c.callerAlive(ctx) {
+		c.breaker.failure(endpointOf(path))
+	}
+}
+
+// noteUnreadableErrorBody counts an error body that stalled or was cut off
+// (a read error, not the end of the body) as the absence of an answer.
+func (c *Client) noteUnreadableErrorBody(ctx context.Context, path string, readErr error) {
+	if readErr != nil {
+		c.noteUnanswered(ctx, path)
+	}
+}
+
+// callerAlive reports whether neither the caller's context nor the client's
+// lifetime has ended, i.e. whether a failure can be the API's.
+func (c *Client) callerAlive(ctx context.Context) bool {
+	return ctx.Err() == nil && c.lifeCtx.Err() == nil
+}
+
+// isServiceUnavailable reports whether an envelope response_code says the
 // server cannot serve right now (SERVICE_UNAVAILABLE), as opposed to an
 // answer about the resource (NOT_FOUND, FORBIDDEN, BAD_REQUEST, CONFLICT,
 // NOT_IMPLEMENTED, ...) that only a healthy API gives. One decision for the
-// success counter and for the consumers that classify a decoded non-OK
-// envelope on a 2xx response.
-func ServerUnavailableCode(c types.ResponseCode) bool {
+// breaker (it does not count as a good answer) and for the code that
+// classifies a decoded non-OK envelope on a 2xx response.
+func isServiceUnavailable(c types.ResponseCode) bool {
 	return c == types.ServiceUnavailableResponseCode
 }
 
@@ -1042,22 +1072,6 @@ func wellFormedXML(body []byte) bool {
 // For non-OK statuses do() emits the event inline (those bodies are
 // always small enough not to need streaming) and returns pc=nil.
 func (c *Client) do(ctx context.Context, method, path string, locale *types.Locale, idempotent bool) (*http.Response, *pendingCapture, error) {
-	// Message-path policy (see package apipolicy): never queue behind a
-	// failing API on the session goroutine.
-	policy := apipolicy.ModeOf(ctx)
-	if policy == apipolicy.MessageSkip {
-		return nil, nil, apipolicy.ErrSkipped
-	}
-	var remaining time.Duration
-	if policy == apipolicy.Message {
-		// The build shares one budget across all its requests; a request
-		// that starts after it is spent never goes out (ErrBudgetSpent, so
-		// callers can tell it from a request that was sent and timed out).
-		remaining, _ = apipolicy.Remaining(ctx)
-		if remaining <= 0 {
-			return nil, nil, fmt.Errorf("api: %s %s: %w: %w", method, path, apipolicy.ErrBudgetSpent, context.DeadlineExceeded)
-		}
-	}
 	// Reject new requests after Close, and register this one as in-flight
 	// — both under mu so the check and the WaitGroup.Add can't straddle a
 	// concurrent Close (which sets closed under mu BEFORE Wait).
@@ -1072,18 +1086,7 @@ func (c *Client) do(ctx context.Context, method, path string, locale *types.Loca
 	// Derive the request ctx from the caller's ctx AND the client
 	// lifetime: Close cancels lifeCtx, aborting this request even if the
 	// caller passed a ctx that never fires (e.g. context.Background()).
-	var (
-		reqCtx    context.Context
-		cancelReq context.CancelFunc
-	)
-	if policy == apipolicy.Message {
-		// What is left of the build's one budget, body included (cancelReq
-		// fires when the body is closed): a build that makes several
-		// requests is bounded as a whole.
-		reqCtx, cancelReq = context.WithTimeout(ctx, remaining)
-	} else {
-		reqCtx, cancelReq = context.WithCancel(ctx)
-	}
+	reqCtx, cancelReq := context.WithCancel(ctx)
 	//nolint:contextcheck // lifeCtx is the client-lifetime cancellation root; AfterFunc wires it to abort this request, it is not a request-scoped parent
 	stopLife := context.AfterFunc(c.lifeCtx, cancelReq)
 	ctx = reqCtx
@@ -1156,6 +1159,12 @@ func (c *Client) do(ctx context.Context, method, path string, locale *types.Loca
 				c.emitEvent(req, 0, time.Since(started), attempts, locale, reqBody, reqTruncated, ctx.Err())
 				return nil, backoff.Permanent(fmt.Errorf("api: %s %s attempt=%d: %w", method, path, attempts, ctx.Err()))
 			}
+			// The request ctx is alive, so this is the API or the path to it
+			// failing (a refused or reset connection, http.Client.Timeout),
+			// not a caller that gave up.
+			if c.lifeCtx.Err() == nil {
+				c.breaker.failure(endpointOf(path))
+			}
 			if !idempotent {
 				// A transport error does NOT prove the server never
 				// processed the request: http.Client.Timeout firing while
@@ -1167,6 +1176,10 @@ func (c *Client) do(ctx context.Context, method, path string, locale *types.Loca
 				// side effect — same policy as the 5xx branch below.
 				c.emitEvent(req, 0, time.Since(started), attempts, locale, reqBody, reqTruncated, err)
 				return nil, backoff.Permanent(fmt.Errorf("api: %s %s attempt=%d: %w", method, path, attempts, err))
+			}
+			if c.lifeCtx.Err() == nil {
+				// A retry follows: tell the flight this attempt failed.
+				apipolicy.AttemptFailed(ctx)
 			}
 			c.logger.Debug("api: request failed, will retry",
 				slog.String("method", method),
@@ -1199,10 +1212,10 @@ func (c *Client) do(ctx context.Context, method, path string, locale *types.Loca
 			// invoke emit() after consuming the body. Streaming = no full-
 			// body materialization regardless of payload size.
 			//
-			// successCount is NOT advanced here: the status line alone does
-			// not show that the API works (a degraded one answers headers
-			// and then stalls or truncates the body); the caller counts
-			// the response once it has read the body.
+			// The breaker is not told of a success here: the status line
+			// alone does not show that the API works (a degraded one
+			// answers headers and then stalls or truncates the body); the
+			// caller reports it once it has read the body.
 			pc = c.installCapture(r, req, r.StatusCode, latency, attempts, locale, reqBody, reqTruncated)
 			return r, nil
 		case r.StatusCode == http.StatusTooManyRequests:
@@ -1213,18 +1226,24 @@ func (c *Client) do(ctx context.Context, method, path string, locale *types.Loca
 			// Retry-After header is deliberately not mapped onto
 			// backoff/v5's RetryAfterError, which carries no cause and
 			// would degrade the terminal error on exhaustion.
-			parserBytes, eventBytes, truncated := c.readErrorBody(r)
+			parserBytes, eventBytes, truncated, _ := c.readErrorBody(r)
 			_ = r.Body.Close()
 			retryErr := c.toAPIError(method, path, r.StatusCode, parserBytes)
 			c.emitEventReqResp(req, r.StatusCode, latency, attempts, reqBody, reqTruncated, eventBytes, truncated, locale, retryErr)
+			c.breaker.failure(endpointOf(path))
+			apipolicy.AttemptFailed(ctx)
 			return nil, retryErr
 		case r.StatusCode >= 400 && r.StatusCode < 500:
 			// Client error — read the body ONCE; reuse for both the
 			// structured-error decode and the APIEvent capture.
-			parserBytes, eventBytes, truncated := c.readErrorBody(r)
+			parserBytes, eventBytes, truncated, readErr := c.readErrorBody(r)
 			err := c.toAPIError(method, path, r.StatusCode, parserBytes)
 			_ = r.Body.Close()
 			c.emitEventReqResp(req, r.StatusCode, latency, attempts, reqBody, reqTruncated, eventBytes, truncated, locale, err)
+			c.noteUnreadableErrorBody(ctx, path, readErr)
+			// A 4xx is an answer about the request, whatever its envelope
+			// says: it leaves the breaker alone, and the loaders remember it
+			// for the key.
 			return nil, backoff.Permanent(err)
 		default:
 			// Server error or unexpected status. Body read once and
@@ -1232,15 +1251,22 @@ func (c *Client) do(ctx context.Context, method, path string, locale *types.Loca
 			// included the status code, dropping the server's error
 			// envelope (`<error><message>...</message></error>`)
 			// entirely while 4xx surfaced it.
-			parserBytes, eventBytes, truncated := c.readErrorBody(r)
+			parserBytes, eventBytes, truncated, readErr := c.readErrorBody(r)
 			_ = r.Body.Close()
 			retryErr := c.toAPIError(method, path, r.StatusCode, parserBytes)
 			c.emitEventReqResp(req, r.StatusCode, latency, attempts, reqBody, reqTruncated, eventBytes, truncated, locale, retryErr)
+			// A server error, 502/503/504 and a SERVICE_UNAVAILABLE envelope
+			// included, is an answer about one resource: it leaves the
+			// breaker alone, and the loaders remember it for the key. Only a
+			// body that was cut off is the absence of an answer.
+			c.noteUnreadableErrorBody(ctx, path, readErr)
 			if !idempotent {
 				// Server may have processed the request — re-issuing
-				// would re-execute. Treat 5xx as terminal.
+				// would re-execute. Treat 5xx as terminal: no retry follows,
+				// so no failed attempt is reported.
 				return nil, backoff.Permanent(retryErr)
 			}
+			apipolicy.AttemptFailed(ctx)
 			return nil, retryErr
 		}
 	}
@@ -1255,9 +1281,6 @@ func (c *Client) do(ctx context.Context, method, path string, locale *types.Loca
 		// backoff/v5 treats WithMaxTries(0) as UNLIMITED attempts —
 		// never let a zero value through the uint conversion.
 		tries = defaultMaxAttempts
-	}
-	if policy == apipolicy.Message {
-		tries = 1 // no retries on the message path
 	}
 	r, err := backoff.Retry(ctx, op,
 		backoff.WithBackOff(exp),
@@ -1306,16 +1329,17 @@ func (b *cancelOnClose) Close() error {
 // empty stream — losing the server's error message.
 //
 // Streaming isn't needed here — error bodies are always small.
-func (c *Client) readErrorBody(r *http.Response) (parserBytes []byte, eventBytes []byte, truncated bool) {
+func (c *Client) readErrorBody(r *http.Response) (parserBytes []byte, eventBytes []byte, truncated bool, readErr error) {
 	if r.Body == nil {
-		return nil, nil, false
+		return nil, nil, false, nil
 	}
 	// Read ONE byte past the internal cap so an oversized body is
 	// detectable: reading exactly maxErrorBodyBytes made a 3 MiB body
 	// with a 2 MiB configured event limit report Truncated=false (only
 	// 1 MiB was retained, and the configured-limit comparison alone
 	// couldn't see the internal-cap overflow).
-	body, readErr := io.ReadAll(io.LimitReader(r.Body, maxErrorBodyBytes+1))
+	var body []byte
+	body, readErr = io.ReadAll(io.LimitReader(r.Body, maxErrorBodyBytes+1))
 	if readErr != nil {
 		// Keep whatever arrived — a partial envelope may still decode,
 		// and the capture retains diagnostic value either way.
@@ -1334,7 +1358,7 @@ func (c *Client) readErrorBody(r *http.Response) (parserBytes []byte, eventBytes
 	capture := c.capture
 	c.mu.RUnlock()
 	if capture.Emit == nil || !capture.ResponseBody || capture.BodyLimit <= 0 {
-		return parserBytes, nil, false
+		return parserBytes, nil, false, readErr
 	}
 	limit := capture.BodyLimit
 	truncated = internalOverflow || len(body) > limit
@@ -1345,7 +1369,7 @@ func (c *Client) readErrorBody(r *http.Response) (parserBytes []byte, eventBytes
 	eventBytes = make([]byte, capLen)
 	copy(eventBytes, body[:capLen])
 	eventBytes = c.redactCapture(eventBytes, truncated)
-	return parserBytes, eventBytes, truncated
+	return parserBytes, eventBytes, truncated, readErr
 }
 
 // capBuf is the io.Writer used inside the response-capture TeeReader.

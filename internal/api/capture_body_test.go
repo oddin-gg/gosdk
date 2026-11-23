@@ -359,7 +359,7 @@ func TestRedactSensitive_ShortToken(t *testing.T) {
 }
 
 // TestRedactSensitive_WireEncodedForms is the regression for encoded
-// credential echoes (Codex P2): an XML response echoing a token that
+// credential echoes: an XML response echoing a token that
 // contains XML-sensitive characters carries the CHARACTER-ESCAPED form
 // (&amp;, &lt;, …), and a URL rendered into a body or error carries the
 // QUERY-ESCAPED form — neither matches an exact raw-token replacement,
@@ -383,7 +383,7 @@ func TestRedactSensitive_WireEncodedForms(t *testing.T) {
 }
 
 // TestRedactCapture_BoundarySplitToken is the regression for the
-// truncation-bisected token (Codex P2): capture buffers are capped at
+// truncation-bisected token: capture buffers are capped at
 // BodyLimit BEFORE redaction, so a token straddling the limit leaves a
 // prefix fragment that exact-match replacement cannot find — with the
 // boundary in the token's last byte, the fragment is nearly the whole

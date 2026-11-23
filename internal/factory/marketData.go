@@ -2,11 +2,15 @@ package factory
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
 
+	"github.com/oddin-gg/gosdk/internal/api"
+	"github.com/oddin-gg/gosdk/internal/apipolicy"
 	"github.com/oddin-gg/gosdk/internal/cache"
+	"github.com/oddin-gg/gosdk/internal/cache/lru"
 	"github.com/oddin-gg/gosdk/internal/config"
 	"github.com/oddin-gg/gosdk/types"
 )
@@ -258,7 +262,15 @@ func (m *marketDataImpl) makeMarketName(ctx context.Context, marketDescription *
 
 		// handle props markets
 		if isPropsMarket {
-			if name, ok := m.getPropsName(ctx, value, locale); ok {
+			name, ok, unavailable := m.getPropsName(ctx, value, locale)
+			if unavailable {
+				// The player's name is not there for this message (the
+				// lookup was skipped or timed out): the name of the market
+				// comes without it, not with the raw player URN in its
+				// place, which would read as a complete name.
+				return nil, nil
+			}
+			if ok {
 				value = name
 			}
 		}
@@ -271,11 +283,17 @@ func (m *marketDataImpl) makeMarketName(ctx context.Context, marketDescription *
 
 // getPropsName resolves a player-props specifier value (a player URN)
 // to the player's localized name. Callers gate on the market carrying
-// the player_props group.
-func (m *marketDataImpl) getPropsName(ctx context.Context, entityID string, locale types.Locale) (string, bool) {
+// the player_props group. unavailable reports a lookup that did not give an
+// usable answer for this message (skipped, a wait that ran out, a cancelled
+// message, or an answer of the API that is a failure of the key, such as a
+// server error or a 403): the market has no name in that locale, the same on
+// the message that waited for the lookup and on the ones that skip the key
+// afterwards. A specifier that is not a player, and a player the API does
+// not know (404), keep the raw value (ok false, unavailable false).
+func (m *marketDataImpl) getPropsName(ctx context.Context, entityID string, locale types.Locale) (name string, ok, unavailable bool) {
 	urn, err := types.ParseURN(entityID)
 	if err != nil {
-		return "", false
+		return "", false, false
 	}
 
 	//nolint:gocritic // for simpler extension
@@ -289,12 +307,24 @@ func (m *marketDataImpl) getPropsName(ctx context.Context, entityID string, loca
 			},
 		)
 		if err != nil {
-			// Swallowed like the other name lookups, but reported so a
-			// failing player endpoint opens the event's failure window.
-			reportNameFailure(ctx, err)
-			return "", false
+			// Swallowed like the other name lookups: a missing player name
+			// must not fail the message.
+			return "", false, lookupGaveNoAnswer(err)
 		}
-		return player.Name, true
+		return player.Name, true, false
 	}
-	return "", false
+	return "", false, false
+}
+
+// lookupGaveNoAnswer reports whether a failed name lookup gave no usable
+// answer on the message path: it was skipped, the message stopped waiting for
+// it or was cancelled, or the API answered with a failure of the key (see
+// api.IsKeyFailure), which later messages skip for a while. An answer that
+// the entity does not exist (404) is not one.
+func lookupGaveNoAnswer(err error) bool {
+	return errors.Is(err, apipolicy.ErrSkipped) ||
+		errors.Is(err, lru.ErrFlightTooOld) ||
+		errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, context.Canceled) ||
+		api.IsKeyFailure(err)
 }
