@@ -185,6 +185,9 @@ func TestSessionRegistry_FactAfterRemovalIsDropped(t *testing.T) {
 	m.OnFeedSessionGone(id)
 	m.OnMessageProcessed(id, 1, time.Now(), systemClock{}.now(), 0)
 	m.OnSessionAlive(id, 1, time.Now(), systemClock{}.now(), true, types.AllMessageInterest)
+	if err := m.OnSnapshotCompleteReceived(t.Context(), id, 1, 9, types.AllMessageInterest); err != nil {
+		t.Fatal(err)
+	}
 	if _, ok := m.sessionFactsOf(id); ok {
 		t.Fatal("a late fact brought a removed session back")
 	}
