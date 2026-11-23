@@ -757,14 +757,13 @@ func (m *Manager) OnFeedSessionGone(session uuid.UUID) {
 	m.clientMu.Lock()
 	if _, ok := m.clientSessions[session]; ok {
 		delete(m.clientSessions, session)
-		m.refreshSnapshotCompleteLocked()
 	}
 	m.clientMu.Unlock()
 	m.sessionQueueSettled(session)
 }
 
 // OnClientSessionOpened registers a session of the client with its
-// interest, whether it takes snapshot_complete and the producers it covers:
+// interest and the producers it covers:
 // from now on its scope counts as one a replay can reach. A session
 // registers before its consumer starts, so before its first delivery.
 //
@@ -789,7 +788,6 @@ func (m *Manager) OnClientSessionOpened(session uuid.UUID, messageInterest types
 		alive:            make(map[int]aliveFact),
 		snapshotComplete: make(map[int]snapshotCompleteFact),
 	}
-	m.refreshSnapshotCompleteLocked()
 	m.clientMu.Unlock()
 }
 

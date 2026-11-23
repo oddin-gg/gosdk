@@ -20,12 +20,6 @@ import (
 type sessionRecord struct {
 	id       uuid.UUID
 	interest types.MessageInterest
-	// takesSnapshotComplete is whether the session's queue gets the
-	// snapshot_complete messages a recovery waits for. Every session does,
-	// except a low-priority one next to a high-priority one, which would
-	// see each completion twice. It changes as sessions come and go, since
-	// "next to" means the other open sessions of the client.
-	takesSnapshotComplete bool
 	// producers are the producers of the catalog the session's interest
 	// covers, as of when it registered, in id order. A producer the catalog
 	// learns later is not in it.
@@ -66,29 +60,20 @@ type snapshotCompleteFact struct {
 
 // sessionFacts is a copy of a sessionRecord for readers outside the lock.
 type sessionFacts struct {
-	id                    uuid.UUID
-	interest              types.MessageInterest
-	takesSnapshotComplete bool
-	producers             []int
-	processed             map[int]processedFact
-	alive                 map[int]aliveFact
-	snapshotComplete      map[int]snapshotCompleteFact
+	id               uuid.UUID
+	interest         types.MessageInterest
+	producers        []int
+	processed        map[int]processedFact
+	alive            map[int]aliveFact
+	snapshotComplete map[int]snapshotCompleteFact
 }
 
 // hasLane reports whether the session has a lane of its own to recover: it
-// receives messages. The alive-only interest has none, so it holds no
+// receives messages, and so takes snapshot_complete (every session with a
+// lane is bound to it, fixed when the session opens). The alive-only interest has none, so it holds no
 // recovery and loses nothing.
 func hasLane(interest types.MessageInterest) bool {
 	return interest != types.SystemAliveOnly
-}
-
-// takesSnapshotComplete is the rule for one session among the interests of
-// all the open sessions of the client.
-func takesSnapshotComplete(interest types.MessageInterest, all []types.MessageInterest) bool {
-	if !hasLane(interest) {
-		return false
-	}
-	return !(interest == types.LowPriorityOnlyMessageInterest && slices.Contains(all, types.HiPriorityOnlyMessageInterest))
 }
 
 // producersOfInterest lists the catalog's producers the interest covers, in
@@ -111,18 +96,6 @@ func (m *Manager) producersOfInterest(interest types.MessageInterest) []int {
 	return ids
 }
 
-// refreshSnapshotCompleteLocked recomputes which sessions take
-// snapshot_complete. clientMu must be held.
-func (m *Manager) refreshSnapshotCompleteLocked() {
-	all := make([]types.MessageInterest, 0, len(m.clientSessions))
-	for _, rec := range m.clientSessions {
-		all = append(all, rec.interest)
-	}
-	for _, rec := range m.clientSessions {
-		rec.takesSnapshotComplete = takesSnapshotComplete(rec.interest, all)
-	}
-}
-
 // sessionFactsOf returns a copy of the record of a session, if it is
 // registered.
 func (m *Manager) sessionFactsOf(session uuid.UUID) (sessionFacts, bool) {
@@ -133,13 +106,12 @@ func (m *Manager) sessionFactsOf(session uuid.UUID) (sessionFacts, bool) {
 		return sessionFacts{}, false
 	}
 	return sessionFacts{
-		id:                    rec.id,
-		interest:              rec.interest,
-		takesSnapshotComplete: rec.takesSnapshotComplete,
-		producers:             slices.Clone(rec.producers),
-		processed:             cloneMap(rec.processed),
-		alive:                 cloneMap(rec.alive),
-		snapshotComplete:      cloneMap(rec.snapshotComplete),
+		id:               rec.id,
+		interest:         rec.interest,
+		producers:        slices.Clone(rec.producers),
+		processed:        cloneMap(rec.processed),
+		alive:            cloneMap(rec.alive),
+		snapshotComplete: cloneMap(rec.snapshotComplete),
 	}, true
 }
 

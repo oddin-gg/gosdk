@@ -34,9 +34,6 @@ func TestSessionRegistry_RecordHoldsInterestAndProducersOfInterest(t *testing.T)
 		if !slices.Equal(rec.producers, tc.want) {
 			t.Fatalf("%s: producers = %v, want %v", tc.interest, rec.producers, tc.want)
 		}
-		if !rec.takesSnapshotComplete {
-			t.Fatalf("%s: a session alone takes snapshot_complete", tc.interest)
-		}
 	}
 }
 
@@ -54,8 +51,8 @@ func TestSessionRegistry_AliveOnlyHasNoLane(t *testing.T) {
 	if len(m.clientSessions) != 0 {
 		t.Fatalf("registry = %v, want empty", m.clientSessions)
 	}
-	if takesSnapshotComplete(types.SystemAliveOnly, nil) {
-		t.Fatal("an alive-only session takes no snapshot_complete")
+	if hasLane(types.SystemAliveOnly) {
+		t.Fatal("an alive-only session has no lane")
 	}
 	m.OnMessageProcessed(id, 1, time.Now(), systemClock{}.now(), 0)
 	m.OnSessionAlive(id, 1, time.Now(), systemClock{}.now(), true, types.SystemAliveOnly)
@@ -67,59 +64,28 @@ func TestSessionRegistry_AliveOnlyHasNoLane(t *testing.T) {
 	}
 }
 
-// A low-priority session next to a high-priority one does not take
-// snapshot_complete (it would see each completion twice); alone it does. The
-// answer follows the sessions that are open, in whatever order they came.
-func TestSessionRegistry_LowPriorityNextToHighDoesNotTakeSnapshotComplete(t *testing.T) {
-	takes := func(m *Manager, id uuid.UUID) bool {
-		t.Helper()
-		rec, ok := m.sessionFactsOf(id)
-		if !ok {
-			t.Fatalf("session %s not registered", id)
-		}
-		return rec.takesSnapshotComplete
-	}
+// Every session with a lane takes snapshot_complete, fixed when it opens: a
+// low-priority session next to a high-priority one records a completion like
+// any other, and the other sessions coming and going change nothing for it.
+func TestSessionRegistry_LowPriorityNextToHighTakesSnapshotCompleteToo(t *testing.T) {
 	m, _ := openedManagerWithActors(t, 1)
-	low, hi, all := uuid.New(), uuid.New(), uuid.New()
-
+	low, hi := uuid.New(), uuid.New()
 	m.OnClientSessionOpened(low, types.LowPriorityOnlyMessageInterest)
-	if !takes(m, low) {
-		t.Fatal("a low-priority session alone takes snapshot_complete")
-	}
 	m.OnClientSessionOpened(hi, types.HiPriorityOnlyMessageInterest)
-	if takes(m, low) {
-		t.Fatal("a low-priority session next to a high-priority one must not take snapshot_complete")
-	}
-	if !takes(m, hi) {
-		t.Fatal("the high-priority session takes snapshot_complete")
-	}
-	m.OnClientSessionOpened(all, types.AllMessageInterest)
-	if !takes(m, all) || takes(m, low) {
-		t.Fatalf("an unrelated session changed the rule: all=%v low=%v", takes(m, all), takes(m, low))
-	}
-	m.OnFeedSessionGone(hi)
-	if !takes(m, low) {
-		t.Fatal("the low-priority session takes snapshot_complete again once the high-priority one is gone")
-	}
-}
 
-func TestTakesSnapshotComplete_Rule(t *testing.T) {
-	lo, hi, live := types.LowPriorityOnlyMessageInterest, types.HiPriorityOnlyMessageInterest, types.LiveOnlyMessageInterest
-	for _, tc := range []struct {
-		name     string
-		interest types.MessageInterest
-		all      []types.MessageInterest
-		want     bool
-	}{
-		{"low alone", lo, []types.MessageInterest{lo}, true},
-		{"low next to hi", lo, []types.MessageInterest{lo, hi}, false},
-		{"hi next to low", hi, []types.MessageInterest{lo, hi}, true},
-		{"low next to live", lo, []types.MessageInterest{lo, live}, true},
-		{"alive-only", types.SystemAliveOnly, []types.MessageInterest{hi}, false},
-	} {
-		if got := takesSnapshotComplete(tc.interest, tc.all); got != tc.want {
-			t.Errorf("%s: %v, want %v", tc.name, got, tc.want)
+	for name, id := range map[string]uuid.UUID{"low": low, "hi": hi} {
+		m.recordSnapshotComplete(id, 1, 5)
+		rec, ok := m.sessionFactsOf(id)
+		if !ok || rec.snapshotComplete[1].requestID != 5 {
+			t.Fatalf("%s: snapshot_complete fact = %+v (ok=%v)", name, rec.snapshotComplete, ok)
 		}
+	}
+
+	m.OnFeedSessionGone(hi)
+	m.recordSnapshotComplete(low, 1, 6)
+	rec, ok := m.sessionFactsOf(low)
+	if !ok || rec.snapshotComplete[1].requestID != 6 {
+		t.Fatalf("after the high-priority session is gone: %+v (ok=%v)", rec.snapshotComplete, ok)
 	}
 }
 
