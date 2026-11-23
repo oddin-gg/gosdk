@@ -54,8 +54,8 @@ func TestSessionRegistry_AliveOnlyHasNoLane(t *testing.T) {
 	if hasLane(types.SystemAliveOnly) {
 		t.Fatal("an alive-only session has no lane")
 	}
-	m.OnMessageProcessed(id, 1, time.Now(), systemClock{}.now(), 0)
-	m.OnSessionAlive(id, 1, time.Now(), systemClock{}.now(), true, types.SystemAliveOnly)
+	m.OnMessageProcessed(id, 1, time.Now(), systemClock{}.Now(), 0)
+	m.OnSessionAlive(id, 1, time.Now(), systemClock{}.Now(), true, types.SystemAliveOnly)
 	if _, ok := m.sessionFactsOf(id); ok {
 		t.Fatal("a fact registered an alive-only session")
 	}
@@ -101,9 +101,9 @@ func TestSessionRegistry_KeepsFactsPerSessionAndProducer(t *testing.T) {
 	m.OnClientSessionOpened(b, types.AllMessageInterest)
 
 	gen1, gen2 := time.Unix(1_700_000_000, 0), time.Unix(1_700_000_005, 0)
-	taken1 := clk.now()
+	taken1 := clk.Now()
 	clk.advance(time.Second)
-	taken2 := clk.now()
+	taken2 := clk.Now()
 
 	m.OnMessageProcessed(a, 1, gen1, taken1, 0)
 	m.OnMessageProcessed(a, 1, gen2, taken2, 55)
@@ -149,7 +149,7 @@ func TestSessionRegistry_SnapshotCompleteRecordedOnlyWhenAdmitted(t *testing.T) 
 	}
 	rec, _ := m.sessionFactsOf(id)
 	f, ok := rec.snapshotComplete[3]
-	if !ok || f.requestID != 77 || f.at != clk.now() {
+	if !ok || f.requestID != 77 || f.at != clk.Now() {
 		t.Fatalf("snapshot complete = %+v (ok=%v), want request 77 at the fake clock's reading", f, ok)
 	}
 
@@ -171,20 +171,20 @@ func TestSessionRegistry_FactAfterRemovalIsDropped(t *testing.T) {
 	id := uuid.New()
 
 	// Before it is registered a fact has nowhere to go.
-	m.OnMessageProcessed(id, 1, time.Now(), systemClock{}.now(), 0)
+	m.OnMessageProcessed(id, 1, time.Now(), systemClock{}.Now(), 0)
 	if _, ok := m.sessionFactsOf(id); ok {
 		t.Fatal("a fact registered a session")
 	}
 
 	m.OnClientSessionOpened(id, types.AllMessageInterest)
-	m.OnMessageProcessed(id, 1, time.Now(), systemClock{}.now(), 0)
+	m.OnMessageProcessed(id, 1, time.Now(), systemClock{}.Now(), 0)
 	if rec, ok := m.sessionFactsOf(id); !ok || rec.processed[1].count != 1 {
 		t.Fatalf("record = %+v (ok=%v), want one processed fact", rec, ok)
 	}
 
 	m.OnFeedSessionGone(id)
-	m.OnMessageProcessed(id, 1, time.Now(), systemClock{}.now(), 0)
-	m.OnSessionAlive(id, 1, time.Now(), systemClock{}.now(), true, types.AllMessageInterest)
+	m.OnMessageProcessed(id, 1, time.Now(), systemClock{}.Now(), 0)
+	m.OnSessionAlive(id, 1, time.Now(), systemClock{}.Now(), true, types.AllMessageInterest)
 	if err := m.OnSnapshotCompleteReceived(t.Context(), id, 1, 9, types.AllMessageInterest); err != nil {
 		t.Fatal(err)
 	}
@@ -223,7 +223,7 @@ func TestManager_OnSessionAliveForwardsToActor(t *testing.T) {
 	m.OnClientSessionOpened(id, types.AllMessageInterest)
 
 	created := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
-	m.OnSessionAlive(id, 1, created, systemClock{}.now(), true, types.AllMessageInterest)
+	m.OnSessionAlive(id, 1, created, systemClock{}.Now(), true, types.AllMessageInterest)
 	actorBarrier(t, m, pm, 1)
 	if got := actorOf(t, m, 1).lastUserSessionAlive; !got.Equal(created) {
 		t.Fatalf("lastUserSessionAlive = %v, want %v", got, created)
@@ -231,7 +231,7 @@ func TestManager_OnSessionAliveForwardsToActor(t *testing.T) {
 
 	m.OnFeedSessionGone(id)
 	later := created.Add(time.Minute)
-	m.OnSessionAlive(id, 1, later, systemClock{}.now(), true, types.AllMessageInterest)
+	m.OnSessionAlive(id, 1, later, systemClock{}.Now(), true, types.AllMessageInterest)
 	actorBarrier(t, m, pm, 1)
 	if _, ok := m.sessionFactsOf(id); ok {
 		t.Fatal("an alive brought a removed session back")

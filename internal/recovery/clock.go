@@ -4,7 +4,7 @@ import (
 	"time"
 )
 
-// stamp is what a fact carries of when it happened: both readings taken at
+// Stamp is what a fact carries of when it happened: both readings taken at
 // one moment, on the goroutine that saw it (the recovery side handles it
 // later).
 //
@@ -17,31 +17,23 @@ import (
 // Go cannot build a time.Time with an arbitrary monotonic reading, which is
 // why the monotonic side is a separate field and not the one embedded in
 // wall: a test can then move the two apart.
-type stamp struct {
+type Stamp struct {
 	wall time.Time
 	mono time.Duration
 }
 
-// Stamp is the exported name of stamp for the packages that post facts.
-type Stamp = stamp
-
 // NewStamp builds a stamp from its two readings.
-func NewStamp(wall time.Time, mono time.Duration) Stamp { return stamp{wall: wall, mono: mono} }
+func NewStamp(wall time.Time, mono time.Duration) Stamp { return Stamp{wall: wall, mono: mono} }
 
 // Wall is the wall-clock reading.
-func (s stamp) Wall() time.Time { return s.wall }
+func (s Stamp) Wall() time.Time { return s.wall }
 
 // Mono is the monotonic reading.
-func (s stamp) Mono() time.Duration { return s.mono }
+func (s Stamp) Mono() time.Duration { return s.mono }
 
-// clock reads both clocks at once. One is made per feed and handed to
+// Clock reads both clocks at once. One is made per feed and handed to
 // everything that stamps a fact or measures a duration, so the readings of
 // a fact and of whoever judges it come from one source.
-type clock interface {
-	now() stamp
-}
-
-// Clock is the exported name of clock for the packages that post facts.
 type Clock interface {
 	// Now reads both clocks.
 	Now() Stamp
@@ -57,13 +49,11 @@ type systemClock struct{}
 // monotonic one counted from the start of the process.
 func SystemClock() Clock { return systemClock{} }
 
-func (systemClock) Now() Stamp { return systemClock{}.now() }
-
-func (systemClock) now() stamp {
+func (systemClock) Now() Stamp {
 	// One time.Now call serves both readings, so they are taken at the
 	// same moment.
 	t := time.Now()
-	return stamp{wall: t, mono: t.Sub(processStart)}
+	return Stamp{wall: t, mono: t.Sub(processStart)}
 }
 
 // wallStep is how far the difference between a stamp's wall and mono
@@ -89,7 +79,7 @@ type clockOffset struct {
 //
 // generatedAt is the alive's timestamp by the producer's clock; received is
 // when the SDK received it.
-func measureOffset(generatedAt time.Time, received stamp) clockOffset {
+func measureOffset(generatedAt time.Time, received Stamp) clockOffset {
 	return clockOffset{
 		offset: received.wall.Sub(generatedAt),
 		skew:   wallMinusMono(received),
@@ -99,7 +89,7 @@ func measureOffset(generatedAt time.Time, received stamp) clockOffset {
 // wallMinusMono is the difference between a stamp's two readings. No step of
 // the wall clock can move the monotonic one, so a change of this difference
 // is exactly the step.
-func wallMinusMono(s stamp) time.Duration {
+func wallMinusMono(s Stamp) time.Duration {
 	return time.Duration(s.wall.UnixNano()) - s.mono
 }
 
@@ -109,7 +99,7 @@ func wallMinusMono(s stamp) time.Duration {
 // wall clock stepped, and the offset is moved by the step, the producer's
 // clock not having moved with it. Less than that is the jitter of reading
 // two clocks, or a slew, and leaves it.
-func (o clockOffset) at(reading stamp) time.Duration {
+func (o clockOffset) at(reading Stamp) time.Duration {
 	step := wallMinusMono(reading) - o.skew
 	if step > wallStep || step < -wallStep {
 		return o.offset + step
@@ -119,6 +109,6 @@ func (o clockOffset) at(reading stamp) time.Duration {
 
 // producerNow is the producer's clock now: the SDK's wall clock at the
 // reading less the offset as of that reading.
-func (o clockOffset) producerNow(reading stamp) time.Time {
+func (o clockOffset) producerNow(reading Stamp) time.Time {
 	return reading.wall.Add(-o.at(reading))
 }

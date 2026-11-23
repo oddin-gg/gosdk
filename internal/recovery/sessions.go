@@ -43,7 +43,7 @@ type processedFact struct {
 	// taken is when the session began processing the message, both
 	// readings: its age includes the time it waited in the broker's queue
 	// and the session's own.
-	taken stamp
+	taken Stamp
 	// requestID is the recovery the message belongs to; 0 for a live message.
 	requestID int
 	// count is how many messages of the producer the session has reported.
@@ -53,7 +53,7 @@ type processedFact struct {
 // aliveFact is the last alive of a producer a session has handled.
 type aliveFact struct {
 	generatedAt time.Time
-	taken       stamp
+	taken       Stamp
 	subscribed  bool
 }
 
@@ -61,7 +61,7 @@ type aliveFact struct {
 // has handled.
 type snapshotCompleteFact struct {
 	requestID int
-	at        stamp
+	at        Stamp
 }
 
 // sessionFacts is a copy of a sessionRecord for readers outside the lock.
@@ -174,7 +174,7 @@ func (m *Manager) OnSessionAlive(session uuid.UUID, producerID int, generatedAt 
 // recordSnapshotComplete notes that a snapshot_complete has been admitted to the actor for the session:
 // recorded as the session's last completion of the producer.
 func (m *Manager) recordSnapshotComplete(session uuid.UUID, producerID int, requestID int) {
-	at := m.clock().now()
+	at := m.clock().Now()
 	m.clientMu.Lock()
 	defer m.clientMu.Unlock()
 	if rec, ok := m.clientSessions[session]; ok {
@@ -184,7 +184,7 @@ func (m *Manager) recordSnapshotComplete(session uuid.UUID, producerID int, requ
 
 // clock is the manager's clock; a manager built without one reads the
 // system's.
-func (m *Manager) clock() clock {
+func (m *Manager) clock() Clock {
 	if m.clk == nil {
 		return systemClock{}
 	}

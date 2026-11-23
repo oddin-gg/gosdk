@@ -22,13 +22,11 @@ func newFakeClock() *fakeClock {
 	}
 }
 
-func (c *fakeClock) now() stamp {
+func (c *fakeClock) Now() Stamp {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return stamp{wall: c.wall, mono: c.mono}
+	return Stamp{wall: c.wall, mono: c.mono}
 }
-
-func (c *fakeClock) Now() Stamp { return c.now() }
 
 // advance moves both readings by d, as time passing does.
 func (c *fakeClock) advance(d time.Duration) {
@@ -52,28 +50,28 @@ func (c *fakeClock) advanceMono(d time.Duration) {
 	c.mono += d
 }
 
-var _ clock = (*fakeClock)(nil)
 var _ Clock = (*fakeClock)(nil)
-var _ clock = systemClock{}
+var _ Clock = (*fakeClock)(nil)
+var _ Clock = systemClock{}
 
 func TestFakeClock_ReadingsMoveIndependently(t *testing.T) {
 	c := newFakeClock()
-	start := c.now()
+	start := c.Now()
 
 	c.stepWall(30 * time.Second)
-	got := c.now()
+	got := c.Now()
 	if got.mono != start.mono || !got.wall.Equal(start.wall.Add(30*time.Second)) {
 		t.Fatalf("a wall step moved the monotonic side: %+v -> %+v", start, got)
 	}
 
 	c.advanceMono(5 * time.Second)
-	after := c.now()
+	after := c.Now()
 	if after.mono-got.mono != 5*time.Second || !after.wall.Equal(got.wall) {
 		t.Fatalf("a monotonic move moved the wall side: %+v -> %+v", got, after)
 	}
 
 	c.advance(time.Second)
-	last := c.now()
+	last := c.Now()
 	if last.mono-after.mono != time.Second || last.wall.Sub(after.wall) != time.Second {
 		t.Fatalf("advance must move both: %+v -> %+v", after, last)
 	}
@@ -102,13 +100,13 @@ func TestSystemClock_MonotonicSideCountsFromProcessStartAndNeverGoesBack(t *test
 
 // measured at the feed, producer's clock 3 s behind the SDK's.
 func measuredOn(c *fakeClock, behind time.Duration) clockOffset {
-	r := c.now()
+	r := c.Now()
 	return measureOffset(r.wall.Add(-behind), r)
 }
 
 func TestClockOffset_Measured(t *testing.T) {
 	c := newFakeClock()
-	r := c.now()
+	r := c.Now()
 	o := measureOffset(r.wall.Add(-3*time.Second), r)
 	if o.offset != 3*time.Second {
 		t.Fatalf("offset = %v, want 3s", o.offset)
@@ -128,7 +126,7 @@ func TestClockOffset_BothClocksAdvancingLeavesTheOffset(t *testing.T) {
 	c := newFakeClock()
 	o := measuredOn(c, 3*time.Second)
 	c.advance(10 * time.Minute)
-	if got := o.at(c.now()); got != 3*time.Second {
+	if got := o.at(c.Now()); got != 3*time.Second {
 		t.Fatalf("offset after time passed = %v, want 3s", got)
 	}
 }
@@ -140,11 +138,11 @@ func TestClockOffset_StepOfTheWallClockIsCorrectedOut(t *testing.T) {
 	for _, step := range []time.Duration{30 * time.Second, -30 * time.Second, 10 * time.Minute, -10 * time.Minute} {
 		c := newFakeClock()
 		o := measuredOn(c, 3*time.Second)
-		before := c.now()
+		before := c.Now()
 		producerNowBefore := o.producerNow(before)
 
 		c.stepWall(step)
-		after := c.now()
+		after := c.Now()
 
 		if got, want := o.at(after), 3*time.Second+step; got != want {
 			t.Errorf("step %v: offset = %v, want %v", step, got, want)
@@ -161,7 +159,7 @@ func TestClockOffset_StepThenTimePassing(t *testing.T) {
 	o := measuredOn(c, 3*time.Second)
 	c.stepWall(-30 * time.Second)
 	c.advance(2 * time.Minute)
-	if got, want := o.at(c.now()), 3*time.Second-30*time.Second; got != want {
+	if got, want := o.at(c.Now()), 3*time.Second-30*time.Second; got != want {
 		t.Fatalf("offset = %v, want %v", got, want)
 	}
 }
@@ -188,7 +186,7 @@ func TestClockOffset_AMovementUnderASecondIsNotAStepAndOneOverItIs(t *testing.T)
 			if tc.stepped {
 				want += tc.move
 			}
-			if got := o.at(c.now()); got != want {
+			if got := o.at(c.Now()); got != want {
 				t.Fatalf("offset = %v, want %v", got, want)
 			}
 		})
@@ -202,7 +200,7 @@ func TestClockOffset_MonotonicMovingAloneReadsAsAWallStepBack(t *testing.T) {
 	c := newFakeClock()
 	o := measuredOn(c, 3*time.Second)
 	c.advanceMono(5 * time.Second)
-	if got, want := o.at(c.now()), 3*time.Second-5*time.Second; got != want {
+	if got, want := o.at(c.Now()), 3*time.Second-5*time.Second; got != want {
 		t.Fatalf("offset = %v, want %v", got, want)
 	}
 }
@@ -213,9 +211,9 @@ func TestClockOffset_AtIsStateless(t *testing.T) {
 	c := newFakeClock()
 	o := measuredOn(c, 3*time.Second)
 	c.stepWall(30 * time.Second)
-	stepped := c.now()
+	stepped := c.Now()
 	c.stepWall(-30 * time.Second)
-	back := c.now()
+	back := c.Now()
 
 	if got := o.at(stepped); got != 33*time.Second {
 		t.Fatalf("stepped reading: offset = %v, want 33s", got)

@@ -193,9 +193,9 @@ type Manager struct {
 	clientMu       sync.Mutex
 	clientSessions map[uuid.UUID]*sessionRecord
 
-	// clk stamps the facts the manager itself takes; the production clock
-	// unless a test sets another.
-	clk clock
+	// clk stamps the facts the manager itself takes; nil reads the system's
+	// clock, and a test sets another.
+	clk Clock
 }
 
 // tickDropWarnInterval bounds how often per-producer tick-drop warns are
@@ -219,7 +219,6 @@ func NewManager(cfg config.Config, producerManager *producer.Manager, apiClient 
 		logger:              logger,
 		initialSnapshotTime: initialSnapshotTime,
 		sequence:            newGenerator(1),
-		clk:                 systemClock{},
 		actors:              make(map[int]*recoveryActor),
 		handles:             make(map[int]*Handle),
 		processingTimes:     make(map[uuid.UUID]time.Time),

@@ -807,7 +807,6 @@ func newSession(
 		exchangeName:             exchangeName,
 		sportIDPrefix:            sportIDPrefix,
 		sessionID:                sessionID,
-		clock:                    recovery.SystemClock(),
 		isReplay:                 isReplay,
 		logger:                   logger,
 		exceptionStrategy:        exceptionStrategy,
