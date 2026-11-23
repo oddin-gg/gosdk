@@ -755,9 +755,7 @@ func (m *Manager) OnFeedChannelRestored(session uuid.UUID) { m.sessionQueueSettl
 // It needs no queue, so it must not hold recoveries back.
 func (m *Manager) OnFeedSessionGone(session uuid.UUID) {
 	m.clientMu.Lock()
-	if _, ok := m.clientSessions[session]; ok {
-		delete(m.clientSessions, session)
-	}
+	delete(m.clientSessions, session)
 	m.clientMu.Unlock()
 	m.sessionQueueSettled(session)
 }
