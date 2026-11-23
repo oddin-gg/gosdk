@@ -213,3 +213,30 @@ func TestSessionRegistry_DerivedViewsUnchanged(t *testing.T) {
 		t.Fatal("a stalled live session must not hold the deadline of a prematch producer")
 	}
 }
+
+// The alive of a client session reaches the actor as the sign that the
+// client side is getting messages, whether or not the registry still holds
+// the session: the fact goes to the record, the alive to the actor.
+func TestManager_OnSessionAliveForwardsToActor(t *testing.T) {
+	m, pm := openedManagerWithActors(t, 1)
+	id := uuid.New()
+	m.OnClientSessionOpened(id, types.AllMessageInterest)
+
+	created := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
+	m.OnSessionAlive(id, 1, created, systemClock{}.now(), true, types.AllMessageInterest)
+	actorBarrier(t, m, pm, 1)
+	if got := actorOf(t, m, 1).lastUserSessionAlive; !got.Equal(created) {
+		t.Fatalf("lastUserSessionAlive = %v, want %v", got, created)
+	}
+
+	m.OnFeedSessionGone(id)
+	later := created.Add(time.Minute)
+	m.OnSessionAlive(id, 1, later, systemClock{}.now(), true, types.AllMessageInterest)
+	actorBarrier(t, m, pm, 1)
+	if _, ok := m.sessionFactsOf(id); ok {
+		t.Fatal("an alive brought a removed session back")
+	}
+	if got := actorOf(t, m, 1).lastUserSessionAlive; !got.Equal(later) {
+		t.Fatalf("after the session is gone: lastUserSessionAlive = %v, want %v", got, later)
+	}
+}
