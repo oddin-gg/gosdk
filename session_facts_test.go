@@ -262,6 +262,21 @@ func TestSession_AliveOnlySessionPostsNoSessionFacts(t *testing.T) {
 	if a.session != (uuid.UUID{}) || a.producer != 1 || !a.generatedAt.Equal(created) || !a.subscribed {
 		t.Fatalf("system alive = %+v", a)
 	}
+
+	// A message that is not an alive, on the same interest, is not the
+	// client's processing either: whatever reaches the pump carries no
+	// processed fact.
+	o.processFeedMessage(t.Context(), oddsChangeFM(created, nil), types.SystemAliveOnly, nil, false, nil)
+	select {
+	case env := <-o.msgCh:
+		if env.settled != nil {
+			env.settled()
+		}
+	default:
+	}
+	if got := l.of("processed"); len(got) != 0 {
+		t.Fatalf("an alive-only session posted processed facts: %+v", got)
+	}
 }
 
 // A snapshot_complete names its session.
