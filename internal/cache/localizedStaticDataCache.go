@@ -226,17 +226,15 @@ func (l *LocalizedStaticDataCache) Item(ctx context.Context, id int) (types.Loca
 	return l.LocalizedItem(ctx, id, l.locales)
 }
 
-// Close cancels the lifecycle ctx (stopping the periodic-refresh
-// goroutine and any in-flight fetch) and JOINS the refresh goroutine —
-// cancel-without-join let it briefly outlive Client.Done, breaking the
-// "Close nil return means all internal work finished" determinism
-// contract. The join cannot hang: every path in the refresh loop is
-// bounded by lifeCtx (in-flight fetches derive from it with a load
-// timeout), so cancellation unwinds it promptly. Idempotent AND safe
-// for concurrent callers — the previous bare read-then-nil of closeFn
-// raced when two goroutines closed at once (cache.Manager.Close has no
-// serialization of its own); concurrent callers all block until the
-// goroutine has exited.
+// Close ends the lifetime shared by every cache of the manager (stopping the
+// periodic-refresh goroutine and every in-flight fetch of every cache) and
+// JOINS the refresh goroutine — ending without the join let it briefly outlive
+// Client.Done, breaking the "Close nil return means all internal work
+// finished" determinism contract. The join cannot hang: every path in the
+// refresh loop is bounded by the lifetime (in-flight fetches derive from it
+// with a load timeout), so ending it unwinds the loop promptly. Idempotent AND
+// safe for concurrent callers: ending the lifetime is, and all callers block
+// until the goroutine has exited.
 func (l *LocalizedStaticDataCache) Close() {
 	l.CloseCtx(context.Background())
 }
@@ -284,7 +282,7 @@ func (l *LocalizedStaticDataCache) timerTick(ctx context.Context) {
 		loc := locale
 		_, _ = l.sf.Do(string(loc), func() (interface{}, error) {
 			// Same bound as loadLocales: the refresh fetch dies with the
-			// cache lifetime (ctx here IS lifeCtx) and can't run forever
+			// cache lifetime (ctx here is the lifetime context) and can't run forever
 			// on a timeout-less custom HTTP client.
 			fetchCtx, cancel := context.WithTimeout(ctx, lru.LoadTimeout)
 			defer cancel()
