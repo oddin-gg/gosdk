@@ -236,6 +236,11 @@ func (m *MatchStatusCache) MatchStatus(ctx context.Context, id types.URN) (*Loca
 			}
 			entry, ok := m.lookup(id)
 			if !ok {
+				// Closed while the fetch ran: the observer's store was
+				// refused, which is neither a miss nor an absent match.
+				if err := m.life.Err(); err != nil {
+					return nil, err
+				}
 				// Distinguish WHY a successful fetch didn't populate.
 				// A ClearCacheItem/Purge landing mid-flight suppresses
 				// the observer's store (per-id tombstone) — a transient

@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -546,5 +547,25 @@ func TestClose_ARefreshThatEndsAfterCloseKeepsTheStaticData(t *testing.T) {
 	c.timerTick(t.Context())
 	if got := read(); got != "live" {
 		t.Fatalf("a refresh that finished after Close stored %q", got)
+	}
+}
+
+// A status fetch whose response arrives after Close is refused by the
+// observer's store; the caller gets the closed error, not a cache miss that
+// reads as an absent match.
+func TestClose_AStatusFetchClosedMidFlightReportsClosed(t *testing.T) {
+	var catalog atomic.Pointer[string]
+	seed := bulkCatalogWithStaticVariants
+	catalog.Store(&seed)
+	client := newAPIClientForTest(t, closeCommitServer(t, &catalog))
+	life := testLife(t)
+	// Subscribed before the cache, so it sees the response first: the
+	// lifetime ends after the download and before the store.
+	client.SubscribeWithAPIObserver(holdObserver(life.End))
+	c := newMatchStatusCache(life, client, &fakeCacheCfg{}, log.New(nil))
+
+	_, err := c.MatchStatus(t.Context(), types.URN{Prefix: "od", Type: "match", ID: 42})
+	if err == nil || errors.Is(err, ErrItemNotFoundInCache) {
+		t.Fatalf("got %v, want the closed error", err)
 	}
 }
