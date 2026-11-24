@@ -345,6 +345,37 @@ func TestMachineTime_FailedRecoveryIsAskedForAgainWithBackoffThreeTimesThenEvery
 	expect(t, f.lastStatus(pre).cause, causeFirstRecoveryCompleted, "cause")
 }
 
+// Of the failures at the slow pace, the first is a warning; the rest, one per
+// producer per interval, are debug.
+func TestMachineTime_OnlyTheFirstSlowRetryFailureIsAWarning(t *testing.T) {
+	f := newFeed(t)
+	f.open(1, all)
+	f.startFeed()
+	f.alive(pre)
+	f.logs.take()
+	for _, pause := range backoffs {
+		f.refuse(f.lastSnapshot(pre))
+		f.runWithAlives(pause)
+	}
+	f.refuse(f.lastSnapshot(pre))
+	for range 4 {
+		f.runWithAlives(slowRetryInterval)
+		f.refuse(f.lastSnapshot(pre))
+	}
+	slow, warned := 0, 0
+	for _, line := range f.logs.take() {
+		if strings.Contains(line, "so the producer stays down") {
+			slow++
+			if strings.HasPrefix(line, "WARN ") {
+				warned++
+			}
+		}
+	}
+	expect(t, slow, 5, "failures at the slow pace")
+	expect(t, warned, 1, "of them warnings")
+	expect(t, f.lastStatus(pre).cause, causeRecoveryFailed, "the producer stays down for the failure")
+}
+
 // A success after the slow retry starts the backoff over for the next failure.
 func TestMachineTime_SuccessAfterTheSlowRetryStartsTheBackoffOver(t *testing.T) {
 	f := newFeed(t)
@@ -1372,4 +1403,20 @@ func TestMachineTime_QuietSessionIsNoLatenessWhenNoAliveIsRecent(t *testing.T) {
 	f.m.tick()
 	expect(t, f.lastStatus(pre).cause, causeAliveIntervalViolation, "cause")
 	expect(t, f.m.byID[pre].delayed, false, "delayed")
+}
+
+// A producer's inactivity counts from the start of the feed when that is later
+// than the machine's making: time before the start does not count.
+func TestMachineTime_TimeBetweenMakingTheMachineAndStartingItIsNotInactivity(t *testing.T) {
+	f := newFeed(t)
+	f.open(1, all)
+	f.clock.advance(2 * f.m.settings.maxInactivity)
+	f.startFeed()
+	f.advance(5 * time.Second)
+	expect(t, f.m.byID[pre].inactive, false, "inactive shortly after the start")
+	expect(t, len(f.statusesOf(pre)), 0, "status changes")
+
+	f.advance(f.m.settings.maxInactivity)
+	expect(t, f.m.byID[pre].inactive, true, "inactive once the limit has passed since the start")
+	expect(t, f.lastStatus(pre).cause, causeAliveIntervalViolation, "cause")
 }

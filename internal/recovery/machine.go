@@ -133,8 +133,10 @@ func newMachine(
 // ---- the lifecycle
 
 // sessionOpened registers a session, before or after start. A session whose
-// interest has a lane gets one for every producer it covers.
-func (m *machine) sessionOpened(id uuid.UUID, interest types.MessageInterest) {
+// interest has a lane gets one for every producer it covers. openedAt is a
+// reading of the clock taken by the caller before the session's queue is bound,
+// so no message in the queue is older than the lane's checkpoint.
+func (m *machine) sessionOpened(id uuid.UUID, interest types.MessageInterest, openedAt Stamp) {
 	if m.session(id) != nil {
 		m.log.Warnf("Session %s opened twice; the second is ignored", id)
 		return
@@ -149,7 +151,7 @@ func (m *machine) sessionOpened(id uuid.UUID, interest types.MessageInterest) {
 	}
 	for _, t := range m.tracks {
 		if interest.IsProducerInScope(t.producer) {
-			m.addLane(s, t)
+			m.addLane(s, t, openedAt)
 		}
 	}
 	for _, l := range s.lanes {
@@ -166,8 +168,9 @@ func (m *machine) sessionOpened(id uuid.UUID, interest types.MessageInterest) {
 // the lanes got at start, from the client's seed, so what it never received is
 // asked for. A lane of a producer that has recovered starts at the producer's
 // now, with no gap: it has nothing from before it, and misses nothing a
-// recovery could bring.
-func (m *machine) addLane(s *session, t *track) {
+// recovery could bring; its checkpoint is that reading of the producer's clock
+// at openedAt, the reading taken before the session's queue was bound.
+func (m *machine) addLane(s *session, t *track, openedAt Stamp) {
 	l := &lane{producer: t.id}
 	s.lanes = append(s.lanes, l)
 	if !m.started {
@@ -180,7 +183,7 @@ func (m *machine) addLane(s *session, t *track) {
 		m.markDown(t, causeSessionOpened)
 		return
 	}
-	l.checkpoint = t.producerNow(m.clock.Now())
+	l.checkpoint = t.producerNow(openedAt)
 }
 
 // sessionClosed removes a session: it leaves the checkpoints and the
@@ -726,10 +729,6 @@ func (m *machine) publishInfo(t *track, a *active, successful bool) {
 // with none, the producer is up.
 func (m *machine) complete(t *track, a *active, mono time.Duration) {
 	t.active = nil
-	if !a.accepted {
-		// the snapshot_complete was quicker than the API's answer
-		m.publishInfo(t, a, true)
-	}
 	if t.gap != nil && t.gap.seq <= a.covers {
 		t.gap = nil
 	}
@@ -752,7 +751,9 @@ func (m *machine) complete(t *track, a *active, mono time.Duration) {
 	t.failures = 0
 	t.retryAt = 0
 	m.counters.completed++
-	t.everRecovered = true
+	if m.witnessed(a) {
+		t.everRecovered = true
+	}
 	m.log.Infof("Recovery %d of producer %d completed in %d ms, for %v",
 		a.requestID, t.id, (mono - a.issuedMono).Milliseconds(), a.causes)
 	if m.hasGaps(t) {
@@ -760,6 +761,19 @@ func (m *machine) complete(t *track, a *active, mono time.Duration) {
 		return
 	}
 	m.bringUp(t, causeRecoveryCompleted)
+}
+
+// witnessed reports whether a session still open saw the recovery's
+// snapshot_complete. Only then did the snapshot reach a queue that is still
+// there; a recovery whose every witness closed since leaves the producer as
+// never recovered, so a session opened next starts from the client's seed.
+func (m *machine) witnessed(a *active) bool {
+	for id := range a.seen {
+		if m.session(id) != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // failed says the API did not accept the recovery, or it timed out: it is asked
@@ -778,8 +792,15 @@ func (m *machine) failed(t *track, a *active, mono time.Duration, reason string)
 	t.failures++
 	if t.failures > recoveryReissues {
 		t.retryAt = mono + slowRetryInterval
-		m.log.Warnf("Recovery %d of producer %d failed, %s; %d in a row, so the producer stays down and it is asked for every %s",
+		// the first of the streak that reaches the slow pace is a warning; the
+		// rest, one per producer per interval for as long as it lasts, are debug
+		msg := fmt.Sprintf("Recovery %d of producer %d failed, %s; %d in a row, so the producer stays down and it is asked for every %s",
 			a.requestID, t.id, reason, t.failures, slowRetryInterval)
+		if t.failures == recoveryReissues+1 {
+			m.log.Warnf("%s", msg)
+		} else {
+			m.log.Debugf("%s", msg)
+		}
 		m.markDown(t, causeRecoveryFailed)
 		return
 	}
@@ -941,10 +962,12 @@ func (m *machine) hasGaps(t *track) bool {
 
 // upIfNothingMissing brings a producer back that is down only for gaps that went
 // away with a closed session, or for a lost connection that no session it has now
-// missed anything of.
+// missed anything of. Not once the feed is closing: a request refused or a
+// connection back then recovered nothing.
 func (m *machine) upIfNothingMissing(t *track) {
 	if t.down &&
 		m.connected &&
+		!m.closing &&
 		t.everRecovered &&
 		t.active == nil &&
 		t.cause != causeProcessingDelay &&
@@ -1092,7 +1115,8 @@ func (m *machine) addTrack(producer types.Producer) *track {
 	m.byID[t.id] = t
 	for _, s := range m.sessions {
 		if hasLane(s.interest) && s.interest.IsProducerInScope(producer) {
-			m.addLane(s, t)
+			// a session already open has its queue bound: the lane starts now
+			m.addLane(s, t, m.clock.Now())
 		}
 	}
 	return t

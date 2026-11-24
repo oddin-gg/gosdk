@@ -1692,3 +1692,224 @@ func TestMachine_LostChannelOfASessionNotReceivingTheProducerHoldsNothingOfIt(t 
 	f.unsubscribed(pre)
 	expectCalls(t, f, pre, 2, "the prematch producer is asked for at once")
 }
+
+// ---- the first recovery needs a witness
+
+// A recovery the API accepted whose only awaited session closed before its
+// snapshot_complete has no witness: the producer comes up, but it is not
+// recovered, and a session opened next starts from the client's seed.
+func TestMachine_RecoveryWhoseOnlySessionClosedBeforeItsSnapshotCompleteLeavesTheProducerUnrecovered(t *testing.T) {
+	f := newFeed(t)
+	from := f.now().Add(-time.Hour)
+	f.cat.from[pre] = from
+	f.open(1, prematch)
+	f.startFeed()
+	f.alive(pre)
+	r := f.lastSnapshot(pre)
+	f.accept(r)
+	f.close(1)
+	expectDown(t, f, pre, false, "nothing is missing once the only session is gone")
+
+	f.clock.advance(5 * time.Second)
+	f.open(2, prematch)
+	cp, _ := f.checkpoint(2, pre)
+	expectTime(t, cp, from, "the new session starts at the seed")
+	expectDown(t, f, pre, true, "the new session has a recovery to make")
+	expect(t, f.lastStatus(pre).cause, causeSessionOpened, "cause")
+	f.alive(pre)
+	expectTime(t, f.lastSnapshot(pre).after, from, "the recovery starts at the seed")
+	expectCalls(t, f, pre, 2, "recoveries asked for")
+}
+
+// The same with the new session opening before the old one closes: both orders
+// agree.
+func TestMachine_SessionOpenedBeforeTheOnlyWitnessClosesAlsoStartsAtTheSeed(t *testing.T) {
+	f := newFeed(t)
+	from := f.now().Add(-time.Hour)
+	f.cat.from[pre] = from
+	f.open(1, prematch)
+	f.startFeed()
+	f.alive(pre)
+	f.accept(f.lastSnapshot(pre))
+	f.clock.advance(5 * time.Second)
+	f.open(2, prematch)
+	f.close(1)
+	cp, _ := f.checkpoint(2, pre)
+	expectTime(t, cp, from, "the new session starts at the seed")
+	expectDown(t, f, pre, true, "the new session has a recovery to make")
+	expect(t, f.lastStatus(pre).cause, causeSessionOpened, "cause")
+	f.alive(pre)
+	expectTime(t, f.lastSnapshot(pre).after, from, "the recovery starts at the seed")
+	expectCalls(t, f, pre, 2, "recoveries asked for")
+}
+
+// A snapshot_complete seen by a session that is still open is a witness: a session
+// opened next starts at the producer's now, with no gap.
+func TestMachine_RecoverySeenByAnOpenSessionLetsALaterSessionStartWithNoGap(t *testing.T) {
+	f := newFeed(t)
+	f.cat.from[pre] = f.now().Add(-time.Hour)
+	f.open(1, prematch)
+	f.startFeed()
+	f.alive(pre)
+	f.complete(f.lastSnapshot(pre), 1)
+	f.clock.advance(5 * time.Second)
+	f.open(2, prematch)
+	cp, _ := f.checkpoint(2, pre)
+	expectTime(t, cp, f.now(), "the new session starts at the producer's now")
+	expectDown(t, f, pre, false, "the producer")
+	expectCalls(t, f, pre, 1, "recoveries asked for")
+}
+
+// ---- closing
+
+// Once the feed is closing, a request refused with no gap left recovered nothing:
+// no producer comes up for it.
+func TestMachine_RefusedRequestAfterTheSessionsClosedAtShutdownBringsNoProducerUp(t *testing.T) {
+	f := newFeed(t)
+	f.open(1, all)
+	f.startFeed()
+	f.bothUp(1)
+	f.m.connectionDown()
+	f.m.connectionUp()
+	r := f.lastSnapshot(pre)
+	f.m.beginClosing()
+	f.close(1)
+	told := len(f.out.statuses)
+
+	f.refuse(r)
+	expectDown(t, f, pre, true, "after the refusal")
+	expect(t, len(f.out.statuses), told, "status changes")
+}
+
+// Nor does the connection coming back bring one up while the feed is closing.
+func TestMachine_ConnectionBackAfterTheSessionsClosedAtShutdownBringsNoProducerUp(t *testing.T) {
+	f := newFeed(t)
+	f.open(1, all)
+	f.startFeed()
+	f.bothUp(1)
+	f.m.connectionDown()
+	f.m.beginClosing()
+	f.close(1)
+	told := len(f.out.statuses)
+
+	f.m.connectionUp()
+	expectDown(t, f, pre, true, "the connection is back")
+	expect(t, len(f.out.statuses), told, "status changes")
+}
+
+// ---- the lane's checkpoint at the opening of a session
+
+// A session is opened with the reading taken before its queue was bound: a message
+// in the queue stamped after that reading and before the handling is not older
+// than the checkpoint, so a loss of the channel asks from the reading, not from
+// the handling.
+func TestMachine_SessionOpenedWithAnEarlierReadingStartsItsLaneAtTheReading(t *testing.T) {
+	f := newFeed(t)
+	f.open(1, all)
+	f.startFeed()
+	f.bothUp(1)
+	f.clock.advance(time.Minute)
+	f.alive(pre)
+	reading := f.stamp()
+	f.clock.advance(10 * time.Second)
+
+	f.openAt(2, prematch, reading)
+	cp, _ := f.checkpoint(2, pre)
+	expectTime(t, cp, reading.Wall(), "the lane starts at the reading, not at the handling")
+	expectDown(t, f, pre, false, "no gap yet")
+
+	f.m.channelLost(sid(2))
+	f.m.channelReopened(sid(2))
+	f.alive(pre)
+	r := f.lastSnapshot(pre)
+	expectTime(t, r.after, reading.Wall(), "the recovery starts at the reading")
+}
+
+// ---- the answer to an earlier request
+
+// The answer to a request that was given up leaves the one asked for since alone.
+func TestMachine_RefusalOfAnEarlierRequestLeavesTheNewerOneAlone(t *testing.T) {
+	f := newFeed(t)
+	f.open(1, all)
+	f.startFeed()
+	f.alive(pre)
+	first := f.lastSnapshot(pre)
+	f.m.connectionDown()
+	f.m.connectionUp()
+	second := f.lastSnapshot(pre)
+	if second.requestID == first.requestID {
+		t.Fatal("the second request has the id of the first")
+	}
+	failed := f.m.counters.failed
+	infos := len(f.out.infos)
+
+	f.refuse(first)
+	expect(t, f.inFlight(pre), second.requestID, "the request in flight")
+	expect(t, f.m.counters.failed, failed, "failures counted")
+	expect(t, f.m.byID[pre].failures, 0, "failures in a row")
+	expect(t, f.m.byID[pre].retryAt, time.Duration(0), "backoff")
+	expect(t, len(f.out.infos), infos, "recovery infos published")
+	expectCalls(t, f, pre, 2, "recoveries asked for")
+}
+
+// So does a late success: it does not mark the newer request accepted.
+func TestMachine_LateSuccessOfAnEarlierRequestDoesNotAcceptTheNewerOne(t *testing.T) {
+	f := newFeed(t)
+	f.open(1, all)
+	f.startFeed()
+	f.alive(pre)
+	first := f.lastSnapshot(pre)
+	f.m.connectionDown()
+	f.m.connectionUp()
+	second := f.lastSnapshot(pre)
+	infos := len(f.out.infos)
+
+	f.accept(first)
+	expect(t, f.inFlight(pre), second.requestID, "the request in flight")
+	expect(t, f.m.byID[pre].active.accepted, false, "the newer request accepted")
+	expect(t, len(f.out.infos), infos, "recovery infos published")
+	f.complete(second, 1)
+	expectDown(t, f, pre, false, "after the newer one completes")
+}
+
+// ---- a late producer and a session that does not receive it
+
+// A producer the catalog adds after the machine was made gets no lane in a
+// session whose interest leaves it out, and the recovery of it does not wait for
+// that session.
+func TestMachine_LateTrackGivesNoLaneToASessionWhoseInterestExcludesTheProducer(t *testing.T) {
+	f := newFeed(t)
+	f.open(1, prematch)
+	f.open(2, liveOnly)
+	f.startFeed()
+	late := fakeProducer{id: 9, name: "late", scopes: []types.ProducerScope{types.LiveProducerScope}, window: statefulWindow}
+	f.cat.list = append(f.cat.list, late)
+
+	f.alive(9)
+	_, received := f.checkpoint(1, 9)
+	expect(t, received, false, "the prematch session receives the live producer")
+	_, received = f.checkpoint(2, 9)
+	expect(t, received, true, "the live session receives it")
+	r := f.lastSnapshot(9)
+	f.complete(r, 2)
+	expectDown(t, f, 9, false, "completed without the prematch session's snapshot_complete")
+}
+
+// ---- the resume points published
+
+// A resume point is published when it moves, not again while it stands.
+func TestMachine_ResumePointIsPublishedOnlyWhenItMoves(t *testing.T) {
+	f := upWith(t, all)
+	f.m.publishResumePoints()
+	published := len(f.out.pointsOf(pre))
+	expect(t, published, 1, "publications after the first call")
+	f.m.publishResumePoints()
+	expect(t, len(f.out.pointsOf(pre)), published, "publications with nothing moved")
+
+	f.clock.advance(time.Minute)
+	f.live(1, pre, 0)
+	f.m.publishResumePoints()
+	expect(t, len(f.out.pointsOf(pre)), published+1, "publications after the checkpoint moved")
+	got := f.out.pointsOf(pre)
+	expectTime(t, got[len(got)-1], f.now(), "the new point")
+}

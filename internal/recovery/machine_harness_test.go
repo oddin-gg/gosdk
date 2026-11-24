@@ -80,21 +80,67 @@ type fakeOutbox struct {
 	calls []snapshotRequest
 	// statuses is every status change, public or not.
 	statuses []statusChange
-	infos    map[int]types.RecoveryInfo
-	points   map[int]time.Time
-	down     map[int]bool
+	// infos and points are every recovery info and resume point published, in order.
+	infos  []publishedInfo
+	points []publishedPoint
+	down   map[int]bool
 }
 
 func newFakeOutbox() *fakeOutbox {
-	return &fakeOutbox{infos: map[int]types.RecoveryInfo{}, points: map[int]time.Time{}, down: map[int]bool{}}
+	return &fakeOutbox{down: map[int]bool{}}
 }
 
-func (o *fakeOutbox) request(call snapshotRequest)                 { o.calls = append(o.calls, call) }
-func (o *fakeOutbox) recoveryInfo(id int, info types.RecoveryInfo) { o.infos[id] = info }
-func (o *fakeOutbox) resumePoint(id int, point time.Time)          { o.points[id] = point }
+func (o *fakeOutbox) request(call snapshotRequest) { o.calls = append(o.calls, call) }
+func (o *fakeOutbox) recoveryInfo(id int, info types.RecoveryInfo) {
+	o.infos = append(o.infos, publishedInfo{producerID: id, info: info})
+}
+func (o *fakeOutbox) resumePoint(id int, point time.Time) {
+	o.points = append(o.points, publishedPoint{producerID: id, point: point})
+}
 func (o *fakeOutbox) status(change statusChange) {
 	o.statuses = append(o.statuses, change)
 	o.down[change.producerID] = change.down
+}
+
+type publishedInfo struct {
+	producerID int
+	info       types.RecoveryInfo
+}
+
+type publishedPoint struct {
+	producerID int
+	point      time.Time
+}
+
+// lastInfo is the last recovery info published for the producer.
+func (o *fakeOutbox) lastInfo(p int) (types.RecoveryInfo, bool) {
+	for i := len(o.infos) - 1; i >= 0; i-- {
+		if o.infos[i].producerID == p {
+			return o.infos[i].info, true
+		}
+	}
+	return nil, false
+}
+
+// lastPoint is the last resume point published for the producer.
+func (o *fakeOutbox) lastPoint(p int) (time.Time, bool) {
+	for i := len(o.points) - 1; i >= 0; i-- {
+		if o.points[i].producerID == p {
+			return o.points[i].point, true
+		}
+	}
+	return time.Time{}, false
+}
+
+// pointsOf are the resume points published for the producer, in order.
+func (o *fakeOutbox) pointsOf(p int) []time.Time {
+	var out []time.Time
+	for _, pp := range o.points {
+		if pp.producerID == p {
+			out = append(out, pp.point)
+		}
+	}
+	return out
 }
 
 // logSink keeps the machine's log lines as "LEVEL message".
@@ -173,9 +219,16 @@ func (f *feed) startFeed() {
 	f.m.connectionUp()
 }
 
+// open opens session n, its reading of the clock taken now.
 func (f *feed) open(n int, interest types.MessageInterest) {
+	f.openAt(n, interest, f.stamp())
+}
+
+// openAt opens session n with the reading of the clock the caller took before
+// binding the session's queue.
+func (f *feed) openAt(n int, interest types.MessageInterest, at Stamp) {
 	f.opened = append(f.opened, n)
-	f.m.sessionOpened(sid(n), interest)
+	f.m.sessionOpened(sid(n), interest, at)
 }
 
 func (f *feed) close(n int) {
@@ -208,8 +261,7 @@ func (f *feed) snapshotComplete(n, p, requestID int) { f.m.snapshotComplete(sid(
 
 func (f *feed) resume(p int) (time.Time, bool) {
 	f.m.publishResumePoints()
-	at, ok := f.out.points[p]
-	return at, ok
+	return f.out.lastPoint(p)
 }
 
 // snapshots are the producer's snapshot requests so far.
@@ -316,7 +368,7 @@ func (f *feed) inFlight(p int) int {
 // recoveryInfo is the last published outcome of the producer's request.
 func (f *feed) recoveryInfo(p int) types.RecoveryInfo {
 	f.t.Helper()
-	info, ok := f.out.infos[p]
+	info, ok := f.out.lastInfo(p)
 	if !ok {
 		f.t.Fatalf("no recovery info of producer %d", p)
 	}
