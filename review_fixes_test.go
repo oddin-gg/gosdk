@@ -362,7 +362,7 @@ func (r *recordingRecoveryProcessor) OnMessageProcessingEnded(_ uuid.UUID, _ int
 }
 func (r *recordingRecoveryProcessor) OnAliveReceived(int, types.MessageTimestamp, bool, types.MessageInterest) {
 }
-func (r *recordingRecoveryProcessor) OnSnapshotCompleteReceived(context.Context, int, int, types.MessageInterest) error {
+func (r *recordingRecoveryProcessor) OnSnapshotCompleteReceived(context.Context, uuid.UUID, int, int, types.MessageInterest) error {
 	return nil
 }
 
@@ -548,7 +548,7 @@ func (noopRecoveryProcessor) OnMessageProcessingStarted(uuid.UUID, int, time.Tim
 func (noopRecoveryProcessor) OnMessageProcessingEnded(uuid.UUID, int, time.Time)   {}
 func (noopRecoveryProcessor) OnAliveReceived(int, types.MessageTimestamp, bool, types.MessageInterest) {
 }
-func (noopRecoveryProcessor) OnSnapshotCompleteReceived(context.Context, int, int, types.MessageInterest) error {
+func (noopRecoveryProcessor) OnSnapshotCompleteReceived(context.Context, uuid.UUID, int, int, types.MessageInterest) error {
 	return nil
 }
 
@@ -1787,7 +1787,7 @@ func (c *countingRecoveryProcessor) OnMessageProcessingEnded(uuid.UUID, int, tim
 }
 func (c *countingRecoveryProcessor) OnAliveReceived(int, types.MessageTimestamp, bool, types.MessageInterest) {
 }
-func (c *countingRecoveryProcessor) OnSnapshotCompleteReceived(context.Context, int, int, types.MessageInterest) error {
+func (c *countingRecoveryProcessor) OnSnapshotCompleteReceived(context.Context, uuid.UUID, int, int, types.MessageInterest) error {
 	return nil
 }
 

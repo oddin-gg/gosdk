@@ -15,6 +15,7 @@ import (
 	feedXML "github.com/oddin-gg/gosdk/internal/feed/xml"
 	log "github.com/oddin-gg/gosdk/internal/log"
 	"github.com/oddin-gg/gosdk/internal/producer"
+	"github.com/oddin-gg/gosdk/internal/recovery"
 	"github.com/oddin-gg/gosdk/internal/utils"
 	"github.com/oddin-gg/gosdk/types"
 )
@@ -35,9 +36,17 @@ var errFeedMessageDecode = errors.New("gosdk: feed message decode failed")
 // fires it after the message lands in the public buffer — completing the
 // NEXT.md §0.6 contract that deliveries are acked only after admission to
 // the subscription buffer.
+//
+// settled, when set, is the session's fact that the delivery is finished
+// with: the pump runs it once the ack has run, so what the recovery manager
+// records as processed is a message the client holds and whose ack has run
+// (an ack error is logged and the fact is posted all the same). It is set
+// on the same final envelope as ack, and only for a message handed to the
+// client.
 type sessionEnvelope struct {
-	msg types.SessionMessage
-	ack func()
+	msg     types.SessionMessage
+	ack     func()
+	settled func()
 }
 
 // runAck fires a possibly-nil ack closure. Session/pump code paths call
@@ -136,6 +145,25 @@ type recoveryMessageProcessor interface {
 	// deadline. Direct, never blocks.
 	OnRecoveryMessageReceived(producerID int, requestID int)
 	OnMessageProcessingEnded(sessionID uuid.UUID, producerID int, timestamp time.Time)
+	// OnMessageProcessed reports that the session has finished with a
+	// message of the producer: the client holds it and its ack has run. It
+	// is run by the pump when the delivery's ack has settled. generatedAt is the
+	// message's timestamp by the producer's clock, taken the instant the
+	// session began processing it (both clock readings: its age includes
+	// the time it waited in the broker's queue), requestID the recovery it
+	// belongs to, 0 for a live message. Posted once per message handed to
+	// the client; nothing for an alive, a snapshot_complete, an unparsable
+	// message, or the SDK's own alive session.
+	//
+	// An alive is acknowledged by the session itself, not by the pump, so
+	// it may be reported before the message handed over just before it has
+	// been acknowledged: by one envelope at most, the one the pump holds.
+	OnMessageProcessed(sessionID uuid.UUID, producerID int, generatedAt time.Time, taken recovery.Stamp, requestID int)
+	// OnSessionAlive reports an alive that a session of the client has
+	// handled, with the instant it was taken. The alives of the alive-only
+	// interest (the SDK's own alive session, or a client subscription of
+	// that interest) are not the session's: they go to OnAliveReceived.
+	OnSessionAlive(sessionID uuid.UUID, producerID int, generatedAt time.Time, taken recovery.Stamp, isSubscribed bool, messageInterest types.MessageInterest)
 	OnAliveReceived(producerID int, timestamp types.MessageTimestamp, isSubscribed bool, messageInterest types.MessageInterest)
 	// OnSnapshotCompleteReceived admits a snapshot-complete to the
 	// producer's recovery actor. Unlike the lossy observability events
@@ -147,7 +175,7 @@ type recoveryMessageProcessor interface {
 	// must then leave the AMQP delivery UNACKED so the broker redelivers.
 	// A nil error means the transition was admitted and the delivery may
 	// be acked.
-	OnSnapshotCompleteReceived(ctx context.Context, producerID int, requestID int, messageInterest types.MessageInterest) error
+	OnSnapshotCompleteReceived(ctx context.Context, sessionID uuid.UUID, producerID int, requestID int, messageInterest types.MessageInterest) error
 }
 
 type oddsFeedSessionImpl struct {
@@ -159,8 +187,10 @@ type oddsFeedSessionImpl struct {
 	exchangeName             string
 	sportIDPrefix            string
 	sessionID                uuid.UUID
-	logger                   *log.Logger
-	exceptionStrategy        ExceptionStrategy
+	// clock stamps the facts the session posts; nil reads the system's.
+	clock             recovery.Clock
+	logger            *log.Logger
+	exceptionStrategy ExceptionStrategy
 
 	closeFn   context.CancelFunc
 	msgCh     chan sessionEnvelope
@@ -175,6 +205,14 @@ type oddsFeedSessionImpl struct {
 
 	errMu sync.RWMutex
 	err   error
+}
+
+// stamp reads the session's clock: the system's unless one was set.
+func (o *oddsFeedSessionImpl) stamp() recovery.Stamp {
+	if o.clock == nil {
+		return recovery.SystemClock().Now()
+	}
+	return o.clock.Now()
 }
 
 func (o *oddsFeedSessionImpl) RespCh() <-chan sessionEnvelope {
@@ -436,10 +474,14 @@ func (o *oddsFeedSessionImpl) processFeedMessage(ctx context.Context, feedMessag
 	// the client bind the alive key as well, so a healthy client still
 	// advances the cursor with the alives it processes.
 	reportsProcessing := messageInterest != types.SystemAliveOnly
+	// Stamped when processing starts and posted at the end: the age of a
+	// message counts from the moment the session took it.
+	taken := o.stamp()
 	if reportsProcessing {
-		o.recoveryMessageProcessor.OnMessageProcessingStarted(o.sessionID, producerID, time.Now())
+		o.recoveryMessageProcessor.OnMessageProcessingStarted(o.sessionID, producerID, taken.Wall())
 	}
-	if requestID, ok := recoveryRequestID(feedMessage.Message); ok {
+	requestID, hasRequestID := recoveryRequestID(feedMessage.Message)
+	if hasRequestID {
 		o.recoveryMessageProcessor.OnRecoveryMessageReceived(producerID, requestID)
 	}
 
@@ -478,7 +520,14 @@ func (o *oddsFeedSessionImpl) processFeedMessage(ctx context.Context, feedMessag
 
 	switch msg := feedMessage.Message.(type) {
 	case *feedXML.Alive:
-		o.recoveryMessageProcessor.OnAliveReceived(producerID, feedMessage.Timestamp, msg.Subscribed != nil && *msg.Subscribed == 1, messageInterest)
+		subscribed := msg.Subscribed != nil && *msg.Subscribed == 1
+		if messageInterest == types.SystemAliveOnly {
+			// The alive channel of the SDK: bound to no session, so it
+			// posts no fact of a session's.
+			o.recoveryMessageProcessor.OnAliveReceived(producerID, feedMessage.Timestamp, subscribed, messageInterest)
+		} else {
+			o.recoveryMessageProcessor.OnSessionAlive(o.sessionID, producerID, feedMessage.Timestamp.Created, taken, subscribed, messageInterest)
+		}
 		endProcessing(feedMessage.Timestamp.Created)
 		// Terminal handling: consumed by the recovery machinery, never
 		// forwarded — intentional drop. The reads of feedMessage are done,
@@ -492,7 +541,7 @@ func (o *oddsFeedSessionImpl) processFeedMessage(ctx context.Context, feedMessag
 		// (default 6h), so if admission fails (ctx cancelled / recovery
 		// manager shutting down) we leave the delivery unacked and let
 		// the broker redeliver.
-		if err := o.recoveryMessageProcessor.OnSnapshotCompleteReceived(ctx, producerID, msg.RequestID, messageInterest); err != nil {
+		if err := o.recoveryMessageProcessor.OnSnapshotCompleteReceived(ctx, o.sessionID, producerID, msg.RequestID, messageInterest); err != nil {
 			o.logger.WithError(err).
 				WithField("producer_id", producerID).
 				WithField("request_id", msg.RequestID).
@@ -545,22 +594,33 @@ func (o *oddsFeedSessionImpl) processFeedMessage(ctx context.Context, feedMessag
 	// dominated by BetCancel / BetSettlement / FixtureChange / Rollback*
 	// could leave the cursor stale and drive false producer-down /
 	// processing-queue-delay decisions.
+	var settled func()
+	if reportsProcessing {
+		generatedAt := feedMessage.Timestamp.Created
+		reqID := 0
+		if hasRequestID {
+			reqID = requestID
+		}
+		settled = func() {
+			o.recoveryMessageProcessor.OnMessageProcessed(o.sessionID, producerID, generatedAt, taken, reqID)
+		}
+	}
 	var admitted bool
 	switch msg := message.(type) {
 	case types.OddsChange:
-		admitted = o.send(ctx, sessionEnvelope{msg: types.SessionMessage{EventMessage: types.EventMessage{OddsChange: msg}}, ack: ack})
+		admitted = o.send(ctx, sessionEnvelope{msg: types.SessionMessage{EventMessage: types.EventMessage{OddsChange: msg}}, ack: ack, settled: settled})
 	case types.BetStop:
-		admitted = o.send(ctx, sessionEnvelope{msg: types.SessionMessage{EventMessage: types.EventMessage{BetStop: msg}}, ack: ack})
+		admitted = o.send(ctx, sessionEnvelope{msg: types.SessionMessage{EventMessage: types.EventMessage{BetStop: msg}}, ack: ack, settled: settled})
 	case types.BetCancel:
-		admitted = o.send(ctx, sessionEnvelope{msg: types.SessionMessage{EventMessage: types.EventMessage{BetCancel: msg}}, ack: ack})
+		admitted = o.send(ctx, sessionEnvelope{msg: types.SessionMessage{EventMessage: types.EventMessage{BetCancel: msg}}, ack: ack, settled: settled})
 	case types.BetSettlement:
-		admitted = o.send(ctx, sessionEnvelope{msg: types.SessionMessage{EventMessage: types.EventMessage{BetSettlement: msg}}, ack: ack})
+		admitted = o.send(ctx, sessionEnvelope{msg: types.SessionMessage{EventMessage: types.EventMessage{BetSettlement: msg}}, ack: ack, settled: settled})
 	case types.FixtureChangeMessage:
-		admitted = o.send(ctx, sessionEnvelope{msg: types.SessionMessage{EventMessage: types.EventMessage{FixtureChange: msg}}, ack: ack})
+		admitted = o.send(ctx, sessionEnvelope{msg: types.SessionMessage{EventMessage: types.EventMessage{FixtureChange: msg}}, ack: ack, settled: settled})
 	case types.RollbackBetSettlement:
-		admitted = o.send(ctx, sessionEnvelope{msg: types.SessionMessage{EventMessage: types.EventMessage{RollbackBetSettlement: msg}}, ack: ack})
+		admitted = o.send(ctx, sessionEnvelope{msg: types.SessionMessage{EventMessage: types.EventMessage{RollbackBetSettlement: msg}}, ack: ack, settled: settled})
 	case types.RollbackBetCancel:
-		admitted = o.send(ctx, sessionEnvelope{msg: types.SessionMessage{EventMessage: types.EventMessage{RollbackBetCancel: msg}}, ack: ack})
+		admitted = o.send(ctx, sessionEnvelope{msg: types.SessionMessage{EventMessage: types.EventMessage{RollbackBetCancel: msg}}, ack: ack, settled: settled})
 	default:
 		// Unrecognized built type: treat as unparsable and DO NOT
 		// advance the cursor — we can't claim we processed a message

@@ -53,7 +53,7 @@ func (*sessionHookRecorder) OnMessageProcessingStarted(uuid.UUID, int, time.Time
 func (*sessionHookRecorder) OnMessageProcessingEnded(uuid.UUID, int, time.Time)            {}
 func (*sessionHookRecorder) OnAliveReceived(int, types.MessageTimestamp, bool, types.MessageInterest) {
 }
-func (*sessionHookRecorder) OnSnapshotCompleteReceived(context.Context, int, int, types.MessageInterest) error {
+func (*sessionHookRecorder) OnSnapshotCompleteReceived(context.Context, uuid.UUID, int, int, types.MessageInterest) error {
 	return nil
 }
 

@@ -1911,7 +1911,16 @@ func (c *Client) deliverToSubscription(sub *Subscription, env sessionEnvelope) b
 		select {
 		case sub.messages <- env.msg:
 			timer.Stop()
-			return c.settleAck(sub, env.ack)
+			if !c.settleAck(sub, env.ack) {
+				return false
+			}
+			// The delivery is settled: the session's fact that it is done
+			// with the message goes out now, not when it was handed to the
+			// pump, so a checkpoint made of it is not ahead of the broker.
+			if env.settled != nil {
+				env.settled()
+			}
+			return true
 		case <-sub.pumpStop:
 			timer.Stop()
 			return false
