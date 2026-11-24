@@ -15,6 +15,7 @@ import (
 	"github.com/oddin-gg/gosdk/internal/api"
 	"github.com/oddin-gg/gosdk/internal/apipolicy"
 	"github.com/oddin-gg/gosdk/internal/cache/lru"
+	feedXML "github.com/oddin-gg/gosdk/internal/feed/xml"
 	log "github.com/oddin-gg/gosdk/internal/log"
 	"github.com/oddin-gg/gosdk/types"
 )
@@ -495,5 +496,55 @@ func TestClose_ACatalogFlightClosedBetweenItsCommitsStoresNothing(t *testing.T) 
 				t.Fatalf("a flight closed between its commits changed the cache: %q before, %q after", before, after)
 			}
 		})
+	}
+}
+
+// The feed path of the match status is a second writer of its cache: after
+// Close it stores nothing.
+func TestClose_AFeedMessageAfterCloseStoresNoMatchStatus(t *testing.T) {
+	var catalog atomic.Pointer[string]
+	seed := bulkCatalogWithStaticVariants
+	catalog.Store(&seed)
+	m := NewManager(t.Context(), newAPIClientForTest(t, closeCommitServer(t, &catalog)), &fakeCacheCfg{}, log.New(nil), nil)
+	t.Cleanup(func() { m.CloseCtx(context.Background()) })
+	id := types.URN{Prefix: "od", Type: "match", ID: 42}
+
+	if !m.CloseCtx(t.Context()) {
+		t.Fatal("CloseCtx did not complete")
+	}
+	m.MatchStatusCache.refreshOrInsertFeedItem(id, &feedXML.SportEventStatus{Status: ptrOf(1), MatchStatus: ptrOf(1)}, time.Time{})
+	if n := m.MatchStatusCache.entries.Len(); n != 0 {
+		t.Fatalf("a feed message after Close stored %d entries", n)
+	}
+}
+
+// The periodic refresh of the localized static data is a second writer: a
+// refresh whose fetch finishes across Close leaves what the cache held.
+func TestClose_ARefreshThatEndsAfterCloseKeepsTheStaticData(t *testing.T) {
+	life := testLife(t)
+	var closeDuringFetch atomic.Bool
+	fetcher := func(_ context.Context, _ types.Locale) ([]types.StaticData, error) {
+		if closeDuringFetch.Load() {
+			life.End()
+			return []types.StaticData{{ID: 1, Description: types.Some("changed")}}, nil
+		}
+		return []types.StaticData{{ID: 1, Description: types.Some("live")}}, nil
+	}
+	c := newLocalizedStaticDataCache(life, &fakeCacheCfg{}, log.New(nil), nil, fetcher)
+	t.Cleanup(c.Close)
+	en := []types.Locale{types.EnLocale}
+	if _, err := c.LocalizedItem(t.Context(), 1, en); err != nil {
+		t.Fatalf("first load: %v", err)
+	}
+	read := func() string {
+		c.mux.RLock()
+		defer c.mux.RUnlock()
+		return c.internalCache[1][types.EnLocale]
+	}
+
+	closeDuringFetch.Store(true)
+	c.timerTick(t.Context())
+	if got := read(); got != "live" {
+		t.Fatalf("a refresh that finished after Close stored %q", got)
 	}
 }
