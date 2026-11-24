@@ -214,7 +214,7 @@ func BenchmarkOutcomeNameRead(b *testing.B) {
 // walks every outcome (twice), which is why the factory memoizes the
 // lookup per market (see marketDataImpl.description).
 func BenchmarkMarketDescriptionByID_WarmHit(b *testing.B) {
-	mc := newMarketDescriptionCache(b.Context(), nil, nil)
+	mc := newMarketDescriptionCache(testLife(b), nil, nil)
 	for _, n := range []int{2, 348} {
 		id := 100 + n
 		outcomes := make([]data.MarketDescriptionOutcome, n)

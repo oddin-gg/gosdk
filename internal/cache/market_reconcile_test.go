@@ -231,7 +231,7 @@ func TestMarketDescriptionCache_FreshLocaleDisagreementPreserved(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	mc := newMarketDescriptionCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	mc := newMarketDescriptionCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 	ctx := t.Context()
 
 	// Both locales load fresh, back to back: en lists {1,2}, de {1}.
@@ -340,7 +340,7 @@ func TestMarketDescriptionCache_StaleFallbackRevalidatesCoverage(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	mc := newMarketDescriptionCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	mc := newMarketDescriptionCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 	mc.catalogTTL = 50 * time.Millisecond
 	ctx := t.Context()
 
@@ -465,7 +465,7 @@ func TestMarketDescriptionCache_InFlightLocaleNotSweptAsStale(t *testing.T) {
 			Outcomes: &apiXML.OutcomesWrapper{Outcome: outcomes},
 		}
 	}
-	mc := newMarketDescriptionCache(t.Context(), nil, log.New(nil))
+	mc := newMarketDescriptionCache(testLife(t), nil, log.New(nil))
 	key := CompositeKey{MarketID: 9}
 	start := time.Now()
 
@@ -552,7 +552,7 @@ func TestMarketDescriptionCache_LoadingLocaleRefcountSettles(t *testing.T) {
 		_, _ = io.WriteString(w, bulkCatalogWithStaticVariants)
 	}))
 	t.Cleanup(srv.Close)
-	mc := newMarketDescriptionCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	mc := newMarketDescriptionCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 	mc.catalogTTL = 50 * time.Millisecond
 	ctx := t.Context()
 
@@ -629,7 +629,7 @@ func TestMarketDescriptionCache_SweepSuppressedWhileLocaleLoadsEndToEnd(t *testi
 		_, _ = io.WriteString(w, *body.Load())
 	}))
 	t.Cleanup(srv.Close)
-	mc := newMarketDescriptionCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	mc := newMarketDescriptionCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 	mc.catalogTTL = 50 * time.Millisecond
 	ctx := t.Context()
 
@@ -723,7 +723,7 @@ func TestMarketDescriptionCache_StalePreClearFlightLoses(t *testing.T) {
 		_, _ = io.WriteString(w, *body.Load())
 	}))
 	t.Cleanup(srv.Close)
-	mc := newMarketDescriptionCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	mc := newMarketDescriptionCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 	mc.catalogTTL = 50 * time.Millisecond
 	ctx := t.Context()
 
@@ -838,7 +838,7 @@ func TestMarketDescriptionCache_SupersededFlightJoinsWinner(t *testing.T) {
 	}
 	t.Cleanup(func() { marketCommitGateHook = nil })
 
-	mc := newMarketDescriptionCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	mc := newMarketDescriptionCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 	mc.catalogTTL = 50 * time.Millisecond
 	ctx := t.Context()
 
@@ -947,7 +947,7 @@ func TestMarketDescriptionCache_MidCommitSupersededFlightJoinsWinner(t *testing.
 	}
 	t.Cleanup(func() { marketCommitGateHook = nil })
 
-	mc := newMarketDescriptionCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	mc := newMarketDescriptionCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 	mc.catalogTTL = 50 * time.Millisecond
 	ctx := t.Context()
 
@@ -1143,7 +1143,7 @@ func TestMarketDescriptionCache_MalformedRecordSurvivesOtherLocale(t *testing.T)
 	}))
 	t.Cleanup(srv.Close)
 
-	mc := newMarketDescriptionCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	mc := newMarketDescriptionCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 	ctx := t.Context()
 
 	// Loading BOTH locales runs de's reconcile after en recorded the
@@ -1199,7 +1199,7 @@ func TestMarketDescriptionCache_NameOnlyEntryCannotCoverVacuously(t *testing.T) 
 		_, _ = io.WriteString(w, enMalformed)
 	}))
 	t.Cleanup(srv.Close)
-	mc := newMarketDescriptionCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	mc := newMarketDescriptionCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 	mc.catalogTTL = 50 * time.Millisecond
 	ctx := t.Context()
 
@@ -1361,7 +1361,7 @@ func TestMarketDescriptionCache_EmptyOutcomesContainerNotCovered(t *testing.T) {
 
 	// The cold-creation shape is covered too: a fresh cache seeing only
 	// the empty-container row must classify the market as incomplete.
-	mc2 := newMarketDescriptionCache(t.Context(), newAPIClientForTest(t, srv.Server), log.New(nil))
+	mc2 := newMarketDescriptionCache(testLife(t), newAPIClientForTest(t, srv.Server), log.New(nil))
 	if _, err := mc2.MarketDescriptionByID(ctx, 9, types.None[string](), []types.Locale{types.EnLocale}); !errors.Is(err, ErrMarketLocaleIncomplete) {
 		t.Fatalf("cold lookup on empty-container row: err = %v, want ErrMarketLocaleIncomplete", err)
 	}
@@ -1415,7 +1415,7 @@ func TestMarketDescriptionCache_ReconcileSuppressedByMidFlightClear(t *testing.T
 		_, _ = io.WriteString(w, *body.Load())
 	}))
 	t.Cleanup(srv.Close)
-	mc := newMarketDescriptionCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	mc := newMarketDescriptionCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 	mc.catalogTTL = 50 * time.Millisecond
 	ctx := t.Context()
 
@@ -1479,7 +1479,7 @@ func TestMarketDescriptionCache_ReconcilePerLocale(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	mc := newMarketDescriptionCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	mc := newMarketDescriptionCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 	ctx := t.Context()
 
 	if _, err := mc.LocalizedMarketDescriptions(ctx, types.EnLocale); err != nil {

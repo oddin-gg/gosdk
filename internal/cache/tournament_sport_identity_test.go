@@ -66,7 +66,7 @@ func TestBuildTournament_CachedSportOverridesRouteSport(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tc := newTournamentCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	tc := newTournamentCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 	id := types.URN{Prefix: "od", Type: "tournament", ID: 7}
 	cachedSport := types.URN{Prefix: "od", Type: "sport", ID: 1}
 	routeSport := types.URN{Prefix: "od", Type: "sport", ID: 99} // conflicting route

@@ -53,7 +53,7 @@ func asymmetricSportServer(t *testing.T) *httptest.Server {
 // are exercised.
 func TestSportCache_AsymmetricLocales(t *testing.T) {
 	srv := asymmetricSportServer(t)
-	sc := newSportDataCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	sc := newSportDataCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 
 	en, de := types.Locale("en"), types.Locale("de")
 	sport1 := types.URN{Prefix: "od", Type: "sport", ID: 1}

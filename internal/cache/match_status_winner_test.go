@@ -273,7 +273,7 @@ func TestBuildMatchStatus_StatusDescriptionOutcomes(t *testing.T) {
 			}
 			return nil, nil // the de catalog omits status 42
 		}
-		static := newLocalizedStaticDataCache(t.Context(), &minimalCfg{}, log.New(nil), nil, fetcher)
+		static := newLocalizedStaticDataCache(testLife(t), &minimalCfg{}, log.New(nil), nil, fetcher)
 		defer static.Close()
 
 		out, err := BuildMatchStatus(t.Context(), newStatusCache(id, 42), static, id, []types.Locale{types.EnLocale, types.DeLocale})
@@ -298,7 +298,7 @@ func TestBuildMatchStatus_StatusDescriptionOutcomes(t *testing.T) {
 		fetcher := func(ctx context.Context, locale types.Locale) ([]types.StaticData, error) {
 			return []types.StaticData{{ID: 1, Description: types.Some("other")}}, nil
 		}
-		static := newLocalizedStaticDataCache(t.Context(), &minimalCfg{}, log.New(nil), nil, fetcher)
+		static := newLocalizedStaticDataCache(testLife(t), &minimalCfg{}, log.New(nil), nil, fetcher)
 		defer static.Close()
 
 		out, err := BuildMatchStatus(t.Context(), newStatusCache(id, 42), static, id, []types.Locale{types.EnLocale, types.DeLocale})
@@ -314,7 +314,7 @@ func TestBuildMatchStatus_StatusDescriptionOutcomes(t *testing.T) {
 		fetcher := func(ctx context.Context, locale types.Locale) ([]types.StaticData, error) {
 			return nil, errors.New("upstream exploded")
 		}
-		static := newLocalizedStaticDataCache(t.Context(), &minimalCfg{}, log.New(nil), nil, fetcher)
+		static := newLocalizedStaticDataCache(testLife(t), &minimalCfg{}, log.New(nil), nil, fetcher)
 		defer static.Close()
 
 		if _, err := BuildMatchStatus(t.Context(), newStatusCache(id, 42), static, id, []types.Locale{types.EnLocale}); err == nil {

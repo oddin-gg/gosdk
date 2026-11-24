@@ -95,8 +95,8 @@ type EventCache[K comparable, L comparable, T CachedEntry[L]] struct {
 	purgedAt time.Time
 	purgeGen atomic.Uint64
 
-	// lifetime is Config.Lifetime (may be nil); see that field's doc.
-	lifetime context.Context
+	// life is Config.Lifetime (may be nil); see that field's doc.
+	life *Lifetime
 
 	// onAdmit is Config.OnAdmit (may be nil); see that field's doc.
 	onAdmit func(key any, value any)
@@ -143,10 +143,11 @@ type Config struct {
 
 	// Lifetime, when non-nil, is the detach root for singleflight
 	// loads: a load survives its first caller's cancellation but NOT
-	// the owning component's shutdown (cancel Lifetime on Close and
-	// every in-flight loader's ctx cancels with it). Nil falls back to
-	// context.WithoutCancel(callerCtx) — fully detached.
-	Lifetime context.Context
+	// the owning component's shutdown (ending the Lifetime cancels
+	// every in-flight loader's ctx). Admission and StoreSide commits
+	// run inside it, so none lands after it has ended. Nil falls back
+	// to context.WithoutCancel(callerCtx) — fully detached.
+	Lifetime *Lifetime
 
 	// Endpoint is the REST endpoint the loader asks: the breaker a message
 	// build honours before it starts or joins a load. The zero value is
@@ -187,7 +188,7 @@ func NewEventCache[K comparable, L comparable, T CachedEntry[L]](
 		lru:       NewTTL[K, T](size, onEvict, ttl),
 		loader:    loader,
 		clearedAt: make(map[K]time.Time),
-		lifetime:  cfg.Lifetime,
+		life:      cfg.Lifetime,
 		endpoint:  cfg.Endpoint,
 		onAdmit:   cfg.OnAdmit,
 	}
@@ -259,7 +260,7 @@ func (c *EventCache[K, L, T]) get(ctx context.Context, key K, locales []L, clear
 	// not outlive the component that started it. Bounded by LoadTimeout
 	// so a stuck upstream / misconfigured HTTP client cannot leave the
 	// load running indefinitely (see LoadCoalesced for the same defense).
-	base := c.lifetime //nolint:contextcheck // deliberate detach: the owning cache's lifetime ctx, not the caller's, is the correct cancellation root for the shared load
+	base := c.life.Context() //nolint:contextcheck // deliberate detach: the owning cache's lifetime ctx, not the caller's, is the correct cancellation root for the shared load
 	if base == nil {
 		// Without the caller's message mark: see LoadCoalesced.
 		base = apipolicy.WithoutGate(context.WithoutCancel(ctx))
@@ -317,13 +318,9 @@ func (c *EventCache[K, L, T]) get(ctx context.Context, key K, locales []L, clear
 			// may contain invalidated data — discard and let the caller
 			// retry from the now-empty entry.
 			//
-			// Close-gate: a flight whose fetch completed just before the
-			// owner's lifetime was cancelled could otherwise pause here,
-			// survive a successful client Close, then resume and mutate the
-			// cache — contradicting Close's quiescence guarantee. The
-			// re-check immediately before admission shrinks that window to
-			// a few instructions. (base is the lifetime ctx when the owner
-			// configured one; the WithoutCancel fallback never fires.)
+			// Close-gate: the admission is a commit of the owner's lifetime,
+			// so a flight that finished across Close stores nothing and
+			// Close returns only after a running admission has finished.
 			//
 			// There is one flight per key, so no other flight admits an entry
 			// for it in the meantime; the flights that overlap across a Clear
@@ -333,8 +330,12 @@ func (c *EventCache[K, L, T]) get(ctx context.Context, key K, locales []L, clear
 			// fetch ran, admitting it would give its stale locales a fresh
 			// lifetime. The load is discarded then and the caller's retry
 			// merges onto whatever the cache holds now.
+			if !c.life.Enter() {
+				return zero, c.life.Err()
+			}
+			defer c.life.Leave()
 			c.clearMu.Lock()
-			cleared := c.clearedAt[key].After(started) || c.purgedAt.After(started) || base.Err() != nil
+			cleared := c.clearedAt[key].After(started) || c.purgedAt.After(started)
 			if !cleared {
 				cur, curOK := c.lru.Peek(key)
 				cleared = curOK != hadExisting || (curOK && cur != existing)
@@ -463,8 +464,13 @@ var clearForgetHook func()
 // then survive an invalidation that removed the parent entry.
 //
 // `store` must be brief and must not call back into this cache's Clear /
-// Get / Purge (clearMu is held).
+// Get / Purge (clearMu is held). It is also a commit of the lifetime: once
+// the lifetime has ended it does not run.
 func (c *EventCache[K, L, T]) StoreSide(key K, since time.Time, store func()) bool {
+	if !c.life.Enter() {
+		return false
+	}
+	defer c.life.Leave()
 	c.clearMu.Lock()
 	defer c.clearMu.Unlock()
 	if c.clearedAt[key].After(since) || c.purgedAt.After(since) {

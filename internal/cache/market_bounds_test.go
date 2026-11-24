@@ -41,7 +41,7 @@ func TestMarketDescriptionCache_VariantCachedAcrossCalls(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	mc := newMarketDescriptionCache(t.Context(), newAPIClientForTest(t, srv), nil)
+	mc := newMarketDescriptionCache(testLife(t), newAPIClientForTest(t, srv), nil)
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 
@@ -81,7 +81,7 @@ func TestMarketDescriptionCache_ByIDMissSharesBulkLoad(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	mc := newMarketDescriptionCache(t.Context(), newAPIClientForTest(t, srv), nil)
+	mc := newMarketDescriptionCache(testLife(t), newAPIClientForTest(t, srv), nil)
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 
@@ -120,7 +120,7 @@ func TestMarketDescriptionCache_MalformedRowSkipped(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	mc := newMarketDescriptionCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	mc := newMarketDescriptionCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 
@@ -163,7 +163,7 @@ func TestMatchStatusCache_Bounded(t *testing.T) {
 
 // TestPlayersCache_Bounded pins the same class of fix for players.
 func TestPlayersCache_Bounded(t *testing.T) {
-	c := newPlayersCache(t.Context(), nil, log.New(nil))
+	c := newPlayersCache(testLife(t), nil, log.New(nil))
 	for i := 0; i < playersCacheSize+50; i++ {
 		// Straight to the store: this test pins only the LRU bound. Real
 		// admissions go through storeIfNotCleared (tombstone-gated).

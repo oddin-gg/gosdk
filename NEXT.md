@@ -475,6 +475,10 @@ what it **waits** for; it does not change any request.
   A message that stops waiting leaves the flight running; it fills the cache for
   later messages and getters. A getter that joins a flight a message started
   gets the same answer it would get from its own.
+  Every store of a flight is a commit of one lifetime owner (`lru.Lifetime`,
+  shared by all caches of the client): `Close` cancels the flights and returns
+  only after the commits that were running, and a flight that ends later stores
+  nothing, so no flight stores into a cache once `Close` has returned.
 - **One breaker per endpoint** (`internal/api/breaker.go`). The endpoints are
   the resource kinds of `apipolicy.Endpoint` (match summary, fixture, competitor
   profile, player profile, tournament info, market descriptions, variant

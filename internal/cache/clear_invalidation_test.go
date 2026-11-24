@@ -38,7 +38,7 @@ func TestSportCache_ClearInvalidatesLoadedLocales(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	sc := newSportDataCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	sc := newSportDataCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 
@@ -96,7 +96,7 @@ func TestSportCache_EmptyTournamentsCachedAfterFirstFetch(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	sc := newSportDataCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	sc := newSportDataCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 
@@ -155,7 +155,7 @@ func TestMarketDescriptionCache_SnapshotPointersAreCloned(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	mc := newMarketDescriptionCache(t.Context(), newAPIClientForTest(t, srv), nil)
+	mc := newMarketDescriptionCache(testLife(t), newAPIClientForTest(t, srv), nil)
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 
@@ -211,7 +211,7 @@ func TestMarketDescriptionCache_ClearItemInvalidatesBulkView(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	mc := newMarketDescriptionCache(t.Context(), newAPIClientForTest(t, srv), nil)
+	mc := newMarketDescriptionCache(testLife(t), newAPIClientForTest(t, srv), nil)
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 
@@ -271,7 +271,7 @@ func TestSportCache_MalformedRowDoesNotPartiallyCommit(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	sc := newSportDataCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	sc := newSportDataCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 
 	if _, err := sc.Sports(t.Context(), []types.Locale{types.EnLocale}); err == nil {
 		t.Fatal("first load should fail on the malformed row")

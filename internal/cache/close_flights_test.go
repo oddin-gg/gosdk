@@ -1,7 +1,6 @@
 package cache
 
 import (
-	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +11,7 @@ import (
 	"time"
 
 	"github.com/oddin-gg/gosdk/internal/apipolicy"
+	"github.com/oddin-gg/gosdk/internal/cache/lru"
 	log "github.com/oddin-gg/gosdk/internal/log"
 	"github.com/oddin-gg/gosdk/types"
 )
@@ -59,7 +59,8 @@ func TestFlights_DetachedFlightsStopAtClose(t *testing.T) {
 	defer srv.Close()
 	defer unhold()
 
-	life, closeCaches := context.WithCancel(t.Context())
+	life := lru.NewLifetime(t.Context())
+	closeCaches := life.End
 	defer closeCaches()
 	client := newAPIClientForTest(t, srv)
 	markets := newMarketDescriptionCache(life, client, log.New(nil))
@@ -130,7 +131,8 @@ func TestFlights_DetachedFlightsStopAtClose(t *testing.T) {
 // the stores, where the request itself can no longer be cut short.
 func TestFlights_ARefreshThatDownloadedBeforeCloseCommitsNothing(t *testing.T) {
 	srv := newMarketSrv(t, bulkCatalogWithStaticVariants)
-	life, closeCaches := context.WithCancel(t.Context())
+	life := lru.NewLifetime(t.Context())
+	closeCaches := life.End
 	defer closeCaches()
 	mc := newMarketDescriptionCache(life, newAPIClientForTest(t, srv.Server), log.New(nil))
 	mc.catalogTTL = 50 * time.Millisecond
@@ -214,57 +216,43 @@ func TestFlights_AnIconThatDownloadedBeforeCloseStoresNothing(t *testing.T) {
 	cases := []struct {
 		name string
 		body string
-		// build returns the icon lookup, whether an icon is cached, and what
-		// Close does to the cache after it cancelled the lifetime.
-		build func(life context.Context, srv *httptest.Server) (lookup func() (*string, error), cached func() bool, closeIcons func())
+		// build returns the icon lookup and whether an icon is cached.
+		build func(life *lru.Lifetime, srv *httptest.Server) (lookup func() (*string, error), cached func() bool)
 	}{
-		{"competitor", iconCompetitorXML, func(life context.Context, srv *httptest.Server) (func() (*string, error), func() bool, func()) {
+		{"competitor", iconCompetitorXML, func(life *lru.Lifetime, srv *httptest.Server) (func() (*string, error), func() bool) {
 			cc := newCompetitorCache(life, newAPIClientForTest(t, srv), log.New(nil))
 			return func() (*string, error) { return cc.CompetitorIcon(t.Context(), cid, types.EnLocale) },
-				func() bool { _, ok := cc.loadIcon(cid); return ok }, cc.closeIcons
+				func() bool { _, ok := cc.loadIcon(cid); return ok }
 		}},
-		{"tournament", iconTournamentXML, func(life context.Context, srv *httptest.Server) (func() (*string, error), func() bool, func()) {
+		{"tournament", iconTournamentXML, func(life *lru.Lifetime, srv *httptest.Server) (func() (*string, error), func() bool) {
 			tc := newTournamentCache(life, newAPIClientForTest(t, srv), log.New(nil))
 			return func() (*string, error) { return tc.TournamentIcon(t.Context(), tid, types.EnLocale) },
-				func() bool { _, ok := tc.loadIcon(tid); return ok }, tc.closeIcons
+				func() bool { _, ok := tc.loadIcon(tid); return ok }
 		}},
 	}
-	// Close cancels the lifetime and then closes the icon stores; the two
-	// variants pin each half on its own: a lifetime cancelled alone (a cache
-	// used without a manager) and closeIcons alone (the gate that makes the
-	// check and the store one step).
-	closes := []struct {
-		name string
-		do   func(cancel context.CancelFunc, closeIcons func())
-	}{
-		{"lifetime cancelled", func(cancel context.CancelFunc, _ func()) { cancel() }},
-		{"closeIcons alone", func(_ context.CancelFunc, closeIcons func()) { closeIcons() }},
-	}
 	for _, tc := range cases {
-		for _, cl := range closes {
-			t.Run(tc.name+"/"+cl.name, func(t *testing.T) {
-				life, cancel := context.WithCancel(t.Context())
-				defer cancel()
-				lookup, cached, closeIcons := tc.build(life, serve(tc.body))
+		t.Run(tc.name, func(t *testing.T) {
+			life := lru.NewLifetime(t.Context())
+			defer life.End()
+			lookup, cached := tc.build(life, serve(tc.body))
 
-				hookRan := make(chan struct{})
-				iconCommitGateHook = func() {
-					cl.do(cancel, closeIcons)
-					close(hookRan)
-				}
-				t.Cleanup(func() { iconCommitGateHook = nil })
+			hookRan := make(chan struct{})
+			iconCommitGateHook = func() {
+				life.End()
+				close(hookRan)
+			}
+			t.Cleanup(func() { iconCommitGateHook = nil })
 
-				// The caller's wait ends with the flight, store included.
-				_, _ = lookup()
-				select {
-				case <-hookRan:
-				case <-time.After(5 * time.Second):
-					t.Fatal("the icon flight never reached its store")
-				}
-				if cached() {
-					t.Fatal("an icon fetched before Close was stored after it")
-				}
-			})
-		}
+			// The caller's wait ends with the flight, store included.
+			_, _ = lookup()
+			select {
+			case <-hookRan:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the icon flight never reached its store")
+			}
+			if cached() {
+				t.Fatal("an icon fetched before Close was stored after it")
+			}
+		})
 	}
 }

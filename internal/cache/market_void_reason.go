@@ -30,9 +30,9 @@ import (
 // under the cache lifetime.
 type MarketVoidReasonsCache struct {
 	apiClient *api.Client
-	// lifetime is the detach root for coalesced loads — cancelled by
-	// Manager.Close so no fetch outlives the owner.
-	lifetime context.Context
+	// life is the lifetime of the owning manager: the detach root of the
+	// flights and the owner of every commit (see lru.Lifetime).
+	life *lru.Lifetime
 
 	mu     sync.RWMutex // guards loaded/void/clearedAt (state only — never held across I/O)
 	loaded bool
@@ -67,7 +67,7 @@ func (m *MarketVoidReasonsCache) MarketVoidReasons(ctx context.Context) ([]data.
 
 	flightKey := fmt.Sprintf("void_reasons|%d", m.flightGen.Load())
 
-	return lru.LoadCoalesced(ctx, m.lifetime, &m.sf, apipolicy.EndpointStatic, flightKey, func(loadCtx context.Context) ([]data.MarketVoidReasons, error) {
+	return lru.LoadCoalesced(ctx, m.life.Context(), &m.sf, apipolicy.EndpointStatic, flightKey, func(loadCtx context.Context) ([]data.MarketVoidReasons, error) {
 		// Re-check under the flight — a peer may have loaded already.
 		m.mu.RLock()
 		if m.loaded {
@@ -83,12 +83,14 @@ func (m *MarketVoidReasonsCache) MarketVoidReasons(ctx context.Context) ([]data.
 			// loaded stays false → next call retries. No poisoning.
 			return nil, err
 		}
-		m.mu.Lock()
-		if !m.clearedAt.After(loadStarted) {
-			m.void = v
-			m.loaded = true
-		}
-		m.mu.Unlock()
+		m.life.Commit(func() {
+			m.mu.Lock()
+			if !m.clearedAt.After(loadStarted) {
+				m.void = v
+				m.loaded = true
+			}
+			m.mu.Unlock()
+		})
 		// The caller still gets the freshly fetched list even when a
 		// racing Clear suppressed the store.
 		return v, nil
@@ -123,8 +125,8 @@ func (m *MarketVoidReasonsCache) Clear() {
 	m.mu.Unlock()
 }
 
-func newMarketVoidReasonsCache(lifeCtx context.Context, client *api.Client) *MarketVoidReasonsCache {
-	return &MarketVoidReasonsCache{apiClient: client, lifetime: lifeCtx}
+func newMarketVoidReasonsCache(life *lru.Lifetime, client *api.Client) *MarketVoidReasonsCache {
+	return &MarketVoidReasonsCache{apiClient: client, life: life}
 }
 
 // NewMarketVoidReason constructs a value-typed types.MarketVoidReason.

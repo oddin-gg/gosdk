@@ -49,9 +49,9 @@ const playersCacheSize = 10000
 type PlayersCache struct {
 	apiClient *api.Client
 	logger    *log.Logger
-	// lifetime is the detach root for singleflight profile loads —
-	// cancelled by Manager.Close so no fetch outlives the owner.
-	lifetime context.Context
+	// life is the lifetime of the owning manager: the detach root of the
+	// flights and the owner of every commit (see lru.Lifetime).
+	life *lru.Lifetime
 
 	players *lru.TTL[PlayerCacheKey, types.Player]
 	// loadGroup deduplicates concurrent fetches of the same
@@ -97,8 +97,12 @@ const (
 
 // storeIfNotCleared admits a loaded player unless a Clear for its id
 // (or a Purge) landed after the load started. Returns false when the
-// store was suppressed.
+// store was suppressed, also because the owner's lifetime has ended.
 func (c *PlayersCache) storeIfNotCleared(key PlayerCacheKey, p types.Player, loadStarted time.Time) bool {
+	if !c.life.Enter() {
+		return false
+	}
+	defer c.life.Leave()
 	c.clearMu.Lock()
 	defer c.clearMu.Unlock()
 	if c.clearedIDsAt[key.PlayerID].After(loadStarted) || c.purgedAt.After(loadStarted) {
@@ -225,7 +229,7 @@ func (c *PlayersCache) GetPlayers(ctx context.Context, ids []PlayerCacheKey) (ma
 func (c *PlayersCache) loadPlayer(ctx context.Context, key PlayerCacheKey) (types.Player, error) {
 	for {
 		gen := c.flightGen.Load()
-		p, err := lru.LoadCoalesced(ctx, c.lifetime, &c.loadGroup, apipolicy.EndpointPlayer, c.flightKey(gen, key), func(loadCtx context.Context) (types.Player, error) {
+		p, err := lru.LoadCoalesced(ctx, c.life.Context(), &c.loadGroup, apipolicy.EndpointPlayer, c.flightKey(gen, key), func(loadCtx context.Context) (types.Player, error) {
 			// Stale-generation guard — see errStaleFlight for the
 			// register-vs-clear window this closes.
 			if c.flightGen.Load() != gen {
@@ -319,11 +323,11 @@ func (c *PlayersCache) snapshot(ids []PlayerCacheKey) (map[PlayerCacheKey]types.
 	return found, missing
 }
 
-func newPlayersCache(lifeCtx context.Context, apiClient *api.Client, logger *log.Logger) *PlayersCache {
+func newPlayersCache(life *lru.Lifetime, apiClient *api.Client, logger *log.Logger) *PlayersCache {
 	return &PlayersCache{
 		apiClient:    apiClient,
 		logger:       logger,
-		lifetime:     lifeCtx,
+		life:         life,
 		players:      lru.NewTTL[PlayerCacheKey, types.Player](playersCacheSize, nil, lru.DefaultEventCacheTTL),
 		clearedIDsAt: make(map[string]time.Time),
 	}

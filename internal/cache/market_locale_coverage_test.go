@@ -48,7 +48,7 @@ func TestMarketDescriptionByID_IncompleteLocaleIsTypedError(t *testing.T) {
 	srv := localeSplitCatalogServer(t)
 	defer srv.Close()
 
-	mc := newMarketDescriptionCache(t.Context(), newAPIClientForTest(t, srv), nil)
+	mc := newMarketDescriptionCache(testLife(t), newAPIClientForTest(t, srv), nil)
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
@@ -99,7 +99,7 @@ func TestMarketDescriptionByID_MalformedRowIsIncompleteNotNotFound(t *testing.T)
 	}))
 	defer srv.Close()
 
-	mc := newMarketDescriptionCache(t.Context(), newAPIClientForTest(t, srv), nil)
+	mc := newMarketDescriptionCache(testLife(t), newAPIClientForTest(t, srv), nil)
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
@@ -130,7 +130,7 @@ func TestMultiLocalizedMarketDescriptions_FiltersPartialCoverage(t *testing.T) {
 	srv := localeSplitCatalogServer(t)
 	defer srv.Close()
 
-	mc := newMarketDescriptionCache(t.Context(), newAPIClientForTest(t, srv), nil)
+	mc := newMarketDescriptionCache(testLife(t), newAPIClientForTest(t, srv), nil)
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 

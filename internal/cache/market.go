@@ -134,9 +134,9 @@ func variantKey(marketID int, variant types.Optional[string]) CompositeKey {
 type MarketDescriptionCache struct {
 	apiClient *api.Client
 	logger    *log.Logger
-	// lifetime is the detach root for singleflight catalog loads —
-	// cancelled by Manager.Close so no fetch outlives the owner.
-	lifetime context.Context
+	// life is the lifetime of the owning manager: the detach root of the
+	// flights and the owner of every commit (see lru.Lifetime).
+	life *lru.Lifetime
 
 	mu sync.RWMutex
 	// loadedLocales records WHEN each locale's bulk catalog was last
@@ -626,7 +626,7 @@ func (m *MarketDescriptionCache) loadOne(ctx context.Context, marketID *int, var
 				sfKey = fmt.Sprintf("%d|*|%s", gen, locale)
 			}
 
-			_, err := lru.LoadCoalesced(ctx, m.lifetime, &m.sf, ep, sfKey,
+			_, err := lru.LoadCoalesced(ctx, m.life.Context(), &m.sf, ep, sfKey,
 				m.catalogFlight(gen, sfKey, loc, marketID, variantStr, isDynamicVariant))
 			if errors.Is(err, errStaleFlight) {
 				continue // re-register under the fresh generation
@@ -638,16 +638,6 @@ func (m *MarketDescriptionCache) loadOne(ctx context.Context, marketID *int, var
 		}
 	}
 	return nil
-}
-
-// lifetimeEnded reports whether the owner's lifetime was cancelled. The
-// commit steps of a catalog flight call it under m.mu: a flight whose
-// download completed just before Close would otherwise resume afterwards
-// and write into a cache that Close declared quiescent. Same close-gate as
-// lru.EventCache's admission; Close does not take m.mu, so what remains is
-// the few instructions between the check and the store, as there.
-func (m *MarketDescriptionCache) lifetimeEnded() bool {
-	return m.lifetime != nil && m.lifetime.Err() != nil
 }
 
 // catalogFlight is the body of one catalog flight: the bulk download of a
@@ -707,9 +697,11 @@ func (m *MarketDescriptionCache) catalogFlight(
 				// Feed the warm-path retry backoff (see
 				// refreshFailedAt); cleared again on the next
 				// successful commit below.
-				m.mu.Lock()
-				m.refreshFailedAt[loc] = time.Now()
-				m.mu.Unlock()
+				m.life.Commit(func() {
+					m.mu.Lock()
+					m.refreshFailedAt[loc] = time.Now()
+					m.mu.Unlock()
+				})
 			}
 			return struct{}{}, fmt.Errorf("fetch market description %s locale %s: %w", sfKey, loc, err)
 		}
@@ -728,16 +720,18 @@ func (m *MarketDescriptionCache) catalogFlight(
 		// read reported a wrong transient ErrItemNotFound for a
 		// market that exists upstream.
 		if !isDynamicVariant {
-			m.mu.Lock()
-			if m.lifetimeEnded() {
-				m.mu.Unlock()
-				return struct{}{}, m.lifetime.Err()
+			// Every store of the flight is a commit of the owner's
+			// lifetime (m.life): after Close it stores nothing.
+			if !m.life.Enter() {
+				return struct{}{}, m.life.Err()
 			}
+			m.mu.Lock()
 			superseded := m.fetchCursor[loc].After(loadStarted)
 			if !superseded && loadStarted.After(m.fetchCursor[loc]) {
 				m.fetchCursor[loc] = loadStarted
 			}
 			m.mu.Unlock()
+			m.life.Leave()
 			if superseded {
 				return struct{}{}, errStaleFlight
 			}
@@ -790,8 +784,11 @@ func (m *MarketDescriptionCache) catalogFlight(
 		// loaded with pre-clear data would make bulk reads skip the
 		// refetch the Clear asked for; the next read reloads fresh.
 		if !isDynamicVariant {
+			if !m.life.Enter() {
+				return struct{}{}, m.life.Err()
+			}
 			m.mu.Lock()
-			if !m.lifetimeEnded() && !m.lastClearAt.After(loadStarted) && !m.fetchCursor[loc].After(loadStarted) {
+			if !m.lastClearAt.After(loadStarted) && !m.fetchCursor[loc].After(loadStarted) {
 				// Timestamped with the fetch's START, not its
 				// completion: the freshness window must cover the
 				// age of the DATA, not of the transfer. Also
@@ -808,6 +805,7 @@ func (m *MarketDescriptionCache) catalogFlight(
 			// above. Re-check and hand them to the winner.
 			lost := m.fetchCursor[loc].After(loadStarted)
 			m.mu.Unlock()
+			m.life.Leave()
 			if lost {
 				return struct{}{}, errStaleFlight
 			}
@@ -831,7 +829,7 @@ func (m *MarketDescriptionCache) refreshInBackground(ctx context.Context, locale
 		if lru.SkippedByGate(ctx, &m.sf, sfKey, apipolicy.EndpointCatalog) != nil {
 			continue
 		}
-		lru.StartCoalesced(m.lifetime, &m.sf, sfKey, m.catalogFlight(gen, sfKey, loc, nil, "", false)) //nolint:contextcheck // deliberate detach: the refresh runs under the cache lifetime, not the caller's context
+		lru.StartCoalesced(m.life.Context(), &m.sf, sfKey, m.catalogFlight(gen, sfKey, loc, nil, "", false)) //nolint:contextcheck // deliberate detach: the refresh runs under the cache lifetime, not the caller's context
 	}
 }
 
@@ -855,11 +853,12 @@ func (m *MarketDescriptionCache) refreshInBackground(ctx context.Context, locale
 // through the merge), so it can never observe — and prune — an entry
 // whose first locale is still being populated.
 func (m *MarketDescriptionCache) reconcileBulk(locale types.Locale, seen map[CompositeKey]struct{}, loadStarted time.Time) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.lifetimeEnded() {
+	if !m.life.Enter() {
 		return
 	}
+	defer m.life.Leave()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	// An EMPTY response carries no removal authority. response_code=OK
 	// with zero <market> rows decodes successfully (nil slice, nil
 	// error) — an upstream deploy glitch or truncated-but-well-formed
@@ -920,13 +919,13 @@ func (m *MarketDescriptionCache) reconcileBulk(locale types.Locale, seen map[Com
 func (m *MarketDescriptionCache) upsert(description data.MarketDescription, locale types.Locale, loadStarted time.Time) error {
 	key := variantKey(description.ID, types.FromPtr(description.Variant))
 
-	m.mu.Lock()
-	if m.lifetimeEnded() {
+	if !m.life.Enter() {
 		// The owner is closed: a download that finished across Close
 		// stores nothing.
-		m.mu.Unlock()
 		return nil
 	}
+	defer m.life.Leave()
+	m.mu.Lock()
 	if m.clearedAt[key].After(loadStarted) || m.purgedAt.After(loadStarted) {
 		// A Clear for THIS key (or a Purge) landed after the load
 		// started: its data may predate the invalidation. Skip only
@@ -1089,11 +1088,11 @@ func splitGroups(raw string) []string {
 	return out
 }
 
-func newMarketDescriptionCache(lifeCtx context.Context, client *api.Client, logger *log.Logger) *MarketDescriptionCache {
+func newMarketDescriptionCache(life *lru.Lifetime, client *api.Client, logger *log.Logger) *MarketDescriptionCache {
 	return &MarketDescriptionCache{
 		apiClient:       client,
 		logger:          logger,
-		lifetime:        lifeCtx,
+		life:            life,
 		loadedLocales:   make(map[types.Locale]time.Time),
 		loadingLocales:  make(map[types.Locale]int),
 		fetchCursor:     make(map[types.Locale]time.Time),

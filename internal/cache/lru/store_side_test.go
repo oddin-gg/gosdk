@@ -159,7 +159,7 @@ func TestLoadCoalesced_LifetimeCancelAbortsDetachedLoad(t *testing.T) {
 // TestEventCacheGet_LifetimeCancelAbortsDetachedLoad is the EventCache
 // twin: Config.Lifetime is the detach root for Get's singleflight loads.
 func TestEventCacheGet_LifetimeCancelAbortsDetachedLoad(t *testing.T) {
-	lifetime, lifetimeCancel := context.WithCancel(context.Background())
+	lifetime := NewLifetime(context.Background())
 	loadCtxErr := make(chan error, 1)
 	started := make(chan struct{})
 
@@ -183,7 +183,7 @@ func TestEventCacheGet_LifetimeCancelAbortsDetachedLoad(t *testing.T) {
 
 	<-started
 	time.Sleep(80 * time.Millisecond)
-	lifetimeCancel()
+	lifetime.End()
 
 	select {
 	case err := <-loadCtxErr:

@@ -31,7 +31,7 @@ func notFoundServer(t *testing.T) *httptest.Server {
 // permanent 404 from a transport failure and retried it forever.
 func TestMatchStatusCache_Upstream404_MapsToNotFound(t *testing.T) {
 	srv := notFoundServer(t)
-	msc := newMatchStatusCache(t.Context(), newAPIClientForTest(t, srv), &fakeCacheCfg{}, log.New(nil))
+	msc := newMatchStatusCache(testLife(t), newAPIClientForTest(t, srv), &fakeCacheCfg{}, log.New(nil))
 	id := types.URN{Prefix: "od", Type: "match", ID: 404}
 
 	_, err := msc.MatchStatus(context.Background(), id)
@@ -51,7 +51,7 @@ func TestMatchStatusCache_Upstream404_MapsToNotFound(t *testing.T) {
 // competitor/player), not propagate as a bare retryable APIError.
 func TestFixtureCache_Upstream404_MapsToNotFound(t *testing.T) {
 	srv := notFoundServer(t)
-	fc := newFixtureCache(t.Context(), newAPIClientForTest(t, srv))
+	fc := newFixtureCache(testLife(t), newAPIClientForTest(t, srv))
 	id := types.URN{Prefix: "od", Type: "match", ID: 404}
 
 	_, err := fc.Fixture(context.Background(), id, []types.Locale{types.EnLocale})

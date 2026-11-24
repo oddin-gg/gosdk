@@ -45,7 +45,7 @@ func TestBuildMatchStatus_ScoreboardInnerFieldsNotAliased(t *testing.T) {
 
 	apiC := newAPIClientForTest(t, srv)
 	cfg := &minimalCfg{apiURL: srv.URL, token: "tok"}
-	c := newMatchStatusCache(t.Context(), apiC, cfg, log.New(nil))
+	c := newMatchStatusCache(testLife(t), apiC, cfg, log.New(nil))
 
 	urn, _ := types.ParseURN("od:match:7")
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)

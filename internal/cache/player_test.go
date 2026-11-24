@@ -58,7 +58,7 @@ func TestPlayersCache_DistinctKeysLoadInParallel(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	pc := newPlayersCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	pc := newPlayersCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 
 	keys := []PlayerCacheKey{
 		{PlayerID: "od:player:1", Locale: types.EnLocale},
@@ -124,7 +124,7 @@ func TestPlayersCache_SingleCallBatchLoadsInParallel(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	pc := newPlayersCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	pc := newPlayersCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 
 	keys := []PlayerCacheKey{
 		{PlayerID: "od:player:1", Locale: types.EnLocale},
@@ -192,7 +192,7 @@ func TestPlayersCache_BatchBoundEnforced(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	pc := newPlayersCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	pc := newPlayersCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 	ids := make([]PlayerCacheKey, 0, keys)
 	for i := range keys {
 		ids = append(ids, PlayerCacheKey{PlayerID: fmt.Sprintf("od:player:%d", i+1), Locale: types.EnLocale})
@@ -242,7 +242,7 @@ func TestPlayersCache_BatchWith404KeepsClassification(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	pc := newPlayersCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	pc := newPlayersCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 	ids := []PlayerCacheKey{
 		{PlayerID: "od:player:1", Locale: types.EnLocale},
 		{PlayerID: "od:player:404", Locale: types.EnLocale},
@@ -279,7 +279,7 @@ func TestPlayersCache_DuplicateKeyDeduplicated(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	pc := newPlayersCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	pc := newPlayersCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 	key := PlayerCacheKey{PlayerID: "od:player:42", Locale: types.EnLocale}
 
 	const callers = 8
@@ -325,7 +325,7 @@ func TestPlayersCache_ClearStorm_NeverLeaksStaleFlightOrDiverges(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	pc := newPlayersCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	pc := newPlayersCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 	key := PlayerCacheKey{PlayerID: "od:player:7", Locale: types.EnLocale}
 
 	stop := make(chan struct{})
@@ -396,7 +396,7 @@ func TestPlayersCache_UnderageDecoded(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	pc := newPlayersCache(t.Context(), newAPIClientForTest(t, srv), log.New(nil))
+	pc := newPlayersCache(testLife(t), newAPIClientForTest(t, srv), log.New(nil))
 
 	want := map[string]types.UnderageStatus{
 		"od:player:1": types.UnderageYes,

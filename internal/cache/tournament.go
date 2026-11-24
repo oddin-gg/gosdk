@@ -48,13 +48,11 @@ type TournamentCache struct {
 	iconMu sync.RWMutex
 	icons  map[types.URN]*string
 
-	// lifetime is the detach root of the icon flights (cancelled with the
-	// owning manager); iconSF coalesces concurrent fetches of one icon.
-	lifetime context.Context
-	iconSF   lru.Flights
-	// iconsClosed (guarded by iconMu) makes every later icon flight store a
-	// no-op; closeIcons sets it.
-	iconsClosed bool
+	// life is the lifetime of the owning manager: the detach root of the
+	// icon flights and the owner of their commits. iconSF coalesces
+	// concurrent fetches of one icon.
+	life   *lru.Lifetime
+	iconSF lru.Flights
 }
 
 // LocalizedTournament holds tournament data; mu guards every field.
@@ -328,7 +326,7 @@ func (t *TournamentCache) TournamentIcon(ctx context.Context, id types.URN, loca
 		return v, nil
 	}
 
-	return lru.LoadCoalesced(ctx, t.lifetime, &t.iconSF, apipolicy.EndpointTournament, iconFlightKey(id, locale), func(loadCtx context.Context) (*string, error) {
+	return lru.LoadCoalesced(ctx, t.life.Context(), &t.iconSF, apipolicy.EndpointTournament, iconFlightKey(id, locale), func(loadCtx context.Context) (*string, error) {
 		// A flight that ended just before this one started has stored it.
 		if v, ok := t.loadIcon(id); ok {
 			return v, nil
@@ -347,26 +345,15 @@ func (t *TournamentCache) TournamentIcon(ctx context.Context, id types.URN, loca
 		// its icon resurrected by us — StoreSide is atomic with Clear, so
 		// there is no check-to-write window for a Clear to slip through.
 		// The callers still get the fresh value.
-		// Once the owner's lifetime ended the store is a no-op; the check
-		// and the store are one step under iconMu, which closeIcons (called
-		// by Close right after it cancelled the lifetime) takes too.
+		// StoreSide is a commit of the owner's lifetime too: after Close it
+		// stores nothing.
 		t.lru.StoreSide(id, fetchStarted, func() {
 			t.iconMu.Lock()
 			defer t.iconMu.Unlock()
-			if t.iconsClosed || (t.lifetime != nil && t.lifetime.Err() != nil) {
-				return
-			}
 			t.icons[id] = data.IconPath
 		})
 		return data.IconPath, nil
 	})
-}
-
-// closeIcons makes every later icon flight store a no-op.
-func (t *TournamentCache) closeIcons() {
-	t.iconMu.Lock()
-	t.iconsClosed = true
-	t.iconMu.Unlock()
 }
 
 func (t *TournamentCache) loadIcon(id types.URN) (*string, bool) {
@@ -408,16 +395,16 @@ func (t *TournamentCache) ClearCacheItem(id types.URN) {
 	t.iconSF.ForgetPrefix(iconFlightPrefix(id))
 }
 
-func newTournamentCache(lifeCtx context.Context, client *api.Client, logger *log.Logger) *TournamentCache {
+func newTournamentCache(life *lru.Lifetime, client *api.Client, logger *log.Logger) *TournamentCache {
 	tc := &TournamentCache{
 		apiClient: client,
 		logger:    logger,
 		icons:     make(map[types.URN]*string),
-		lifetime:  lifeCtx,
+		life:      life,
 	}
 	tc.lru = lru.NewEventCache[types.URN, types.Locale, *LocalizedTournament](
 		lru.Config{
-			Lifetime: lifeCtx,
+			Lifetime: life,
 			Endpoint: apipolicy.EndpointTournament,
 			// Evict the icon alongside the entry — LRU/TTL eviction
 			// previously left icon side-map entries behind forever.

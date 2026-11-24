@@ -36,9 +36,9 @@ type LocalizedStaticDataCache struct {
 	locales               []types.Locale
 	internalCache         map[int]map[types.Locale]string
 	loadedLocales         map[types.Locale]struct{}
-	lifeCtx               context.Context
-	closeFn               context.CancelFunc
-	closeOnce             sync.Once
+	// life owns the detach root of the fetches and every commit of this
+	// cache; CloseCtx ends it.
+	life *lru.Lifetime
 	// timerDone closes when the periodic-refresh goroutine exits;
 	// Close joins on it so shutdown is deterministic.
 	timerDone chan struct{}
@@ -176,25 +176,22 @@ func (l *LocalizedStaticDataCache) loadLocales(ctx context.Context, locales []ty
 
 				// Built INSIDE the flight body: only the starter runs this
 				// closure, so coalesced waiters don't each retain a timer.
-				fetchCtx, cancel := context.WithTimeout(l.lifeCtx, lru.LoadTimeout)
+				fetchCtx, cancel := context.WithTimeout(l.life.Context(), lru.LoadTimeout)
 				defer cancel()
 				data, err := l.fetcher(apipolicy.WithAttemptFailed(fetchCtx, fl.NoteAttemptFailed), loc)
 				if err != nil {
 					return nil, err
 				}
 
-				l.mux.Lock()
-				// Close-gate: a flight whose fetch finished just before the
-				// cache lifetime was cancelled could otherwise pause here,
-				// survive a successful Client.Close, then resume and commit —
-				// contradicting Close's "nil return ⇒ all internal work
-				// finished" contract. Re-check the lifetime immediately before
-				// the commit (mirrors the EventCache / whoami close-gates),
-				// shrinking the window to the few instructions under the lock.
-				if l.lifeCtx.Err() != nil {
-					l.mux.Unlock()
-					return nil, l.lifeCtx.Err()
+				// Close-gate: the commit belongs to the owner's lifetime, so a
+				// flight whose fetch finished across Close stores nothing and
+				// Close (which ends the lifetime) returns only after a running
+				// commit has finished.
+				if !l.life.Enter() {
+					return nil, l.life.Err()
 				}
+				defer l.life.Leave()
+				l.mux.Lock()
 				for _, sd := range data {
 					localCache, ok := l.internalCache[sd.GetID()]
 					if !ok {
@@ -229,17 +226,15 @@ func (l *LocalizedStaticDataCache) Item(ctx context.Context, id int) (types.Loca
 	return l.LocalizedItem(ctx, id, l.locales)
 }
 
-// Close cancels the lifecycle ctx (stopping the periodic-refresh
-// goroutine and any in-flight fetch) and JOINS the refresh goroutine —
-// cancel-without-join let it briefly outlive Client.Done, breaking the
-// "Close nil return means all internal work finished" determinism
-// contract. The join cannot hang: every path in the refresh loop is
-// bounded by lifeCtx (in-flight fetches derive from it with a load
-// timeout), so cancellation unwinds it promptly. Idempotent AND safe
-// for concurrent callers — the previous bare read-then-nil of closeFn
-// raced when two goroutines closed at once (cache.Manager.Close has no
-// serialization of its own); concurrent callers all block until the
-// goroutine has exited.
+// Close ends the lifetime shared by every cache of the manager (stopping the
+// periodic-refresh goroutine and every in-flight fetch of every cache) and
+// JOINS the refresh goroutine — ending without the join let it briefly outlive
+// Client.Done, breaking the "Close nil return means all internal work
+// finished" determinism contract. The join cannot hang: every path in the
+// refresh loop is bounded by the lifetime (in-flight fetches derive from it
+// with a load timeout), so ending it unwinds the loop promptly. Idempotent AND
+// safe for concurrent callers: ending the lifetime is, and all callers block
+// until the goroutine has exited.
 func (l *LocalizedStaticDataCache) Close() {
 	l.CloseCtx(context.Background())
 }
@@ -251,11 +246,8 @@ func (l *LocalizedStaticDataCache) Close() {
 // leaks harmlessly until its in-flight fetch unwinds (everything it
 // waits on was cancelled).
 func (l *LocalizedStaticDataCache) CloseCtx(ctx context.Context) bool {
-	l.closeOnce.Do(func() {
-		if l.closeFn != nil {
-			l.closeFn()
-		}
-	})
+	// Idempotent; a no-op when the manager has ended the lifetime already.
+	l.life.End()
 	if l.timerDone == nil {
 		return true
 	}
@@ -290,7 +282,7 @@ func (l *LocalizedStaticDataCache) timerTick(ctx context.Context) {
 		loc := locale
 		_, _ = l.sf.Do(string(loc), func() (interface{}, error) {
 			// Same bound as loadLocales: the refresh fetch dies with the
-			// cache lifetime (ctx here IS lifeCtx) and can't run forever
+			// cache lifetime (ctx here is the lifetime context) and can't run forever
 			// on a timeout-less custom HTTP client.
 			fetchCtx, cancel := context.WithTimeout(ctx, lru.LoadTimeout)
 			defer cancel()
@@ -311,6 +303,10 @@ func (l *LocalizedStaticDataCache) timerTick(ctx context.Context) {
 					fresh[sd.GetID()] = d
 				}
 			}
+			if !l.life.Enter() {
+				return nil, l.life.Err()
+			}
+			defer l.life.Leave()
 			l.mux.Lock()
 			// An EMPTY answer carries no removal authority — an OK reply
 			// with zero rows decodes successfully, and a description set
@@ -359,43 +355,39 @@ func (l *LocalizedStaticDataCache) startTimer() {
 		defer close(l.timerDone)
 		select {
 		case <-time.After(l.refreshInitialDelay):
-		case <-l.lifeCtx.Done():
+		case <-l.life.Context().Done():
 			return
 		}
 		// Refresh NOW, not on the first ticker fire: the ticker's first
 		// tick lands a full tickPeriod after the initial delay, so data
 		// loaded near startup stayed stale for initialDelay+tickPeriod
 		// (~48h) instead of the intended ~24h.
-		l.timerTick(l.lifeCtx)
+		l.timerTick(l.life.Context())
 		ticker := time.NewTicker(l.refreshTickPeriod)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
-				l.timerTick(l.lifeCtx)
-			case <-l.lifeCtx.Done():
+				l.timerTick(l.life.Context())
+			case <-l.life.Context().Done():
 				return
 			}
 		}
 	}()
 }
 
-// newLocalizedStaticDataCache constructs the cache. ctx is used to
-// derive a lifecycle context (via WithoutCancel + WithCancel): caller
-// metadata propagates into the periodic refresh goroutine, but its
-// cancellation is severed so the cache outlives the construction-time
-// ctx. Close() cancels the lifecycle. preloadLocales (defaults to the
+// newLocalizedStaticDataCache constructs the cache. life is the lifetime
+// the refresh goroutine and the fetches run under; Close() ends it.
+// preloadLocales (defaults to the
 // configured DefaultLocale when empty) is the locale set the cache
 // fetches on first Item() call and refreshes on each timer tick.
 func newLocalizedStaticDataCache(
-	ctx context.Context,
+	life *lru.Lifetime,
 	oddsFeedConfiguration config.Config,
 	logger *log.Logger,
 	preloadLocales []types.Locale,
 	fetcher func(ctx context.Context, locale types.Locale) ([]types.StaticData, error),
 ) *LocalizedStaticDataCache {
-	lifeCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
-
 	// Default locale always first (primary). Append preloads, dedup.
 	locales := []types.Locale{oddsFeedConfiguration.DefaultLocale()}
 	seen := map[types.Locale]struct{}{oddsFeedConfiguration.DefaultLocale(): {}}
@@ -413,8 +405,7 @@ func newLocalizedStaticDataCache(
 		locales:               locales,
 		internalCache:         make(map[int]map[types.Locale]string),
 		loadedLocales:         make(map[types.Locale]struct{}),
-		lifeCtx:               lifeCtx,
-		closeFn:               cancel,
+		life:                  life,
 		timerDone:             make(chan struct{}),
 		refreshInitialDelay:   initialDelay,
 		refreshTickPeriod:     tickPeriod,

@@ -196,10 +196,10 @@ func (m *MatchCache) OnFeedMessage(id types.URN, feedMessage *types.FeedMessage)
 // ClearCacheItem is the public invalidation hook.
 func (m *MatchCache) ClearCacheItem(id types.URN) { m.lru.Clear(id) }
 
-func newMatchCache(lifeCtx context.Context, client *api.Client, logger *log.Logger) *MatchCache {
+func newMatchCache(life *lru.Lifetime, client *api.Client, logger *log.Logger) *MatchCache {
 	mc := &MatchCache{apiClient: client, logger: logger}
 	mc.lru = lru.NewEventCache[types.URN, types.Locale, *LocalizedMatch](
-		lru.Config{Lifetime: lifeCtx, Endpoint: apipolicy.EndpointSummary},
+		lru.Config{Lifetime: life, Endpoint: apipolicy.EndpointSummary},
 		func(
 			ctx context.Context,
 			id types.URN,
