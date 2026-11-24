@@ -21,7 +21,7 @@ import (
 //
 // Event recoveries expire here, and the deferred ones.
 //
-// S7 seam: a pending reset of the safety net waiting for a disabled producer is
+// Seam for the safety net: a pending reset of it, waiting for a disabled producer, is
 // cancelled here.
 func (m *machine) tick() {
 	mono := m.mono()

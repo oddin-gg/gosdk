@@ -1521,7 +1521,7 @@ func TestMachine_RewindBeforeTheStartIsLeftToTheSeed(t *testing.T) {
 	}
 }
 
-// ---- defects found after the first review round
+// ---- shutdown, first lanes and late tracks
 
 // A no-lane producer is not brought up while the feed closes: nothing is up for a
 // session that has closed at shutdown.

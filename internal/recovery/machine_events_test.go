@@ -2,6 +2,8 @@ package recovery
 
 import (
 	"errors"
+	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"testing"
@@ -107,7 +109,9 @@ func TestMachineEvents_EventRecoveryCompletesOnceEveryAwaitedSessionHasSeenItsSn
 	f.open(1, all)
 	f.open(2, liveOnly)
 	f.startFeed()
+	expect(t, f.m.counters.eventRequested, 0, "requests before it is asked for")
 	id := f.recoverEvent(live)
+	expect(t, f.m.counters.eventRequested, 1, "requests sent")
 	call := f.lastEventAsked()
 	expect(t, call.requestID, id, "request id")
 	expect(t, call.producer, "live", "producer name")
@@ -1016,9 +1020,11 @@ func TestMachineEvents_EventRecoveryAskedForWhileASessionAwaitsItsChannelWaitsFo
 	f.m.channelLost(sid(2))
 	id := f.recoverEvent(live)
 	expect(t, len(f.eventsAsked()), 0, "asked for before the channel is back")
+	expect(t, f.m.counters.eventRequested, 0, "requests counted before it is sent")
 	expect(t, len(f.m.deferred), 1, "waiting")
 	f.m.channelReopened(sid(2))
 	expect(t, len(f.eventsAsked()), 1, "asked for once the channel is back")
+	expect(t, f.m.counters.eventRequested, 1, "requests counted once it is sent")
 	expect(t, f.lastEventAsked().requestID, id, "under the id its caller has")
 	expect(t, len(f.m.deferred), 0, "waiting")
 	// and awaited by both sessions
@@ -1190,4 +1196,381 @@ func TestMachineEvents_EveryEndingLeavesNothingBehind(t *testing.T) {
 	expect(t, len(f.out.outcomes), 40, "one outcome each")
 	expect(t, len(f.m.byID[live].endedEvents) <= endedRemembered, true, "what is remembered is bounded")
 	expect(t, len(f.m.byID[live].endedEvents), endedRemembered, "what is remembered")
+}
+
+// ---- the API's acceptance
+
+// A snapshot_complete says the API took the request: a refusal that comes after it
+// changes nothing.
+func TestMachineEvents_RefusalAfterASnapshotCompleteIsIgnoredAndTheEventRecoveryCompletes(t *testing.T) {
+	f := newFeed(t)
+	f.open(1, all)
+	f.open(2, all)
+	f.startFeed()
+	id := f.recoverEvent(live)
+	f.snapshotComplete(1, live, id)
+	f.refuseEvent(id)
+	f.expectNotEnded(id)
+	expect(t, f.m.counters.eventRefused, 0, "refused")
+	f.snapshotComplete(2, live, id)
+	f.expectEnded(id, completed)
+	f.expectNoEventState()
+}
+
+// With no answer from the API at all, the silence after the snapshot_complete of
+// one session ends it at the snapshot-complete timeout.
+func TestMachineEvents_SnapshotCompleteWithNoAnswerFromTheApiTimesOutAfterTheSnapshotCompleteTimeoutOfSilence(t *testing.T) {
+	f := newFeed(t)
+	f.open(1, all)
+	f.open(2, all)
+	f.startFeed()
+	id := f.recoverEvent(live)
+	f.snapshotComplete(1, live, id)
+	f.advance(f.m.settings.snapshotCompleteTimeout)
+	f.expectNotEnded(id)
+	f.advance(time.Second)
+	end := f.expectEnded(id, timedOut)
+	if !strings.Contains(end.err.Error(), f.m.settings.snapshotCompleteTimeout.String()) {
+		t.Fatalf("reason: %v", end.err)
+	}
+}
+
+// ---- the deferral with several sessions
+
+// Every session that awaits its channel is waited for: one back is not enough, and
+// the last one back, or closed, releases it.
+func TestMachineEvents_DeferredEventRecoveryIsAskedForOnlyOnceEverySessionAwaitingItsChannelIsBackOrClosed(t *testing.T) {
+	for name, last := range map[string]func(f *feed){
+		"the channel returns": func(f *feed) { f.m.channelReopened(sid(2)) },
+		"the session closes":  func(f *feed) { f.close(2) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFeed(t)
+			f.open(1, all)
+			f.open(2, all)
+			f.startFeed()
+			f.m.channelLost(sid(1))
+			f.m.channelLost(sid(2))
+			id := f.recoverEvent(live)
+			expect(t, len(f.eventsAsked()), 0, "asked for while both wait")
+			f.m.channelReopened(sid(1))
+			expect(t, len(f.eventsAsked()), 0, "asked for while one still waits")
+			expect(t, len(f.m.deferred), 1, "waiting")
+			last(f)
+			expect(t, len(f.eventsAsked()), 1, "asked for once none waits")
+			expect(t, f.lastEventAsked().requestID, id, "under the id its caller has")
+			expect(t, len(f.m.deferred), 0, "waiting")
+		})
+	}
+}
+
+// Requests that wait are one request only when producer, event and kind are the
+// same.
+func TestMachineEvents_DeferredEventRecoveriesAreCoalescedPerProducerEventAndKind(t *testing.T) {
+	f := newFeed(t)
+	f.open(1, all)
+	f.startFeed()
+	f.m.channelLost(sid(1))
+	odds := f.event(live, 1)
+	stateful, err := f.askEvent(live, 1, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherProducer := f.event(pre, 1)
+	otherEvent := f.event(live, 2)
+	expect(t, len(f.m.deferred), 4, "waiting: four requests")
+	ids := map[int]bool{odds: true, stateful: true, otherProducer: true, otherEvent: true}
+	expect(t, len(ids), 4, "request ids")
+	expect(t, f.event(live, 1), odds, "the same producer, event and kind")
+	expect(t, len(f.m.deferred), 4, "waiting: still four")
+
+	f.m.channelReopened(sid(1))
+	asked := f.eventsAsked()
+	expect(t, len(asked), 4, "asked for")
+	expect(t, asked[1].stateful, true, "the stateful one is asked for as stateful")
+	expect(t, asked[2].producerID, pre, "the other producer's is asked for of it")
+}
+
+// ---- what puts off an event recovery's deadline
+
+// acceptedEventRecovery is a feed with these sessions open and an event recovery of
+// the live producer asked for and accepted, with its request id and when it was asked for.
+func acceptedEventRecovery(t *testing.T, sessions ...int) (f *feed, id int, askedAt time.Time) {
+	t.Helper()
+	f = newFeed(t)
+	for _, n := range sessions {
+		f.open(n, all)
+	}
+	f.startFeed()
+	id = f.recoverEvent(live)
+	askedAt = f.now()
+	f.acceptEvent(id)
+	return f, id, askedAt
+}
+
+// expectExpiredAtTheDeadline says the event recovery, four minutes in, is given up
+// the snapshot-complete timeout after it was accepted, not before.
+func expectExpiredAtTheDeadline(t *testing.T, f *feed, id int) {
+	t.Helper()
+	f.advance(time.Minute)
+	f.expectNotEnded(id)
+	f.advance(time.Second)
+	f.expectEnded(id, timedOut)
+}
+
+// A message of another producer, queued ahead of the request as it may be, says
+// nothing of the snapshot of this producer's.
+func TestMachineEvents_MessageOfAnotherProducerDoesNotPutOffTheDeadlineOfAnEventRecovery(t *testing.T) {
+	f, id, askedAt := acceptedEventRecovery(t, 1)
+	f.advance(4 * time.Minute)
+	f.processed(1, pre, askedAt.Add(-time.Millisecond), 0)
+	f.sessionAliveAt(1, pre, askedAt.Add(-time.Millisecond))
+	expectExpiredAtTheDeadline(t, f, id)
+}
+
+// A session that is not awaited, since it opened after the request, says nothing of it.
+func TestMachineEvents_MessageOfASessionThatIsNotAwaitedDoesNotPutOffTheDeadlineOfAnEventRecovery(t *testing.T) {
+	f, id, askedAt := acceptedEventRecovery(t, 1)
+	f.advance(time.Second)
+	f.open(2, all)
+	f.advance(4*time.Minute - time.Second)
+	f.processed(2, live, askedAt.Add(-time.Millisecond), 0)
+	f.sessionAliveAt(2, live, askedAt.Add(-time.Millisecond))
+	expectExpiredAtTheDeadline(t, f, id)
+}
+
+// A session that has seen the snapshot_complete has nothing more of it to take.
+func TestMachineEvents_MessageOfASessionThatSawTheSnapshotCompleteDoesNotPutOffTheDeadlineOfAnEventRecovery(t *testing.T) {
+	f, id, askedAt := acceptedEventRecovery(t, 1, 2)
+	f.snapshotComplete(1, live, id)
+	f.advance(4 * time.Minute)
+	f.processed(1, live, askedAt.Add(-time.Millisecond), 0)
+	f.sessionAliveAt(1, live, askedAt.Add(-time.Millisecond))
+	expectExpiredAtTheDeadline(t, f, id)
+}
+
+// ---- what is ahead of what
+
+// A snapshot message is queued ahead only of what its own producer asked for: the
+// ids of another producer's event recovery are no sign of life for a producer's recovery.
+func TestMachineEvents_SnapshotOfAnotherProducersEventRecoveryDoesNotPutOffTheDeadlineOfAProducersRecovery(t *testing.T) {
+	f := newFeed(t)
+	f.open(1, all)
+	f.startFeed()
+	other := f.recoverEvent(live)
+	f.acceptEvent(other)
+	f.clock.advance(time.Second)
+	f.alive(pre)
+	recovery := f.lastSnapshot(pre)
+	f.accept(recovery)
+	f.runWithAlives(4 * time.Minute)
+	f.processed(1, pre, f.now(), other)
+	f.runWithAlives(time.Minute + time.Second)
+	expect(t, f.m.counters.timedOut, 1, "five minutes after it was accepted")
+}
+
+// The same for an event recovery: another producer's is not queued ahead of it.
+func TestMachineEvents_SnapshotOfAnotherProducersEventRecoveryDoesNotPutOffTheDeadlineOfAnEventRecovery(t *testing.T) {
+	f := newFeed(t)
+	f.open(1, all)
+	f.startFeed()
+	other := f.recoverEvent(live)
+	f.acceptEvent(other)
+	f.advance(time.Second)
+	id := f.recoverEvent(pre)
+	f.acceptEvent(id)
+	f.advance(4 * time.Minute)
+	f.processed(1, pre, f.now(), other)
+	f.advance(time.Minute + time.Second)
+	f.expectEnded(id, timedOut)
+}
+
+// What ended after an event recovery was asked for is not queued ahead of it,
+// whichever kind it was.
+func TestMachineEvents_SnapshotOfAnEventRecoveryThatEndedAfterOneWasAskedForDoesNotPutOffItsDeadline(t *testing.T) {
+	f := newFeed(t)
+	f.open(1, all)
+	f.startFeed()
+	id := f.event(live, 1)
+	f.acceptEvent(id)
+	f.advance(time.Second)
+	later := f.event(live, 2)
+	f.refuseEvent(later)
+	f.advance(4 * time.Minute)
+	f.processed(1, live, f.now(), later)
+	f.advance(time.Minute)
+	f.expectEnded(id, timedOut)
+}
+
+func TestMachineEvents_SnapshotOfAProducerRecoveryThatEndedAfterAnEventRecoveryWasAskedForDoesNotPutOffItsDeadline(t *testing.T) {
+	f := newFeed(t)
+	f.open(1, prematch)
+	f.startFeed()
+	id := f.recoverEvent(pre)
+	f.acceptEvent(id)
+	f.clock.advance(time.Second)
+	f.alive(pre)
+	recovery := f.lastSnapshot(pre)
+	f.refuse(recovery)
+	f.runWithAlives(4 * time.Minute)
+	f.processed(1, pre, f.now(), recovery.requestID)
+	f.runWithAlives(time.Minute)
+	f.expectEnded(id, timedOut)
+}
+
+// ---- the producer's clock
+
+// An event recovery is asked for at the producer's now, not the SDK's: a message the
+// producer generated before that is queued ahead of it, whatever the SDK's clock says.
+func TestMachineEvents_MessageGeneratedBeforeTheRequestByTheProducersClockPutsOffTheDeadlineWhateverTheSdksClockSays(t *testing.T) {
+	f := newFeed(t)
+	f.open(1, all)
+	f.startFeed()
+	// the producer's clock is ten minutes ahead of the SDK's, as its alive says
+	ahead := f.now().Add(10 * time.Minute)
+	f.m.alive(live, ahead, ahead, f.stamp(), true)
+	id := f.recoverEvent(live)
+	askedAt := f.now()
+	f.acceptEvent(id)
+	f.advance(4 * time.Minute)
+	// generated after the request by the producer's clock: not ahead of it
+	f.processed(1, live, askedAt.Add(11*time.Minute), 0)
+	// generated before it by the producer's clock, though later than the request by the SDK's
+	f.processed(1, live, askedAt.Add(9*time.Minute), 0)
+	f.advance(f.m.settings.snapshotCompleteTimeout)
+	f.expectNotEnded(id)
+	f.advance(time.Second)
+	f.expectEnded(id, timedOut)
+}
+
+// ---- the order they are reported in
+
+// What ends in one step is reported earliest asked for first, whatever the order of
+// the ids: they run backwards here.
+func TestMachineEvents_EventRecoveriesEndingInTheSameStepAreReportedEarliestAskedForFirst(t *testing.T) {
+	for name, end := range map[string]func(f *feed){
+		"the connection is lost": func(f *feed) { f.m.connectionDown() },
+		"the feed closes":        func(f *feed) { f.m.beginClosing(); f.m.close() },
+		"they expire":            func(f *feed) { f.advance(7 * time.Hour) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFeed(t)
+			f.open(1, all)
+			f.startFeed()
+			next := 100
+			f.m.nextID = func() int { next -= 10; return next }
+			var asked []int
+			for n := 1; n <= 5; n++ {
+				asked = append(asked, f.event(live, n))
+				f.clock.advance(time.Second)
+			}
+			end(f)
+			reported := make([]int, 0, len(f.out.outcomes))
+			for _, o := range f.out.outcomes {
+				reported = append(reported, o.requestID)
+			}
+			expect(t, fmt.Sprint(reported), fmt.Sprint(asked), "request ids in the order reported")
+		})
+	}
+}
+
+// ---- the feed closing
+
+// Once the feed is closing, or closed, an event recovery is refused at once with the
+// error of the feed closing: nothing is sent, and no outcome is reported, since the
+// caller has the error.
+func TestMachineEvents_EventRecoveryOnceTheFeedIsClosingOrClosedIsRefusedAtOnce(t *testing.T) {
+	for name, closeFeed := range map[string]func(f *feed){
+		"closing":            func(f *feed) { f.m.beginClosing() },
+		"closed":             func(f *feed) { f.m.close() },
+		"closing and closed": func(f *feed) { f.m.beginClosing(); f.m.close() },
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFeed(t)
+			f.open(1, all)
+			f.startFeed()
+			closeFeed(f)
+			id, err := f.askEvent(live, 1, false)
+			expect(t, id, 0, "request id")
+			if !errors.Is(err, errFeedClosing) {
+				t.Fatalf("error: %v", err)
+			}
+			expect(t, len(f.eventsAsked()), 0, "requests sent")
+			expect(t, len(f.out.outcomes), 0, "outcomes reported")
+			f.expectNoEventState()
+		})
+	}
+}
+
+// ---- the producer the catalog has disabled
+
+// The actor does not refuse an event recovery of a producer the catalog has
+// disabled, and does not end one for it: the client's request is its own.
+func TestMachineEvents_EventRecoveryOfAProducerTheCatalogHasDisabledIsAskedForAndRunsLikeAnyOther(t *testing.T) {
+	f := newFeed(t)
+	f.open(1, all)
+	f.startFeed()
+	f.cat.disabled[live] = true
+	id := f.recoverEvent(live)
+	expect(t, f.lastEventAsked().requestID, id, "asked for")
+	f.acceptEvent(id)
+	f.snapshotComplete(1, live, id)
+	f.expectEnded(id, completed)
+
+	silent := f.event(live, 2)
+	f.acceptEvent(silent)
+	f.advance(f.m.settings.snapshotCompleteTimeout + time.Second)
+	f.expectEnded(silent, timedOut)
+	f.expectNoEventState()
+}
+
+// ---- the request ids
+
+// A late snapshot_complete of a request that ended meets no new request of its id:
+// the machine draws again past what it remembers of the ones that ended without
+// completing, of either kind.
+func TestMachineEvents_RequestIdOfARequestThatEndedAndIsRememberedIsDrawnAgain(t *testing.T) {
+	f := newFeed(t)
+	f.open(1, prematch)
+	f.startFeed()
+	f.alive(pre)
+	recovery := f.lastSnapshot(pre).requestID
+	f.m.answered(recovery, errors.New("503"))
+	event := f.recoverEvent(pre)
+	f.refuseEvent(event)
+	expect(t, len(f.m.byID[pre].ended), 1, "recoveries remembered")
+	expect(t, len(f.m.byID[pre].endedEvents), 1, "event recoveries remembered")
+	drawn := []int{recovery, event, 900}
+	f.m.nextID = func() int {
+		id := drawn[0]
+		drawn = drawn[1:]
+		return id
+	}
+	expect(t, f.event(pre, 2), 900, "the first id not in flight nor remembered")
+	expect(t, len(drawn), 0, "ids drawn")
+}
+
+// A source that gives only ids that are taken is left after a bounded number of
+// draws, and the id is the next free one above the last.
+func TestMachineEvents_RequestIdSourceThatGivesOnlyTakenIdsIsLeftAfterABoundedNumberOfDraws(t *testing.T) {
+	f := newFeed(t)
+	f.open(1, all)
+	f.startFeed()
+	first := f.event(live, 1)
+	second := f.event(live, 2)
+	draws := 0
+	f.m.nextID = func() int { draws++; return first }
+	got := f.event(live, 3)
+	expect(t, draws, maxIDDraws, "ids drawn")
+	expect(t, got, max(first, second)+1, "the next free id above the last drawn")
+}
+
+// Counting up from the largest id wraps to 1, never to a negative or zero one.
+func TestMachineEvents_RequestIdCountingUpFromTheLargestIntegerWrapsToTheFirstFreeOne(t *testing.T) {
+	f := newFeed(t)
+	f.open(1, all)
+	f.startFeed()
+	f.m.nextID = func() int { return math.MaxInt }
+	expect(t, f.event(live, 1), math.MaxInt, "the first")
+	expect(t, f.event(live, 2), 1, "the second")
 }

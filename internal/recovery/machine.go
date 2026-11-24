@@ -75,7 +75,9 @@ import (
 // timeout after the API accepted it. One asked for while a session that
 // receives the producer has no queue bound waits for it, since its snapshot
 // could go to either queue or to none, and is asked for once the queue is
-// back. Whatever is in flight when the feed closes fails.
+// back. Whatever is in flight when the feed closes fails, and one asked for once
+// the feed is closing is refused. A producer the catalog has disabled is no reason
+// to refuse one.
 //
 // The zero time.Time stands for "none" where a time is optional, and for "a
 // full snapshot" where it is a gap's start or a request's.
@@ -103,6 +105,8 @@ type machine struct {
 	// published only when it goes back, so sessions closing one by one at
 	// shutdown cannot carry it past what one of them had left.
 	closing bool
+	// closed says the feed has closed: nothing is asked for after it.
+	closed bool
 	// startedAt is when the feed opened, on the monotonic clock.
 	startedAt time.Duration
 	// connected says the transport has reported its connection up with every
@@ -251,11 +255,10 @@ func (m *machine) sessionClosed(id uuid.UUID) {
 			continue
 		}
 		delete(e.awaited, id)
-		seenAny := len(e.seen) > 0
 		delete(e.seen, id)
 		// as for a recovery: with no snapshot_complete seen, and none left to wait
-		// for, the API's answer decides
-		if e.allSeen() && (e.accepted || seenAny) {
+		// for, the API's answer decides (a snapshot_complete seen has accepted it)
+		if e.allSeen() && e.accepted {
 			m.eventCompleted(e)
 		}
 	}
@@ -290,6 +293,7 @@ func (m *machine) start() {
 // close is the end of the feed: the event recoveries in flight have failed, and
 // so have the ones that waited for a channel. Nothing is asked for after it.
 func (m *machine) close() {
+	m.closed = true
 	for _, e := range m.sortedEvents() {
 		m.endEvent(e, types.RecoveryStatusFailed, errFeedClosing)
 	}
@@ -571,7 +575,7 @@ func (m *machine) sessionAlive(id uuid.UUID, producerID int, generatedAt, markAt
 // taken time against its timestamp by the producer's clock. It is unknown when
 // the offset is not fresh.
 //
-// S7 seam: the safety net judges the sample here.
+// Seam for the safety net: it judges the sample here.
 func (m *machine) sample(l *lane, t *track, generatedAt time.Time, taken Stamp) {
 	if !m.offsetFresh(t, m.mono()) {
 		l.hasAge = false
@@ -734,15 +738,47 @@ func (m *machine) clamped(t *track, requestID int, gapStart, after time.Time) {
 	}
 }
 
+// maxIDDraws is how many ids newRequestID draws before it stops trusting its
+// source and counts up from the last one.
+const maxIDDraws = 1000
+
 // newRequestID draws a request id that is not 0, which stands for a live message
-// in processed, and not one of a request in flight, which a snapshot_complete
-// could not tell from it: it draws again.
+// in processed, and not one a snapshot_complete could take for another request:
+// one in flight, or one of a recovery or an event recovery that ended without
+// completing and is still remembered, whose late snapshot_complete may yet
+// come. It draws again; a source that keeps giving taken ids is left after
+// maxIDDraws of them, and the id is the next free one above the last drawn.
 func (m *machine) newRequestID() int {
-	for {
-		if id := m.nextID(); id != 0 && !m.inFlight(id) {
+	id := 0
+	for range maxIDDraws {
+		if id = m.nextID(); m.free(id) {
 			return id
 		}
 	}
+	for {
+		id++
+		if id < 1 {
+			id = 1
+		}
+		if m.free(id) {
+			return id
+		}
+	}
+}
+
+// free reports whether a request can take the id: it is not 0, and no request
+// in flight, waiting or remembered as ended has it.
+func (m *machine) free(requestID int) bool {
+	if requestID == 0 || m.inFlight(requestID) {
+		return false
+	}
+	for _, t := range m.tracks {
+		if slices.ContainsFunc(t.ended, func(e ended) bool { return e.requestID == requestID }) ||
+			slices.ContainsFunc(t.endedEvents, func(e ended) bool { return e.requestID == requestID }) {
+			return false
+		}
+	}
+	return true
 }
 
 // inFlight reports whether a recovery or an event recovery of this request id has
@@ -946,18 +982,24 @@ var (
 	// connection is down: its snapshot would go to queues that are gone, or not bound
 	// yet, and nothing would give it up.
 	errEventRecoveryConnectionDown = errors.New("recovery: the connection is not up")
-	// errFeedClosing is why an event recovery in flight ends when the feed closes.
+	// errFeedClosing is why an event recovery is refused once the feed is
+	// closing, and why one in flight ends when the feed closes.
 	errFeedClosing = errors.New("recovery: the feed is closing")
 )
 
 // recoverEvent asks for one event's messages again, odds or stateful, and
-// answers with the request id it will run under, or why it is refused: the
-// producer is not known, the connection is down, or the producer has
-// maxPendingEventRecoveries in flight. A request for an event and kind that is
+// answers with the request id it will run under, or why it is refused: the feed
+// is closing or closed, the producer is not known, the connection is down, or
+// the producer has maxPendingEventRecoveries in flight. A producer the catalog
+// has disabled is not refused: the request is the client's, whatever the
+// producer's state. A request for an event and kind that is
 // in flight, or waiting for a channel, is that one: it gets its id. The
 // outcome comes through the outbox, whenever it is: a refusal here is no
 // outcome, the caller has no recovery.
 func (m *machine) recoverEvent(producerID int, eventID types.URN, stateful bool) (int, error) {
+	if m.closing || m.closed {
+		return 0, errFeedClosing
+	}
 	t := m.known(producerID)
 	if t == nil {
 		return 0, fmt.Errorf("recovery: unknown producer %d", producerID)
