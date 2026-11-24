@@ -430,3 +430,70 @@ func TestClose_AFlightThatEndsAfterCloseStoresNothing(t *testing.T) {
 type holdObserver func()
 
 func (h holdObserver) OnAPIResponse(api.Response) { h() }
+
+// A catalog flight that is closed between its first commit (the cursor) and
+// the stores that follow stores no row and no mark, and its callers get the
+// closed error instead of a partial catalog.
+func TestClose_ACatalogFlightClosedBetweenItsCommitsStoresNothing(t *testing.T) {
+	en := []types.Locale{types.EnLocale}
+	cases := []struct {
+		name  string
+		arm   func(closeManager func())
+		run   func(ctx context.Context, m *Manager) error
+		state func(m *Manager) string
+	}{
+		{
+			name: "market catalog",
+			arm: func(closeManager func()) {
+				marketCommitGateHook = func(types.Locale) { closeManager() }
+				t.Cleanup(func() { marketCommitGateHook = nil })
+			},
+			run: func(ctx context.Context, m *Manager) error {
+				_, err := m.MarketDescriptionCache.MarketDescriptionByID(ctx, 9, types.None[string](), en)
+				return err
+			},
+			state: func(m *Manager) string {
+				mc := m.MarketDescriptionCache
+				mc.mu.RLock()
+				defer mc.mu.RUnlock()
+				return fmt.Sprintf("base=%d loaded=%d", len(mc.base), len(mc.loadedLocales))
+			},
+		},
+		{
+			name: "sport catalog",
+			arm: func(closeManager func()) {
+				sportCommitGateHook = func(types.Locale) { closeManager() }
+				t.Cleanup(func() { sportCommitGateHook = nil })
+			},
+			run: func(ctx context.Context, m *Manager) error {
+				_, err := m.SportDataCache.Sports(ctx, en)
+				return err
+			},
+			state: func(m *Manager) string {
+				sc := m.SportDataCache
+				sc.mu.RLock()
+				defer sc.mu.RUnlock()
+				return fmt.Sprintf("sports=%d loaded=%d", len(sc.sports), len(sc.loadedLocales))
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var catalog atomic.Pointer[string]
+			seed := bulkCatalogWithStaticVariants
+			catalog.Store(&seed)
+			srv := closeCommitServer(t, &catalog)
+			m := NewManager(t.Context(), newAPIClientForTest(t, srv), &fakeCacheCfg{}, log.New(nil), nil)
+			t.Cleanup(func() { m.CloseCtx(context.Background()) })
+			before := tc.state(m)
+
+			tc.arm(func() { m.CloseCtx(context.Background()) })
+			if err := tc.run(t.Context(), m); err == nil {
+				t.Fatal("the flight reported success although the cache was closed before its stores")
+			}
+			if after := tc.state(m); after != before {
+				t.Fatalf("a flight closed between its commits changed the cache: %q before, %q after", before, after)
+			}
+		})
+	}
+}

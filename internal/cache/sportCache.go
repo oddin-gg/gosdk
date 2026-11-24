@@ -492,9 +492,16 @@ func (s *SportCache) ensureLocalesLoaded(ctx context.Context, locales []types.Lo
 				s.markLocaleLoaded(loc, loadStarted)
 				// A flight superseded MID-commit hands its callers to the
 				// winner too (its remaining stores were rejected per row).
+				// Closing the owner refuses the stores above silently, so
+				// this last commit reports it: the callers get the closed
+				// error, never a partial catalog.
+				if !s.life.Enter() {
+					return struct{}{}, s.life.Err()
+				}
 				s.mu.Lock()
 				lost := s.fetchCursor[loc].After(loadStarted)
 				s.mu.Unlock()
+				s.life.Leave()
 				if lost {
 					return struct{}{}, errStaleFlight
 				}
