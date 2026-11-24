@@ -378,6 +378,33 @@ func (m *Manager) AvailableProducers(ctx context.Context) (map[int]types.Produce
 	return res, nil
 }
 
+// AvailableProducersCached is AvailableProducers without a lazy Open: the
+// catalog as it is in memory, or ErrNotOpened before the first Open. For
+// callers that must not do I/O.
+func (m *Manager) AvailableProducersCached() (map[int]types.Producer, error) {
+	m.mu.RLock()
+	if m.producerMap == nil {
+		m.mu.RUnlock()
+		return nil, ErrNotOpened
+	}
+	ds := make([]*data, 0, len(m.producerMap))
+	ids := make([]int, 0, len(m.producerMap))
+	for id, d := range m.producerMap {
+		ids = append(ids, id)
+		ds = append(ds, d)
+	}
+	m.mu.RUnlock()
+	res := make(map[int]types.Producer, len(ds))
+	for i, d := range ds {
+		p, err := buildProducerImpl(d)
+		if err != nil {
+			return nil, err
+		}
+		res[ids[i]] = p
+	}
+	return res, nil
+}
+
 // ActiveProducers ...
 func (m *Manager) ActiveProducers(ctx context.Context) (map[int]types.Producer, error) {
 	producers, err := m.producers(ctx)

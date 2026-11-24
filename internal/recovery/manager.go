@@ -185,12 +185,17 @@ type Manager struct {
 	lostMu       sync.Mutex
 	lostSessions map[uuid.UUID]types.MessageInterest
 
-	// clientSessions holds the open sessions of the client with their
-	// interest (the SDK's own alive-only session is not one of them): the
-	// only places a snapshot replay can be delivered to. Added when a
-	// session opens, removed when its consumer is gone.
+	// clientSessions holds the open sessions of the client (the alive-only
+	// session has no lane and is not one of them): the only places a
+	// snapshot replay can be delivered to, and the facts each reported.
+	// Added when a session opens, before its first delivery; removed when
+	// its consumer is gone.
 	clientMu       sync.Mutex
-	clientSessions map[uuid.UUID]types.MessageInterest
+	clientSessions map[uuid.UUID]*sessionRecord
+
+	// clk stamps the facts the manager itself takes; nil reads the system's
+	// clock, and a test sets another.
+	clk Clock
 }
 
 // tickDropWarnInterval bounds how often per-producer tick-drop warns are
@@ -754,18 +759,32 @@ func (m *Manager) OnFeedSessionGone(session uuid.UUID) {
 	m.sessionQueueSettled(session)
 }
 
-// OnClientSessionOpened registers a session of the client and its
-// interest: from now on its scope counts as one a replay can reach. The
-// SDK's own alive-only session is never registered, it receives no replay.
+// OnClientSessionOpened registers a session of the client with its
+// interest and the producers it covers:
+// from now on its scope counts as one a replay can reach. A session
+// registers before its consumer starts, so before its first delivery.
+//
+// A session with the alive-only interest is never registered: it has no
+// lane, receives no replay and takes no snapshot_complete, so it holds no
+// recovery and loses nothing. That is the SDK's own alive session and a
+// client's alive-only subscription alike.
 func (m *Manager) OnClientSessionOpened(session uuid.UUID, messageInterest types.MessageInterest) {
-	if messageInterest == types.SystemAliveOnly {
+	if !hasLane(messageInterest) {
 		return
 	}
+	producers := m.producersOfInterest(messageInterest)
 	m.clientMu.Lock()
 	if m.clientSessions == nil {
-		m.clientSessions = make(map[uuid.UUID]types.MessageInterest)
+		m.clientSessions = make(map[uuid.UUID]*sessionRecord)
 	}
-	m.clientSessions[session] = messageInterest
+	m.clientSessions[session] = &sessionRecord{
+		id:               session,
+		interest:         messageInterest,
+		producers:        producers,
+		processed:        make(map[int]processedFact),
+		alive:            make(map[int]aliveFact),
+		snapshotComplete: make(map[int]snapshotCompleteFact),
+	}
 	m.clientMu.Unlock()
 }
 
@@ -827,8 +846,8 @@ func (m *Manager) clientInterests() []types.MessageInterest {
 	m.clientMu.Lock()
 	defer m.clientMu.Unlock()
 	out := make([]types.MessageInterest, 0, len(m.clientSessions))
-	for _, mi := range m.clientSessions {
-		out = append(out, mi)
+	for _, rec := range m.clientSessions {
+		out = append(out, rec.interest)
 	}
 	return out
 }
@@ -887,12 +906,12 @@ func (m *Manager) clientProcessingStalled(producerID int, now time.Time, stalled
 	interests := make([]types.MessageInterest, 0, len(stalled))
 	m.clientMu.Lock()
 	for _, session := range stalled {
-		mi, ok := m.clientSessions[session]
+		rec, ok := m.clientSessions[session]
 		if !ok {
 			m.clientMu.Unlock()
 			return true
 		}
-		interests = append(interests, mi)
+		interests = append(interests, rec.interest)
 	}
 	m.clientMu.Unlock()
 
@@ -951,7 +970,15 @@ func (m *Manager) OnAliveReceived(producerID int, timestamp types.MessageTimesta
 //
 // An unknown producer is a no-op success: there is no recovery to
 // complete, so the delivery can be acked.
-func (m *Manager) OnSnapshotCompleteReceived(ctx context.Context, producerID int, requestID int, messageInterest types.MessageInterest) error {
+func (m *Manager) OnSnapshotCompleteReceived(ctx context.Context, session uuid.UUID, producerID int, requestID int, messageInterest types.MessageInterest) error {
+	err := m.admitSnapshotComplete(ctx, producerID, requestID, messageInterest)
+	if err == nil {
+		m.recordSnapshotComplete(session, producerID, requestID)
+	}
+	return err
+}
+
+func (m *Manager) admitSnapshotComplete(ctx context.Context, producerID int, requestID int, messageInterest types.MessageInterest) error {
 	m.actorsMu.RLock()
 	a, ok := m.actors[producerID]
 	m.actorsMu.RUnlock()

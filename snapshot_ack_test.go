@@ -26,7 +26,7 @@ func (f *fakeSnapshotProcessor) OnMessageProcessingStarted(uuid.UUID, int, time.
 func (f *fakeSnapshotProcessor) OnMessageProcessingEnded(uuid.UUID, int, time.Time)   {}
 func (f *fakeSnapshotProcessor) OnAliveReceived(int, types.MessageTimestamp, bool, types.MessageInterest) {
 }
-func (f *fakeSnapshotProcessor) OnSnapshotCompleteReceived(context.Context, int, int, types.MessageInterest) error {
+func (f *fakeSnapshotProcessor) OnSnapshotCompleteReceived(context.Context, uuid.UUID, int, int, types.MessageInterest) error {
 	f.calls.Add(1)
 	return f.err
 }

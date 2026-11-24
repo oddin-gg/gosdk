@@ -1182,3 +1182,42 @@ func TestManager_Setters_CanceledCtxDoesNotMutate(t *testing.T) {
 		t.Fatalf("cancelled-ctx setter mutated state: enabled %v -> %v", before, after)
 	}
 }
+
+// The cached listing never opens the catalog by itself: before Open it says
+// so, after Open it lists what is in memory.
+func TestManager_AvailableProducersCached(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = io.WriteString(w, producersBody)
+	}))
+	defer srv.Close()
+
+	mgr := NewManager(&minimalCfg{}, newAPIClient(t, srv), log.New(nil))
+	if _, err := mgr.AvailableProducersCached(); !errors.Is(err, ErrNotOpened) {
+		t.Fatalf("before Open: err = %v, want ErrNotOpened", err)
+	}
+	if hits.Load() != 0 {
+		t.Fatalf("the cached listing made %d API calls", hits.Load())
+	}
+	if err := mgr.Open(t.Context()); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	cached, err := mgr.AvailableProducersCached()
+	if err != nil {
+		t.Fatal(err)
+	}
+	full, err := mgr.AvailableProducers(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cached) == 0 || len(cached) != len(full) {
+		t.Fatalf("cached %d producers, listing has %d", len(cached), len(full))
+	}
+	for id, p := range cached {
+		if p.ID() != id || full[id].Name() != p.Name() {
+			t.Fatalf("producer %d differs: %q vs %q", id, p.Name(), full[id].Name())
+		}
+	}
+}
