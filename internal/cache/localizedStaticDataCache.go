@@ -304,7 +304,7 @@ func (l *LocalizedStaticDataCache) timerTick(ctx context.Context) {
 				}
 			}
 			if !l.life.Enter() {
-				return nil, nil
+				return nil, l.life.Err()
 			}
 			defer l.life.Leave()
 			l.mux.Lock()
