@@ -9,12 +9,17 @@ import (
 // Lifetime is the one lifetime owner of the caches of a client. Its context
 // is the detach root of every flight; End cancels it and, in the same call,
 // waits for the commits that are running. A cache stores only inside Enter
-// and Leave (or Commit), so no cache changes after End has returned: a flight
-// that finishes later finds the lifetime ended and stores nothing.
+// and Leave (or Commit), so no flight stores into a cache after End has
+// returned: a flight that finishes later finds the lifetime ended and stores
+// nothing. Clear, feed-driven clears and the expiry of a TTL on read still
+// remove entries.
 //
 // A commit is a brief in-memory step that never waits on a flight, so End
 // holds no lock while it waits for a flight. The order of locks is always the
-// lifetime first, then the lock of the cache; a commit must not Enter again.
+// lifetime first, then the lock of the cache. A commit must not Enter again:
+// once End is waiting for the write lock, a second read lock taken by the same
+// goroutine blocks behind it, so the commit never finishes, End never returns
+// and Close hangs.
 //
 // The methods of a nil *Lifetime never end: standalone use and tests.
 type Lifetime struct {
