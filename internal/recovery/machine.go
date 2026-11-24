@@ -101,6 +101,7 @@ type machineCounters struct {
 	reissued           int
 	completed          int
 	failed             int
+	timedOut           int
 	abandoned          int
 	unknownCompletions int
 	unknownProducers   int
@@ -442,7 +443,8 @@ func (m *machine) alive(producerID int, generatedAt, markAt time.Time, received 
 // processed says a session has finished a message of the producer. A live one
 // moves the session's checkpoint; a snapshot one, from a recovery, does not. One
 // without a positive timestamp moves none of that, as an alive stamped so,
-// which sessionAlive ignores, moves none.
+// which sessionAlive ignores, moves none: it was delivered, and a snapshot one
+// still puts off the deadline for its snapshot_complete.
 //
 // markAt is what the session's checkpoint is taken from: generatedAt, or the
 // producer's now at receipt when the message is stamped ahead of it. taken is
@@ -455,9 +457,15 @@ func (m *machine) processed(id uuid.UUID, producerID int, generatedAt, markAt ti
 	}
 	l.lastAt, l.taken = taken.mono, true
 	if !validStamp(generatedAt) {
-		// not a time: as the sample it would read as an age from the epoch
+		// not a time: as the sample it would read as an age from the epoch. A
+		// snapshot message is still heard: the request id says it is on its way,
+		// whatever it is stamped
+		if requestID != 0 {
+			m.heard(t, id, generatedAt, requestID)
+		}
 		return
 	}
+	m.heard(t, id, generatedAt, requestID)
 	if requestID == 0 {
 		l.checkpoint = laterOf(l.checkpoint, markAt)
 		m.sample(l, t, generatedAt, taken)
@@ -477,6 +485,7 @@ func (m *machine) sessionAlive(id uuid.UUID, producerID int, generatedAt, markAt
 		return
 	}
 	l.lastAt, l.taken = taken.mono, true
+	m.heard(t, id, generatedAt, 0)
 	if subscribed {
 		l.checkpoint = laterOf(l.checkpoint, markAt)
 	}

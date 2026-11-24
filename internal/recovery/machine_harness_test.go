@@ -128,7 +128,11 @@ type feed struct {
 	cat   *fakeCatalog
 	out   *fakeOutbox
 	logs  *logSink
-	m     *machine
+	// start is the wall clock when the feed was made.
+	start time.Time
+	// monoCount is how many seconds monoSeconds has moved.
+	monoCount int
+	m         *machine
 	// opened are the sessions open, for the alives in their queues.
 	opened []int
 	ids    int
@@ -152,6 +156,7 @@ func newFeed(t *testing.T) *feed {
 func newFeedWith(t *testing.T, settings recoverySettings, window int) *feed {
 	t.Helper()
 	f := &feed{t: t, clock: newFakeClock(), cat: newFakeCatalog(window), out: newFakeOutbox(), logs: &logSink{}}
+	f.start = f.clock.Now().wall
 	f.m = newMachine(f.cat, settings, f.out, f.clock, log.New(slog.New(f.logs)), func() int {
 		f.ids++
 		return f.ids
