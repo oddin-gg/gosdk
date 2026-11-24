@@ -42,7 +42,7 @@ func (m *machine) tick() {
 		if m.started {
 			last := t.lastAliveAt
 			if !t.hasAlive {
-				last = m.startedAt
+				last = max(t.createdAt, m.startedAt)
 			}
 			if !t.inactive && mono-last > m.settings.maxInactivity {
 				t.inactive = true

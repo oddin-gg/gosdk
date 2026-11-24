@@ -1315,3 +1315,61 @@ func TestMachineClock_WhatIsPublishedFollowsTheWallClockWhateverTheMonotonicOneD
 		expectTime(t, f.lastStatus(pre).at, f.now(), "when it went down")
 	}
 }
+
+// A track learned late by a message, not an alive, is not inactive at once: its
+// inactivity counts from when it was learned, not from the start of the feed.
+func TestMachineTime_LateTrackLearnedByAMessageIsNotInactiveAtOnce(t *testing.T) {
+	f := newFeed(t)
+	f.open(1, all)
+	f.startFeed()
+	f.clock.advance(time.Hour)
+	f.alive(pre)
+	f.alive(live)
+	f.cat.list = append(f.cat.list, fakeProducer{id: 9, name: "late", window: statefulWindow})
+	f.m.rewind(9, f.now()) // a first fact that is not an alive
+	f.m.tick()
+	if f.m.byID[9] == nil || f.m.byID[9].inactive {
+		t.Fatal("producer 9 was learned a moment ago and is already inactive")
+	}
+	f.advance(21 * time.Second)
+	expect(t, f.m.byID[9].inactive, true, "inactive once the maximum inactivity has passed since it was learned")
+}
+
+// d: a session opened after the request is not awaited by it, so what it takes
+// puts nothing off.
+func TestMachineTime_LateSessionNotAwaitedByTheRecoveryPutsNothingOff(t *testing.T) {
+	f := newFeed(t)
+	f.open(1, prematch)
+	f.startFeed()
+	f.alive(pre)
+	f.accept(f.lastSnapshot(pre))
+	requestedAt := f.now()
+	f.open(2, prematch)
+	f.minutes(6, func() { f.processed(2, pre, requestedAt.Add(-time.Second), 0) })
+	expect(t, f.m.counters.timedOut, 1, "the recovery timed out at five minutes, whatever session 2 took")
+}
+
+// g: lateness by an old sample needs the offset to be fresh when it is judged.
+func TestMachineTime_LateSampleIsNoLatenessOnceTheOffsetIsStale(t *testing.T) {
+	f := withSettings(t, func(s *recoverySettings) { s.maxInactivity = 60 * time.Second })
+	f.open(1, all)
+	f.startFeed()
+	f.bothUp(1)
+	f.live(1, pre, 70*time.Second) // sampled with a fresh offset: 70 s old
+	f.clock.advance(30 * time.Second)
+	f.m.tick() // the alive is 30 s old: recent, but the offset is stale
+	expect(t, f.m.byID[pre].delayed, false, "delayed")
+}
+
+// g: lateness by quiet needs an alive to be recent when it is judged.
+func TestMachineTime_QuietSessionIsNoLatenessWhenNoAliveIsRecent(t *testing.T) {
+	f := newFeed(t)
+	f.open(1, all)
+	f.startFeed()
+	f.bothUp(1)
+	f.live(1, pre, 0)
+	f.clock.advance(25 * time.Second)
+	f.m.tick()
+	expect(t, f.lastStatus(pre).cause, causeAliveIntervalViolation, "cause")
+	expect(t, f.m.byID[pre].delayed, false, "delayed")
+}

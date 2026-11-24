@@ -1520,3 +1520,175 @@ func TestMachine_RewindBeforeTheStartIsLeftToTheSeed(t *testing.T) {
 		t.Fatal("a rewind before the start was taken")
 	}
 }
+
+// ---- defects found after the first review round
+
+// A no-lane producer is not brought up while the feed closes: nothing is up for a
+// session that has closed at shutdown.
+// RecoveryMachineTest: sessionsClosingAtShutdownCompleteNoRecoveryAndBringNoProducerUp
+func TestMachine_AliveAfterTheLastSessionClosedAtShutdownBringsNoProducerUp(t *testing.T) {
+	f := newFeed(t)
+	f.open(1, all)
+	f.startFeed()
+	f.alive(pre)
+	_ = f.lastSnapshot(pre) // asked for, never completed
+	f.m.beginClosing()
+	f.close(1)
+	expectDown(t, f, pre, true, "after the sessions closed at shutdown")
+	f.clock.advance(5 * time.Second)
+	f.alive(pre)
+	expectDown(t, f, pre, true, "after another alive while the feed closes")
+}
+
+// A producer that is up with no lane goes down when a session opens whose lane gets
+// the seed gap, until that recovery completes.
+func TestMachine_ProducerUpWithNoLaneIsDownWhileTheNewSessionsSeedRecoveryRuns(t *testing.T) {
+	f := newFeed(t)
+	f.open(1, aliveOne)
+	f.startFeed()
+	f.alive(pre)
+	expectDown(t, f, pre, false, "no-lane producer up")
+	f.clock.advance(time.Minute)
+	f.open(2, prematch)
+	expectDown(t, f, pre, true, "as the new session opens")
+	down := f.lastStatus(pre)
+	expect(t, down.reason(), types.OtherProducerStatusReason, "reason")
+	f.alive(pre)
+	r := f.lastSnapshot(pre)
+	expectDown(t, f, pre, true, "while the seed recovery of the new session is in flight")
+	f.complete(r, 2)
+	expectDown(t, f, pre, false, "after it")
+	expect(t, f.lastStatus(pre).cause, causeRecoveryCompleted, "cause")
+}
+
+// A producer gap opened while no lane received the producer does not drive the
+// recovery of a session that opens later: that session starts now, with no gap.
+func TestMachine_ProducerGapOfTheNoLanePeriodIsDroppedWhenTheProducerComesUp(t *testing.T) {
+	f := newFeed(t)
+	f.open(1, all)
+	f.startFeed()
+	f.bothUp(1)
+	f.close(1) // last lane gone
+	f.clock.advance(time.Second)
+	f.unsubscribed(pre)
+	f.clock.advance(time.Hour)
+	f.alive(pre) // no-lane up
+	expectDown(t, f, pre, false, "up")
+	calls := len(f.snapshots(pre))
+	f.open(2, prematch)
+	f.alive(pre)
+	expect(t, len(f.snapshots(pre)), calls, "recoveries for a session that starts now")
+	expectDown(t, f, pre, false, "the producer")
+}
+
+// The same rewind point set again, while a recovery that covers it is in flight,
+// does not outlive that recovery.
+func TestMachine_RewindSetAgainToTheSamePointDoesNotOutliveTheRecoveryThatCoveredIt(t *testing.T) {
+	f := upWith(t, all)
+	f.clock.advance(time.Minute)
+	f.live(1, pre, 0)
+	rewound := f.now().Add(-time.Hour)
+	f.m.rewind(pre, rewound)
+	f.m.connectionDown()
+	f.m.connectionUp()
+	f.alive(pre)
+	r := f.lastSnapshot(pre)
+	expectTime(t, r.after, rewound, "the request starts at the rewind")
+	f.accept(r)
+	f.m.rewind(pre, rewound) // the client sets the same value again
+	f.snapshotComplete(1, pre, r.requestID)
+	f.clock.advance(time.Minute)
+	f.live(1, pre, 0)
+	got, _ := f.resume(pre)
+	expectTime(t, got, f.now(), "the resume point after the recovery that started at the rewind")
+}
+
+// A second, earlier rewind lowers the start of the next request.
+func TestMachine_SecondEarlierRewindLowersTheStartOfTheNextRequest(t *testing.T) {
+	f := upWith(t, all)
+	f.clock.advance(time.Minute)
+	f.live(1, pre, 0)
+	f.m.rewind(pre, f.now().Add(-time.Hour))
+	earlier := f.now().Add(-2 * time.Hour)
+	f.m.rewind(pre, earlier)
+	f.m.rewind(pre, f.now().Add(-90*time.Minute)) // later than the lowest: no change
+	f.m.connectionDown()
+	f.m.connectionUp()
+	f.alive(pre)
+	expectTime(t, f.lastSnapshot(pre).after, earlier, "the next request's start")
+}
+
+// A request id of 0 stands for a live message: the machine draws again.
+func TestMachine_RequestIdOfZeroIsRefusedAndDrawnAgain(t *testing.T) {
+	f := newFeed(t)
+	drawn := []int{0, 0, 5}
+	f.m.nextID = func() int {
+		id := drawn[0]
+		drawn = drawn[1:]
+		return id
+	}
+	f.open(1, all)
+	f.startFeed()
+	f.alive(pre)
+	expect(t, f.lastSnapshot(pre).requestID, 5, "the request id")
+	expect(t, len(drawn), 0, "ids drawn")
+}
+
+// ---- a no-lane producer: what holds it back
+
+// a: a producer no session has a lane for is not taken down by a lost connection.
+func TestMachine_NoLaneProducerIsNotTakenDownByALostConnection(t *testing.T) {
+	f := newFeed(t)
+	f.open(1, aliveOne)
+	f.startFeed()
+	f.alive(pre)
+	f.m.connectionDown()
+	expectDown(t, f, pre, false, "after the connection went down")
+	f.m.connectionUp()
+	expectDown(t, f, pre, false, "after it is back")
+}
+
+// b: the no-lane up needs the feed started...
+func TestMachine_NoLaneProducerDoesNotComeUpBeforeTheStart(t *testing.T) {
+	f := newFeed(t)
+	f.open(1, aliveOne)
+	f.m.connectionUp()
+	f.alive(pre)
+	expectDown(t, f, pre, true, "an alive before the start")
+}
+
+// b: ... and the transport connected.
+func TestMachine_NoLaneProducerDoesNotComeUpBeforeTheConnectionIsUp(t *testing.T) {
+	f := newFeed(t)
+	f.open(1, aliveOne)
+	f.m.start()
+	f.alive(pre)
+	expectDown(t, f, pre, true, "an alive before the connection is up")
+	f.m.connectionUp()
+	f.clock.advance(10 * time.Second)
+	f.alive(pre)
+	expectDown(t, f, pre, false, "the next alive")
+}
+
+// c: a producer disabled after its alive is not asked for when the connection comes up.
+func TestMachine_ProducerDisabledBeforeTheConnectionComesUpIsNotRequested(t *testing.T) {
+	f := newFeed(t)
+	f.open(1, all)
+	f.m.start()
+	f.alive(pre)
+	f.cat.disabled[pre] = true
+	f.m.connectionUp()
+	expect(t, len(f.out.calls), 0, "requests")
+}
+
+// e: a lost session that does not receive the producer does not hold its requests.
+func TestMachine_LostChannelOfASessionNotReceivingTheProducerHoldsNothingOfIt(t *testing.T) {
+	f := newFeed(t)
+	f.open(1, all)
+	f.open(2, liveOnly)
+	f.startFeed()
+	f.bothUp(1, 2)
+	f.m.channelLost(sid(2))
+	f.unsubscribed(pre)
+	expectCalls(t, f, pre, 2, "the prematch producer is asked for at once")
+}

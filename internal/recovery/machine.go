@@ -176,6 +176,8 @@ func (m *machine) addLane(s *session, t *track) {
 	if !t.everRecovered {
 		l.gap = m.openGap(nil, m.seed(t))
 		l.checkpoint = l.gap.from
+		// a producer that is up with a recovery to make is down until it is made
+		m.markDown(t, causeSessionOpened)
 		return
 	}
 	l.checkpoint = t.producerNow(m.clock.Now())
@@ -260,6 +262,11 @@ func (m *machine) rewind(producerID int, to time.Time) {
 	}
 	t := m.known(producerID)
 	if t == nil {
+		return
+	}
+	if t.rewind != nil && !to.Before(t.rewind.from) {
+		// not lower than the rewind there is: the same point again, set while the
+		// recovery that covers it is in flight, must not outlive that recovery
 		return
 	}
 	if current := m.currentPoint(t); to.After(current) {
@@ -433,9 +440,13 @@ func (m *machine) alive(producerID int, generatedAt, markAt time.Time, received 
 		m.markDown(t, causeUnsubscribed)
 	}
 	m.maybeRequest(t, mono)
-	if subscribed && t.down && m.started && m.connected && m.receivers(t) == 0 {
+	if subscribed && t.down && m.started && m.connected && !m.closing && m.receivers(t) == 0 {
 		// no session has a lane of this producer, so there is nothing to
-		// recover: a fresh alive is all it takes to be up
+		// recover: a fresh alive is all it takes to be up, and a gap opened
+		// while no lane received it is of no use to a session that opens later,
+		// which starts at the producer's now. Not while the feed closes: nothing
+		// is up for a session that has closed at shutdown.
+		t.gap = nil
 		m.bringUp(t, causeRecoveryCompleted)
 	}
 }
@@ -586,7 +597,7 @@ func (m *machine) request(t *track, mono time.Duration) {
 	now := m.clock.Now()
 	gapStart := m.oldestGap(t)
 	after := m.after(t, gapStart)
-	requestID := m.nextID()
+	requestID := m.newRequestID()
 	a := &active{
 		requestID:   requestID,
 		after:       after,
@@ -637,6 +648,16 @@ func (m *machine) clamped(t *track, requestID int, gapStart, after time.Time) {
 		m.log.Warnf("%s", msg)
 	} else {
 		m.log.Debugf("%s", msg)
+	}
+}
+
+// newRequestID draws a request id that is not 0, which stands for a live message
+// in processed: it draws again.
+func (m *machine) newRequestID() int {
+	for {
+		if id := m.nextID(); id != 0 {
+			return id
+		}
 	}
 }
 
@@ -1065,6 +1086,7 @@ func (m *machine) addTrack(producer types.Producer) *track {
 		down:          true,
 		cause:         causeStarting,
 		aliveInterval: expectedAliveInterval,
+		createdAt:     m.mono(),
 	}
 	m.tracks = append(m.tracks, t)
 	m.byID[t.id] = t
@@ -1134,6 +1156,9 @@ func earlierOf(a, b time.Time) time.Time {
 type track struct {
 	id       int
 	producer types.Producer
+	// createdAt is when the machine learned of the producer, on the monotonic
+	// clock: its inactivity counts from then, or from the start if that is later.
+	createdAt time.Duration
 
 	down          bool
 	cause         statusCause

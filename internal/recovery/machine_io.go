@@ -130,6 +130,8 @@ const (
 	causeConnectionLost
 	// causeChannelLost: a session's channel was lost, and what its queue held with it.
 	causeChannelLost
+	// causeSessionOpened: a session opened whose lane has a recovery to make.
+	causeSessionOpened
 	// causeRecoveryFailed: recovery failed as many times in a row as it is
 	// re-issued with backoff; it is asked for at a slow pace until it succeeds.
 	causeRecoveryFailed
@@ -145,6 +147,7 @@ var causeDescriptions = map[statusCause]string{
 	causeProcessingDelay:        "messages processed too late",
 	causeConnectionLost:         "the broker connection was lost",
 	causeChannelLost:            "a session's channel was lost",
+	causeSessionOpened:          "a session opened that has a recovery to make",
 	causeRecoveryFailed:         "recovery failed too often in a row",
 }
 
@@ -164,7 +167,7 @@ func (c statusCause) reason() types.ProducerStatusReason {
 		return types.ProcessingQueueDelayViolationProducerStatusReason
 	case causeConnectionLost, causeChannelLost:
 		return types.ConnectionDownProducerStatusReason
-	case causeStarting, causeUnsubscribed, causeRecoveryFailed:
+	case causeStarting, causeUnsubscribed, causeSessionOpened, causeRecoveryFailed:
 		return types.OtherProducerStatusReason
 	default:
 		return types.OtherProducerStatusReason
