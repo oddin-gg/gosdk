@@ -84,6 +84,9 @@ type fakeOutbox struct {
 	infos  []publishedInfo
 	points []publishedPoint
 	down   map[int]bool
+	// events are the event recovery requests, and outcomes how each ended, in order.
+	events   []eventRequest
+	outcomes []eventOutcome
 }
 
 func newFakeOutbox() *fakeOutbox {
@@ -97,6 +100,8 @@ func (o *fakeOutbox) recoveryInfo(id int, info types.RecoveryInfo) {
 func (o *fakeOutbox) resumePoint(id int, point time.Time) {
 	o.points = append(o.points, publishedPoint{producerID: id, point: point})
 }
+func (o *fakeOutbox) eventRequest(call eventRequest)  { o.events = append(o.events, call) }
+func (o *fakeOutbox) eventEnded(outcome eventOutcome) { o.outcomes = append(o.outcomes, outcome) }
 func (o *fakeOutbox) status(change statusChange) {
 	o.statuses = append(o.statuses, change)
 	o.down[change.producerID] = change.down

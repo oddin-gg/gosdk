@@ -1,9 +1,12 @@
 package recovery
 
 import (
+	"errors"
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/oddin-gg/gosdk/types"
 )
 
 // The rules that need the clock to run: the deadlines of a recovery, a
@@ -16,8 +19,9 @@ import (
 // recoveries waiting for their backoff go out. The actor calls it at least once a
 // second.
 //
-// S4 seam: the event recoveries expire here, and the deferred ones.
-// S7 seam: a pending reset of the safety net waiting for a disabled producer is
+// Event recoveries expire here, and the deferred ones.
+//
+// Seam for the safety net: a pending reset of it, waiting for a disabled producer, is
 // cancelled here.
 func (m *machine) tick() {
 	mono := m.mono()
@@ -55,18 +59,58 @@ func (m *machine) tick() {
 		}
 		m.maybeRequest(t, mono)
 	}
+	m.expireEvents(mono)
+}
+
+// expireEvents ends the event recoveries that took longer than the maximum
+// recovery time, or that the API accepted and nothing of was heard for the
+// snapshot-complete timeout since: their snapshot_complete is lost. One the API
+// has not answered yet waits for its REST worker's own deadlines, and the
+// maximum recovery time. A deferred one expires at the maximum recovery time
+// too: the channel it waited for never came back. The maximum counts from when
+// the recovery was asked for, whether it waited or not.
+func (m *machine) expireEvents(mono time.Duration) {
+	for _, e := range m.sortedEvents() {
+		var why string
+		switch {
+		case mono-e.askedMono > m.settings.maxRecoveryTime:
+			why = "no snapshot complete within " + m.settings.maxRecoveryTime.String()
+		case e.accepted && mono-e.heardAt > m.settings.snapshotCompleteTimeout:
+			why = "no snapshot complete, nor anything of it heard, within " + m.settings.snapshotCompleteTimeout.String()
+		default:
+			continue
+		}
+		m.counters.eventExpired++
+		m.log.Debugf("Event recovery %d of %s: %s", e.requestID, e.eventID.ToString(), why)
+		m.failEvent(e, types.RecoveryStatusTimedOut, errors.New(why))
+	}
+	var waiting []deferredEvent
+	for _, d := range m.deferred {
+		if mono-d.deferredAt <= m.settings.maxRecoveryTime {
+			waiting = append(waiting, d)
+			continue
+		}
+		m.expireDeferred(d)
+	}
+	m.deferred = waiting
 }
 
 // heard says what a session took may say the recovery in flight is still on its
 // way to it, which puts off the deadline for its snapshot_complete: a message of
 // its snapshot, or one the snapshot and its snapshot_complete queue behind (a
 // live message or an alive sent before the request, or a snapshot message of an
-// earlier recovery of the producer that failed or was given up). This is
-// evidence per session: nothing global is read. Only a session that awaits the
-// recovery and has not seen its snapshot_complete is heard.
-//
-// S4 seam: an event recovery's snapshot is heard here too.
+// earlier recovery of the producer that failed or was given up, or of an event
+// recovery asked for before it). This is evidence per session: nothing global is
+// read. Only a session that awaits the recovery and has not seen its
+// snapshot_complete is heard. An event recovery is put off the same way, by its
+// own snapshot and by what queues ahead of it.
 func (m *machine) heard(t *track, id uuid.UUID, generatedAt time.Time, requestID int) {
+	mono := m.mono()
+	for _, e := range m.eventRecoveries {
+		if e.producerID == t.id && e.awaited[id] && !e.seen[id] && m.eventAhead(t, e, generatedAt, requestID) {
+			e.heardAt = mono
+		}
+	}
 	a := t.active
 	if a == nil || !a.awaited[id] || a.seen[id] {
 		return
@@ -75,23 +119,63 @@ func (m *machine) heard(t *track, id uuid.UUID, generatedAt time.Time, requestID
 		if !generatedAt.Before(a.requestedAt) {
 			return
 		}
-	} else if !t.ahead(a, requestID) {
+	} else if !m.ahead(t, a, requestID) {
 		return
 	}
-	a.heardAt = m.mono()
+	a.heardAt = mono
 }
 
 // ahead reports whether a snapshot message of requestID is the recovery's own,
-// or queued ahead of it: one of the recoveries that ended before the one in
-// flight was asked for (the one in flight is the only one at a time, so what
-// ended is earlier by construction, and no order of ids or clocks is read).
-func (t *track) ahead(a *active, requestID int) bool {
+// or queued ahead of it: one of the recoveries or event recoveries of the
+// producer that ended without completing, or an event recovery in flight, asked
+// for before the one in flight. An event recovery asked for since is not: one
+// after another they would hold a recovery whose snapshot_complete is lost for
+// the maximum recovery time. Order is by when each was sent, never by the
+// value of an id: the sequence number says it, not the clock, which can read the
+// same for two requests.
+func (m *machine) ahead(t *track, a *active, requestID int) bool {
 	if requestID == a.requestID {
 		return true
 	}
+	if e := m.eventRecoveries[requestID]; e != nil {
+		return e.producerID == t.id && e.seq < a.seq
+	}
+	// what ended before the one in flight was asked for: the one in flight is the
+	// only one at a time, so no order is read
 	for _, e := range t.ended {
 		if e.requestID == requestID {
 			return true
+		}
+	}
+	return askedBefore(t.endedEvents, requestID, a.seq)
+}
+
+// eventAhead reports whether a message a session took is the event recovery's own
+// snapshot, or queued ahead of it: a live message or an alive generated before it
+// was asked for, or a snapshot message of a recovery or an event recovery of the
+// producer asked for before it, in flight still or ended without completing.
+func (m *machine) eventAhead(t *track, e *eventActive, generatedAt time.Time, requestID int) bool {
+	if requestID == 0 {
+		return generatedAt.Before(e.requestedAt)
+	}
+	if requestID == e.requestID {
+		return true
+	}
+	if a := t.active; a != nil && a.requestID == requestID {
+		return a.seq < e.seq
+	}
+	if other := m.eventRecoveries[requestID]; other != nil {
+		return other.producerID == t.id && other.seq < e.seq
+	}
+	return askedBefore(t.ended, requestID, e.seq) || askedBefore(t.endedEvents, requestID, e.seq)
+}
+
+// askedBefore reports whether the request id is one of list, sent before the
+// request numbered seq.
+func askedBefore(list []ended, requestID int, seq uint64) bool {
+	for _, e := range list {
+		if e.requestID == requestID {
+			return e.seq < seq
 		}
 	}
 	return false

@@ -74,6 +74,11 @@ type outbox interface {
 	// status reports that a producer went down or came back, or is down for
 	// another cause than before.
 	status(statusChange)
+	// eventRequest sends one event recovery request to a REST worker.
+	eventRequest(eventRequest)
+	// eventEnded reports that an event recovery ended: completed, failed or
+	// timed out. Once per recovery, whatever it ended by.
+	eventEnded(eventOutcome)
 }
 
 // snapshotRequest is one recovery request.
@@ -84,6 +89,28 @@ type snapshotRequest struct {
 	requestID int
 	// after is where it starts: everything since, or a full snapshot for the zero time.
 	after time.Time
+}
+
+// eventRequest is one event recovery request: the producer's messages of one
+// event again.
+type eventRequest struct {
+	producerID int
+	// producer is the producer's name, which the request's path takes.
+	producer  string
+	requestID int
+	eventID   types.URN
+	// stateful asks for the event's stateful messages, not only its odds.
+	stateful bool
+}
+
+// eventOutcome is how an event recovery ended. The status is never pending, and
+// err is nil for a completed one.
+type eventOutcome struct {
+	producerID int
+	requestID  int
+	eventID    types.URN
+	status     types.RecoveryRequestStatus
+	err        error
 }
 
 // statusChange is a producer going down or coming back, or being down for

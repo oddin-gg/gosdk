@@ -1,7 +1,10 @@
 package recovery
 
 import (
+	"cmp"
+	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -58,6 +61,25 @@ import (
 // measured would read as an age, so the offset is moved by the step where it is
 // read: see clockOffset.at.
 //
+// Event recoveries. The client may ask for one event's messages again, odds
+// only or stateful; any number run beside a producer's recovery, and each is
+// its own request. One asked for while another of the same event and kind is
+// in flight is that one; a producer has at most maxPendingEventRecoveries in
+// flight, and one more is refused. Like a recovery, an event recovery waits for
+// the snapshot_complete of every session that receives the producer when it
+// was asked for, and completes once each has seen it; a session that closes
+// stops being waited for. It does not wait for the producer to be up, and a
+// producer going down does not end it: only the loss of a queue does, the
+// connection or a session's channel, since that takes its snapshot_complete
+// with it. It fails when the API refuses it and times out at the maximum
+// recovery time, or when nothing of it is heard for the snapshot-complete
+// timeout after the API accepted it. One asked for while a session that
+// receives the producer has no queue bound waits for it, since its snapshot
+// could go to either queue or to none, and is asked for once the queue is
+// back. Whatever is in flight when the feed closes fails, and one asked for once
+// the feed is closing is refused. A producer the catalog has disabled is no reason
+// to refuse one.
+//
 // The zero time.Time stands for "none" where a time is optional, and for "a
 // full snapshot" where it is a gap's start or a request's.
 //
@@ -70,7 +92,10 @@ type machine struct {
 	clock    Clock
 	log      *log.Logger
 	// nextID gives a request id that is not in use by a request in flight.
-	nextID   func() int
+	nextID func() int
+	// seq is the sequence number of the last request sent: what orders requests,
+	// since two can be sent at one reading of the clock.
+	seq      uint64
 	counters machineCounters
 
 	// tracks is every producer the machine knows, in the order it learned them.
@@ -84,6 +109,8 @@ type machine struct {
 	// published only when it goes back, so sessions closing one by one at
 	// shutdown cannot carry it past what one of them had left.
 	closing bool
+	// closed says the feed has closed: nothing is asked for after it.
+	closed bool
 	// startedAt is when the feed opened, on the monotonic clock.
 	startedAt time.Duration
 	// connected says the transport has reported its connection up with every
@@ -93,6 +120,13 @@ type machine struct {
 	// gapSeq is the number of the last gap opened; a recovery covers the gaps
 	// up to the number at its start.
 	gapSeq uint64
+
+	// eventRecoveries are the event recoveries in flight, by request id.
+	eventRecoveries map[int]*eventActive
+	// deferred are the event recoveries asked for while a session that receives
+	// the producer awaited its channel, in the order they were asked for. Each
+	// has its request id already, which no other request takes.
+	deferred []deferredEvent
 }
 
 // machineCounters count what happened, for tests and logs.
@@ -105,6 +139,10 @@ type machineCounters struct {
 	abandoned          int
 	unknownCompletions int
 	unknownProducers   int
+	eventRequested     int
+	eventRefused       int
+	eventExpired       int
+	eventAbandoned     int
 }
 
 func newMachine(
@@ -123,6 +161,8 @@ func newMachine(
 		log:      logger,
 		nextID:   nextID,
 		byID:     make(map[int]*track),
+
+		eventRecoveries: make(map[int]*eventActive),
 	}
 	for _, producer := range catalog.producers() {
 		m.addTrack(producer)
@@ -213,7 +253,19 @@ func (m *machine) sessionClosed(id uuid.UUID) {
 			m.upIfNothingMissing(t)
 		}
 	}
-	// S4 seam: the event recoveries the session was awaited by leave here.
+	m.releaseDeferred()
+	for _, e := range m.sortedEvents() {
+		if !e.awaited[id] {
+			continue
+		}
+		delete(e.awaited, id)
+		delete(e.seen, id)
+		// as for a recovery: with no snapshot_complete seen, and none left to wait
+		// for, the API's answer decides (a snapshot_complete seen has accepted it)
+		if e.allSeen() && e.accepted {
+			m.eventCompleted(e)
+		}
+	}
 }
 
 // start opens the feed: every session misses everything before now, from the
@@ -240,6 +292,19 @@ func (m *machine) start() {
 			l.checkpoint = l.gap.from
 		}
 	}
+}
+
+// close is the end of the feed: the event recoveries in flight have failed, and
+// so have the ones that waited for a channel. Nothing is asked for after it.
+func (m *machine) close() {
+	m.closed = true
+	for _, e := range m.sortedEvents() {
+		m.endEvent(e, types.RecoveryStatusFailed, errFeedClosing)
+	}
+	for _, d := range m.deferred {
+		m.failDeferred(d, errFeedClosing)
+	}
+	m.deferred = nil
 }
 
 // beginClosing says the feed has begun to close: from now on the published
@@ -311,7 +376,7 @@ func (m *machine) connectionDown() {
 			l.gap = m.openGap(l.gap, l.checkpoint)
 		}
 	}
-	// S4 seam: the event recoveries in flight are given up here.
+	m.giveUpEvents(nil)
 	for _, t := range m.tracks {
 		if m.receivers(t) > 0 {
 			m.markDown(t, causeConnectionLost)
@@ -360,7 +425,7 @@ func (m *machine) channelReopened(id uuid.UUID) {
 	for _, l := range s.lanes {
 		m.maybeRequest(m.byID[l.producer], mono)
 	}
-	// S4 seam: the event recoveries that waited for the channel are released here.
+	m.releaseDeferred()
 }
 
 // queueLost says the session's queue lost what it held: it misses everything
@@ -377,9 +442,10 @@ func (m *machine) queueLost(s *session, cause statusCause, mono time.Duration) {
 }
 
 // notSeen says the session will not see the snapshot_completes it has not seen
-// yet: the recoveries waiting for them are given up, and asked for again as far
+// yet: the recoveries and event recoveries waiting for them are given up, and asked for again as far
 // as anything is missing.
 func (m *machine) notSeen(s *session, mono time.Duration) {
+	m.giveUpEvents(s)
 	for _, l := range s.lanes {
 		t := m.byID[l.producer]
 		if a := t.active; a != nil && a.awaited[s.id] && !a.seen[s.id] {
@@ -510,7 +576,7 @@ func (m *machine) sessionAlive(id uuid.UUID, producerID int, generatedAt, markAt
 // taken time against its timestamp by the producer's clock. It is unknown when
 // the offset is not fresh.
 //
-// S7 seam: the safety net judges the sample here.
+// Seam for the safety net: it judges the sample here.
 func (m *machine) sample(l *lane, t *track, generatedAt time.Time, taken Stamp) {
 	if !m.offsetFresh(t, m.mono()) {
 		l.hasAge = false
@@ -540,7 +606,23 @@ func (m *machine) snapshotComplete(id uuid.UUID, producerID, requestID int) {
 		}
 		return
 	}
-	// S4 seam: an event recovery's snapshot_complete is looked up here.
+	if e := m.eventRecoveries[requestID]; e != nil && e.producerID == producerID {
+		if e.awaited[id] {
+			// a session's second snapshot_complete is no sign of life for the
+			// sessions still awaited
+			first := !e.seen[id]
+			e.seen[id] = true
+			// a snapshot_complete says the API took the request, whatever it answers later
+			e.accepted = true
+			switch {
+			case e.allSeen():
+				m.eventCompleted(e)
+			case first:
+				e.heardAt = m.mono()
+			}
+		}
+		return
+	}
 	m.counters.unknownCompletions++
 	m.log.Debugf("Snapshot complete of producer %d for request %d, which is not in flight", producerID, requestID)
 }
@@ -550,7 +632,10 @@ func (m *machine) snapshotComplete(id uuid.UUID, producerID, requestID int) {
 // answered is a request's outcome: accepted when err is nil.
 func (m *machine) answered(requestID int, err error) {
 	mono := m.mono()
-	// S4 seam: the answer to an event recovery is looked up first.
+	if e := m.eventRecoveries[requestID]; e != nil {
+		m.eventAnswered(e, err, mono)
+		return
+	}
 	for _, t := range m.tracks {
 		a := t.active
 		if a == nil || a.requestID != requestID {
@@ -606,6 +691,7 @@ func (m *machine) request(t *track, mono time.Duration) {
 		after:       after,
 		issuedWall:  now.wall,
 		issuedMono:  mono,
+		seq:         m.nextSeq(),
 		requestedAt: t.producerNow(now),
 		covers:      m.gapSeq,
 		awaited:     m.awaited(t),
@@ -654,14 +740,70 @@ func (m *machine) clamped(t *track, requestID int, gapStart, after time.Time) {
 	}
 }
 
+// nextSeq numbers a request about to be sent.
+func (m *machine) nextSeq() uint64 {
+	m.seq++
+	return m.seq
+}
+
+// maxIDDraws is how many ids newRequestID draws before it stops trusting its
+// source and counts up from the last one.
+const maxIDDraws = 1000
+
 // newRequestID draws a request id that is not 0, which stands for a live message
-// in processed: it draws again.
+// in processed, and not one a snapshot_complete could take for another request:
+// one in flight, or one of a recovery or an event recovery that ended without
+// completing and is still remembered, whose late snapshot_complete may yet
+// come. It draws again; a source that keeps giving taken ids is left after
+// maxIDDraws of them, and the id is the next free one above the last drawn.
 func (m *machine) newRequestID() int {
-	for {
-		if id := m.nextID(); id != 0 {
+	id := 0
+	for range maxIDDraws {
+		if id = m.nextID(); m.free(id) {
 			return id
 		}
 	}
+	for {
+		id++
+		if id < 1 || id > maxRequestID {
+			id = 1
+		}
+		if m.free(id) {
+			return id
+		}
+	}
+}
+
+// free reports whether a request can take the id: it is not 0, and no request
+// in flight, waiting or remembered as ended has it.
+func (m *machine) free(requestID int) bool {
+	if requestID == 0 || m.inFlight(requestID) {
+		return false
+	}
+	for _, t := range m.tracks {
+		if slices.ContainsFunc(t.ended, func(e ended) bool { return e.requestID == requestID }) ||
+			slices.ContainsFunc(t.endedEvents, func(e ended) bool { return e.requestID == requestID }) {
+			return false
+		}
+	}
+	return true
+}
+
+// inFlight reports whether a recovery or an event recovery of this request id has
+// not ended, or an event recovery of it waits for a channel.
+func (m *machine) inFlight(requestID int) bool {
+	if _, ok := m.eventRecoveries[requestID]; ok {
+		return true
+	}
+	if slices.ContainsFunc(m.deferred, func(d deferredEvent) bool { return d.requestID == requestID }) {
+		return true
+	}
+	for _, t := range m.tracks {
+		if t.active != nil && t.active.requestID == requestID {
+			return true
+		}
+	}
+	return false
 }
 
 // oldestGap is the start of the oldest gap of the producer, or of any of its
@@ -838,7 +980,254 @@ func (m *machine) giveUp(t *track, mono time.Duration, reason string) {
 // sent may still be on its way, ahead of the snapshot of the next one asked for.
 func (m *machine) ended(t *track, a *active) {
 	t.active = nil
-	t.remember(ended{requestID: a.requestID, issuedMono: a.issuedMono})
+	t.remember(ended{requestID: a.requestID, seq: a.seq})
+}
+
+// ---- event recoveries
+
+var (
+	// errEventRecoveryConnectionDown is why an event recovery is refused while the
+	// connection is down: its snapshot would go to queues that are gone, or not bound
+	// yet, and nothing would give it up.
+	errEventRecoveryConnectionDown = errors.New("recovery: the connection is not up")
+	// errFeedClosing is why an event recovery is refused once the feed is
+	// closing, and why one in flight ends when the feed closes.
+	errFeedClosing = errors.New("recovery: the feed is closing")
+	// errLostQueue is why an event recovery is given up: its snapshot went with a
+	// queue that was lost.
+	errLostQueue = errors.New("its snapshot went with a lost queue")
+)
+
+// recoverEvent asks for one event's messages again, odds or stateful, and
+// answers with the request id it will run under, or why it is refused: the feed
+// is closing or closed, the producer is not known, the connection is down, or
+// the producer has maxPendingEventRecoveries in flight. A producer the catalog
+// has disabled is not refused: the request is the client's, whatever the
+// producer's state. A request for an event and kind that is
+// in flight, or waiting for a channel, is that one: it gets its id. The
+// outcome comes through the outbox, whenever it is: a refusal here is no
+// outcome, the caller has no recovery.
+func (m *machine) recoverEvent(producerID int, eventID types.URN, stateful bool) (int, error) {
+	if m.closing || m.closed {
+		return 0, errFeedClosing
+	}
+	t := m.known(producerID)
+	if t == nil {
+		return 0, fmt.Errorf("recovery: unknown producer %d", producerID)
+	}
+	for _, e := range m.eventRecoveries {
+		if e.producerID == producerID && e.eventID == eventID && e.stateful == stateful {
+			return e.requestID, nil
+		}
+	}
+	for _, d := range m.deferred {
+		if d.producerID == producerID && d.eventID == eventID && d.stateful == stateful {
+			return d.requestID, nil
+		}
+	}
+	if !m.connected {
+		m.counters.eventRefused++
+		m.log.Debugf("Event recovery of %s not accepted: the connection is not up", eventID.ToString())
+		return 0, errEventRecoveryConnectionDown
+	}
+	if n := m.pendingEvents(producerID); n >= maxPendingEventRecoveries {
+		m.counters.eventRefused++
+		m.log.Debugf("Event recovery of %s not accepted: %d in flight for producer %d", eventID.ToString(), n, producerID)
+		return 0, fmt.Errorf("recovery: producer %d has %d pending event recoveries: %w",
+			producerID, n, ErrTooManyPendingEventRecoveries)
+	}
+	requestID := m.newRequestID()
+	if m.awaitsChannel(t) {
+		// a session that receives it has lost its channel: its snapshot could go to
+		// either queue, or to none
+		m.log.Debugf("Event recovery of %s waits for a session's channel", eventID.ToString())
+		m.deferred = append(m.deferred, deferredEvent{
+			requestID: requestID, producerID: producerID, eventID: eventID, stateful: stateful, deferredAt: m.mono(),
+		})
+		return requestID, nil
+	}
+	m.issueEvent(t, requestID, eventID, stateful, m.mono())
+	return requestID, nil
+}
+
+// pendingEvents is how many event recoveries of the producer are in flight or
+// waiting for a channel.
+func (m *machine) pendingEvents(producerID int) int {
+	n := 0
+	for _, e := range m.eventRecoveries {
+		if e.producerID == producerID {
+			n++
+		}
+	}
+	for _, d := range m.deferred {
+		if d.producerID == producerID {
+			n++
+		}
+	}
+	return n
+}
+
+// issueEvent sends the event recovery to a REST worker, to be awaited by the
+// sessions that receive the producer now. askedMono is when it was asked for:
+// the reading its maximum recovery time counts from, earlier than now for one
+// that waited for a channel.
+func (m *machine) issueEvent(t *track, requestID int, eventID types.URN, stateful bool, askedMono time.Duration) {
+	now := m.clock.Now()
+	m.eventRecoveries[requestID] = &eventActive{
+		requestID:   requestID,
+		producerID:  t.id,
+		eventID:     eventID,
+		stateful:    stateful,
+		askedMono:   askedMono,
+		seq:         m.nextSeq(),
+		requestedAt: t.producerNow(now),
+		awaited:     m.awaited(t),
+		seen:        make(map[uuid.UUID]bool),
+		heardAt:     now.mono,
+	}
+	m.counters.eventRequested++
+	m.out.eventRequest(eventRequest{
+		producerID: t.id,
+		producer:   t.producer.Name(),
+		requestID:  requestID,
+		eventID:    eventID,
+		stateful:   stateful,
+	})
+}
+
+// releaseDeferred asks for the event recoveries that waited for a channel, once
+// no session that receives their producer waits for one. With the connection
+// down by then they are refused, as one asked for then is; with the feed
+// closing they end as the feed's closing ends them, and are not sent; one that
+// waited longer than the maximum recovery time ends as it does when it expires.
+func (m *machine) releaseDeferred() {
+	var waiting []deferredEvent
+	mono := m.mono()
+	for _, d := range m.deferred {
+		t := m.byID[d.producerID]
+		switch {
+		case m.closing:
+			m.failDeferred(d, errFeedClosing)
+		case m.awaitsChannel(t):
+			waiting = append(waiting, d)
+		case !m.connected:
+			m.counters.eventRefused++
+			m.out.eventEnded(eventOutcome{
+				producerID: d.producerID, requestID: d.requestID, eventID: d.eventID,
+				status: types.RecoveryStatusFailed, err: errEventRecoveryConnectionDown,
+			})
+		case mono-d.deferredAt > m.settings.maxRecoveryTime:
+			m.expireDeferred(d)
+		default:
+			m.issueEvent(t, d.requestID, d.eventID, d.stateful, d.deferredAt)
+		}
+	}
+	m.deferred = waiting
+}
+
+// failDeferred reports an event recovery that waited for a channel as failed.
+// The caller takes it out of m.deferred.
+func (m *machine) failDeferred(d deferredEvent, err error) {
+	m.out.eventEnded(eventOutcome{
+		producerID: d.producerID, requestID: d.requestID, eventID: d.eventID,
+		status: types.RecoveryStatusFailed, err: err,
+	})
+}
+
+// expireDeferred reports an event recovery that waited for a channel longer
+// than the maximum recovery time as timed out. The caller takes it out of
+// m.deferred.
+func (m *machine) expireDeferred(d deferredEvent) {
+	m.counters.eventExpired++
+	why := "waited for a session's channel longer than " + m.settings.maxRecoveryTime.String()
+	if n := m.counters.eventExpired; n == 1 || n%1000 == 0 {
+		m.log.Warnf("Event recovery of %s %s, %d expired so far", d.eventID.ToString(), why, n)
+	} else {
+		m.log.Debugf("Event recovery of %s %s", d.eventID.ToString(), why)
+	}
+	m.out.eventEnded(eventOutcome{
+		producerID: d.producerID, requestID: d.requestID, eventID: d.eventID,
+		status: types.RecoveryStatusTimedOut, err: errors.New(why),
+	})
+}
+
+// eventAnswered is the API's answer to an event recovery: accepted when err is
+// nil, which puts the deadline for its snapshot_complete off, or refused, which
+// ends it.
+func (m *machine) eventAnswered(e *eventActive, err error, mono time.Duration) {
+	switch {
+	case e.accepted:
+		// a snapshot_complete came first and said the API took it: the answer changes nothing
+		m.log.Debugf("Event recovery request %d answered after a snapshot complete of it", e.requestID)
+	case err == nil:
+		e.accepted = true
+		e.heardAt = mono
+		if len(e.awaited) == 0 {
+			// no session takes snapshot_completes: nothing would ever complete it
+			m.eventCompleted(e)
+		}
+	default:
+		m.counters.eventRefused++
+		if n := m.counters.eventRefused; n == 1 || n%1000 == 0 {
+			m.log.Warnf("Event recovery request %d not accepted: %s, %d refused so far", e.requestID, err, n)
+		} else {
+			m.log.Debugf("Event recovery request %d not accepted: %s", e.requestID, err)
+		}
+		m.failEvent(e, types.RecoveryStatusFailed, fmt.Errorf("the API did not accept it: %w", err))
+	}
+}
+
+// eventCompleted says every awaited session has seen the event recovery's
+// snapshot_complete.
+func (m *machine) eventCompleted(e *eventActive) {
+	m.log.Infof("Event recovery %d of %s completed", e.requestID, e.eventID.ToString())
+	m.endEvent(e, types.RecoveryStatusCompleted, nil)
+}
+
+// failEvent ends the event recovery without completing: what it sent may still
+// be ahead of a recovery asked for later.
+func (m *machine) failEvent(e *eventActive, status types.RecoveryRequestStatus, err error) {
+	if t := m.byID[e.producerID]; t != nil {
+		t.rememberEvent(ended{requestID: e.requestID, seq: e.seq})
+	}
+	m.endEvent(e, status, err)
+}
+
+// endEvent takes the event recovery out of flight and reports how it ended.
+func (m *machine) endEvent(e *eventActive, status types.RecoveryRequestStatus, err error) {
+	delete(m.eventRecoveries, e.requestID)
+	m.out.eventEnded(eventOutcome{
+		producerID: e.producerID, requestID: e.requestID, eventID: e.eventID, status: status, err: err,
+	})
+}
+
+// giveUpEvents gives up the event recoveries whose snapshot_complete went with a
+// lost queue: every one for a session nil, the connection's, else those still
+// waiting for that session's. A queue lost is all that gives one up: the producer
+// going down for any other cause, late or silent or unsubscribed, leaves them.
+func (m *machine) giveUpEvents(lost *session) {
+	for _, e := range m.sortedEvents() {
+		if lost != nil && (!e.awaited[lost.id] || e.seen[lost.id]) {
+			continue
+		}
+		m.counters.eventAbandoned++
+		m.log.Debugf("Event recovery %d of %s given up: its snapshot went with a lost queue", e.requestID, e.eventID.ToString())
+		m.failEvent(e, types.RecoveryStatusFailed, errLostQueue)
+	}
+}
+
+// sortedEvents are the event recoveries in flight, the earliest asked for first,
+// so what is reported of several does not depend on the map's order. The slice
+// is the caller's to end them while it walks it.
+func (m *machine) sortedEvents() []*eventActive {
+	out := make([]*eventActive, 0, len(m.eventRecoveries))
+	for _, e := range m.eventRecoveries {
+		out = append(out, e)
+	}
+	slices.SortFunc(out, func(a, b *eventActive) int {
+		return cmp.Compare(a.seq, b.seq)
+	})
+	return out
 }
 
 // ---- gaps and checkpoints
@@ -1227,6 +1616,10 @@ type track struct {
 	// ended are the recoveries that failed or were given up, newest first, at
 	// most endedRemembered: what they sent may still be ahead of the one in flight.
 	ended []ended
+	// endedEvents are the event recoveries that failed, expired or were given
+	// up, newest first, at most endedRemembered: what they sent may still be
+	// ahead of a recovery or an event recovery asked for later.
+	endedEvents []ended
 
 	// failures is how many recoveries failed in a row; retryAt is the monotonic
 	// time before which the next is not asked for.
@@ -1243,10 +1636,22 @@ func (t *track) rearm() {
 
 // remember keeps the recovery among the last that ended without completing.
 func (t *track) remember(e ended) {
-	t.ended = append([]ended{e}, t.ended...)
-	if len(t.ended) > endedRemembered {
-		t.ended = t.ended[:endedRemembered]
+	t.ended = remembered(t.ended, e)
+}
+
+// rememberEvent keeps the event recovery among the last that ended without
+// completing.
+func (t *track) rememberEvent(e ended) {
+	t.endedEvents = remembered(t.endedEvents, e)
+}
+
+// remembered is the list with e first, and no more than endedRemembered of them.
+func remembered(list []ended, e ended) []ended {
+	list = append([]ended{e}, list...)
+	if len(list) > endedRemembered {
+		list = list[:endedRemembered]
 	}
+	return list
 }
 
 // producerNow is the producer's clock at a reading: the SDK's wall clock less
@@ -1314,9 +1719,11 @@ type active struct {
 	after time.Time
 	// issuedWall is when it was asked for by the SDK's wall clock: what the
 	// recovery info publishes; issuedMono, on the monotonic clock: what its
-	// deadlines and its order count from.
+	// deadlines count from.
 	issuedWall time.Time
 	issuedMono time.Duration
+	// seq is its sequence number: what orders it among the requests sent.
+	seq uint64
 	// requestedAt is when it was asked for, by the producer's clock.
 	requestedAt time.Time
 	// covers is the number of the last gap it covers.
@@ -1338,18 +1745,59 @@ type active struct {
 }
 
 // allSeen reports whether every awaited session has seen the snapshot_complete.
-func (a *active) allSeen() bool {
-	for id := range a.awaited {
-		if !a.seen[id] {
+func (a *active) allSeen() bool { return allSeen(a.awaited, a.seen) }
+
+// allSeen reports whether every awaited session is among those that have seen it.
+func allSeen(awaited, seen map[uuid.UUID]bool) bool {
+	for id := range awaited {
+		if !seen[id] {
 			return false
 		}
 	}
 	return true
 }
 
-// ended is a recovery that ended without completing: its id, and when it was
-// asked for.
+// ended is a recovery that ended without completing: its id, and its sequence
+// number.
 type ended struct {
+	requestID int
+	seq       uint64
+}
+
+// eventActive is an event recovery in flight.
+type eventActive struct {
 	requestID  int
-	issuedMono time.Duration
+	producerID int
+	eventID    types.URN
+	// stateful says it asks for the event's stateful messages, not only its odds.
+	stateful bool
+	// askedMono is when it was asked for, on the monotonic clock: what its maximum
+	// recovery time counts from, also for one that waited for a channel before it
+	// was sent. seq is its sequence number: what orders it among the requests
+	// sent. requestedAt is when it was sent, by the producer's clock.
+	askedMono   time.Duration
+	seq         uint64
+	requestedAt time.Time
+	// awaited are the sessions whose snapshot_complete it waits for.
+	awaited map[uuid.UUID]bool
+	seen    map[uuid.UUID]bool
+	// accepted says the API took it, or a snapshot_complete said so.
+	accepted bool
+	// heardAt is when the API accepted it, or a session that awaits it last took
+	// something of it or queued ahead of it, or its first snapshot_complete: its
+	// snapshot_complete is waited for this long after, at most, once accepted.
+	heardAt time.Duration
+}
+
+// allSeen reports whether every awaited session has seen the snapshot_complete.
+func (e *eventActive) allSeen() bool { return allSeen(e.awaited, e.seen) }
+
+// deferredEvent is an event recovery waiting for a session's channel.
+type deferredEvent struct {
+	requestID  int
+	producerID int
+	eventID    types.URN
+	stateful   bool
+	// deferredAt is when it was asked for, on the monotonic clock.
+	deferredAt time.Duration
 }
