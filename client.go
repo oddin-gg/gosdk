@@ -2366,9 +2366,13 @@ func (c *Client) SetProducerEnabled(ctx context.Context, id int, enabled bool) e
 // SetProducerRecoveryFromTimestamp sets the point the first snapshot recovery of
 // the producer starts from, for consumers that persist processed timestamps
 // externally and want recovery to resume from a specific point on next connect.
-// Set after the feed has connected, an earlier point than the one the SDK is at
-// lowers where the next recovery starts, and opens no recovery by itself; a later
-// one is ignored. The zero time clears a start set before Connect.
+// Before Connect the zero time clears a start set earlier (a full snapshot); after
+// Connect it does nothing. After Connect, until the producer has completed a first
+// recovery, the start replaces the one set before Connect, earlier or later (a
+// recovery already in flight keeps what it asked for and one more is asked for from
+// the new start); once the producer has a point of its own, an earlier start lowers
+// where the next recovery starts and opens no recovery by itself, and a later one is
+// ignored, with a warning.
 //
 // The point to persist is Producer.TimestampForRecovery: the oldest time a
 // subscription may still be missing messages from.

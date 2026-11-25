@@ -360,13 +360,16 @@ One recovery actor runs every producer's recovery state. The rules, per producer
   buffer (`WithSubscriptionBuffer`, default 256), the point can still lie up to
   that many messages behind what the client has finished.
 - **The start the client sets.** `SetProducerRecoveryFromTimestamp` before `Connect`
-  is the seed of a producer's first recovery. Until the producer has completed a
-  first recovery its start is the seed, and a value the client sets after `Connect`
-  replaces it for the next request (a recovery already in flight keeps what it asked
-  for, and one more is asked for from the new value). Once the producer has a point
-  of its own, an earlier value only lowers where the next recovery starts and opens
-  no request; a later one is ignored, with a WARN. The zero time set after `Connect`
-  does nothing: what was set before it stays the seed.
+  is the seed of a producer's first recovery, and the zero time clears it (a full
+  snapshot). After `Connect` the zero time does nothing: what was set before it stays
+  the seed. Until the producer has completed a first recovery its start is the seed,
+  and a value the client sets after `Connect` replaces it, whether it is earlier or
+  later (a value the seed already has does nothing; a lane whose queue was lost starts
+  from the lost queue's checkpoint if that is earlier; a recovery already in flight
+  keeps what it asked for, and one more is asked for from the new value). Once the
+  producer has a point of its own, an earlier value only lowers where the next
+  recovery starts and opens no request, the point it is at does nothing, and a later
+  one is ignored, with a WARN.
 - **When it completes.** A recovery completes once every subscription that
   receives the producer has taken its `snapshot_complete`; a gap opened
   meanwhile asks for one more, and the producer comes up when none is open. A
@@ -462,9 +465,9 @@ What a client that relied on the earlier behaviour will see differently:
   down (`OtherProducerStatusReason`), and its real first recovery ends with
   `ReturnedFromInactivityProducerStatusReason`.
 - **An event recovery with no subscription completes at the API's acceptance.** Was:
-  it waited for a `snapshot_complete` no session could take. Is: with no session
-  receiving the producer there is nothing to wait for; it completes when the API
-  accepts it, and the stream tells of it. With sessions, every session that receives
+  it waited for a `snapshot_complete` no subscription could take. Is: with no
+  subscription receiving the producer there is nothing to wait for; it completes when
+  the API accepts it, and the stream tells of it. With subscriptions, every subscription that receives
   the producer must take its `snapshot_complete`.
 - **`Producer.RecoveryInfo()` also tells a failure.** Was: set only when a request
   was accepted. Is: set when a request is accepted and when it fails (refused, or
@@ -477,10 +480,10 @@ What a client that relied on the earlier behaviour will see differently:
   before it. A producer that sends only unsubscribed alives stays down as
   unsubscribed (`OtherProducerStatusReason`): it is alive, so it is not reported as
   silent (`AliveIntervalViolationProducerStatusReason`).
-- **Admission of an event recovery.** A request is refused when the actor's request
-  queue (10 000) is full, with an error that wraps the "too many pending" error, so it
-  is retryable like it. A request the API answers without accepting and without an
-  error fails the handle.
+- **Admission of an event recovery.** A request is refused when the SDK's queue of
+  event recovery requests (10 000) is full: the call fails at once, the request was not
+  accepted, and it can be retried. A request the API answers without accepting and
+  without an error fails the handle.
 - **Log lines.** Was: a failing recovery API logged at ERROR with `producer_id` and
   `request_id` fields. Is: one WARN for the first failure of a streak and the next at
   DEBUG (the 60 s retry's first WARN too), and the producer and request ids are in
