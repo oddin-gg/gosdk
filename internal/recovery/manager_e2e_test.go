@@ -805,3 +805,211 @@ func TestManager_MixedProducerCompletesOnEverySessionsSnapshotComplete(t *testin
 		return ok && !st.IsDown()
 	})
 }
+
+// ---- the client's recovery start, before the producer has recovered
+
+// A start the client sets after Connect and before it subscribes is where the first
+// recovery starts, whether the producer's alive came before it or not, and what the
+// client reads back is what it set; nothing is logged above info.
+func TestManager_RecoveryStartSetBetweenConnectAndSubscribeIsTheFirstRecoverysStart(t *testing.T) {
+	for _, withAlive := range []bool{false, true} {
+		r := newRig(t)
+		sink := &lockedBuffer{}
+		r.mgr.logger = debugLogger(sink)
+		r.open()
+		r.sync()
+		if withAlive {
+			r.alive(liveID)
+			r.sync()
+		}
+		want := r.clock.Now().Wall().Add(-10 * time.Minute)
+		if err := r.pm.SetProducerRecoveryFromTimestamp(t.Context(), liveID, want); err != nil {
+			t.Fatal(err)
+		}
+		r.sync()
+		if got := r.timestampForRecovery(liveID); !got.Equal(want) {
+			t.Fatalf("withAlive=%v: TimestampForRecovery = %v, want what was set, %v", withAlive, got, want)
+		}
+		s1 := uuid.New()
+		r.openSession(s1, types.AllMessageInterest)
+		r.alive(liveID)
+		req := r.waitSnapshots(1)[0]
+		if req.afterMillis != want.UnixMilli() {
+			t.Fatalf("withAlive=%v: the first recovery after %d, want the start set, %d", withAlive, req.afterMillis, want.UnixMilli())
+		}
+		if got := r.timestampForRecovery(liveID); !got.Equal(want) {
+			t.Fatalf("withAlive=%v: TimestampForRecovery during the recovery = %v, want %v", withAlive, got, want)
+		}
+		noLogAboveInfo(t, sink)
+		r.mgr.Close()
+	}
+}
+
+// A start set before Connect is the seed whatever the client does with it afterwards:
+// the zero time after Connect clears nothing.
+func TestManager_StartSetBeforeConnectIsTheSeedWhateverIsSetToZeroAfterIt(t *testing.T) {
+	r := newRig(t)
+	if err := r.pm.Open(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	want := r.clock.Now().Wall().Add(-20 * time.Minute)
+	if err := r.pm.SetProducerRecoveryFromTimestamp(t.Context(), liveID, want); err != nil {
+		t.Fatal(err)
+	}
+	r.open()
+	if err := r.pm.SetProducerRecoveryFromTimestamp(t.Context(), liveID, time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	r.sync()
+	s1 := uuid.New()
+	r.openSession(s1, types.AllMessageInterest)
+	r.alive(liveID)
+	if got := r.waitSnapshots(1)[0].afterMillis; got != want.UnixMilli() {
+		t.Fatalf("the first recovery after %d, want the start set before Connect, %d", got, want.UnixMilli())
+	}
+}
+
+// Once the producer has recovered, a start later than its point is ignored with a
+// warning, and an earlier one rewinds.
+func TestManager_StartSetAfterTheProducerRecoveredIsIgnoredWithAWarningWhenLater(t *testing.T) {
+	r := newRig(t)
+	sink := &lockedBuffer{}
+	r.mgr.logger = debugLogger(sink)
+	r.open()
+	s1 := uuid.New()
+	r.openSession(s1, types.AllMessageInterest)
+	r.alive(liveID)
+	first := r.waitSnapshots(1)[0]
+	r.snapshotComplete(s1, liveID, first.requestID)
+	eventually(t, "the live producer up", func() bool { s, ok := r.status(liveID); return ok && !s.IsDown() })
+	r.clock.advance(time.Second)
+	r.alive(liveID)
+	r.processed(s1, liveID)
+	r.sync()
+	point := r.timestampForRecovery(liveID)
+
+	if err := r.pm.SetProducerRecoveryFromTimestamp(t.Context(), liveID, point.Add(30*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	r.sync()
+	if got := r.timestampForRecovery(liveID); !got.Equal(point) {
+		t.Fatalf("a later start moved the point to %v from %v", got, point)
+	}
+	if !strings.Contains(sink.String(), "later than the point it is at") {
+		t.Fatalf("no warning for the start that was ignored:\n%s", sink.String())
+	}
+}
+
+// ---- the session callbacks and the manager's state
+
+// A session that is gone is no longer waited for.
+func TestManager_SessionGoneIsNoLongerWaitedFor(t *testing.T) {
+	r := newRig(t)
+	r.open()
+	s1, s2 := uuid.New(), uuid.New()
+	r.openSession(s1, types.AllMessageInterest)
+	r.openSession(s2, types.AllMessageInterest)
+	r.alive(liveID)
+	first := r.waitSnapshots(1)[0]
+	r.snapshotComplete(s1, liveID, first.requestID)
+	r.sync()
+	if _, ok := r.status(liveID); ok {
+		t.Fatal("the producer came up with a session still to take its snapshot_complete")
+	}
+	r.mgr.OnFeedSessionGone(s2)
+	eventually(t, "the producer up once the session is gone", func() bool { s, ok := r.status(liveID); return ok && !s.IsDown() })
+}
+
+// The producer's last-message timestamp moves with the alive the feed stamped on it, not
+// with its creation time, and not for a producer the client disabled.
+func TestManager_AliveMovesTheLastMessageTimestampOfAnEnabledProducerToItsReceivedTime(t *testing.T) {
+	r := newRig(t)
+	if err := r.pm.Open(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.pm.SetProducerState(t.Context(), preID, false); err != nil {
+		t.Fatal(err)
+	}
+	r.open()
+	now := r.clock.Now()
+	received := now.Wall().Add(2 * time.Second)
+	ts := types.MessageTimestamp{Created: now.Wall().Add(-time.Minute), Received: received}
+	r.mgr.OnAliveReceived(liveID, ts, now, true)
+	r.mgr.OnAliveReceived(preID, ts, now, true)
+	r.sync()
+	live, _ := r.pm.GetProducer(t.Context(), liveID)
+	if got := live.LastMessageTimestamp(); !got.Equal(received) {
+		t.Fatalf("last message timestamp = %v, want the received time %v", got, received)
+	}
+	pre, _ := r.pm.GetProducer(t.Context(), preID)
+	if got := pre.LastMessageTimestamp(); !got.IsZero() {
+		t.Fatalf("the disabled producer's last message timestamp moved to %v", got)
+	}
+}
+
+// A message started while the manager is not open moves no timestamp, and is still
+// tracked as in processing.
+func TestManager_ProcessingStartedBeforeOpenMovesNoTimestamp(t *testing.T) {
+	r := newRig(t)
+	if err := r.pm.Open(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	s1 := uuid.New()
+	now := r.clock.Now()
+	r.mgr.OnMessageProcessingStarted(s1, liveID, now)
+	r.mgr.OnMessageProcessingEnded(s1, liveID, now.Wall())
+	p, _ := r.pm.GetProducer(t.Context(), liveID)
+	if !p.LastMessageTimestamp().IsZero() || !p.LastProcessedMessageGenTimestamp().IsZero() {
+		t.Fatalf("timestamps moved before Open: %v, %v", p.LastMessageTimestamp(), p.LastProcessedMessageGenTimestamp())
+	}
+}
+
+// ---- event recoveries
+
+// An event recovery for a producer no session receives has nothing to wait for: it
+// completes when the API accepts it, and the stream tells of it.
+func TestManager_EventRecoveryWithNoSubscriptionCompletesWhenTheApiAcceptsIt(t *testing.T) {
+	r := newRig(t)
+	r.open()
+	h, err := r.mgr.InitiateEventOddsRecoveryHandle(t.Context(), liveID, matchURN(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-h.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("an event recovery with no subscription did not complete on the API's acceptance")
+	}
+	if res := h.Result(); res.Status != types.RecoveryStatusCompleted || res.Err != nil {
+		t.Fatalf("result = %v, %v, want completed", res.Status, res.Err)
+	}
+	eventually(t, "the event recovery on the stream", func() bool {
+		for _, m := range r.streamed() {
+			if m.EventRecoveryMessage != nil && m.EventRecoveryMessage.RequestID() == h.RequestID() {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+// Only a completed event recovery is told on the stream.
+func TestManager_EventRecoveryThatFailsIsNotToldOnTheStream(t *testing.T) {
+	r := newRig(t)
+	r.open()
+	s1 := uuid.New()
+	r.openSession(s1, types.AllMessageInterest)
+	r.hits.refuse.Store(true)
+	h, err := r.mgr.InitiateEventOddsRecoveryHandle(t.Context(), liveID, matchURN(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-h.Done()
+	r.sync()
+	time.Sleep(50 * time.Millisecond)
+	for _, m := range r.streamed() {
+		if m.EventRecoveryMessage != nil {
+			t.Fatalf("a failed event recovery was told on the stream: %+v", m.EventRecoveryMessage)
+		}
+	}
+}

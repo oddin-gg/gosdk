@@ -144,8 +144,8 @@ func TestManager_OpenCloseStress(t *testing.T) {
 	}
 }
 
-// TestManager_OpenClose_ConcurrentDoesNotResurrect verifies the v2.10
-// review fix: Open's final state-publish uses CAS(Opening, Open) so a
+// TestManager_OpenClose_ConcurrentDoesNotResurrect verifies that
+// Open's final state-publish uses CAS(Opening, Open), so a
 // Close that landed during init can't be overwritten back to Open.
 //
 // We exercise this directly by pre-setting state to Closed (simulating
@@ -171,8 +171,7 @@ func TestManager_OpenClose_ConcurrentDoesNotResurrect(t *testing.T) {
 
 // TestManager_LifecycleGate_Opening: a manager mid-init (state ==
 // Opening, fields half-built) must reject dispatchRecoverEvent so
-// callers don't reach into a half-built manager. Verifies the
-// v2.9 review fix.
+// callers don't reach into a half-built manager.
 func TestManager_LifecycleGate_Opening(t *testing.T) {
 	m := &Manager{
 		logger: newDiscardLogger(),

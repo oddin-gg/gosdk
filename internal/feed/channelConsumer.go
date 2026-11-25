@@ -102,9 +102,9 @@ type ChannelConsumer struct {
 	// other than drain/ctx, BEFORE the channel is torn down and BEFORE
 	// the reopen starts. The exclusive auto-delete queue died with the
 	// channel and everything published until the rebind is lost; the
-	// recovery layer flags the producers this consumer serves down and
-	// floors the recovery cursor at lostAt, so no alive processed after
-	// the loss can move the recovery past the gap.
+	// recovery layer takes the producers this consumer serves down and
+	// recovers from what the session had finished, so no alive processed
+	// after the loss can move the recovery past the gap.
 	onChannelLost func(mi types.MessageInterest, lostAt time.Time)
 
 	// onChannelRestored, when set, is called from run() right after a
@@ -214,6 +214,15 @@ func (c *ChannelConsumer) SetChannelLostHook(fn func(mi types.MessageInterest, l
 // lost channel has been re-declared and re-bound (see onChannelRestored).
 // Must be called before Open.
 func (c *ChannelConsumer) SetChannelRestoredHook(fn func()) { c.onChannelRestored = fn }
+
+// ReportChannelBound tells the bound hook that the consumer's queue is bound. Open
+// calls it once; it is exported so the session's wiring can be exercised without a
+// broker.
+func (c *ChannelConsumer) ReportChannelBound() {
+	if c.onChannelBound != nil {
+		c.onChannelBound()
+	}
+}
 
 // SetChannelBoundHook installs the callback Open invokes once the first
 // channel's queue is declared and bound, before the loop that can report its
@@ -419,9 +428,7 @@ func (c *ChannelConsumer) Open(ctx context.Context, routingKeys []string, messag
 
 	// Told before the loop starts: a loss of this channel is then reported after
 	// the queue was, never before.
-	if c.onChannelBound != nil {
-		c.onChannelBound()
-	}
+	c.ReportChannelBound()
 	c.wg.Go(func() { c.run(loopCtx, deliveries, ch) })
 	return out, nil
 }

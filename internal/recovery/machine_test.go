@@ -1479,7 +1479,9 @@ func TestMachine_RewindFoldsIntoTheNextRequestAndTheResumePointAndClosesOnACover
 	expectTime(t, got, f.now(), "the resume point after the completion")
 }
 
-func TestMachine_RewindIsKeptByARecoveryAskedForBeforeIt(t *testing.T) {
+// A start the client sets while the first recovery of the producer is in flight
+// replaces the seed: that recovery does not cover it, so one more is asked for from it.
+func TestMachine_StartSetDuringTheFirstRecoveryReplacesTheSeedAndIsAskedForAfterIt(t *testing.T) {
 	f := newFeed(t)
 	f.cat.from[pre] = f.now().Add(-2 * time.Hour)
 	f.open(1, all)
@@ -1489,10 +1491,13 @@ func TestMachine_RewindIsKeptByARecoveryAskedForBeforeIt(t *testing.T) {
 	f.accept(first)
 	rewound := f.now().Add(-3 * time.Hour)
 	f.m.rewind(pre, rewound)
-	f.snapshotComplete(1, pre, first.requestID)
-	expect(t, f.m.byID[pre].rewind != nil, true, "the rewind after a recovery that did not cover it")
+	expectTime(t, first.after, f.start.Add(-2*time.Hour), "the recovery in flight keeps what it asked for")
 	got, _ := f.resume(pre)
 	expectTime(t, got, rewound, "the resume point")
+	f.snapshotComplete(1, pre, first.requestID)
+	second := f.lastSnapshot(pre)
+	expect(t, second.requestID != first.requestID, true, "one more asked for")
+	expectTime(t, second.after, rewound, "from the start the client set")
 }
 
 func TestMachine_RewindToALaterPointIsIgnoredWithAWarning(t *testing.T) {

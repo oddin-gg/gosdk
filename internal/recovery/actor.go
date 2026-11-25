@@ -71,9 +71,10 @@ type recoveryActor struct {
 	commands chan *recoverEventCommand
 	samples  chan fact
 
-	// alives are the alives of each producer not handled yet.
-	aliveMu sync.Mutex
-	alives  map[int]*aliveSlot
+	// openAlives is, per producer, the last alives fact queued for it: an alive
+	// joins it only while it is still the last essential fact queued. Guarded by
+	// essentialMu.
+	openAlives map[int]*factAlives
 
 	// issued are the request ids the actor has asked for, oldest first, a
 	// bounded memory: a snapshot_complete of any other is of a request this feed
@@ -116,6 +117,8 @@ type recoveryActor struct {
 	// beforeSample, when set, runs before each take from the samples, after the
 	// look at the essential queue. Tests only; set before the actor runs.
 	beforeSample func()
+	// beforeCommand is beforeSample for the commands.
+	beforeCommand func()
 }
 
 // setBeforeHandle sets what runs inside the handling of each fact. Tests only.
@@ -164,8 +167,8 @@ const maxPendingEventRecoveries = 128
 var ErrTooManyPendingEventRecoveries = errors.New("recovery: too many pending event recoveries for producer")
 
 // errCommandsFull is why an event recovery is refused when the actor's queue of
-// requests has no room.
-var errCommandsFull = errors.New("recovery: the actor's request queue is full")
+// requests has no room: like too many pending, it is retryable.
+var errCommandsFull = fmt.Errorf("recovery: the actor's request queue is full: %w", ErrTooManyPendingEventRecoveries)
 
 // actorManagerOps is the narrow surface the actor needs back into the
 // Manager. Limiting it makes the dependency explicit and keeps test
@@ -210,7 +213,7 @@ func newRecoveryActor(
 		wake:            make(chan struct{}, 1),
 		commands:        make(chan *recoverEventCommand, commandCapacity),
 		samples:         make(chan fact, sampleCapacity),
-		alives:          make(map[int]*aliveSlot),
+		openAlives:      make(map[int]*factAlives),
 		issued:          make(map[int]struct{}),
 		issuedKept:      issuedKept,
 		shutdown:        make(chan struct{}),
@@ -318,21 +321,29 @@ func (a *recoveryActor) isClosed() bool { return a.closing.Load() }
 // start posts the opening of the feed.
 func (a *recoveryActor) start() { a.postEssential(factStart{}) }
 
-// onAlive posts an alive of the SDK's alive channel into its producer's slot,
-// which the actor takes once: it is never dropped, and never queued one by one
-// either.
+// onAlive posts an alive of the SDK's alive channel, never dropped. Alives that
+// arrive one after the other with no essential fact between them share one fact, so
+// a flood of them costs one slot per producer; an essential fact posted after the
+// last of them ends the sharing, so no alive is ever handled before an essential
+// fact posted before it.
 func (a *recoveryActor) onAlive(producerID int, generatedAt time.Time, received Stamp, subscribed bool) {
-	a.aliveMu.Lock()
-	slot, fresh := a.alives[producerID], false
-	if slot == nil {
-		slot, fresh = &aliveSlot{}, true
-		a.alives[producerID] = slot
+	alive := aliveSeen{generatedAt: generatedAt, received: received, subscribed: subscribed}
+	a.essentialMu.Lock()
+	if a.closed {
+		a.essentialMu.Unlock()
+		return
 	}
-	slot.add(aliveSeen{generatedAt: generatedAt, received: received, subscribed: subscribed})
-	if fresh && !a.postEssential(factAlives{producer: producerID}) {
-		delete(a.alives, producerID)
+	if open := a.openAlives[producerID]; open != nil && len(a.essential) > 0 && a.essential[len(a.essential)-1] == fact(open) {
+		open.slot.add(alive)
+		a.essentialMu.Unlock()
+		return
 	}
-	a.aliveMu.Unlock()
+	f := &factAlives{producer: producerID}
+	f.slot.add(alive)
+	a.openAlives[producerID] = f
+	a.essential = append(a.essential, f)
+	a.essentialMu.Unlock()
+	a.signal()
 }
 
 // onSnapshotComplete posts a snapshot_complete a session took. A nil error says
@@ -460,6 +471,9 @@ func (a *recoveryActor) drainCommands() bool {
 		if a.hasEssential() {
 			return true
 		}
+		if a.beforeCommand != nil {
+			a.beforeCommand()
+		}
 		select {
 		case c := <-a.commands:
 			// what was posted before this request is handled before it
@@ -518,10 +532,7 @@ func (a *recoveryActor) handle(f fact) {
 	case factClosed:
 		m.sessionClosed(f.session)
 	case factStart:
-		// what the client set before the feed opened is where a producer that has
-		// not recovered starts from, whatever it sets later
 		for _, p := range a.catalog.producers() {
-			a.catalog.recoveryFrom(p.ID())
 			// every producer starts down, whatever an earlier feed left in the producer manager
 			if err := a.pm.SetProducerDown(p.ID(), true); err != nil {
 				a.logger.WithError(err).WithField("producer_id", p.ID()).Error("recovery: set producer down at start")
@@ -531,8 +542,8 @@ func (a *recoveryActor) handle(f fact) {
 		// the transport reports no connection of its own: a session's queue is
 		// bound or lost, and each says so
 		m.connectionUp()
-	case factAlives:
-		a.takeAlives(f.producer)
+	case *factAlives:
+		a.takeAlives(f)
 	case factProcessed:
 		m.processed(f.session, f.producer, f.generatedAt, m.markOf(f.producer, f.generatedAt, f.taken), f.taken, f.requestID)
 	case factSessionAlive:
@@ -558,17 +569,10 @@ func (a *recoveryActor) handle(f fact) {
 	}
 }
 
-// takeAlives hands the machine the alives of the producer's slot.
-func (a *recoveryActor) takeAlives(producerID int) {
-	a.aliveMu.Lock()
-	slot := a.alives[producerID]
-	delete(a.alives, producerID)
-	a.aliveMu.Unlock()
-	if slot == nil {
-		return
-	}
-	for _, alive := range slot.inOrder() {
-		a.machine.alive(producerID, alive.generatedAt, aliveMark(alive.generatedAt, alive.received), alive.received, alive.subscribed)
+// takeAlives hands the machine the alives of the fact.
+func (a *recoveryActor) takeAlives(f *factAlives) {
+	for _, alive := range f.slot.inOrder() {
+		a.machine.alive(f.producer, alive.generatedAt, aliveMark(alive.generatedAt, alive.received), alive.received, alive.subscribed)
 	}
 }
 
@@ -635,10 +639,19 @@ func (a *recoveryActor) finish() {
 	a.closing.Store(true)
 
 	a.machine.beginClosing()
-	if !a.finishEssential(pending) {
+	if left := a.finishEssential(pending); len(left) > 0 {
 		a.counters.unhandledAtClose.Add(1)
+		starts := make(map[int]time.Time)
+		for _, f := range left {
+			// the start the client set is the one thing the machine cannot guess
+			if r, ok := f.(factRewind); ok && !r.to.IsZero() {
+				if at, set := starts[r.producer]; !set || r.to.Before(at) {
+					starts[r.producer] = r.to
+				}
+			}
+		}
 		a.guard(func() {
-			a.machine.unhandledAtClose()
+			a.machine.unhandledAtClose(starts)
 			a.machine.publishResumePoints()
 		})
 	}
@@ -646,20 +659,20 @@ func (a *recoveryActor) finish() {
 }
 
 // finishEssential handles the queued essential facts until the deadline; it
-// reports whether every one was handled.
-func (a *recoveryActor) finishEssential(pending []fact) bool {
+// returns the ones it did not get to.
+func (a *recoveryActor) finishEssential(pending []fact) []fact {
 	deadline := time.Now().Add(a.finishWait)
 	if by := a.closeBy.Load(); by != nil && by.Before(deadline) {
 		deadline = *by
 	}
 	for i, f := range pending {
 		if !time.Now().Before(deadline) {
-			return false
+			return pending[i:]
 		}
 		a.handle(f)
 		pending[i] = nil
 	}
-	return true
+	return nil
 }
 
 // closeMachine ends the machine: whoever waits for an event recovery is refused,
@@ -671,9 +684,9 @@ func (a *recoveryActor) closeMachine() {
 	for len(a.samples) > 0 {
 		<-a.samples
 	}
-	a.aliveMu.Lock()
-	clear(a.alives)
-	a.aliveMu.Unlock()
+	a.essentialMu.Lock()
+	clear(a.openAlives)
+	a.essentialMu.Unlock()
 	a.guard(a.machine.close)
 	for _, cancel := range a.snapshotCancels {
 		cancel()

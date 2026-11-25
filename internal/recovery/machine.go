@@ -14,7 +14,7 @@ import (
 )
 
 // machine is every producer's recovery state and the rules that change it: the
-// state machine the recovery actor will run. Each method is one fact, handled
+// state machine the recovery actor runs. Each method is one fact, handled
 // to the end before the next. What the machine decides goes out through the
 // outbox, and the outcome of a request comes back as another fact. Nothing
 // here blocks, locks, reads the time on its own or calls the client.
@@ -330,23 +330,31 @@ func (m *machine) beginClosing() {
 	m.closing = true
 }
 
-// unhandledAtClose says the actor closed with facts still queued that it did
-// not handle: each published resume point goes back to the producer's last
-// subscribed alive, or to a full snapshot without one. Of those facts only an
-// unsubscribed alive could have taken a point further back, with the gap it
-// opens from that alive, or from a time only the fact has; a session opened
-// among them starts from the point there is or that alive, and a lost queue
-// from a checkpoint, so the rest move nothing back. The point is therefore
-// never ahead of what a fact left could have needed, and it only goes back, as
-// every point does once the feed is closing. A producer with no point
-// published, because the feed never started or no session received it, keeps
-// the client's start.
-func (m *machine) unhandledAtClose() {
+// unhandledAtClose says the actor closed with facts still queued that it did not
+// handle: each published resume point goes back to the producer's last subscribed
+// alive, and to the start the client set among those facts, the earliest of them
+// for the producer (starts, by producer). Of the facts only an unsubscribed alive
+// could have taken a point further back, with the gap it opens from that alive, and
+// only a start the client set, to that start; a session opened among them starts
+// from the point there is, a lost queue from a checkpoint, and an alive with no
+// subscribed one before it from a time later than any point, so the rest move
+// nothing back. The point is therefore never ahead of what a fact left could have
+// needed, and it only goes back, as every point does once the feed is closing. A
+// producer with no point published, because the feed never started or no session
+// received it, keeps the client's start; one with no subscribed alive keeps its
+// point.
+func (m *machine) unhandledAtClose(starts map[int]time.Time) {
 	for _, t := range m.tracks {
 		if t.published == nil {
 			continue
 		}
-		floor := earlierOf(*t.published, t.safePoint)
+		floor := *t.published
+		if !t.safePoint.IsZero() {
+			floor = earlierOf(floor, t.safePoint)
+		}
+		if to, ok := starts[t.id]; ok {
+			floor = earlierOf(floor, to)
+		}
 		if floor.Equal(*t.published) {
 			continue
 		}
@@ -365,12 +373,21 @@ func fmtResume(point time.Time) string {
 	return point.UTC().Format(time.RFC3339Nano)
 }
 
-// rewind lowers the point the next recovery starts from, for a client that sets
-// the producer's recovery timestamp after the feed has started. It opens no
-// request by itself: it is a gap that does not trigger one, folded into the
-// start of the next request and into the published resume point, and closed
-// only when a recovery that covers it completes, so a failed request keeps it.
-// A point later than the one the producer is at is ignored.
+// rewind is the client setting the producer's recovery start after the feed has
+// started.
+//
+// Until the producer has completed a first recovery its start is the seed, and a
+// value the client sets replaces it: the lanes that got the seed gap start from
+// the new value, and so does every lane opened later. The recovery that is in
+// flight, if any, keeps what it asked for, and the next request starts from the
+// new value.
+//
+// Once the producer has recovered, the point the client sets only lowers the next
+// recovery's start: it opens no request by itself, it is a gap that does not
+// trigger one, folded into the start of the next request and into the published
+// resume point, and closed only when a recovery that covers it completes, so a
+// failed request keeps it. A point later than the one the producer is at is
+// ignored, with a warning.
 //
 // Before the start the client's value is the seed, read at start.
 func (m *machine) rewind(producerID int, to time.Time) {
@@ -379,6 +396,10 @@ func (m *machine) rewind(producerID int, to time.Time) {
 	}
 	t := m.known(producerID)
 	if t == nil {
+		return
+	}
+	if !t.everRecovered {
+		m.reseed(t, to)
 		return
 	}
 	if t.rewind != nil && !to.Before(t.rewind.from) {
@@ -392,6 +413,27 @@ func (m *machine) rewind(producerID int, to time.Time) {
 		return
 	}
 	t.rewind = m.openGap(t.rewind, to)
+}
+
+// reseed replaces the seed of a producer that has not completed a first recovery:
+// what its lanes got from the old one (the gap, and the checkpoint that no message
+// moved) becomes the new one.
+func (m *machine) reseed(t *track, to time.Time) {
+	t.seeded = &to
+	for _, s := range m.sessions {
+		l := s.lane(t.id)
+		if l == nil || l.gap == nil {
+			continue
+		}
+		if l.checkpoint.Equal(l.gap.from) {
+			// no message moved it past the seed
+			l.checkpoint = to
+		}
+		// a new number, so a recovery already asked for does not close it: it
+		// covered what the old seed said
+		m.gapSeq++
+		l.gap.from, l.gap.seq = to, m.gapSeq
+	}
 }
 
 // currentPoint is where the producer is for a rewind to be before: its resume
@@ -624,8 +666,6 @@ func (m *machine) sessionAlive(id uuid.UUID, producerID int, generatedAt, markAt
 // sample records how old the session's last live message or alive was: its
 // taken time against its timestamp by the producer's clock. It is unknown when
 // the offset is not fresh.
-//
-// Seam for the safety net: it judges the sample here.
 func (m *machine) sample(l *lane, t *track, generatedAt time.Time, taken Stamp) {
 	if !m.offsetFresh(t, m.mono()) {
 		l.hasAge = false
@@ -1037,7 +1077,10 @@ func (m *machine) ended(t *track, a *active) {
 var (
 	// errEventRecoveryConnectionDown is why an event recovery is refused while the
 	// connection is down: its snapshot would go to queues that are gone, or not bound
-	// yet, and nothing would give it up.
+	// yet, and nothing would give it up. The transport tells the machine nothing
+	// about the connection as a whole: the actor reports it up at the start, and what
+	// a drop loses is told per session, as a lost channel. The refusal stays for a
+	// transport that reports the connection as a whole.
 	errEventRecoveryConnectionDown = errors.New("recovery: the connection is not up")
 	// errFeedClosing is why an event recovery is refused once the feed is
 	// closing, and why one in flight ends when the feed closes.
@@ -1377,8 +1420,12 @@ func (m *machine) publishResumePoints() {
 }
 
 // seed is the client's recovery start, or the zero time for a full snapshot:
-// what the client set before the feed opened.
+// what the client set before the feed opened, or since while the producer had not
+// recovered.
 func (m *machine) seed(t *track) time.Time {
+	if t.seeded != nil {
+		return *t.seeded
+	}
 	return m.catalog.recoveryFrom(t.id)
 }
 
@@ -1693,6 +1740,9 @@ type track struct {
 	// clampWarnedFrom is the start of the gap whose recovery was last clamped to
 	// the stateful window and warned of.
 	clampWarnedFrom time.Time
+	// seeded is the start the client set after the feed opened, which replaced the
+	// seed of a producer that had not recovered; nil for none.
+	seeded *time.Time
 	// published is the resume point last published, nil for none.
 	published *time.Time
 

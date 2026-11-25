@@ -16,6 +16,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/oddin-gg/gosdk/internal/api"
 	"github.com/oddin-gg/gosdk/internal/producer"
 	"github.com/oddin-gg/gosdk/types"
 )
@@ -39,6 +40,13 @@ type actorRig struct {
 
 func newActorRig(t *testing.T, edit ...func(*minimalCfg)) *actorRig {
 	t.Helper()
+	return newActorRigAs(t, nil, edit...)
+}
+
+// newActorRigAs is newActorRig with the producer manager prepared by setUp before the
+// actor is built, as a client prepares it before it connects.
+func newActorRigAs(t *testing.T, setUp func(pm *producer.Manager, clock *fakeClock), edit ...func(*minimalCfg)) *actorRig {
+	t.Helper()
 	srv, hits := fixtureSrv(t)
 	t.Cleanup(srv.Close)
 	u, _ := url.Parse(srv.URL)
@@ -61,6 +69,9 @@ func newActorRig(t *testing.T, edit ...func(*minimalCfg)) *actorRig {
 	ops := newFakeManagerOps()
 	clock := newFakeClock()
 	clock.wall = time.Now().Truncate(time.Millisecond)
+	if setUp != nil {
+		setUp(pm, clock)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	a := newRecoveryActor(ctx, cfg, apiClientFor(srv, cfg), pm, ops, newDiscardLogger(), clock, producers, 0)
@@ -311,7 +322,7 @@ func TestActor_StreamOfEventRecoveryRequestsHoldsUpNoTurn(t *testing.T) {
 // The alives of a producer wait in one slot, however many arrive, and an
 // unsubscribed one in it still opens its gap: the machine is given the last
 // subscribed alive before it, the unsubscribed one, and the latest.
-func TestActor_AlivesAreOneSlotPerProducerAndAnUnsubscribedOneInItStillOpensTheGap(t *testing.T) {
+func TestActor_AlivesInARowTakeOneSlotAndAnUnsubscribedOneInItStillOpensTheGap(t *testing.T) {
 	r := newActorRig(t)
 	r.startWith(types.AllMessageInterest, 1)
 	var queued int
@@ -331,7 +342,7 @@ func TestActor_AlivesAreOneSlotPerProducerAndAnUnsubscribedOneInItStillOpensTheG
 	r.postAlive(preID, true)
 	r.a.essentialMu.Lock()
 	for _, f := range r.a.essential {
-		if _, ok := f.(factAlives); ok {
+		if _, ok := f.(*factAlives); ok {
 			queued++
 		}
 	}
@@ -550,11 +561,13 @@ func TestActor_FactThatFailsIsCountedAndTheActorGoesOn(t *testing.T) {
 // The resume point is published as the facts move it: the client's start once the
 // feed opens, then what the sessions finish as the first recovery's gap closes.
 func TestActor_ResumePointIsPublishedAsTheFactsMoveIt(t *testing.T) {
-	r := newActorRig(t)
-	seed := r.clock.Now().Wall().Add(-10 * time.Minute)
-	if err := r.pm.SetProducerRecoveryFromTimestamp(t.Context(), liveID, seed); err != nil {
-		t.Fatal(err)
-	}
+	var seed time.Time
+	r := newActorRigAs(t, func(pm *producer.Manager, clock *fakeClock) {
+		seed = clock.Now().Wall().Add(-10 * time.Minute)
+		if err := pm.SetProducerRecoveryFromTimestamp(t.Context(), liveID, seed); err != nil {
+			t.Fatal(err)
+		}
+	})
 	r.startWith(types.AllMessageInterest, 1)
 	if got := r.timestampForRecovery(liveID); !got.Equal(seed) {
 		t.Fatalf("resume point after the start = %v, want the client's start %v", got, seed)
@@ -751,29 +764,35 @@ func TestActor_GapQueuedWhenTheCloseComesTakesThePointBack(t *testing.T) {
 
 // A session's close queued when the actor closes moves no point forward: the sessions close
 // one by one at shutdown, and the point the client persists must not depend on
-// the order.
+// the order. The session that is behind leaves, and the point stays where it was.
 func TestActor_SessionsCloseQueuedWhenTheActorClosesMovesThePointNoFurther(t *testing.T) {
 	r := newActorRig(t)
 	r.startWith(types.AllMessageInterest, 1, 2)
 	r.postAlive(liveID, true)
 	r.a.drain()
-	for _, id := range []int{1, 2} {
-		r.a.handle(factSnapshotComplete{session: sid(id), producer: liveID, requestID: 0})
+	first := r.a.machine.byID[liveID].active.requestID
+	r.a.handle(factSnapshotComplete{session: sid(1), producer: liveID, requestID: first})
+	r.a.handle(factSnapshotComplete{session: sid(2), producer: liveID, requestID: first})
+	if r.a.machine.byID[liveID].active != nil {
+		t.Fatal("the first recovery did not complete")
 	}
 	r.clock.advance(10 * time.Second)
 	r.postAlive(liveID, true)
-	now := r.stamp()
-	r.a.postSample(factProcessed{session: sid(1), producer: liveID, generatedAt: now.Wall(), taken: now})
-	r.a.drain()
-	before := r.timestampForRecovery(liveID)
-	r.a.postEssential(factClosed{session: sid(2)})
-	r.a.postEssential(factClosed{session: sid(1)})
-	go r.a.run()
-	if !r.stop() {
-		t.Fatal("the actor did not stop")
+	behind := r.stamp()
+	r.a.postSample(factProcessed{session: sid(1), producer: liveID, generatedAt: behind.Wall(), taken: behind})
+	r.clock.advance(10 * time.Second)
+	r.postAlive(liveID, true)
+	ahead := r.stamp()
+	r.a.postSample(factProcessed{session: sid(2), producer: liveID, generatedAt: ahead.Wall(), taken: ahead})
+	r.drainAll()
+	if got := r.timestampForRecovery(liveID); !got.Equal(behind.Wall()) {
+		t.Fatalf("resume point before the close = %v, want the session that is behind, %v", got, behind.Wall())
 	}
-	if got := r.timestampForRecovery(liveID); got.After(before) {
-		t.Fatalf("closing the sessions at the close moved the point forward, %v to %v", before, got)
+	r.a.postEssential(factClosed{session: sid(1)})
+	r.a.postEssential(factClosed{session: sid(2)})
+	r.closeBeforeRunning()
+	if got := r.timestampForRecovery(liveID); !got.Equal(behind.Wall()) {
+		t.Fatalf("closing the sessions at the close moved the point to %v, want it where it was, %v", got, behind.Wall())
 	}
 }
 
@@ -1010,12 +1029,15 @@ func TestManager_EventRecoveryOfAnInvalidProducerCostsNoCommand(t *testing.T) {
 	r := newRig(t)
 	r.open()
 	for id := 1000; id < 1020; id++ {
-		if _, err := r.mgr.InitiateEventOddsRecoveryHandle(t.Context(), id, matchURN(1)); err == nil {
-			t.Fatalf("producer %d: expected an error", id)
+		if _, err := r.mgr.InitiateEventOddsRecoveryHandle(t.Context(), id, matchURN(1)); !errors.Is(err, producer.ErrProducerNotFound) {
+			t.Fatalf("producer %d: err = %v, want producer.ErrProducerNotFound", id, err)
 		}
 	}
 	if got := len(r.mgr.actor().commands); got != 0 {
 		t.Fatalf("%d commands queued for producers the catalog does not have", got)
+	}
+	if got := r.mgr.actor().counters.factsHandledTotal.Load(); got > 3 {
+		t.Fatalf("the actor handled %d facts for producers the catalog does not have", got)
 	}
 	if got := r.hits.eventRecover.Load(); got != 0 {
 		t.Fatalf("%d requests sent for producers the catalog does not have", got)
@@ -1083,4 +1105,430 @@ func newRigWith(t *testing.T, handle func(http.ResponseWriter, *http.Request) bo
 	r := newRig(t)
 	r.hits.override.Store(&handle)
 	return r
+}
+
+// ---- an alive is never handled before an essential fact posted before it
+
+// blockRecoveryPosts makes the fixture hold every recovery request until its context ends.
+func blockRecoveryPosts(r *actorRig) {
+	h := func(w http.ResponseWriter, req *http.Request) bool {
+		if strings.Contains(req.URL.Path, "/recovery/initiate_request") {
+			<-req.Context().Done()
+			return true
+		}
+		return false
+	}
+	r.hits.override.Store(&h)
+}
+
+// An unsubscribed alive received after the API accepted the request gives the recovery
+// up (the producer took it and then said it is not subscribed: it lost it), whether
+// the actor handles the facts as they are posted or has them wait in its queue: an
+// alive does not join a slot queued before the acceptance.
+func TestActor_UnsubscribedAliveAfterTheAcceptanceIsHandledAfterItWhateverTheActorIsDoing(t *testing.T) {
+	run := func(stalled bool) (abandoned int, inFlight bool) {
+		r := newActorRig(t)
+		blockRecoveryPosts(r)
+		r.startWith(types.AllMessageInterest, 1)
+		r.postAlive(liveID, true)
+		r.a.drain()
+		id := r.a.machine.byID[liveID].active.requestID
+		r.clock.advance(time.Second)
+		r.postAlive(liveID, true)
+		if !stalled {
+			r.a.drain()
+		}
+		r.clock.advance(time.Second)
+		r.a.postEssential(factAnswered{requestID: id}) // the API accepted
+		if !stalled {
+			r.a.drain()
+		}
+		r.clock.advance(time.Second)
+		r.postAlive(liveID, false) // received after the acceptance
+		r.a.drain()
+		return r.a.machine.counters.abandoned, r.a.machine.byID[liveID].active != nil
+	}
+	ab, act := run(false)
+	ab2, act2 := run(true)
+	if ab != 1 {
+		t.Fatalf("facts handled as they come: abandoned = %d, want the recovery given up", ab)
+	}
+	if ab != ab2 || act != act2 {
+		t.Fatalf("the same facts give another outcome when they wait: abandoned %d/%d, in flight %v/%v", ab, ab2, act, act2)
+	}
+}
+
+// Alives that arrive one after the other share a fact; an essential fact between
+// them ends the sharing.
+func TestActor_AlivesShareAFactOnlyWhileNothingEssentialIsPostedBetweenThem(t *testing.T) {
+	r := newActorRig(t)
+	count := func() int {
+		r.a.essentialMu.Lock()
+		defer r.a.essentialMu.Unlock()
+		n := 0
+		for _, f := range r.a.essential {
+			if _, ok := f.(*factAlives); ok {
+				n++
+			}
+		}
+		return n
+	}
+	r.postAlive(liveID, true)
+	r.postAlive(liveID, true)
+	r.postAlive(liveID, false)
+	if got := count(); got != 1 {
+		t.Fatalf("alives in a row: %d facts, want 1", got)
+	}
+	r.a.postEssential(factChannelLost{session: sid(1)})
+	r.postAlive(liveID, true)
+	r.postAlive(liveID, true)
+	if got := count(); got != 2 {
+		t.Fatalf("alives after an essential fact: %d facts, want 2", got)
+	}
+	r.postAlive(preID, true)
+	r.postAlive(liveID, true)
+	if got := count(); got != 4 {
+		t.Fatalf("an alive of another producer in between: %d facts, want 4", got)
+	}
+}
+
+// ---- a close with a request in flight
+
+// closeWhileTheActorIsBusy closes the manager with the actor held inside a fact, after
+// the requests in flight have been aborted by the close and their goroutines have
+// finished: an answer they posted is in the actor's queue before the actor sees
+// the close.
+func closeWhileTheActorIsBusy(t *testing.T, r *rig, aborted <-chan struct{}) {
+	t.Helper()
+	a := r.mgr.actor()
+	busy := make(chan struct{})
+	release := make(chan struct{})
+	a.setBeforeHandle(func(f fact) {
+		if _, ok := f.(factBarrier); ok {
+			close(busy)
+			<-release
+		}
+	})
+	a.postEssential(factBarrier{})
+	<-busy
+	closed := make(chan struct{})
+	go func() {
+		r.mgr.CloseCtx(t.Context())
+		close(closed)
+	}()
+	select {
+	case <-aborted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("close did not cancel the request in flight")
+	}
+	a.detached.Wait() // the goroutines of the requests have posted what they were going to
+	close(release)
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("close did not return")
+	}
+}
+
+func noLogAboveInfo(t *testing.T, sink *lockedBuffer) {
+	t.Helper()
+	for line := range strings.SplitSeq(sink.String(), "\n") {
+		if strings.Contains(line, "level=WARN") || strings.Contains(line, "level=ERROR") {
+			t.Fatalf("a clean close logged above info: %s", line)
+		}
+	}
+}
+
+// An event recovery whose request the close aborted ends as closed, not as a refusal
+// by the API, however busy the actor is when the aborted request answers.
+func TestManager_CloseWhileTheActorIsBusyEndsAnEventRecoveryAsClosed(t *testing.T) {
+	entered := make(chan struct{}, 1)
+	aborted := make(chan struct{})
+	r := newRigWith(t, func(w http.ResponseWriter, req *http.Request) bool {
+		if strings.Contains(req.URL.Path, "/odds/events/") {
+			entered <- struct{}{}
+			<-req.Context().Done()
+			close(aborted)
+			return true
+		}
+		return false
+	})
+	sink := &lockedBuffer{}
+	r.mgr.logger = debugLogger(sink)
+	r.open()
+	s1 := uuid.New()
+	r.openSession(s1, types.AllMessageInterest)
+	h, err := r.mgr.InitiateEventOddsRecoveryHandle(t.Context(), liveID, matchURN(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-entered
+	closeWhileTheActorIsBusy(t, r, aborted)
+	res := h.Result()
+	if res.Status != types.RecoveryStatusFailed || !errors.Is(res.Err, ErrManagerClosed) {
+		t.Fatalf("result = %v, %v, want failed as closed", res.Status, res.Err)
+	}
+	noLogAboveInfo(t, sink)
+}
+
+// A snapshot recovery whose request the close aborted is no failure: nothing above info
+// is logged, no backoff is announced and the recovery info is not touched.
+func TestManager_CloseWhileTheActorIsBusyLogsNothingAboveInfoForASnapshotRequest(t *testing.T) {
+	entered := make(chan struct{}, 1)
+	aborted := make(chan struct{})
+	r := newRigWith(t, func(w http.ResponseWriter, req *http.Request) bool {
+		if strings.Contains(req.URL.Path, "/recovery/initiate_request") {
+			entered <- struct{}{}
+			<-req.Context().Done()
+			close(aborted)
+			return true
+		}
+		return false
+	})
+	sink := &lockedBuffer{}
+	r.mgr.logger = debugLogger(sink)
+	r.open()
+	s1 := uuid.New()
+	r.openSession(s1, types.AllMessageInterest)
+	r.alive(liveID)
+	<-entered
+	closeWhileTheActorIsBusy(t, r, aborted)
+	noLogAboveInfo(t, sink)
+	p, _ := r.pm.GetProducer(t.Context(), liveID)
+	if info := p.RecoveryInfo(); info != nil {
+		t.Fatalf("recovery info = request %d successful %v after a clean close, want none", (*info).RequestID(), (*info).Successful())
+	}
+}
+
+// ---- the end, in detail
+
+// A start the client set and the actor did not get to before it closed takes the point
+// back to it, as handling it would have.
+func TestActor_StartTheClientSetAndLeftUnhandledAtTheCloseTakesThePointBackToIt(t *testing.T) {
+	run := func(finishWait time.Duration) (point, to time.Time) {
+		r := newActorRig(t)
+		blockRecoveryPosts(r)
+		r.startWith(types.AllMessageInterest, 1)
+		r.postAlive(liveID, true)
+		r.a.drain()
+		first := r.a.machine.byID[liveID].active.requestID
+		r.a.handle(factSnapshotComplete{session: sid(1), producer: liveID, requestID: first})
+		r.clock.advance(10 * time.Second)
+		r.postAlive(liveID, true)
+		taken := r.stamp()
+		r.a.postSample(factProcessed{session: sid(1), producer: liveID, generatedAt: taken.Wall(), taken: taken})
+		r.drainAll()
+		to = r.stamp().Wall().Add(-10 * time.Minute)
+		r.a.finishWait = finishWait
+		r.a.postEssential(factRewind{producer: liveID, to: to})
+		r.closeBeforeRunning()
+		return r.timestampForRecovery(liveID), to
+	}
+	handled, to := run(2 * time.Second)
+	if !handled.Equal(to) {
+		t.Fatalf("handled, the point = %v, want the start %v", handled, to)
+	}
+	unhandled, to := run(0)
+	if !unhandled.Equal(to) {
+		t.Fatalf("left unhandled, the point = %v, want the start %v as when it is handled", unhandled, to)
+	}
+}
+
+// The close's own deadline bounds what the actor spends on the facts it holds: with it
+// past, nothing is handled and the points are taken back.
+func TestActor_CloseDeadlineBoundsWhatTheActorHandlesAsItCloses(t *testing.T) {
+	r := newActorRig(t)
+	h := r.record()
+	r.startWith(types.AllMessageInterest, 1)
+	n := len(h.all())
+	r.a.postEssential(factChannelLost{session: sid(1)})
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	r.a.stopBounded(ctx) // sets the close, with its deadline already past
+	go r.a.run()
+	select {
+	case <-r.a.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the actor did not stop")
+	}
+	if got := len(h.all()); got != n {
+		t.Fatalf("the actor handled %d facts past the deadline of the close", got-n)
+	}
+	if got := r.a.counters.unhandledAtClose.Load(); got != 1 {
+		t.Fatalf("unhandled-at-close = %d, want 1", got)
+	}
+}
+
+// blockingTransport answers every request, but only once released, whatever its
+// context says: a request that cannot be cancelled.
+type blockingTransport struct {
+	release chan struct{}
+	entered chan struct{}
+}
+
+func (b *blockingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	select {
+	case b.entered <- struct{}{}:
+	default:
+	}
+	<-b.release
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Status:     "200 OK",
+		Header:     http.Header{"Content-Type": []string{"application/xml"}},
+		Body:       io.NopCloser(strings.NewReader(okBody)),
+		Request:    req,
+	}, nil
+}
+
+// The close joins the goroutines of the requests, bounded by its deadline: it reports
+// that it did not complete while one is still running, and that it did once it has ended.
+func TestActor_StopBoundedJoinsTheRequestsInFlightWithinItsDeadline(t *testing.T) {
+	r := newActorRig(t)
+	bt := &blockingTransport{release: make(chan struct{}), entered: make(chan struct{}, 1)}
+	released := false
+	release := func() {
+		if !released {
+			released = true
+			close(bt.release)
+		}
+	}
+	defer release()
+	cfg := &minimalCfg{apiURL: "api.test", token: "tok"}
+	blocked := api.New(cfg)
+	blocked.SetHTTPClient(&http.Client{Transport: bt, Timeout: time.Minute})
+	r.a.api = blocked
+	r.startWith(types.AllMessageInterest, 1)
+	r.postAlive(liveID, true)
+	r.a.drain() // the request goes out and waits in the transport
+	select {
+	case <-bt.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the request never reached the transport")
+	}
+	go r.a.run()
+
+	short, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	if r.a.stopBounded(short) {
+		t.Fatal("stopBounded reported completion with a request still running")
+	}
+	release()
+	long, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel2()
+	if !r.a.stopBounded(long) {
+		t.Fatal("stopBounded did not complete once the request had ended")
+	}
+}
+
+// A fact handled while the actor closes asks for nothing: no request goes out once the
+// actor is closing.
+func TestActor_NoRequestGoesOutWhileTheActorIsClosing(t *testing.T) {
+	r := newActorRig(t)
+	r.startWith(types.AllMessageInterest, 1)
+	r.postAlive(liveID, true) // the alive that would ask for the first recovery, left for the close
+	r.closeBeforeRunning()
+	r.a.detached.Wait()
+	if got := r.hits.recover.Load(); got != 0 {
+		t.Fatalf("%d recovery requests went out while the actor closed", got)
+	}
+}
+
+// What a REST worker tells the machine: the API's error, or a refusal when it said no
+// without one, or nothing when it accepted.
+func TestAnswerOf_ASuccessIsAcceptedAndAFailureWithOrWithoutAnErrorIsNot(t *testing.T) {
+	boom := errors.New("503")
+	for _, tc := range []struct {
+		success bool
+		err     error
+		want    error
+	}{
+		{true, nil, nil},
+		{false, boom, boom},
+		{true, boom, boom},
+		{false, nil, errNotAccepted},
+	} {
+		if got := answerOf(tc.success, tc.err); !errors.Is(got, tc.want) && (got != nil || tc.want != nil) {
+			t.Errorf("answerOf(%v, %v) = %v, want %v", tc.success, tc.err, got, tc.want)
+		}
+	}
+}
+
+// A request that the close cancelled, or one a newer request superseded, has no answer
+// for the machine.
+func TestActor_AnswerOfACancelledRequestIsNotPosted(t *testing.T) {
+	r := newActorRig(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	r.a.answer(ctx, 1, true, nil)
+	cancel()
+	r.a.answer(ctx, 2, false, context.Canceled)
+	r.a.essentialMu.Lock()
+	defer r.a.essentialMu.Unlock()
+	if len(r.a.essential) != 1 {
+		t.Fatalf("%d answers queued, want the one of the request that was not cancelled", len(r.a.essential))
+	}
+	if f, ok := r.a.essential[0].(factAnswered); !ok || f.requestID != 1 || f.err != nil {
+		t.Fatalf("queued %+v", r.a.essential[0])
+	}
+}
+
+// ---- what wakes the actor
+
+// A sample, a command and a turn that left work behind each wake the actor, without
+// the clock's tick: the loop here ticks once an hour.
+func TestActor_ASampleOrACommandWakesTheActorAndALeftOverQueueIsTakenWithoutATick(t *testing.T) {
+	r := newActorRig(t)
+	r.a.tickEvery = time.Hour
+	h := r.record()
+	r.run()
+	r.a.postSample(factProcessed{session: sid(1), producer: liveID, taken: r.stamp()})
+	eventually(t, "a sample to be handled", func() bool { return len(h.all()) == 1 })
+	c := &recoverEventCommand{producerID: liveID, eventID: matchURN(1), reply: make(chan recoverEventReply, 1)}
+	if err := r.a.postCommand(t.Context(), c); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-c.reply:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a command was not taken without a tick")
+	}
+	r.stop()
+
+	// more samples than a turn takes, queued before the loop runs: the turn that
+	// leaves some behind wakes the actor for the rest
+	again := newActorRig(t)
+	again.a.tickEvery = time.Hour
+	ha := again.record()
+	total := samplesPerTurn*2 + 500
+	for range total {
+		again.a.postSample(factProcessed{session: sid(1), producer: liveID, taken: again.stamp()})
+	}
+	again.run()
+	eventually(t, "every sample to be handled", func() bool { return len(ha.all()) == total })
+}
+
+// A command is handled after the essential facts posted before it, even those that
+// arrive after the actor looked.
+func TestActor_CommandTakenAfterAnEssentialFactWasPostedIsHandledAfterIt(t *testing.T) {
+	r := newActorRig(t)
+	h := r.record()
+	posted := false
+	r.a.beforeCommand = func() {
+		if !posted {
+			posted = true
+			r.a.postEssential(factChannelLost{session: sid(1)})
+			c := &recoverEventCommand{producerID: liveID, eventID: matchURN(1), reply: make(chan recoverEventReply, 1)}
+			_ = r.a.postCommand(t.Context(), c)
+		}
+	}
+	c := &recoverEventCommand{producerID: liveID, eventID: matchURN(2), reply: make(chan recoverEventReply, 1)}
+	if err := r.a.postCommand(t.Context(), c); err != nil {
+		t.Fatal(err)
+	}
+	r.drainAll()
+	got := kinds(h.all())
+	want := []string{"factChannelLost", "*recovery.recoverEventCommand", "*recovery.recoverEventCommand"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("handled %v, want %v", got, want)
+	}
 }

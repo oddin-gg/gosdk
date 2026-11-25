@@ -20,16 +20,23 @@ type actorCatalog struct {
 	a *recoveryActor
 	// list is the producers the catalog had when the feed opened, by id.
 	list []types.Producer
-	// seeds are the recovery starts the client had set when each producer was
-	// first read: what a lane of a producer that has not recovered starts from,
-	// whatever the client sets later. Actor goroutine only.
+	// seeds are the recovery starts the client had set when the feed opened, and of
+	// a producer learned later when it was first read: what a lane of a producer
+	// that has not recovered starts from, whatever the client clears later. Actor
+	// goroutine only, after the feed opens.
 	seeds map[int]time.Time
 }
 
 func newActorCatalog(a *recoveryActor, producers []types.Producer) *actorCatalog {
 	list := slices.Clone(producers)
 	slices.SortFunc(list, func(x, y types.Producer) int { return x.ID() - y.ID() })
-	return &actorCatalog{a: a, list: list, seeds: make(map[int]time.Time)}
+	c := &actorCatalog{a: a, list: list, seeds: make(map[int]time.Time)}
+	// what the client set before the feed opened is where a producer that has not
+	// recovered starts from, whatever it sets later: read as the feed opens
+	for _, p := range list {
+		c.recoveryFrom(p.ID())
+	}
+	return c
 }
 
 func (c *actorCatalog) producers() []types.Producer { return slices.Clone(c.list) }
@@ -105,7 +112,7 @@ func (a *recoveryActor) request(r snapshotRequest) {
 		defer a.detached.Done()
 		defer cancel()
 		success, err := a.api.PostRecovery(ctx, r.producer, r.requestID, nodeID, r.after)
-		a.postEssential(factAnswered{requestID: r.requestID, err: answerOf(success, err)})
+		a.answer(ctx, r.requestID, success, err)
 	}()
 }
 
@@ -130,8 +137,19 @@ func (a *recoveryActor) eventRequest(r eventRequest) {
 		} else {
 			success, err = a.api.PostEventOddsRecovery(ctx, r.producer, r.eventID, r.requestID, nodeID)
 		}
-		a.postEssential(factAnswered{requestID: r.requestID, err: answerOf(success, err)})
+		a.answer(ctx, r.requestID, success, err)
 	}()
+}
+
+// answer hands the machine a request's outcome. A request that was cancelled
+// (the close, the next request for the producer, or the end of its event
+// recovery) has no outcome: its error is the cancellation, no refusal by the API,
+// and the machine has already dealt with what it was for.
+func (a *recoveryActor) answer(ctx context.Context, requestID int, success bool, err error) {
+	if ctx.Err() != nil {
+		return
+	}
+	a.postEssential(factAnswered{requestID: requestID, err: answerOf(success, err)})
 }
 
 func (a *recoveryActor) recoveryInfo(producerID int, info types.RecoveryInfo) {

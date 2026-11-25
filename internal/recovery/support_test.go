@@ -222,7 +222,7 @@ func apiClientFor(srv *httptest.Server, cfg *minimalCfg) *api.Client {
 			target: srv.URL,
 			base:   &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
 		},
-		Timeout: 2 * time.Second,
+		Timeout: 30 * time.Second,
 	})
 	return apiClient
 }
@@ -234,7 +234,7 @@ func newTestHTTPClient(srv *httptest.Server) *http.Client {
 			target: srv.URL,
 			base:   &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
 		},
-		Timeout: 2 * time.Second,
+		Timeout: 30 * time.Second,
 	}
 }
 

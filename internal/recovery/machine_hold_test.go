@@ -2,6 +2,8 @@ package recovery
 
 import (
 	"errors"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -268,18 +270,21 @@ func TestMachineClose_UnhandledFactsTakeThePointBackToTheLastSubscribedAlive(t *
 	expectTime(t, point, f.now(), "the point follows the session")
 
 	f.m.beginClosing()
-	f.m.unhandledAtClose()
+	f.m.unhandledAtClose(nil)
 	got, _ := f.out.lastPoint(pre)
 	expectTime(t, got, lastSubscribed, "back to the last subscribed alive")
 	if _, ok := f.out.lastPoint(live); ok {
 		t.Fatal("a point was published for a producer no session receives")
 	}
 	expect(t, len(f.out.pointsOf(pre)), 2, "points published")
-	f.m.unhandledAtClose()
+	f.m.unhandledAtClose(nil)
 	expect(t, len(f.out.pointsOf(pre)), 2, "a second call moves nothing")
 }
 
-func TestMachineClose_UnhandledFactsWithNoSubscribedAliveTakeThePointBackToAFullSnapshot(t *testing.T) {
+// With no subscribed alive nothing can take the point further back than it is: the
+// unsubscribed alive that opens a gap has no safe point to start it from, and the
+// client's start is kept, not replaced by a full snapshot.
+func TestMachineClose_UnhandledFactsWithNoSubscribedAliveKeepTheClientsStart(t *testing.T) {
 	f := newFeed(t)
 	seed := f.now().Add(-time.Hour)
 	f.cat.from[pre] = seed
@@ -287,19 +292,40 @@ func TestMachineClose_UnhandledFactsWithNoSubscribedAliveTakeThePointBackToAFull
 	f.startFeed()
 	point, _ := f.resume(pre)
 	expectTime(t, point, seed, "the client's start")
+	published := len(f.out.pointsOf(pre))
 
 	f.m.beginClosing()
-	f.m.unhandledAtClose()
-	got, ok := f.out.lastPoint(pre)
-	expect(t, ok, true, "a point published")
-	expectTime(t, got, time.Time{}, "a full snapshot")
+	f.m.unhandledAtClose(nil)
+	expect(t, len(f.out.pointsOf(pre)), published, "points published")
+	got, _ := f.out.lastPoint(pre)
+	expectTime(t, got, seed, "the point after the close")
+}
+
+// A start the client set that is left unhandled takes the point back to it, and one
+// later than the point changes nothing.
+func TestMachineClose_StartTheClientSetAndLeftUnhandledTakesThePointBackToIt(t *testing.T) {
+	f := upWith(t, all)
+	f.clock.advance(10 * time.Minute)
+	f.alive(pre)
+	f.live(1, pre, 0)
+	point, _ := f.resume(pre)
+	published := len(f.out.pointsOf(pre))
+
+	f.m.beginClosing()
+	f.m.unhandledAtClose(map[int]time.Time{pre: point.Add(time.Hour)})
+	expect(t, len(f.out.pointsOf(pre)), published, "points published for a start later than the point")
+
+	earlier := point.Add(-10 * time.Minute)
+	f.m.unhandledAtClose(map[int]time.Time{pre: earlier})
+	got, _ := f.out.lastPoint(pre)
+	expectTime(t, got, earlier, "the point after the close")
 }
 
 func TestMachineClose_FeedThatNeverStartedKeepsTheClientsStart(t *testing.T) {
 	f := newFeed(t)
 	f.cat.from[pre] = f.now().Add(-time.Hour)
 	f.open(1, all)
-	f.m.unhandledAtClose()
+	f.m.unhandledAtClose(nil)
 	expect(t, len(f.out.points), 0, "points published")
 }
 
@@ -315,7 +341,7 @@ func TestMachineClose_PointAlreadyBehindTheLastSubscribedAliveIsKept(t *testing.
 	published := len(f.out.pointsOf(pre))
 
 	f.m.beginClosing()
-	f.m.unhandledAtClose()
+	f.m.unhandledAtClose(nil)
 	expect(t, len(f.out.pointsOf(pre)), published, "points published")
 }
 
@@ -390,4 +416,221 @@ func TestMachineHold_RecoveryWaitsForEverySessionThatLostItsChannel(t *testing.T
 	expect(t, len(f.snapshots(live)), calls, "recoveries asked for while session 3 awaits its queue")
 	f.m.channelReopened(sid(3))
 	expect(t, len(f.snapshots(live)), calls+1, "recoveries asked for once the last queue is bound")
+}
+
+// ---- the client's start while the producer has not recovered
+
+// A start set after the feed opened and before any session subscribed is the seed
+// of the first recovery, with an alive before it or not, and nothing is logged.
+func TestMachineSeed_StartSetBeforeTheFirstSessionIsTheFirstRecoverysStart(t *testing.T) {
+	for _, withAlive := range []bool{false, true} {
+		f := newFeed(t)
+		f.startFeed()
+		if withAlive {
+			f.alive(pre)
+		}
+		set := f.now().Add(-10 * time.Minute)
+		f.logs.take()
+		f.m.rewind(pre, set)
+		f.open(1, all)
+		f.alive(pre)
+		expectTime(t, f.lastSnapshot(pre).after, set, "the first recovery")
+		for _, line := range f.logs.take() {
+			if strings.HasPrefix(line, "WARN") {
+				t.Fatalf("withAlive=%v: a warning for a start that is taken: %s", withAlive, line)
+			}
+		}
+		got, _ := f.resume(pre)
+		expectTime(t, got, set, "the resume point")
+	}
+}
+
+// A start the client sets replaces the seed, later or earlier than it, for the lanes
+// that have it and for the next request.
+func TestMachineSeed_StartSetReplacesTheSeedEarlierOrLater(t *testing.T) {
+	for _, delta := range []time.Duration{-time.Hour, 10 * time.Minute} {
+		f := newFeed(t)
+		f.cat.from[pre] = f.now().Add(-30 * time.Minute)
+		f.open(1, all)
+		f.startFeed()
+		set := f.now().Add(-30*time.Minute + delta)
+		f.m.rewind(pre, set)
+		expectTime(t, f.m.session(sid(1)).lane(pre).checkpoint, set, "the checkpoint no message moved")
+		f.alive(pre)
+		expectTime(t, f.lastSnapshot(pre).after, set, "the first recovery")
+	}
+}
+
+// A message a session finished keeps its checkpoint when the seed is replaced.
+func TestMachineSeed_CheckpointAMessageMovedIsLeftWhenTheSeedIsReplaced(t *testing.T) {
+	f := newFeed(t)
+	f.cat.from[pre] = f.now().Add(-time.Hour)
+	f.open(1, all)
+	f.startFeed()
+	f.clock.advance(time.Minute)
+	f.alive(pre)
+	f.live(1, pre, 0)
+	moved, _ := f.checkpoint(1, pre)
+	f.m.rewind(pre, f.now().Add(-2*time.Hour))
+	got, _ := f.checkpoint(1, pre)
+	expectTime(t, got, moved, "the checkpoint")
+}
+
+// Once the producer has recovered, a later value is ignored with a warning and an
+// earlier one is a rewind.
+func TestMachineSeed_OnceRecoveredALaterStartIsIgnoredWithAWarningAndAnEarlierOneRewinds(t *testing.T) {
+	f := upWith(t, all)
+	f.clock.advance(time.Minute)
+	f.live(1, pre, 0)
+	f.logs.take()
+	f.m.rewind(pre, f.now().Add(time.Minute))
+	lines := f.logs.take()
+	if len(lines) != 1 || !strings.HasPrefix(lines[0], "WARN") {
+		t.Fatalf("log = %v, want one warning", lines)
+	}
+	earlier := f.now().Add(-time.Hour)
+	f.m.rewind(pre, earlier)
+	got, _ := f.resume(pre)
+	expectTime(t, got, earlier, "the resume point after an earlier start")
+}
+
+// ---- a full snapshot stays one
+
+// A recovery for the producer's whole history asks for it again, whatever made it
+// ask again: a refusal, the deadline, a lost queue.
+func TestMachineSeed_FullSnapshotIsAskedForAgainAsOneWhateverMadeItAskAgain(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		cause func(f *feed, r snapshotRequest)
+	}{
+		{"refused", func(f *feed, r snapshotRequest) { f.refuse(r) }},
+		{"deadline", func(f *feed, r snapshotRequest) {
+			f.accept(r)
+			f.runWithAlives(6 * time.Minute)
+		}},
+		{"queue lost", func(f *feed, r snapshotRequest) {
+			f.accept(r)
+			f.m.channelLost(sid(1))
+			f.m.channelReopened(sid(1))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFeed(t)
+			f.open(1, prematch)
+			f.startFeed()
+			f.alive(pre)
+			first := f.lastSnapshot(pre)
+			expectTime(t, first.after, time.Time{}, "the first request")
+			tc.cause(f, first)
+			f.runWithAlives(30 * time.Second)
+			f.alive(pre)
+			if got := len(f.snapshots(pre)); got < 2 {
+				t.Fatalf("asked for again %d times, want at least once", got-1)
+			}
+			for _, r := range f.snapshots(pre) {
+				expectTime(t, r.after, time.Time{}, "request "+strconv.Itoa(r.requestID))
+			}
+		})
+	}
+}
+
+// ---- a disabled producer's other facts
+
+// A producer the client disabled is left alone by a lost channel, a snapshot_complete
+// and a session's delay: nothing is told of it and nothing is asked for it.
+func TestMachineHold_DisabledProducerIsLeftAloneByALostChannelASnapshotCompleteAndADelay(t *testing.T) {
+	f := newFeed(t)
+	f.open(1, all)
+	f.startFeed()
+	f.bothUp(1)
+	statuses := len(f.statusesOf(pre))
+	calls := len(f.snapshots(pre))
+	f.cat.disabled[pre] = true
+
+	f.m.channelLost(sid(1))
+	f.m.channelReopened(sid(1))
+	f.alive(pre)
+	f.m.snapshotComplete(sid(1), pre, 12345)
+	f.live(1, pre, 25*time.Second)
+	f.advance(10 * time.Millisecond)
+	expect(t, len(f.statusesOf(pre)), statuses, "statuses of the disabled producer")
+	expect(t, len(f.snapshots(pre)), calls, "recoveries asked for the disabled producer")
+	expectDown(t, f, pre, false, "the disabled producer")
+}
+
+// ---- a late answer, and a late snapshot_complete
+
+// The API's refusal of a request that a snapshot_complete has already completed changes
+// nothing: the producer stays up, no failure is counted and no failed outcome is told.
+func TestMachineHold_LateRefusalOfARequestThatCompletedChangesNothing(t *testing.T) {
+	f := newFeed(t)
+	f.open(1, prematch)
+	f.startFeed()
+	f.alive(pre)
+	r := f.lastSnapshot(pre)
+	f.snapshotComplete(1, pre, r.requestID)
+	expectDown(t, f, pre, false, "the producer after its snapshot_complete")
+	infos := len(f.out.infos)
+	f.refuse(r)
+	expectDown(t, f, pre, false, "the producer after the late refusal")
+	expect(t, f.m.counters.failed, 0, "failures counted")
+	expect(t, len(f.out.infos), infos, "outcomes told")
+	f.runWithAlives(time.Minute)
+	expectCalls(t, f, pre, 1, "recoveries asked for")
+}
+
+// A snapshot_complete of a request that has been abandoned does not put off the deadline
+// of the one that replaced it.
+func TestMachineHold_SnapshotCompleteOfAnAbandonedRequestDoesNotPutOffTheNewDeadline(t *testing.T) {
+	f := newFeed(t)
+	f.open(1, prematch)
+	f.startFeed()
+	f.alive(pre)
+	first := f.lastSnapshot(pre)
+	f.accept(first)
+	f.runWithAlives(5*time.Minute + 2*time.Second) // the deadline passes: the request failed
+	f.runWithAlives(6 * time.Second)               // its backoff
+	second := f.lastSnapshot(pre)
+	expect(t, second.requestID != first.requestID, true, "a new request")
+	f.accept(second)
+	timedOut := f.m.counters.timedOut
+	f.runWithAlives(4 * time.Minute)
+	f.snapshotComplete(1, pre, first.requestID) // late, of the abandoned id
+	f.runWithAlives(time.Minute + 2*time.Second)
+	expect(t, f.m.counters.timedOut, timedOut+1, "the new request timed out at its own deadline")
+}
+
+// ---- the status details
+
+// A producer that sends only unsubscribed alives is alive: it stays down for being
+// unsubscribed and is not reported as silent.
+func TestMachineHold_ProducerSendingOnlyUnsubscribedAlivesStaysUnsubscribedNotSilent(t *testing.T) {
+	f := upWith(t, all)
+	for range 10 {
+		f.clock.advance(10 * time.Second)
+		f.unsubscribed(pre)
+		f.m.tick()
+	}
+	expectDown(t, f, pre, true, "the producer")
+	expect(t, f.lastStatus(pre).cause, causeUnsubscribed, "cause")
+}
+
+// A recovery that completes while a session lags brings the producer straight to down
+// for the delay: it is never told up first.
+func TestMachineHold_RecoveryCompletingWhileASessionLagsIsNeverToldUp(t *testing.T) {
+	f := newFeed(t)
+	f.open(1, prematch)
+	f.startFeed()
+	f.alive(pre)
+	r := f.lastSnapshot(pre)
+	f.accept(r)
+	f.live(1, pre, 25*time.Second)
+	f.advance(10 * time.Millisecond)
+	f.snapshotComplete(1, pre, r.requestID)
+	for _, s := range f.statusesOf(pre) {
+		if !s.down {
+			t.Fatalf("the producer was told up while a session lags: %+v", s)
+		}
+	}
+	expect(t, f.lastStatus(pre).cause, causeProcessingDelay, "cause")
 }

@@ -45,9 +45,6 @@ func (m *machine) stalledAmong(awaited, seen map[uuid.UUID]bool, mono time.Durat
 // second.
 //
 // Event recoveries expire here, and the deferred ones.
-//
-// Seam for the safety net: a pending reset of it, waiting for a disabled producer, is
-// cancelled here.
 func (m *machine) tick() {
 	mono := m.mono()
 	for _, t := range m.tracks {

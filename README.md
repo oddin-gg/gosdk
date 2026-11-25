@@ -359,6 +359,14 @@ One recovery actor runs every producer's recovery state. The rules, per producer
   resumes from. Because the SDK acks a message when it enters the subscription's
   buffer (`WithSubscriptionBuffer`, default 256), the point can still lie up to
   that many messages behind what the client has finished.
+- **The start the client sets.** `SetProducerRecoveryFromTimestamp` before `Connect`
+  is the seed of a producer's first recovery. Until the producer has completed a
+  first recovery its start is the seed, and a value the client sets after `Connect`
+  replaces it for the next request (a recovery already in flight keeps what it asked
+  for, and one more is asked for from the new value). Once the producer has a point
+  of its own, an earlier value only lowers where the next recovery starts and opens
+  no request; a later one is ignored, with a WARN. The zero time set after `Connect`
+  does nothing: what was set before it stays the seed.
 - **When it completes.** A recovery completes once every subscription that
   receives the producer has taken its `snapshot_complete`; a gap opened
   meanwhile asks for one more, and the producer comes up when none is open. A
@@ -447,6 +455,36 @@ What a client that relied on the earlier behaviour will see differently:
 - **The loss of the SDK's own alive channel alone opens no gap.** Was: it counted
   as a loss for every producer, with a recovery. Is: a connection drop still loses
   every subscription's channel, and that is what recovers.
+- **First status without a subscription.** Was: the first alive after `Connect`
+  asked for a recovery and the producer came up when it completed. Is: a producer no
+  subscription receives is reported up with `FirstRecoveryCompletedProducerStatusReason`
+  on a fresh alive, with no recovery; the first `Subscribe` that covers it takes it
+  down (`OtherProducerStatusReason`), and its real first recovery ends with
+  `ReturnedFromInactivityProducerStatusReason`.
+- **An event recovery with no subscription completes at the API's acceptance.** Was:
+  it waited for a `snapshot_complete` no session could take. Is: with no session
+  receiving the producer there is nothing to wait for; it completes when the API
+  accepts it, and the stream tells of it. With sessions, every session that receives
+  the producer must take its `snapshot_complete`.
+- **`Producer.RecoveryInfo()` also tells a failure.** Was: set only when a request
+  was accepted. Is: set when a request is accepted and when it fails (refused, or
+  timed out), with `Successful() == false` for a failure. A request the close aborted
+  tells nothing.
+- **Statuses when a delay meets another state.** A delay that starts or ends on a
+  producer that is already down changes only `IsDelayed` (a status with the same
+  reason is published, as before). A recovery that completes while a subscription
+  lags takes the producer to down for the delay at once, with no "up, delayed" status
+  before it. A producer that sends only unsubscribed alives stays down as
+  unsubscribed (`OtherProducerStatusReason`): it is alive, so it is not reported as
+  silent (`AliveIntervalViolationProducerStatusReason`).
+- **Admission of an event recovery.** A request is refused when the actor's request
+  queue (10 000) is full, with an error that wraps the "too many pending" error, so it
+  is retryable like it. A request the API answers without accepting and without an
+  error fails the handle.
+- **Log lines.** Was: a failing recovery API logged at ERROR with `producer_id` and
+  `request_id` fields. Is: one WARN for the first failure of a streak and the next at
+  DEBUG (the 60 s retry's first WARN too), and the producer and request ids are in
+  the message text, not fields.
 - **The tick is a second.** Was: ten seconds, with a 60 s warm-up before the
   alive-inactivity check. Is: a second, and the inactivity check counts from the
   opening of the feed.

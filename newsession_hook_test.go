@@ -19,6 +19,8 @@ type lossRecordingProcessor struct {
 	mu      sync.Mutex
 	session uuid.UUID
 	calls   int
+	// restored are the sessions whose queue was reported bound.
+	restored []uuid.UUID
 }
 
 func (p *lossRecordingProcessor) OnFeedChannelLost(session uuid.UUID) {
@@ -27,8 +29,12 @@ func (p *lossRecordingProcessor) OnFeedChannelLost(session uuid.UUID) {
 	p.session = session
 	p.calls++
 }
-func (*lossRecordingProcessor) OnFeedChannelRestored(uuid.UUID) {}
-func (*lossRecordingProcessor) OnFeedSessionGone(uuid.UUID)     {}
+func (p *lossRecordingProcessor) OnFeedChannelRestored(session uuid.UUID) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.restored = append(p.restored, session)
+}
+func (*lossRecordingProcessor) OnFeedSessionGone(uuid.UUID) {}
 func (*lossRecordingProcessor) OnClientSessionOpened(uuid.UUID, types.MessageInterest, recovery.Stamp) {
 }
 func (*lossRecordingProcessor) OnMessageProcessingStarted(uuid.UUID, int, recovery.Stamp)         {}
@@ -75,6 +81,37 @@ func TestNewSession_ChannelLostHookDelegatesToRecovery(t *testing.T) {
 			}
 			if tc.wantCalls == 1 && rec.session != impl.sessionID {
 				t.Fatalf("hook reported session %s, want the session's own id %s", rec.session, impl.sessionID)
+			}
+		})
+	}
+}
+
+// TestNewSession_ChannelBoundHookReportsTheSessionsQueueBoundToRecovery pins the other
+// line of wiring: the consumer reports its first queue bound, from Open, and that
+// reaches the recovery processor under the session's id. Without it a session
+// registered with its queue not bound would never be reported bound, and nothing
+// would be recovered for its producers. A replay session reports nothing.
+func TestNewSession_ChannelBoundHookReportsTheSessionsQueueBoundToRecovery(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		isReplay bool
+		want     int
+	}{
+		{"live session reports its queue bound", false, 1},
+		{"replay session stays silent", true, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &lossRecordingProcessor{}
+			s := newSession(nil, nil, nil, nil, rec, "ex", "od:sport:", tc.isReplay, log.New(nil), StrategyCatch, 0)
+			impl := s.(*oddsFeedSessionImpl)
+			impl.channelConsumer.ReportChannelBound()
+			rec.mu.Lock()
+			defer rec.mu.Unlock()
+			if len(rec.restored) != tc.want {
+				t.Fatalf("queue reported bound %d times, want %d", len(rec.restored), tc.want)
+			}
+			if tc.want == 1 && rec.restored[0] != impl.sessionID {
+				t.Fatalf("reported session %s, want the session's own id %s", rec.restored[0], impl.sessionID)
 			}
 		})
 	}

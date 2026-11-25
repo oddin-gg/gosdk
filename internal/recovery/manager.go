@@ -19,7 +19,7 @@ import (
 )
 
 // Manager lifecycle states. Stored atomically so observers don't need
-// the actorsMu RWMutex just to gate state-dependent operations.
+// a lock just to gate state-dependent operations.
 //
 // The Opening state separates "Open started" from "Open finished
 // initialising" — without it, Open's CAS NotOpened → Open would
@@ -629,7 +629,7 @@ func (m *Manager) dispatchRecoverEvent(ctx context.Context, producerID int, even
 	}
 }
 
-// --- Handle registry (called by actors via actorManagerOps) ---
+// --- Handle registry (called by the actor via actorManagerOps) ---
 
 // LookupHandle returns the tracked handle for a request id. The second
 // return value is false when the id is unknown (never registered) or
@@ -657,7 +657,7 @@ func (m *Manager) completeHandle(requestID int, status types.RecoveryRequestStat
 	if h == nil {
 		return nil
 	}
-	h.complete(status, err, time.Now())
+	h.complete(status, err, m.clock().Now().Wall())
 	return h
 }
 
@@ -684,7 +684,7 @@ func (m *Manager) failPendingHandles(err error) {
 	}
 	m.handlesMu.RUnlock()
 	for _, h := range pending {
-		h.complete(types.RecoveryStatusFailed, err, time.Now())
+		h.complete(types.RecoveryStatusFailed, err, m.clock().Now().Wall())
 	}
 }
 
@@ -699,8 +699,8 @@ func (m *Manager) nextRequestID() int { return m.sequence.next() }
 //
 // Drop-oldest semantics, matching the public event-channel policy
 // (NEXT.md §0.3): on full, drop the oldest queued message and push
-// the new one. Blocking on a slow consumer would stall actors and
-// risk shutdown deadlocks (an actor still holding a value while
+// the new one. Blocking on a slow consumer would stall the actor and
+// risk shutdown deadlocks (the actor still holding a value while
 // runShutdown waits on its done channel).
 //
 // Snapshots the session pointer atomically so a concurrent Close that
@@ -729,7 +729,7 @@ func (m *Manager) emitRecoveryMessage(msg types.RecoveryMessage) {
 	// bail here — otherwise it could push onto a channel the deferred
 	// close is about to (or already did) close. Together with the
 	// emitMu-guarded close, this makes "no send on closed out" a
-	// mechanical invariant instead of an actors-stopped-first ordering
+	// mechanical invariant instead of an actor-stopped-first ordering
 	// convention.
 	if m.session.Load() != sess {
 		return

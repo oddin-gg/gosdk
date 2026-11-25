@@ -33,9 +33,14 @@ type factClosed struct{ session uuid.UUID }
 // before now.
 type factStart struct{}
 
-// factAlives says the producer's slot holds alives to take: one fact per slot, however
-// many alives arrive until it is taken.
-type factAlives struct{ producer int }
+// factAlives is the alives of one producer that arrived one after the other with no
+// essential fact between them: the machine is given what it needs of them. An alive
+// that arrives after any other essential fact is in a fact of its own, so no alive
+// is handled before an essential fact posted before it.
+type factAlives struct {
+	producer int
+	slot     aliveSlot
+}
 
 // factSnapshotComplete is a snapshot_complete a session took.
 type factSnapshotComplete struct {
@@ -129,8 +134,8 @@ type aliveSeen struct {
 	subscribed  bool
 }
 
-// aliveSlot is the alives of one producer not taken yet: the alives of a producer
-// come every few seconds, but a stalled actor must not hold them one by one. It
+// aliveSlot is the alives of a fact not taken yet: the alives of a producer come
+// every few seconds, but a stalled actor must not hold them one by one. It
 // keeps what the machine needs of them: the last subscribed one before the first
 // unsubscribed one, where a gap starts; that first unsubscribed one, which opens
 // the gap; and the latest.
