@@ -151,6 +151,11 @@ type ChannelConsumer struct {
 	// Guarded by mu.
 	opening chan struct{}
 
+	// shutdown is set, under mu, when Close's shutdown begins. An Open
+	// that finds it set creates no channel and starts no loop. Guarded
+	// by mu.
+	shutdown bool
+
 	// drainCh implements graceful close (NEXT.md §8 Subscriptions):
 	// closing it stops INTAKE — consume() returns at its next select
 	// iteration, so the delivery currently being processed completes
@@ -201,6 +206,11 @@ type ChannelConsumer struct {
 	ackMu    sync.Mutex
 	chClosed bool
 }
+
+// errConsumerClosed is what Open returns after Close's shutdown has begun.
+// No consumer started, so no consumer-gone report follows: the caller that
+// sees the error owns the cleanup for its own registration.
+var errConsumerClosed = errors.New("feed: consumer closed")
 
 // SetChannelLostHook installs the callback invoked once per lost
 // consumer channel (see onChannelLost). The callback receives this
@@ -376,6 +386,10 @@ func (c *ChannelConsumer) Open(ctx context.Context, routingKeys []string, messag
 		c.mu.Unlock()
 		return nil, errors.New("feed: consumer already opened")
 	}
+	if c.shutdown {
+		c.mu.Unlock()
+		return nil, errConsumerClosed
+	}
 	c.routingKeys = append([]string(nil), routingKeys...)
 	c.messageInterest = messageInterest
 	opening := make(chan struct{})
@@ -513,7 +527,8 @@ func (c *ChannelConsumer) settledSignal() <-chan struct{} {
 // Close terminates the consumer loop, waits for it to exit, and closes the
 // outgoing channel. Idempotent. Cap the wait via the supplied ctx. A Close
 // that arrives while Open is running waits for Open to return and then
-// closes the channel and loop Open created.
+// closes the channel and loop Open created. An Open after Close's shutdown
+// began returns errConsumerClosed and creates nothing.
 func (c *ChannelConsumer) Close(ctx context.Context) error {
 	c.closeOnce.Do(func() { go c.runShutdown() })
 
@@ -537,6 +552,7 @@ func (c *ChannelConsumer) Close(ctx context.Context) error {
 
 func (c *ChannelConsumer) runShutdown() {
 	c.mu.Lock()
+	c.shutdown = true
 	opening := c.opening
 	c.mu.Unlock()
 	if opening != nil {

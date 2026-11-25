@@ -2,6 +2,8 @@ package feed
 
 import (
 	"context"
+	"errors"
+	"math/rand/v2"
 	"runtime"
 	"sync/atomic"
 	"testing"
@@ -188,6 +190,34 @@ func TestChannelConsumer_CloseAfterOpen_TearsDown(t *testing.T) {
 	assertTornDown(t, c, o.ch, h, res.out)
 }
 
+// Open after a finished Close creates no channel, starts nothing and
+// reports nothing, whatever the number of Closes before it.
+func TestChannelConsumer_OpenAfterClose_CreatesNothing(t *testing.T) {
+	o := newGateOpener()
+	close(o.release)
+	c := NewChannelConsumer(o, &factory.FeedMessageFactory{}, discardConsumerLogger(), "ex", "od:sport:", 0)
+	h := &lifecycleHooks{}
+	h.install(c)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	for range 2 {
+		if err := c.Close(ctx); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	}
+	res := <-startOpen(c)
+	if !errors.Is(res.err, errConsumerClosed) || res.out != nil {
+		t.Fatalf("Open = (%v, %v), want (nil, errConsumerClosed)", res.out, res.err)
+	}
+	if got := o.calls.Load(); got != 0 {
+		t.Errorf("CreateChannel called %d times, want 0", got)
+	}
+	c.wg.Wait()
+	if h.gone.Load() != 0 || h.lost.Load() != 0 || h.restored.Load() != 0 {
+		t.Errorf("hooks fired: gone=%d lost=%d restored=%d", h.gone.Load(), h.lost.Load(), h.restored.Load())
+	}
+}
+
 // Close before Open and a second Close return nil and report nothing.
 func TestChannelConsumer_CloseBeforeOpenAndTwice(t *testing.T) {
 	o := newGateOpener()
@@ -206,7 +236,10 @@ func TestChannelConsumer_CloseBeforeOpenAndTwice(t *testing.T) {
 	}
 }
 
-// Close racing the rest of a running Open always ends torn down.
+// One Open against Closes started at random points before, during and
+// after it: either Open fails with errConsumerClosed having created
+// nothing, or it succeeds and is torn down; gone fires once in the second
+// case and never in the first.
 func TestChannelConsumer_OpenCloseRace(t *testing.T) {
 	for i := range 200 {
 		o := newGateOpener()
@@ -218,37 +251,44 @@ func TestChannelConsumer_OpenCloseRace(t *testing.T) {
 		mi := types.LiveOnlyMessageInterest
 		start := make(chan struct{})
 		opened := make(chan gateOpenResult, 1)
-		closed := make(chan struct{})
+		closers := 1 + rand.IntN(3)
+		closeDone := make(chan struct{}, closers)
 		go func() {
 			<-start
+			for range rand.IntN(50) {
+				runtime.Gosched()
+			}
 			out, err := c.Open(context.Background(), []string{"k"}, &mi)
 			opened <- gateOpenResult{out, err}
 		}()
-		go func() {
-			<-start
-			// Close once Open has begun (it is then racing Open's remaining
-			// steps) and not before: a Close that finishes before Open
-			// starts is the separate Open-after-Close ordering.
-			for {
-				c.mu.Lock()
-				begun := c.opening != nil || c.outgoing != nil
-				c.mu.Unlock()
-				if begun {
-					break
+		for range closers {
+			delay := rand.IntN(50)
+			go func() {
+				<-start
+				for range delay {
+					runtime.Gosched()
 				}
-				runtime.Gosched()
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			_ = c.Close(ctx)
-			close(closed)
-		}()
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				_ = c.Close(ctx)
+				closeDone <- struct{}{}
+			}()
+		}
 		close(start)
 		res := <-opened
-		<-closed
+		for range closers {
+			<-closeDone
+		}
 
 		if res.err != nil {
-			t.Fatalf("iteration %d: Open: %v", i, res.err)
+			if !errors.Is(res.err, errConsumerClosed) {
+				t.Fatalf("iteration %d: Open: %v", i, res.err)
+			}
+			if o.calls.Load() != 0 || h.gone.Load() != 0 {
+				t.Fatalf("iteration %d: refused Open created %d channels, gone=%d", i, o.calls.Load(), h.gone.Load())
+			}
+			c.wg.Wait()
+			continue
 		}
 		assertTornDown(t, c, o.ch, h, res.out)
 	}
