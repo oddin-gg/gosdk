@@ -1432,6 +1432,10 @@ func TestActor_NoRequestGoesOutWhileTheActorIsClosing(t *testing.T) {
 	if got := r.hits.recover.Load(); got != 0 {
 		t.Fatalf("%d recovery requests went out while the actor closed", got)
 	}
+	// nothing was even started: a request that was would have left its cancel behind
+	if got := len(r.a.snapshotCancels); got != 0 {
+		t.Fatalf("%d requests were started while the actor closed", got)
+	}
 }
 
 // What a REST worker tells the machine: the API's error, or a refusal when it said no
