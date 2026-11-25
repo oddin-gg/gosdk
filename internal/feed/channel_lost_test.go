@@ -733,3 +733,61 @@ func TestChannelConsumer_ChannelLost_CloseWaitsForInFlightAck(t *testing.T) {
 		t.Fatal("the loss path set chClosed: the reopened channel's acks would be skipped")
 	}
 }
+
+// TestChannelConsumer_BoundHookRunsOnceBeforeAnyLossIsReported pins the
+// ordering the recovery layer's registration rests on: the bound hook runs once,
+// from Open, after the first channel's queue is created and before the loop and
+// watcher that can lose it start. A loss of that very channel, taken away at once,
+// is therefore reported after the queue was reported bound, never before.
+func TestChannelConsumer_BoundHookRunsOnceBeforeAnyLossIsReported(t *testing.T) {
+	shortDwell(t)
+	opener := newSequencedOpener(2, false)
+	rec := &lossRecorder{seq: &opener.seq}
+	c := NewChannelConsumer(opener, &factory.FeedMessageFactory{}, discardConsumerLogger(), "ex", "od:sport:", 0)
+	c.SetChannelLostHook(rec.hook)
+	var boundAt, boundCalls atomic.Int32
+	c.SetChannelBoundHook(func() {
+		boundCalls.Add(1)
+		boundAt.Store(opener.seq.Add(1))
+	})
+	closeConsumer(t, c)
+
+	// the broker takes the channel away the moment it exists
+	close(opener.chans[0])
+	mi := types.LiveOnlyMessageInterest
+	if _, err := c.Open(context.Background(), []string{"k"}, &mi); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if boundCalls.Load() != 1 {
+		t.Fatalf("bound hook calls after Open = %d, want 1", boundCalls.Load())
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for len(rec.snapshot()) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the loss of the first channel was not reported")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if lost := rec.snapshot()[0].ordinal; lost < boundAt.Load() {
+		t.Fatalf("loss reported at %d, before the queue was reported bound at %d", lost, boundAt.Load())
+	}
+	if boundCalls.Load() != 1 {
+		t.Fatalf("bound hook calls = %d, want 1: a reopen is the restored hook's", boundCalls.Load())
+	}
+}
+
+// TestChannelConsumer_OpenFailureDoesNotReportBound: a consumer that cannot
+// create its channel has no queue, so nothing is reported bound.
+func TestChannelConsumer_OpenFailureDoesNotReportBound(t *testing.T) {
+	opener := newSequencedOpener(0, false)
+	c := NewChannelConsumer(opener, &factory.FeedMessageFactory{}, discardConsumerLogger(), "ex", "od:sport:", 0)
+	var boundCalls atomic.Int32
+	c.SetChannelBoundHook(func() { boundCalls.Add(1) })
+	mi := types.LiveOnlyMessageInterest
+	if _, err := c.Open(context.Background(), []string{"k"}, &mi); err == nil {
+		t.Fatal("Open succeeded without a channel")
+	}
+	if boundCalls.Load() != 0 {
+		t.Fatalf("bound hook calls = %d, want 0", boundCalls.Load())
+	}
+}
