@@ -750,9 +750,7 @@ func TestMachineEvents_LostConnectionGivesUpTheEventRecoveriesInFlight(t *testin
 	f.m.connectionDown()
 	for _, id := range []int{answered, waiting} {
 		end := f.expectEnded(id, failedEnd)
-		if end.err == nil {
-			t.Fatal("a failed one has a reason")
-		}
+		expect(t, errors.Is(end.err, errLostQueue), true, "reason")
 	}
 	expect(t, f.m.counters.eventAbandoned, 2, "given up")
 	f.m.connectionUp()
@@ -776,7 +774,8 @@ func TestMachineEvents_SessionsLostChannelGivesUpTheEventRecoveriesWaitingForIt(
 
 	f.m.channelLost(sid(2))
 	expect(t, f.m.counters.eventAbandoned, 1, "the one session 2 had yet to see")
-	f.expectEnded(seenByOne, failedEnd)
+	end := f.expectEnded(seenByOne, failedEnd)
+	expect(t, errors.Is(end.err, errLostQueue), true, "reason")
 	f.snapshotComplete(1, live, seenByBoth)
 	f.expectEnded(seenByBoth, completed)
 }
@@ -1573,4 +1572,140 @@ func TestMachineEvents_RequestIdCountingUpFromTheLargestIntegerWrapsToTheFirstFr
 	f.m.nextID = func() int { return math.MaxInt }
 	expect(t, f.event(live, 1), math.MaxInt, "the first")
 	expect(t, f.event(live, 2), 1, "the second")
+}
+
+// Counting up from the largest id the wire carries wraps to 1: a larger one does
+// not fit a signed 32-bit id.
+func TestMachineEvents_RequestIdCountingUpFromTheLargestWireIdWrapsToTheFirstFreeOne(t *testing.T) {
+	f := newFeed(t)
+	f.open(1, all)
+	f.startFeed()
+	f.m.nextID = func() int { return maxRequestID }
+	expect(t, f.event(live, 1), maxRequestID, "the first")
+	expect(t, f.event(live, 2), 1, "the second")
+}
+
+// ---- the maximum recovery time counts from when an event recovery was asked for
+
+// One that waited for a channel keeps the time it was asked for as the start of
+// its maximum recovery time: its snapshot kept arriving after it was sent does not
+// give it a new one.
+func TestMachineEvents_ReleasedEventRecoveryKeepsItsMaximumRecoveryTimeFromWhenItWasAskedFor(t *testing.T) {
+	f := newFeed(t)
+	f.open(1, all)
+	f.startFeed()
+	f.m.channelLost(sid(1))
+	id := f.recoverEvent(live)
+	f.advance(5*time.Hour + 59*time.Minute)
+	f.m.channelReopened(sid(1))
+	expect(t, len(f.eventsAsked()), 1, "sent once the channel is back")
+	f.acceptEvent(id)
+	for range 4 {
+		f.advance(30 * time.Second)
+		f.processed(1, live, f.now(), id)
+	}
+	end := f.expectEnded(id, timedOut)
+	if !strings.Contains(end.err.Error(), "6h0m0s") {
+		t.Fatalf("reason: %v", end.err)
+	}
+	expect(t, f.m.counters.eventExpired, 1, "expired")
+	f.expectNoEventState()
+}
+
+// A deferred one past the maximum recovery time, whose channel is back before the
+// next tick, ends as an expired deferred one does and is not sent.
+func TestMachineEvents_DeferredEventRecoveryPastTheMaximumRecoveryTimeIsNotSentWhenTheChannelIsBackBetweenTwoTicks(t *testing.T) {
+	f := newFeed(t)
+	f.open(1, all)
+	f.startFeed()
+	f.m.channelLost(sid(1))
+	id := f.recoverEvent(live)
+	f.clock.advance(6*time.Hour + time.Second)
+	f.m.channelReopened(sid(1))
+	expect(t, len(f.eventsAsked()), 0, "requests")
+	end := f.expectEnded(id, timedOut)
+	if !strings.Contains(end.err.Error(), "6h0m0s") {
+		t.Fatalf("reason: %v", end.err)
+	}
+	expect(t, f.m.counters.eventExpired, 1, "expired")
+	expect(t, f.m.counters.eventRequested, 0, "requests counted")
+	f.expectNoEventState()
+}
+
+// ---- the order of requests is by their sequence number
+
+// Two event recoveries asked for at one reading of the clock are ordered by when
+// they were sent: the snapshot of the earlier puts off the deadline of the later.
+func TestMachineEvents_SnapshotOfAnEventRecoveryPutsOffTheDeadlineOfOneSentAtTheSameClockReading(t *testing.T) {
+	f := newFeed(t)
+	f.open(1, all)
+	f.startFeed()
+	earlier := f.event(live, 1)
+	later := f.event(live, 2)
+	f.acceptEvent(earlier)
+	f.acceptEvent(later)
+	f.advance(4 * time.Minute)
+	f.processed(1, live, f.now(), earlier)
+	f.advance(time.Minute + time.Second)
+	f.expectNotEnded(later)
+	f.expectNotEnded(earlier)
+}
+
+// And the snapshot of the later does not put off the earlier.
+func TestMachineEvents_SnapshotOfAnEventRecoverySentAtTheSameClockReadingAfterOneDoesNotPutOffTheEarlier(t *testing.T) {
+	f := newFeed(t)
+	f.open(1, all)
+	f.startFeed()
+	earlier := f.event(live, 1)
+	later := f.event(live, 2)
+	f.acceptEvent(earlier)
+	f.acceptEvent(later)
+	f.advance(4 * time.Minute)
+	f.processed(1, live, f.now(), later)
+	f.advance(time.Minute + time.Second)
+	f.expectEnded(earlier, timedOut)
+	f.expectNotEnded(later)
+}
+
+// What ends in one step is reported in the order it was sent, also for requests
+// at one reading of the clock, whatever the order of the ids.
+func TestMachineEvents_EventRecoveriesSentAtOneClockReadingAreReportedInTheOrderSent(t *testing.T) {
+	f := newFeed(t)
+	f.open(1, all)
+	f.startFeed()
+	ids := []int{50, 7, 30}
+	f.m.nextID = func() int {
+		id := ids[0]
+		ids = ids[1:]
+		return id
+	}
+	var asked []int
+	for n := 1; n <= 3; n++ {
+		asked = append(asked, f.event(live, n))
+	}
+	f.m.connectionDown()
+	reported := make([]int, 0, len(f.out.outcomes))
+	for _, o := range f.out.outcomes {
+		reported = append(reported, o.requestID)
+	}
+	expect(t, fmt.Sprint(reported), fmt.Sprint(asked), "request ids in the order reported")
+}
+
+// ---- the feed closing, with channels coming back
+
+// A channel that comes back once the feed is closing sends nothing: the event
+// recovery that waited for it ends as the feed's closing ends it.
+func TestMachineEvents_ChannelReopenedOnceTheFeedIsClosingSendsNothingAndEndsTheDeferredEventRecovery(t *testing.T) {
+	f := newFeed(t)
+	f.open(1, all)
+	f.startFeed()
+	f.m.channelLost(sid(1))
+	id := f.recoverEvent(live)
+	f.m.beginClosing()
+	f.m.channelReopened(sid(1))
+	expect(t, len(f.eventsAsked()), 0, "requests")
+	expect(t, f.m.counters.eventRequested, 0, "requests counted")
+	end := f.expectEnded(id, failedEnd)
+	expect(t, errors.Is(end.err, errFeedClosing), true, "reason")
+	f.expectNoEventState()
 }

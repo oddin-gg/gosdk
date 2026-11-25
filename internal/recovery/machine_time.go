@@ -67,12 +67,13 @@ func (m *machine) tick() {
 // snapshot-complete timeout since: their snapshot_complete is lost. One the API
 // has not answered yet waits for its REST worker's own deadlines, and the
 // maximum recovery time. A deferred one expires at the maximum recovery time
-// too: the channel it waited for never came back.
+// too: the channel it waited for never came back. The maximum counts from when
+// the recovery was asked for, whether it waited or not.
 func (m *machine) expireEvents(mono time.Duration) {
 	for _, e := range m.sortedEvents() {
 		var why string
 		switch {
-		case mono-e.issuedMono > m.settings.maxRecoveryTime:
+		case mono-e.askedMono > m.settings.maxRecoveryTime:
 			why = "no snapshot complete within " + m.settings.maxRecoveryTime.String()
 		case e.accepted && mono-e.heardAt > m.settings.snapshotCompleteTimeout:
 			why = "no snapshot complete, nor anything of it heard, within " + m.settings.snapshotCompleteTimeout.String()
@@ -89,17 +90,7 @@ func (m *machine) expireEvents(mono time.Duration) {
 			waiting = append(waiting, d)
 			continue
 		}
-		m.counters.eventExpired++
-		why := "waited for a session's channel longer than " + m.settings.maxRecoveryTime.String()
-		if n := m.counters.eventExpired; n == 1 || n%1000 == 0 {
-			m.log.Warnf("Event recovery of %s %s, %d expired so far", d.eventID.ToString(), why, n)
-		} else {
-			m.log.Debugf("Event recovery of %s %s", d.eventID.ToString(), why)
-		}
-		m.out.eventEnded(eventOutcome{
-			producerID: d.producerID, requestID: d.requestID, eventID: d.eventID,
-			status: types.RecoveryStatusTimedOut, err: errors.New(why),
-		})
+		m.expireDeferred(d)
 	}
 	m.deferred = waiting
 }
@@ -139,14 +130,15 @@ func (m *machine) heard(t *track, id uuid.UUID, generatedAt time.Time, requestID
 // producer that ended without completing, or an event recovery in flight, asked
 // for before the one in flight. An event recovery asked for since is not: one
 // after another they would hold a recovery whose snapshot_complete is lost for
-// the maximum recovery time. Order is by when each was asked for, never by the
-// value of an id.
+// the maximum recovery time. Order is by when each was sent, never by the
+// value of an id: the sequence number says it, not the clock, which can read the
+// same for two requests.
 func (m *machine) ahead(t *track, a *active, requestID int) bool {
 	if requestID == a.requestID {
 		return true
 	}
 	if e := m.eventRecoveries[requestID]; e != nil {
-		return e.producerID == t.id && e.issuedMono < a.issuedMono
+		return e.producerID == t.id && e.seq < a.seq
 	}
 	// what ended before the one in flight was asked for: the one in flight is the
 	// only one at a time, so no order is read
@@ -155,7 +147,7 @@ func (m *machine) ahead(t *track, a *active, requestID int) bool {
 			return true
 		}
 	}
-	return askedBefore(t.endedEvents, requestID, a.issuedMono)
+	return askedBefore(t.endedEvents, requestID, a.seq)
 }
 
 // eventAhead reports whether a message a session took is the event recovery's own
@@ -170,19 +162,20 @@ func (m *machine) eventAhead(t *track, e *eventActive, generatedAt time.Time, re
 		return true
 	}
 	if a := t.active; a != nil && a.requestID == requestID {
-		return a.issuedMono < e.issuedMono
+		return a.seq < e.seq
 	}
 	if other := m.eventRecoveries[requestID]; other != nil {
-		return other.producerID == t.id && other.issuedMono < e.issuedMono
+		return other.producerID == t.id && other.seq < e.seq
 	}
-	return askedBefore(t.ended, requestID, e.issuedMono) || askedBefore(t.endedEvents, requestID, e.issuedMono)
+	return askedBefore(t.ended, requestID, e.seq) || askedBefore(t.endedEvents, requestID, e.seq)
 }
 
-// askedBefore reports whether the request id is one of list, asked for before issuedMono.
-func askedBefore(list []ended, requestID int, issuedMono time.Duration) bool {
+// askedBefore reports whether the request id is one of list, sent before the
+// request numbered seq.
+func askedBefore(list []ended, requestID int, seq uint64) bool {
 	for _, e := range list {
 		if e.requestID == requestID {
-			return e.issuedMono < issuedMono
+			return e.seq < seq
 		}
 	}
 	return false

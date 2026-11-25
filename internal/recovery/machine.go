@@ -1,6 +1,7 @@
 package recovery
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"slices"
@@ -91,7 +92,10 @@ type machine struct {
 	clock    Clock
 	log      *log.Logger
 	// nextID gives a request id that is not in use by a request in flight.
-	nextID   func() int
+	nextID func() int
+	// seq is the sequence number of the last request sent: what orders requests,
+	// since two can be sent at one reading of the clock.
+	seq      uint64
 	counters machineCounters
 
 	// tracks is every producer the machine knows, in the order it learned them.
@@ -298,10 +302,7 @@ func (m *machine) close() {
 		m.endEvent(e, types.RecoveryStatusFailed, errFeedClosing)
 	}
 	for _, d := range m.deferred {
-		m.out.eventEnded(eventOutcome{
-			producerID: d.producerID, requestID: d.requestID, eventID: d.eventID,
-			status: types.RecoveryStatusFailed, err: errFeedClosing,
-		})
+		m.failDeferred(d, errFeedClosing)
 	}
 	m.deferred = nil
 }
@@ -690,6 +691,7 @@ func (m *machine) request(t *track, mono time.Duration) {
 		after:       after,
 		issuedWall:  now.wall,
 		issuedMono:  mono,
+		seq:         m.nextSeq(),
 		requestedAt: t.producerNow(now),
 		covers:      m.gapSeq,
 		awaited:     m.awaited(t),
@@ -738,6 +740,12 @@ func (m *machine) clamped(t *track, requestID int, gapStart, after time.Time) {
 	}
 }
 
+// nextSeq numbers a request about to be sent.
+func (m *machine) nextSeq() uint64 {
+	m.seq++
+	return m.seq
+}
+
 // maxIDDraws is how many ids newRequestID draws before it stops trusting its
 // source and counts up from the last one.
 const maxIDDraws = 1000
@@ -757,7 +765,7 @@ func (m *machine) newRequestID() int {
 	}
 	for {
 		id++
-		if id < 1 {
+		if id < 1 || id > maxRequestID {
 			id = 1
 		}
 		if m.free(id) {
@@ -972,7 +980,7 @@ func (m *machine) giveUp(t *track, mono time.Duration, reason string) {
 // sent may still be on its way, ahead of the snapshot of the next one asked for.
 func (m *machine) ended(t *track, a *active) {
 	t.active = nil
-	t.remember(ended{requestID: a.requestID, issuedMono: a.issuedMono})
+	t.remember(ended{requestID: a.requestID, seq: a.seq})
 }
 
 // ---- event recoveries
@@ -985,6 +993,9 @@ var (
 	// errFeedClosing is why an event recovery is refused once the feed is
 	// closing, and why one in flight ends when the feed closes.
 	errFeedClosing = errors.New("recovery: the feed is closing")
+	// errLostQueue is why an event recovery is given up: its snapshot went with a
+	// queue that was lost.
+	errLostQueue = errors.New("its snapshot went with a lost queue")
 )
 
 // recoverEvent asks for one event's messages again, odds or stateful, and
@@ -1035,7 +1046,7 @@ func (m *machine) recoverEvent(producerID int, eventID types.URN, stateful bool)
 		})
 		return requestID, nil
 	}
-	m.issueEvent(t, requestID, eventID, stateful)
+	m.issueEvent(t, requestID, eventID, stateful, m.mono())
 	return requestID, nil
 }
 
@@ -1057,15 +1068,18 @@ func (m *machine) pendingEvents(producerID int) int {
 }
 
 // issueEvent sends the event recovery to a REST worker, to be awaited by the
-// sessions that receive the producer now.
-func (m *machine) issueEvent(t *track, requestID int, eventID types.URN, stateful bool) {
+// sessions that receive the producer now. askedMono is when it was asked for:
+// the reading its maximum recovery time counts from, earlier than now for one
+// that waited for a channel.
+func (m *machine) issueEvent(t *track, requestID int, eventID types.URN, stateful bool, askedMono time.Duration) {
 	now := m.clock.Now()
 	m.eventRecoveries[requestID] = &eventActive{
 		requestID:   requestID,
 		producerID:  t.id,
 		eventID:     eventID,
 		stateful:    stateful,
-		issuedMono:  now.mono,
+		askedMono:   askedMono,
+		seq:         m.nextSeq(),
 		requestedAt: t.producerNow(now),
 		awaited:     m.awaited(t),
 		seen:        make(map[uuid.UUID]bool),
@@ -1083,12 +1097,17 @@ func (m *machine) issueEvent(t *track, requestID int, eventID types.URN, statefu
 
 // releaseDeferred asks for the event recoveries that waited for a channel, once
 // no session that receives their producer waits for one. With the connection
-// down by then they are refused, as one asked for then is.
+// down by then they are refused, as one asked for then is; with the feed
+// closing they end as the feed's closing ends them, and are not sent; one that
+// waited longer than the maximum recovery time ends as it does when it expires.
 func (m *machine) releaseDeferred() {
 	var waiting []deferredEvent
+	mono := m.mono()
 	for _, d := range m.deferred {
 		t := m.byID[d.producerID]
 		switch {
+		case m.closing:
+			m.failDeferred(d, errFeedClosing)
 		case m.awaitsChannel(t):
 			waiting = append(waiting, d)
 		case !m.connected:
@@ -1097,11 +1116,39 @@ func (m *machine) releaseDeferred() {
 				producerID: d.producerID, requestID: d.requestID, eventID: d.eventID,
 				status: types.RecoveryStatusFailed, err: errEventRecoveryConnectionDown,
 			})
+		case mono-d.deferredAt > m.settings.maxRecoveryTime:
+			m.expireDeferred(d)
 		default:
-			m.issueEvent(t, d.requestID, d.eventID, d.stateful)
+			m.issueEvent(t, d.requestID, d.eventID, d.stateful, d.deferredAt)
 		}
 	}
 	m.deferred = waiting
+}
+
+// failDeferred reports an event recovery that waited for a channel as failed.
+// The caller takes it out of m.deferred.
+func (m *machine) failDeferred(d deferredEvent, err error) {
+	m.out.eventEnded(eventOutcome{
+		producerID: d.producerID, requestID: d.requestID, eventID: d.eventID,
+		status: types.RecoveryStatusFailed, err: err,
+	})
+}
+
+// expireDeferred reports an event recovery that waited for a channel longer
+// than the maximum recovery time as timed out. The caller takes it out of
+// m.deferred.
+func (m *machine) expireDeferred(d deferredEvent) {
+	m.counters.eventExpired++
+	why := "waited for a session's channel longer than " + m.settings.maxRecoveryTime.String()
+	if n := m.counters.eventExpired; n == 1 || n%1000 == 0 {
+		m.log.Warnf("Event recovery of %s %s, %d expired so far", d.eventID.ToString(), why, n)
+	} else {
+		m.log.Debugf("Event recovery of %s %s", d.eventID.ToString(), why)
+	}
+	m.out.eventEnded(eventOutcome{
+		producerID: d.producerID, requestID: d.requestID, eventID: d.eventID,
+		status: types.RecoveryStatusTimedOut, err: errors.New(why),
+	})
 }
 
 // eventAnswered is the API's answer to an event recovery: accepted when err is
@@ -1141,7 +1188,7 @@ func (m *machine) eventCompleted(e *eventActive) {
 // be ahead of a recovery asked for later.
 func (m *machine) failEvent(e *eventActive, status types.RecoveryRequestStatus, err error) {
 	if t := m.byID[e.producerID]; t != nil {
-		t.rememberEvent(ended{requestID: e.requestID, issuedMono: e.issuedMono})
+		t.rememberEvent(ended{requestID: e.requestID, seq: e.seq})
 	}
 	m.endEvent(e, status, err)
 }
@@ -1165,7 +1212,7 @@ func (m *machine) giveUpEvents(lost *session) {
 		}
 		m.counters.eventAbandoned++
 		m.log.Debugf("Event recovery %d of %s given up: its snapshot went with a lost queue", e.requestID, e.eventID.ToString())
-		m.failEvent(e, types.RecoveryStatusFailed, errors.New("its snapshot went with a lost queue"))
+		m.failEvent(e, types.RecoveryStatusFailed, errLostQueue)
 	}
 }
 
@@ -1178,10 +1225,7 @@ func (m *machine) sortedEvents() []*eventActive {
 		out = append(out, e)
 	}
 	slices.SortFunc(out, func(a, b *eventActive) int {
-		if a.issuedMono != b.issuedMono {
-			return int(a.issuedMono - b.issuedMono)
-		}
-		return a.requestID - b.requestID
+		return cmp.Compare(a.seq, b.seq)
 	})
 	return out
 }
@@ -1675,9 +1719,11 @@ type active struct {
 	after time.Time
 	// issuedWall is when it was asked for by the SDK's wall clock: what the
 	// recovery info publishes; issuedMono, on the monotonic clock: what its
-	// deadlines and its order count from.
+	// deadlines count from.
 	issuedWall time.Time
 	issuedMono time.Duration
+	// seq is its sequence number: what orders it among the requests sent.
+	seq uint64
 	// requestedAt is when it was asked for, by the producer's clock.
 	requestedAt time.Time
 	// covers is the number of the last gap it covers.
@@ -1711,11 +1757,11 @@ func allSeen(awaited, seen map[uuid.UUID]bool) bool {
 	return true
 }
 
-// ended is a recovery that ended without completing: its id, and when it was
-// asked for.
+// ended is a recovery that ended without completing: its id, and its sequence
+// number.
 type ended struct {
-	requestID  int
-	issuedMono time.Duration
+	requestID int
+	seq       uint64
 }
 
 // eventActive is an event recovery in flight.
@@ -1725,9 +1771,12 @@ type eventActive struct {
 	eventID    types.URN
 	// stateful says it asks for the event's stateful messages, not only its odds.
 	stateful bool
-	// issuedMono is when it was asked for, on the monotonic clock: what its
-	// deadlines and its order count from; requestedAt, by the producer's clock.
-	issuedMono  time.Duration
+	// askedMono is when it was asked for, on the monotonic clock: what its maximum
+	// recovery time counts from, also for one that waited for a channel before it
+	// was sent. seq is its sequence number: what orders it among the requests
+	// sent. requestedAt is when it was sent, by the producer's clock.
+	askedMono   time.Duration
+	seq         uint64
 	requestedAt time.Time
 	// awaited are the sessions whose snapshot_complete it waits for.
 	awaited map[uuid.UUID]bool
