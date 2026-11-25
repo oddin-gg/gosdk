@@ -386,7 +386,7 @@ Layered, with no upward dependencies:
 |       Subscribe / Recovery events / catalog methods            |
 +----------------------------------------------------------------+
 |       internal/feed                internal/recovery           |
-|     (AMQP consumer +              (per-producer actor          |
+|     (AMQP consumer +              (one recovery actor          |
 |      ChannelConsumer)               state machine)             |
 +----------------------------------------------------------------+
 |  internal/cache       internal/api         internal/factory    |
@@ -678,14 +678,13 @@ This differs from .NET's "sync fetch on demand" but is the right Go idiom: synch
    **dormant mode** … Actors arm themselves on the first AMQP-related
    event.~~ **Superseded:** no dormant-actor lifecycle exists.
    Construction stores an UNOPENED `recovery.Manager` placeholder (so
-   the atomic handle is never nil) but spawns NO goroutines and NO
-   actors; the manager is OPENED on the connect path only (see §11), which
-   pre-spawns actors for the active-producer catalog and lazily spawns
-   later ones. The design GOAL this step encoded still holds: API-only
-   clients stay completely quiet — achieved by not creating recovery
-   machinery at all until Connect. Producer-down suppression right
-   after connect is handled by the tick loop's warm-up gate
-   (`inactivityArmed`), not a dormant mode.
+   the atomic handle is never nil) but starts NO goroutines and NO
+   actor; the manager is OPENED on the connect path only (see §11), which
+   builds the one recovery actor over the active-producer catalog (a
+   later producer gets its track on its first fact). The design GOAL this
+   step encoded still holds: API-only clients stay completely quiet —
+   achieved by not creating recovery machinery at all until Connect.
+   A producer's alive inactivity counts from the opening of the feed.
 8. Return `*Client` ready for API/cache calls.
 
 If any step fails, partial state is torn down and an error is returned.
@@ -832,7 +831,7 @@ This means a slow or stalled consumer applies backpressure all the way to the br
 - **Decode failure** → the delivery is admitted as an `Unparsable` message. Under `ExceptionStrategy` `Catch` it reaches the consumer like any message and is acked on public-buffer admission (we'd never decode it correctly on retry). Under `Throw` the subscription terminates and the delivery stays unacked — the session never handled it.
 - **Graceful subscription close** (`Subscription.Close(ctx)`) → finish the in-flight decode + admit cycle for the current delivery; stop accepting new deliveries; drain the pipeline and the in-process buffer to consumers (up to the supplied `ctx` deadline) — acks fire as each drained message reaches the public buffer. No `Nack`. See §Subscriptions for full graceful-close semantics.
 - **Abrupt cancellation** (caller `ctx` cancelled, `client.Close(ctx)`, terminal error) → the delivery in the consumer's hand is `Nack(requeue=false)`; deliveries parked deeper in the pipeline are simply never acked. Neither is redelivered anywhere: the exclusive auto-delete queue is deleted with the channel, so an unacked delivery is lost from the broker along with the queue — "unacked" only means it was never acked-then-lost-from-view. We don't requeue, because the SDK's own recovery mechanism (snapshot/event recovery) is the authoritative gap-filler; double-delivery from broker requeue would be noise. Already-buffered messages on `Messages()` remain readable (they were acked on admission), and recovery covers the gap the deleted queue left.
-- **Connection or channel drops** → the exclusive auto-delete queue is deleted with its channel — with the whole connection, or alone on a channel-level exception — so unacked deliveries AND everything published until the consumer re-binds are lost from the broker; nothing is redelivered. At the moment of loss — detected by a per-channel watcher on `NotifyClose`/`NotifyCancel`, so a consumer parked behind a slow reader reports no later than any other — the consumer tells the recovery manager (`OnFeedChannelLost`, with the lost session's message interest and the loss instant). Every known producer in that session's scope is flagged down with `ConnectionDown` and its **recovery floor** is lowered to the earlier of the loss instant and the producer's recovery cursor as it stood *before the most recent alive* (an explicit rewind, else the alive before the last one seen, in the producer's clock domain): the last alive may have been generated after the broker deleted the queue but processed before the loss was seen, so it is not trusted — one alive interval of already-received replay is the price of never trusting it; the next system alive starts a snapshot recovery that reaches back at least to that floor — but not before every lost session in the producer's scope has re-bound its queue (`OnFeedChannelRestored`) or gone away (`OnFeedSessionGone`): a replay published before the queue exists routes nowhere, and its `snapshot_complete` with it, so the request is deferred and issued on the rebind, the producer staying flagged down meanwhile. The floor is what makes the design order-independent: an alive that reaches the actor before the loss notice may advance the producer's alive cursor, but `makeSnapshotRecovery` never starts later than the floor, and the floor is discharged only by a recovery that covered it. The alive-only session's loss counts for every producer (a connection drop kills its channel too, and it is never parked behind a reader), at the price of one snapshot recovery when only the alive channel dies alone. The alive-based inactivity check alone would miss any connection drop shorter than `MaxInactivity`, and would never notice a single channel's loss while alives keep flowing on another. Consumer-visible message-id dedup is not a goal.
+- **Connection or channel drops** → the exclusive auto-delete queue is deleted with its channel — with the whole connection, or alone on a channel-level exception — so unacked deliveries AND everything published until the consumer re-binds are lost from the broker; nothing is redelivered. At the moment of loss — detected by a per-channel watcher on `NotifyClose`/`NotifyCancel`, so a consumer parked behind a slow reader reports no later than any other — the consumer tells the recovery manager (`OnFeedChannelLost`, with the lost session's id). The machine opens a gap in that session's lane from its **checkpoint** (what the session finished, so what its queue still held is covered too), takes the session's producers down with `ConnectionDown`, and gives up a recovery that waited for this session's `snapshot_complete`. Nothing is asked for those producers until the consumer has re-declared and re-bound its queue (`OnFeedChannelRestored`): a replay published before the queue exists routes nowhere, and its `snapshot_complete` with it. The next alive of the producer then starts a recovery from the oldest open gap. A fact that reaches the actor before the loss notice cannot move the gap's start past the loss: a checkpoint moves only with what the session finished, and the notice is an essential fact that is handled before any sample posted after it. The SDK's own alive channel is no session of the actor's: losing it alone opens no gap, and a connection drop reaches every session's channel. The alive-based inactivity check alone would miss any connection drop shorter than `MaxInactivity`, and would never notice a single channel's loss while alives keep flowing on another. Consumer-visible message-id dedup is not a goal.
 
 **Configurable knobs:**
 
@@ -1025,24 +1024,41 @@ This scope is narrower than .NET/Java's, but it's the only coherent interpretati
 
 ## 11. Recovery state machine
 
-Single goroutine per producer. Owns all state for that producer. Communicates via channels.
+One goroutine, the recovery actor, runs one state machine (`machine`) that owns the
+recovery state of every producer and every session of the client. Nothing else
+touches that state, so it needs no lock; the machine reads no clock of its own and
+writes only through an outbox. Whoever has something to tell posts a fact and
+returns, never waiting.
 
 ```go
-// As built (internal/recovery). Handle REGISTRY lives on the Manager,
-// not the actor; the actor tracks only its own in-flight event recoveries.
+// As built (internal/recovery). The Handle REGISTRY lives on the Manager; the
+// machine tracks the event recoveries in flight, and its outbox publishes.
 type recoveryActor struct {
-    producerID      int
-    inbox           chan actorEvent          // alive, snapshotComplete, processingStarted/Ended, recoverEvent(+Completed), tick, ...
-    eventRecoveries map[int]*eventRecovery   // requestID → in-flight per-event recovery
-    lastSystemAlive *time.Time
-    downReason      types.ProducerDownReason
-    ctx             context.Context          // actor lifetime; cancelled on manager cleanup (aborts detached API calls)
-    api             *api.Client
-    pm              *producer.Manager
-    mgr             actorManagerOps          // registerHandle / completeHandle, etc.
-    logger          *log.Logger
+    essential []fact                   // never dropped, in order: sessions, start, alives (one slot per producer),
+                                       // snapshot_completes, lost/reopened channels, API answers, rewinds
+    commands  chan *recoverEventCommand // bounded; refused when full
+    samples   chan fact                // processed messages and session alives; lossy
+    machine   *machine                 // the rules; one goroutine, no locks, no time.Now
+    ctx       context.Context          // lifetime; cancelled on manager cleanup (aborts the REST requests)
+    api       *api.Client
+    pm        *producer.Manager        // status, resume point, recovery info
+    mgr       actorManagerOps          // registerHandle / completeHandle, etc.
 }
 ```
+
+The actor takes the essential facts first, then the commands, then the samples;
+the lesser queues yield as soon as an essential fact waits, so nothing posted after
+an essential fact is handled before it. It looks at the clock every second.
+
+The machine models, per producer and per session of the client with a lane, a
+checkpoint (the newest live message or subscribed alive the session finished) and
+gaps (what a session may be missing: a lost queue opens one from its checkpoint, a
+silent or unsubscribed producer from its last subscribed alive). A recovery starts
+from the oldest open gap, clamped to the producer's stateful recovery window, and
+completes once every session that receives the producer has taken its
+`snapshot_complete`. A failed request is asked for again after 5, 10 and 20
+seconds, then every 60 seconds, with the producer down. The oldest gap or
+checkpoint is the producer's resume point (`Producer.TimestampForRecovery`).
 
 ### Staying quiet for API-only clients
 
@@ -1054,24 +1070,21 @@ is achieved structurally instead:
   `gosdk.New`. `New` constructs an UNOPENED placeholder Manager so the
   atomic handle is never nil, but it owns no goroutines and runs no work
   until opened. An API-only client (`gosdk.New` + `client.Sports(ctx)`
-  etc.) that never connects leaves that Manager unopened, so no tick loop runs and no
+  etc.) that never connects leaves that Manager unopened, so no actor runs and no
   producer-down events are emitted.
-- **Actors exist only while the Manager is open.** `Open` pre-spawns one
-  actor per producer in the active-producer catalog (the bootstrap fetch it
-  already performs); producers that appear later are spawned lazily by
-  `findOrSpawn` on their first recovery request or feed event. Nothing is
-  spawned before `Open`, and `gosdk.New` never creates the Manager at all.
-- **Producer-down is warm-up-gated after connect.** The tick loop starts
-  immediately (so `MaxRecoveryExecution` expiry is enforced promptly) but
-  carries an `inactivityArmed` flag that stays false until `initialDelay`
-  elapses; the per-tick inactivity/producer-down check is suppressed until
-  then, so a freshly-connected producer isn't flagged down before its first
-  alive can arrive.
+- **The actor exists only while the Manager is open.** `Open` builds it over the
+  producers of the active-producer catalog (the bootstrap fetch it already
+  performs) and starts the feed; a producer that appears later gets its track
+  when its first fact arrives. Nothing runs before `Open`, and `gosdk.New` never
+  creates the Manager at all.
+- **A producer is reported down when its alives stop.** The alive inactivity
+  counts from the opening of the feed: a producer that sends no alive within
+  `MaxInactivity` of it is reported down with `AliveIntervalViolation`.
 
 ### Reliable per-request completion
 
 When a caller invokes `client.RecoverEventOdds(ctx, p, e)`, the actor
-(early-reply restructure — the API call must not block the actor goroutine):
+(early reply — the API call must not block the actor goroutine):
 1. Registers the handle (creates it keyed by `requestID`, status `Pending`)
    and records the in-flight recovery.
 2. Returns the handle to the caller **synchronously**, before the API call
@@ -1082,42 +1095,36 @@ When a caller invokes `client.RecoverEventOdds(ctx, p, e)`, the actor
    bounds only admission (the send into the actor inbox and the wait for
    this reply); once the handle is accepted, a caller-side cancel can no
    longer abort the recovery. The API outcome feeds back to the actor as a
-   follow-up event so state mutation stays single-threaded.
+   fact so state mutation stays single-threaded.
 
-The `SnapshotComplete` message is a **correctness event, not lossy observability**: the session admits it to the producer's recovery actor with ctx-bounded backpressure (a full actor inbox blocks rather than dropping) and acks the underlying AMQP delivery ONLY after admission succeeds. If admission can't complete (the recovery manager is shutting down), the delivery is left unacked so the broker redelivers — a dropped-then-acked completion would strand recovery until `MaxRecoveryExecution`.
+The `SnapshotComplete` message is a **correctness event, not lossy observability**: the session admits it to the recovery actor as an essential fact, which is never dropped, and acks the underlying AMQP delivery ONLY after admission succeeds. If admission can't complete (the recovery manager is closed), the delivery is left unacked so the broker redelivers — a dropped-then-acked completion would strand recovery until its deadline. A `snapshot_complete` of a request this feed never asked for (another instance's, which the broker routes here too) completes nothing and is dropped as it is posted.
 
-When the corresponding `SnapshotComplete` arrives (or recovery times out / fails), the actor updates the handle's status (`Completed` / `Failed` / `TimedOut`), closes its `Done` channel, and emits a `RecoveryEvent` on the (lossy) channel. **Even if the channel event is dropped, the handle is reliable** — the caller can `<-handle.Done()`, `handle.Result()`, or `handle.Status()` and get the correct outcome. Handles are GC'd from the manager's map a grace period after completion (constant `recovery.HandleGCGracePeriod`, currently 5 minutes), after which `client.EventRecoveryStatus(requestID)` returns `(_, false)`. Five minutes is generous enough for late pollers without growing the map indefinitely; a consumer that polls only at very long intervals should cache the request ID + outcome itself rather than relying on the SDK map.
+When the corresponding `SnapshotComplete` arrives (or recovery times out / fails), the machine's outbox updates the handle's status (`Completed` / `Failed` / `TimedOut`), closes its `Done` channel, and emits a `RecoveryEvent` on the (lossy) channel. **Even if the channel event is dropped, the handle is reliable** — the caller can `<-handle.Done()`, `handle.Result()`, or `handle.Status()` and get the correct outcome. Handles are GC'd from the manager's map a grace period after completion (constant `recovery.HandleGCGracePeriod`, currently 5 minutes), after which `client.EventRecoveryStatus(requestID)` returns `(_, false)`. Five minutes is generous enough for late pollers without growing the map indefinitely; a consumer that polls only at very long intervals should cache the request ID + outcome itself rather than relying on the SDK map.
 
-Tests drive the actor through full recovery scenarios against an httptest-backed API (real timers with shortened windows — no fake clock): warm-up gating (`inactivityArmed` suppresses producer-down until `initialDelay` elapses), cold start → initial snapshot, producer-down by inactivity → recovery → producer-up, interrupted re-issue, event recovery, handle completion with no channel reader, late/stale API completions, and shutdown-vs-admission races.
+The machine is tested rule by rule on a clock the test moves (a harness that captures its outbox); the actor on its own (queues, order, close); and the manager end to end over an httptest-backed API: start → alive → request → `snapshot_complete` on every session → producer up, a lost channel recovering from the session's checkpoint, an event recovery from the call to its handle's end, and shutdown-vs-admission races.
 
 ### Snapshot-complete deadline
 
-A snapshot recovery that never completes would hold its producer down until
-`WithMaxRecoveryExecution` (default 6 h), so each one carries a deadline
-(`WithSnapshotCompleteDeadline`, default 5 minutes; must be > 0 and not above
-`WithMaxRecoveryExecution`, and it follows that cap when only the cap is
-lowered). Every message carrying the recovery's request id renews it, and so
-does any `snapshot_complete` of it. The deadline is held, not passed, while the
-replay may only be slow to be handled: processing of the producer lags behind
-and messages are being taken up, the processed cursor cannot be read, the first
-message is still in processing, a client message of any producer has been stuck
-in processing longer than `MaxInactivity` in a session that can receive this
-producer (the session queue is shared by the producers of its interest), or a
-lost session in scope has not re-bound its queue. It does not apply to a
-producer whose recovery the open client sessions cannot complete (a LiveOnly or
-PrematchOnly client's other producer, a client that never subscribed, a producer
-of both scopes with only a LiveOnly or only a PrematchOnly session open, since
-it needs a `snapshot_complete` of each scope): that recovery waits for
-`MaxRecoveryExecution` as before. When
-the deadline passes, the actor logs once at WARN and re-issues the snapshot
-from the **same recover-from point** under a NEW request id; the producer stays down, a `snapshot_complete` of the abandoned
-request id is ignored, and the existing request rate limiting and the
-`MaxRecoveryExecution` cap still apply. Keeping the original point matters:
-clamping again against the current time would drop the slice between the two
-requests; if a request of the chain is dropped (its POST fails, or a cap
-expires it), its range stays the floor of the next one. Enforcement is periodic (the manager's ~10 s tick), so the deadline
-is a lower bound. Tests use shortened windows against the httptest API, like
-the rest of this section.
+A recovery that never completes would hold its producer down, so each request has
+two limits. `WithMaxRecoveryExecution` (default 6 h) bounds the request as a whole.
+`WithSnapshotCompleteDeadline` (default 5 minutes; must be > 0 and not above
+`WithMaxRecoveryExecution`, and it follows that cap when only the cap is lowered)
+bounds the silence: once the API accepted the request, the deadline counts from the
+last sign that it is on its way — a snapshot message a session that awaits it
+finished, or a message queued ahead of it (a live message or alive generated before
+the request, a snapshot message of an earlier recovery that failed). Evidence is per
+session; nothing global is read. A session with a client message in processing for
+longer than `MaxInactivity` counts as heard: its queue is stuck behind the message,
+the snapshot with it, and asking again would only queue a second one there.
+
+A request that passes either limit has failed: it is asked for again under a NEW
+request id from the same point (a gap keeps its start until a recovery that covers
+it completes), after 5, 10 and 20 seconds, and then every 60 seconds with the
+producer down (`Other`); a `snapshot_complete` of the abandoned request id is
+ignored. An alive after the producer was silent starts the backoff again. Keeping
+the gap's start matters: asking from a later point would drop the slice between the
+two requests. Enforcement is periodic (the actor's one-second look at the clock), so
+a limit is a lower bound.
 
 ## 12. Configuration
 
@@ -1393,7 +1400,7 @@ The branch must compile and pass CI at the end of every phase, including this on
 
 ### Phase 5 — Recovery state machine (3 days)
 
-- Per-producer actor goroutine pattern as described in §11.
+- One recovery actor goroutine running one state machine, as described in §11.
 - Mock clock; full state-transition coverage.
 - Replaces all of `internal/recovery/` from scratch.
 
@@ -1462,7 +1469,7 @@ Phases 1–4 are mostly independent and can run in parallel across two engineers
 5. ~~**`ExceptionHandlingStrategy` scope**~~ **RESOLVED:** message-processing only (AMQP consumer decode-and-route). Does NOT apply to `Client.X(ctx, ...)` API methods (Go's `(T, error)` is always the contract) or to background goroutines (recovery actors, reconnect — they always log-and-continue, otherwise a transient blip permanently downs a producer). See §10 Exception strategy for the full scope rule.
 6. **Logger replacement at runtime** — should `client.SetLogger(*slog.Logger)` exist, or is logger immutable post-construction? Lean toward immutable.
 7. **Codemod script** — worth writing or just a migration guide table?
-8. ~~**Recovery handle GC grace period**~~ **RESOLVED:** 5 minutes (constant `recovery.HandleGCGracePeriod`). Generous enough for a consumer that polls `EventRecoveryStatus(requestID)` minutes after initiating recovery; cheap because completed handles are tiny and GC happens on the actor tick. A consumer that needs longer retention should cache `(requestID, outcome)` itself rather than rely on SDK retention.
+8. ~~**Recovery handle GC grace period**~~ **RESOLVED:** 5 minutes (constant `recovery.HandleGCGracePeriod`). Generous enough for a consumer that polls `EventRecoveryStatus(requestID)` minutes after initiating recovery; cheap because completed handles are tiny and GC happens on the actor's tick. A consumer that needs longer retention should cache `(requestID, outcome)` itself rather than rely on SDK retention.
 9. **User-facing manual-ack opt-in** — should we offer `WithManualAck()` exposing ack semantics to users (for at-least-once / exactly-once integrations on top), or leave that for v2.1+ if anyone asks? Lean toward "leave for later" — no current ask. Note this is separate from §0.6 (which is internal manual-ack, decided).
 10. **Body redaction completeness** — the redaction substring set covers the access token by default. Should we expose `WithAPICallRedaction(substrings ...string)` for callers who route additional secrets through the SDK (e.g., custom headers in a future API)? Lean toward yes, deferred to first concrete need.
 

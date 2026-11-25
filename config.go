@@ -285,44 +285,46 @@ func WithReplayExchangeName(name string) Option {
 func WithSportIDPrefix(prefix string) Option { return func(c *Config) { c.sportIDPrefix = prefix } }
 
 // WithMaxInactivity caps the max time without an alive message before a
-// producer is considered down (default 20s).
+// producer is considered down (default 20s). It is also how far behind the
+// producer a subscription may process its messages before the producer is
+// reported down for the processing delay, and how long a client callback may stay
+// in one message before the SDK takes the subscription's queue for stuck.
 func WithMaxInactivity(d time.Duration) Option { return func(c *Config) { c.maxInactivity = d } }
 
-// WithMaxRecoveryExecution caps the max time a single recovery may run
-// (default 6h). Enforcement is periodic, not exact: a stuck recovery is
-// swept to RecoveryStatusTimedOut on the recovery manager's tick (every
-// ~10s), so the observed timeout may overshoot d by up to one tick
-// interval. Values below the tick interval are therefore honoured only to
-// tick granularity — pick a value comfortably above ~10s.
+// WithMaxRecoveryExecution caps the max time a single recovery request may take
+// (default 6h): a snapshot recovery or an event recovery that has not completed
+// within d of being asked for has failed. A failed snapshot recovery is asked for
+// again after 5, 10 and 20 seconds, and then every 60 seconds, with the producer
+// down; a failed event recovery ends with RecoveryStatusTimedOut. Enforcement is
+// periodic, not exact: the recovery actor looks at the clock once a second, so
+// the observed timeout may overshoot d by up to a second.
 //
-// d ALSO bounds the maximum snapshot-recovery lookback: a recovery cursor
-// older than d is clamped forward to now-d, so the recovery service is
-// never asked to replay further back than a single recovery may run.
+// d does not bound how far back a recovery reaches. A snapshot recovery starts
+// from the oldest point a subscription may be missing messages from, as far back
+// as the producer's stateful recovery window allows (the SDK logs a warning when
+// it has to start later); after a long outage the replay is as large as that
+// window.
 func WithMaxRecoveryExecution(d time.Duration) Option {
 	return func(c *Config) { c.maxRecoveryExecution = d }
 }
 
-// WithSnapshotCompleteDeadline sets how long a snapshot recovery may go
-// without any sign of life before it is re-requested (default 5m). Every
-// message carrying the recovery's request id renews the deadline; when it
-// passes without one, the SDK logs once, re-issues the snapshot recovery
-// from the same recover-from point under a NEW request id, and keeps the
-// producer down meanwhile — a snapshot_complete of the abandoned request
-// is ignored. The existing request rate limiting still applies, and
-// WithMaxRecoveryExecution still caps the total time. d must be > 0 and
-// must not exceed WithMaxRecoveryExecution; when only
-// WithMaxRecoveryExecution is lowered below the default, the default
-// follows it. Enforcement is periodic (the recovery manager's ~10s tick).
+// WithSnapshotCompleteDeadline sets how long a recovery waits for its
+// snapshot_complete after it was accepted, or after a subscription that awaits it
+// last took something that says it is on its way (default 5m). When it passes
+// with no sign of life the recovery has failed: a snapshot recovery is asked for
+// again under a NEW request id from the same point, after a backoff of 5, 10 and
+// 20 seconds and then every 60 seconds, and an accepted event recovery ends with
+// RecoveryStatusTimedOut. A snapshot_complete of the abandoned request is ignored.
+// A subscription whose client callback has been in one message for longer than
+// WithMaxInactivity counts as having heard something: its queue is stuck behind
+// the message and so is the snapshot, and asking again would only queue a second
+// one there. WithMaxRecoveryExecution still bounds a request as a whole. d must
+// be > 0 and must not exceed WithMaxRecoveryExecution; when only
+// WithMaxRecoveryExecution is lowered below the default, the default follows it.
+// Enforcement is periodic (the recovery actor's one-second look at the clock).
 //
-// The deadline applies only to a producer whose recovery the open client
-// sessions can complete: a LiveOnly or PrematchOnly client never receives
-// the replay of the other scope, a client that did not subscribe receives
-// none, and a producer of both scopes needs a snapshot_complete of each, so
-// a LiveOnly client alone cannot finish it. The recovery of such a producer
-// waits for WithMaxRecoveryExecution instead. A
-// WithSpecificEvents client receives little of the replay, so only the
-// snapshot_complete renews its deadline: a snapshot that takes longer than d
-// is requested again.
+// A recovery completes only once every subscription that receives the producer
+// has taken its snapshot_complete.
 func WithSnapshotCompleteDeadline(d time.Duration) Option {
 	return func(c *Config) {
 		c.snapshotCompleteDeadline = d
@@ -331,7 +333,9 @@ func WithSnapshotCompleteDeadline(d time.Duration) Option {
 }
 
 // WithInitialSnapshotTime sets the duration to look back when issuing the
-// first snapshot recovery on connect. Zero leaves the default.
+// first snapshot recovery of a producer that has no recovery start (see
+// Client.SetProducerRecoveryFromTimestamp). Zero leaves the default, the
+// producer's full history.
 func WithInitialSnapshotTime(d time.Duration) Option {
 	return func(c *Config) { c.initialSnapshotTime = d }
 }

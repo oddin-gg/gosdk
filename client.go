@@ -2363,10 +2363,15 @@ func (c *Client) SetProducerEnabled(ctx context.Context, id int, enabled bool) e
 	return nil
 }
 
-// SetProducerRecoveryFromTimestamp pins the next snapshot recovery's
-// "after" timestamp for this producer. Useful when consumers persist
-// processed timestamps externally and want recovery to resume from a
-// specific point on next connect.
+// SetProducerRecoveryFromTimestamp sets the point the first snapshot recovery of
+// the producer starts from, for consumers that persist processed timestamps
+// externally and want recovery to resume from a specific point on next connect.
+// Set after the feed has connected, an earlier point than the one the SDK is at
+// lowers where the next recovery starts, and opens no recovery by itself; a later
+// one is ignored. The zero time clears a start set before Connect.
+//
+// The point to persist is Producer.TimestampForRecovery: the oldest time a
+// subscription may still be missing messages from.
 func (c *Client) SetProducerRecoveryFromTimestamp(ctx context.Context, id int, t time.Time) error {
 	if err := c.producerManager.SetProducerRecoveryFromTimestamp(ctx, id, t); err != nil {
 		return fmt.Errorf("gosdk: set producer %d recovery-from %s: %w", id, t.Format(time.RFC3339), err)

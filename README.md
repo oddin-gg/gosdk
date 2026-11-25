@@ -320,9 +320,10 @@ is lost — with the whole AMQP connection or alone — its queue dies with
 it and every message published until the SDK re-binds is lost from the
 broker. At that moment the SDK flags every known producer that
 subscription served down (`ConnectionDownProducerStatusReason`) and, once
-the subscription has re-bound its queue, the next alive starts a snapshot
-recovery reaching back at least to the loss (one alive interval further
-back than strictly needed, on purpose). Watch
+the subscription has re-bound its queue, the next alive of the producer
+starts a snapshot recovery that reaches back to what that subscription had
+finished (its checkpoint: the newest live message or subscribed alive it
+handed to the client and settled). Watch
 `RecoveryEvents()` / `ProducerStatus()` for the down → up cycle.
 A producer status is also published when only its `IsDelayed` flag flips (a
 delay starting or ending), and a repeated down status with the same reason is
@@ -344,12 +345,111 @@ if res.Status == types.RecoveryStatusCompleted { ... }
 The handle is reliable — even if the lossy `RecoveryEvents()` channel
 drops the event, `Done()` unblocks correctly.
 
-A producer's snapshot recovery has a **snapshot-complete deadline**
-(`WithSnapshotCompleteDeadline`, default 5 minutes): if neither a message
-carrying the recovery's request id nor its `snapshot_complete` arrives for
-that long, the SDK logs once at WARN and requests the snapshot again from
-the same point under a new request id; the producer stays down meanwhile.
-`WithMaxRecoveryExecution` (default 6 h) still caps the whole attempt.
+One recovery actor runs every producer's recovery state. The rules, per producer:
+
+- **What a recovery asks for.** A subscription tracks, per producer, a
+  checkpoint (see above) and the gaps it may be missing: a lost queue opens one
+  from its checkpoint, a producer that stops sending (an alive that says the
+  feed is unsubscribed, or no alive for `WithMaxInactivity`) opens one from the
+  producer's last subscribed alive. A recovery starts from the oldest open gap,
+  clamped to the producer's stateful recovery window (the SDK logs a WARN with
+  what it could not ask for), and a gap stays open until a recovery that covers
+  it completes. `Producer.TimestampForRecovery()` is that oldest point (or the
+  oldest checkpoint when nothing is open): the time a client that restarts
+  resumes from. Because the SDK acks a message when it enters the subscription's
+  buffer (`WithSubscriptionBuffer`, default 256), the point can still lie up to
+  that many messages behind what the client has finished.
+- **When it completes.** A recovery completes once every subscription that
+  receives the producer has taken its `snapshot_complete`; a gap opened
+  meanwhile asks for one more, and the producer comes up when none is open. A
+  subscription of the `SystemAliveOnly` interest has no lane and is not waited
+  for. A producer no subscription receives has nothing to recover: it comes up
+  on a fresh alive.
+- **When it fails.** An accepted recovery fails when no `snapshot_complete`
+  arrives within `WithSnapshotCompleteDeadline` (default 5 minutes) of the last
+  sign it is on its way (a snapshot message a subscription that awaits it
+  finished, or a message queued ahead of it), or within `WithMaxRecoveryExecution`
+  (default 6 h) of being asked for. A subscription whose client callback has
+  been in one message for longer than `WithMaxInactivity` counts as having heard
+  something, so the deadline does not fire on a stuck callback. A failed request
+  (the API refuses it, or it times out) is asked for again after 5, 10 and 20
+  seconds; after three re-issues the producer stays down with
+  `OtherProducerStatusReason` and the request is repeated every 60 seconds until
+  it succeeds or an alive arrives after the producer was silent, which starts the
+  backoff again. A new request id is used for each, and a late
+  `snapshot_complete` of an abandoned one is ignored.
+- **Event recoveries** (`RecoverEventOdds`, `RecoverEventStateful`) run beside the
+  producer's recovery. Each ends when every subscription that receives the
+  producer has taken its `snapshot_complete`; it fails when the API refuses it,
+  when the queue it waits for is lost (the connection, or a subscription's
+  channel), and when nothing of it is heard for `WithSnapshotCompleteDeadline`
+  after the API accepted it. A producer going down for any other reason (a
+  processing delay, an alive interval, an unsubscribed alive) does not end it. One asked for while a subscription
+  is waiting for its queue to be bound waits for it. At most 128 per producer are
+  pending; an identical request while one is in flight is that one.
+- **Processing delay.** Each subscription is judged on its own: a subscription
+  that handles messages more than `WithMaxInactivity` after the producer
+  generated them, or takes nothing for that long while alives flow, takes the
+  producer down with `ProcessingQueueDelayViolationProducerStatusReason`, without
+  a recovery; the producer comes back when every subscription is on time.
+- **The clock.** The actor looks at the clock once a second, so deadlines and
+  backoffs are exact to about a second; a producer that sends no alive within
+  `WithMaxInactivity` of the feed opening is reported down with
+  `AliveIntervalViolationProducerStatusReason`. Durations run on the monotonic
+  clock, so a step of the system clock fires no deadline and holds none back.
+
+The event-recovery handle is reliable — even if the lossy `RecoveryEvents()`
+channel drops the event, `Done()` unblocks correctly — and a finished handle can
+be read through `EventRecoveryStatus` for five minutes.
+
+### Recovery behaviour changes
+
+What a client that relied on the earlier behaviour will see differently:
+
+- **Completion needs every subscription.** Was: the first `snapshot_complete` of the
+  request (one per scope for a live-only or prematch-only subscription) completed
+  it, and a client's `SystemAliveOnly` subscription could complete it alone. Is:
+  every subscription that receives the producer must have taken its
+  `snapshot_complete`; a `SystemAliveOnly` subscription takes none. A slow
+  subscription next to a fast one keeps the producer down longer, and a producer
+  of both scopes with only a live-only subscription completes.
+- **A recovery starts when a subscription exists.** Was: the first alive after
+  `Connect` asked for a recovery. Is: a producer no subscription receives comes up
+  on a fresh alive with no recovery, and the first `Subscribe` that covers it takes
+  it down (`OtherProducerStatusReason`) until its first recovery completes.
+- **Lookback is the API window.** Was: `WithMaxRecoveryExecution` (6 h by default)
+  bounded how far back a recovery reached. Is: a recovery starts from the oldest
+  point a subscription may be missing, clamped to the producer's stateful recovery
+  window, with a WARN when it must start later. After a long outage the replay can
+  be as large as that window. `WithMaxRecoveryExecution` bounds the time of one
+  request.
+- **Failed recoveries back off.** Was: a failed request was asked for again at
+  every alive, with no limit and no change of status. Is: 5, 10 and 20 seconds,
+  three re-issues, then a retry every 60 seconds with the producer down
+  (`OtherProducerStatusReason`).
+- **An accepted event recovery can time out in silence.** Was: it waited for its
+  `snapshot_complete` up to `WithMaxRecoveryExecution`. Is: it fails after
+  `WithSnapshotCompleteDeadline` with nothing heard of it.
+- **Event recoveries survive a down that loses no queue.** Was: any producer down
+  failed every pending event recovery of the producer. Is: only the loss of a
+  queue (the connection, a subscription's channel) does; a processing delay, an
+  alive interval or an unsubscribed alive leaves them.
+- **An event recovery asked for while a subscription awaits its channel waits for
+  it.** Was: it was sent at once, and its replay could go to a queue that did not
+  exist yet.
+- **The resume point is published at the ack.** Was: `TimestampForRecovery()` was
+  the last system alive's time, which skips what was queued but not yet handled.
+  Is: the oldest point a subscription may still be missing, from the settled
+  deliveries.
+- **Processing delay per subscription, and no recovery for it.** Was: one
+  producer-wide maximum, so a slow subscription next to a fast one went unseen. Is:
+  each subscription is judged on its own.
+- **The loss of the SDK's own alive channel alone opens no gap.** Was: it counted
+  as a loss for every producer, with a recovery. Is: a connection drop still loses
+  every subscription's channel, and that is what recovers.
+- **The tick is a second.** Was: ten seconds, with a 60 s warm-up before the
+  alive-inactivity check. Is: a second, and the inactivity check counts from the
+  opening of the feed.
 
 ### Memory bound
 
