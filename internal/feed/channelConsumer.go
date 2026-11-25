@@ -145,6 +145,12 @@ type ChannelConsumer struct {
 	closed          chan struct{}
 	wg              sync.WaitGroup
 
+	// opening is non-nil while Open runs and closes when Open returns.
+	// A Close that arrives meanwhile waits for it, so the shutdown sees
+	// the loop Open started and tears down the channel Open created.
+	// Guarded by mu.
+	opening chan struct{}
+
 	// drainCh implements graceful close (NEXT.md §8 Subscriptions):
 	// closing it stops INTAKE — consume() returns at its next select
 	// iteration, so the delivery currently being processed completes
@@ -372,7 +378,15 @@ func (c *ChannelConsumer) Open(ctx context.Context, routingKeys []string, messag
 	}
 	c.routingKeys = append([]string(nil), routingKeys...)
 	c.messageInterest = messageInterest
+	opening := make(chan struct{})
+	c.opening = opening
 	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		c.opening = nil
+		c.mu.Unlock()
+		close(opening)
+	}()
 
 	// Create the FIRST AMQP channel SYNCHRONOUSLY — declare the queue,
 	// bind the routing keys, and start consuming BEFORE Open returns.
@@ -497,7 +511,9 @@ func (c *ChannelConsumer) settledSignal() <-chan struct{} {
 }
 
 // Close terminates the consumer loop, waits for it to exit, and closes the
-// outgoing channel. Idempotent. Cap the wait via the supplied ctx.
+// outgoing channel. Idempotent. Cap the wait via the supplied ctx. A Close
+// that arrives while Open is running waits for Open to return and then
+// closes the channel and loop Open created.
 func (c *ChannelConsumer) Close(ctx context.Context) error {
 	c.closeOnce.Do(func() { go c.runShutdown() })
 
@@ -520,6 +536,12 @@ func (c *ChannelConsumer) Close(ctx context.Context) error {
 }
 
 func (c *ChannelConsumer) runShutdown() {
+	c.mu.Lock()
+	opening := c.opening
+	c.mu.Unlock()
+	if opening != nil {
+		<-opening
+	}
 	c.mu.Lock()
 	cancel := c.closeFn
 	c.closeFn = nil
