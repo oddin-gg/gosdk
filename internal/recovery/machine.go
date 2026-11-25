@@ -300,6 +300,7 @@ func (m *machine) start() {
 	for _, s := range m.sessions {
 		for _, l := range s.lanes {
 			l.gap = m.openGap(nil, m.seed(m.byID[l.producer]))
+			l.hasLoss = false
 			// the start it got (an initial interval counted back from now, say)
 			// is where a later loss starts too, while the session has processed
 			// nothing to move it
@@ -332,18 +333,18 @@ func (m *machine) beginClosing() {
 
 // unhandledAtClose says the actor closed with facts still queued that it did not
 // handle: each published resume point goes back to the producer's last subscribed
-// alive, and to the start the client set among those facts, the earliest of them
-// for the producer (starts, by producer). Of the facts only an unsubscribed alive
-// could have taken a point further back, with the gap it opens from that alive, and
-// only a start the client set, to that start; a session opened among them starts
-// from the point there is, a lost queue from a checkpoint, and an alive with no
-// subscribed one before it from a time later than any point, so the rest move
-// nothing back. The point is therefore never ahead of what a fact left could have
-// needed, and it only goes back, as every point does once the feed is closing. A
-// producer with no point published, because the feed never started or no session
-// received it, keeps the client's start; one with no subscribed alive keeps its
-// point.
-func (m *machine) unhandledAtClose(starts map[int]time.Time) {
+// alive, and to the earliest time among the facts left that could have taken it back
+// further (backTo, by producer): the start the client set, and the mark of an alive,
+// whichever alive it is, since an unsubscribed alive opens its gap from the safe point
+// there is, a subscribed alive left before it moves that safe point, and with none the
+// gap starts from the alive's own mark. Nothing else left can take a point back: a
+// session opened among them starts from the point there is, and a lost queue from a
+// checkpoint. The rule gives the point the facts would, or an earlier one: it is never
+// later than handling them would have made it, and where it cannot tell it goes
+// earlier, as every point only goes back once the feed is closing. A producer with no
+// point published, because the feed never started or no session received it, keeps the
+// client's start.
+func (m *machine) unhandledAtClose(backTo map[int]time.Time) {
 	for _, t := range m.tracks {
 		if t.published == nil {
 			continue
@@ -352,8 +353,8 @@ func (m *machine) unhandledAtClose(starts map[int]time.Time) {
 		if !t.safePoint.IsZero() {
 			floor = earlierOf(floor, t.safePoint)
 		}
-		if to, ok := starts[t.id]; ok {
-			floor = earlierOf(floor, to)
+		if at, ok := backTo[t.id]; ok {
+			floor = earlierOf(floor, at)
 		}
 		if floor.Equal(*t.published) {
 			continue
@@ -374,22 +375,24 @@ func fmtResume(point time.Time) string {
 }
 
 // rewind is the client setting the producer's recovery start after the feed has
-// started.
+// started; the zero time never reaches it, it does nothing.
 //
-// Until the producer has completed a first recovery its start is the seed, and a
-// value the client sets replaces it: the lanes that got the seed gap start from
-// the new value, and so does every lane opened later. The recovery that is in
-// flight, if any, keeps what it asked for, and the next request starts from the
-// new value.
+// Until the producer has completed a first recovery its start is the seed, and a value
+// the client sets replaces it: the lanes that got the seed gap start from the new
+// value, unless a loss of their queue opened the gap from an earlier checkpoint, which
+// a start never moves, and so does every lane opened later. A value the seed already
+// has does nothing. The recovery that is in flight, if any, keeps what it asked for,
+// and does not close the new start: one more is asked for from it.
 //
 // Once the producer has recovered, the point the client sets only lowers the next
-// recovery's start: it opens no request by itself, it is a gap that does not
-// trigger one, folded into the start of the next request and into the published
-// resume point, and closed only when a recovery that covers it completes, so a
-// failed request keeps it. A point later than the one the producer is at is
-// ignored, with a warning.
+// recovery's start: it opens no request by itself, it is a gap that does not trigger
+// one, folded into the start of the next request and into the published resume point,
+// and closed only when a recovery that covers it completes, so a failed request keeps
+// it. A point later than the one the producer is at is ignored, with a warning, and
+// the point it is at, which the client set already or a loss left, does nothing.
 //
-// Before the start the client's value is the seed, read at start.
+// Before the start the client's value is the seed, which the actor reads as the feed
+// opens.
 func (m *machine) rewind(producerID int, to time.Time) {
 	if !m.started {
 		return
@@ -402,37 +405,46 @@ func (m *machine) rewind(producerID int, to time.Time) {
 		m.reseed(t, to)
 		return
 	}
-	if t.rewind != nil && !to.Before(t.rewind.from) {
-		// not lower than the rewind there is: the same point again, set while the
-		// recovery that covers it is in flight, must not outlive that recovery
-		return
-	}
-	if current := m.currentPoint(t); to.After(current) {
+	current := m.currentPoint(t)
+	if to.After(current) {
 		m.log.Warnf("The recovery timestamp of producer %d, %s, is later than the point it is at, %s: ignored",
 			t.id, to.UTC().Format(time.RFC3339Nano), current.UTC().Format(time.RFC3339Nano))
+		return
+	}
+	if to.Equal(current) {
+		// nothing to lower: a rewind to the point it is at would outlive the recovery
+		// that covers it, and hold the resume point there
 		return
 	}
 	t.rewind = m.openGap(t.rewind, to)
 }
 
-// reseed replaces the seed of a producer that has not completed a first recovery:
-// what its lanes got from the old one (the gap, and the checkpoint that no message
-// moved) becomes the new one.
+// reseed replaces the seed of a producer that has not completed a first recovery: what
+// its lanes got from the old one (the gap, and the checkpoint that no message moved)
+// becomes the new one.
 func (m *machine) reseed(t *track, to time.Time) {
+	if m.seed(t).Equal(to) {
+		return
+	}
 	t.seeded = &to
 	for _, s := range m.sessions {
 		l := s.lane(t.id)
 		if l == nil || l.gap == nil {
 			continue
 		}
+		from := to
+		if l.hasLoss {
+			// the queue was lost at a checkpoint: what it held is missing whatever the start
+			from = earlierOf(to, l.lossFrom)
+		}
 		if l.checkpoint.Equal(l.gap.from) {
 			// no message moved it past the seed
-			l.checkpoint = to
+			l.checkpoint = from
 		}
 		// a new number, so a recovery already asked for does not close it: it
 		// covered what the old seed said
 		m.gapSeq++
-		l.gap.from, l.gap.seq = to, m.gapSeq
+		l.gap.from, l.gap.seq = from, m.gapSeq
 	}
 }
 
@@ -464,7 +476,7 @@ func (m *machine) connectionDown() {
 	}
 	for _, s := range m.sessions {
 		for _, l := range s.lanes {
-			l.gap = m.openGap(l.gap, l.checkpoint)
+			m.loseLane(l)
 		}
 	}
 	m.giveUpEvents(nil)
@@ -519,12 +531,23 @@ func (m *machine) channelReopened(id uuid.UUID) {
 	m.releaseDeferred()
 }
 
+// loseLane opens the lane's gap from its checkpoint, and remembers where the loss
+// began: a start the client sets later replaces the seed, never this.
+func (m *machine) loseLane(l *lane) {
+	l.gap = m.openGap(l.gap, l.checkpoint)
+	if l.hasLoss {
+		l.lossFrom = earlierOf(l.lossFrom, l.checkpoint)
+	} else {
+		l.hasLoss, l.lossFrom = true, l.checkpoint
+	}
+}
+
 // queueLost says the session's queue lost what it held: it misses everything
 // after its checkpoints, and a recovery that waited for its snapshot_complete
 // will not see it.
 func (m *machine) queueLost(s *session, cause statusCause, mono time.Duration) {
 	for _, l := range s.lanes {
-		l.gap = m.openGap(l.gap, l.checkpoint)
+		m.loseLane(l)
 	}
 	for _, l := range s.lanes {
 		m.markDown(m.byID[l.producer], cause)
@@ -720,6 +743,14 @@ func (m *machine) snapshotComplete(id uuid.UUID, producerID, requestID int) {
 
 // answered is a request's outcome: accepted when err is nil.
 func (m *machine) answered(requestID int, err error) {
+	m.answeredAt(requestID, err, m.mono())
+}
+
+// answeredAt is answered for an answer that arrived at arrived, on the monotonic clock,
+// and was handled later: an alive received after the API accepted a request is judged
+// against when the answer arrived, not when it was handled, however far behind the
+// actor was.
+func (m *machine) answeredAt(requestID int, err error, arrived time.Duration) {
 	mono := m.mono()
 	if e := m.eventRecoveries[requestID]; e != nil {
 		m.eventAnswered(e, err, mono)
@@ -735,7 +766,7 @@ func (m *machine) answered(requestID int, err error) {
 			// a snapshot_complete came first and said the API took it: the answer changes nothing
 			m.log.Debugf("Request %d answered after a snapshot complete of it", requestID)
 		case err == nil:
-			m.accepted(t, a, mono)
+			m.accepted(t, a, min(arrived, mono))
 		default:
 			m.failed(t, a, mono, "the API did not accept it: "+err.Error())
 		}
@@ -973,6 +1004,7 @@ func (m *machine) complete(t *track, a *active, mono time.Duration) {
 		}
 		if l.gap != nil && l.gap.seq <= a.covers {
 			l.gap = nil
+			l.hasLoss = false
 		}
 		if a.seen[s.id] {
 			// the snapshot is as of the request, and what came after was in the queue before it
@@ -1833,6 +1865,10 @@ type lane struct {
 	// checkpoint is the running maximum of what it finished, zero for nothing.
 	checkpoint time.Time
 	gap        *gap
+	// hasLoss says a loss of the session's queue opened the lane's gap, and lossFrom is
+	// where the earliest began: the checkpoint it had then.
+	hasLoss  bool
+	lossFrom time.Time
 	// age is the last sample's age, when hasAge.
 	age    time.Duration
 	hasAge bool

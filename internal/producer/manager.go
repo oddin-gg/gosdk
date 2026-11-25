@@ -327,8 +327,8 @@ func (m *Manager) RecoveryFromTimestamp(id int) (time.Time, error) {
 }
 
 // SetRecoveryFromHook sets what is told of a recovery start the client sets
-// after the recovery machine runs: the producer and the start, the zero time
-// when the client clears it. It is called on the goroutine of the setter, after
+// after the recovery machine is opened: the producer and the start (the zero time
+// too, which the machine ignores). It is called on the goroutine of the setter, after
 // the producer is changed and no lock is held. The result removes the hook, and
 // does nothing when another has replaced it since.
 func (m *Manager) SetRecoveryFromHook(hook func(id int, timestamp time.Time)) (release func()) {
@@ -475,9 +475,11 @@ func (m *Manager) SetProducerState(ctx context.Context, id int, enabled bool) er
 const recoveryFromMaxSkew = time.Minute
 
 // SetProducerRecoveryFromTimestamp sets the start the client wants recovery to
-// resume from. Before the recovery machine runs it is the start of the first
-// recovery; once it runs, the machine is told, and a start earlier than the
-// resume point lowers the start of the next recovery.
+// resume from. Before the recovery machine is opened it is the seed of the first
+// recovery, and the zero time clears it. Once it is opened, the machine is told: the
+// start replaces the seed of a producer that has not completed a first recovery, and
+// lowers the start of the next recovery of one that has, if it is earlier than the
+// resume point; the zero time does nothing.
 func (m *Manager) SetProducerRecoveryFromTimestamp(ctx context.Context, id int, timestamp time.Time) error {
 	err := m.mutateProducerByIDCtx(ctx, id, func(p *data) error {
 		// statefulRecoveryWindowInMinutes is immutable after

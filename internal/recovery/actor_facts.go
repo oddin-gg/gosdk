@@ -33,13 +33,18 @@ type factClosed struct{ session uuid.UUID }
 // before now.
 type factStart struct{}
 
-// factAlives is the alives of one producer that arrived one after the other with no
-// essential fact between them: the machine is given what it needs of them. An alive
-// that arrives after any other essential fact is in a fact of its own, so no alive
-// is handled before an essential fact posted before it.
+// factAlives is the alives of one producer that arrived with no essential fact other
+// than an alive posted between them: the machine is given what it needs of them. An
+// alive that arrives after another essential fact is in a fact of its own, so no
+// alive is handled before an essential fact posted before it.
 type factAlives struct {
 	producer int
 	slot     aliveSlot
+	// after is the number of essential facts that are not alives posted before this
+	// fact; taken says the actor has taken it, so nothing joins it. Guarded by the
+	// actor's essentialMu.
+	after uint64
+	taken bool
 }
 
 // factSnapshotComplete is a snapshot_complete a session took.
@@ -56,14 +61,15 @@ type factChannelLost struct{ session uuid.UUID }
 type factChannelReopened struct{ session uuid.UUID }
 
 // factAnswered is a REST worker's answer to a request: err is nil when the API
-// accepted it.
+// accepted it. at is when it arrived.
 type factAnswered struct {
+	at        Stamp
 	requestID int
 	err       error
 }
 
 // factRewind is the client setting the producer's recovery start after the feed
-// opened; the zero time clears it.
+// opened; the zero time does nothing. Before the feed starts it is the seed.
 type factRewind struct {
 	producer int
 	to       time.Time

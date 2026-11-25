@@ -1013,3 +1013,73 @@ func TestManager_EventRecoveryThatFailsIsNotToldOnTheStream(t *testing.T) {
 		}
 	}
 }
+
+// ---- the clock the handles are stamped by
+
+// A handle ends at the time of the clock the actor reads, whether its recovery ends or
+// the close ends it.
+func TestManager_HandlesAreStampedByTheActorsClock(t *testing.T) {
+	r := newRig(t)
+	r.hits.refuse.Store(true)
+	r.open()
+	s1 := uuid.New()
+	r.openSession(s1, types.AllMessageInterest)
+	r.clock.advance(time.Hour) // far from the system's clock
+	refused, err := r.mgr.InitiateEventOddsRecoveryHandle(t.Context(), liveID, matchURN(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-refused.Done()
+	if got, want := refused.Result().EndedAt, r.clock.Now().Wall(); !got.Equal(want) {
+		t.Fatalf("a refused recovery ended at %v, want the actor's clock, %v", got, want)
+	}
+
+	r.hits.refuse.Store(false)
+	pending, err := r.mgr.InitiateEventOddsRecoveryHandle(t.Context(), liveID, matchURN(2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.sync()
+	r.clock.advance(time.Hour)
+	r.mgr.Close()
+	<-pending.Done()
+	if got, want := pending.Result().EndedAt, r.clock.Now().Wall(); !got.Equal(want) {
+		t.Fatalf("a recovery the close ended, at %v, want the actor's clock, %v", got, want)
+	}
+}
+
+// A handle the close fails is stamped by the manager's clock.
+func TestManager_FailPendingHandlesStampsByTheManagersClock(t *testing.T) {
+	clock := newFakeClock()
+	clock.advance(24 * time.Hour)
+	m := NewManager(&minimalCfg{}, nil, nil, newDiscardLogger(), 0)
+	m.clk = clock
+	h := NewHandle(1, liveID, matchURN(1), clock.Now().Wall())
+	m.registerHandle(h)
+	m.failPendingHandles(ErrManagerClosed)
+	if got, want := h.Result().EndedAt, clock.Now().Wall(); !got.Equal(want) {
+		t.Fatalf("ended at %v, want the manager's clock, %v", got, want)
+	}
+}
+
+// A start the client sets after the seeds were read and before the actor is attached
+// reaches the actor all the same: the hook is installed before the seeds are read.
+func TestManager_StartSetAfterTheSeedsWereReadAndBeforeTheActorIsAttachedIsTheSeed(t *testing.T) {
+	r := newRig(t)
+	if err := r.pm.Open(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	set := r.clock.Now().Wall().Add(-10 * time.Minute)
+	r.mgr.afterSeedsRead = func() {
+		if err := r.pm.SetProducerRecoveryFromTimestamp(t.Context(), liveID, set); err != nil {
+			t.Error(err)
+		}
+	}
+	r.open()
+	s1 := uuid.New()
+	r.openSession(s1, types.AllMessageInterest)
+	r.alive(liveID)
+	if got := r.waitSnapshots(1)[0].afterMillis; got != set.UnixMilli() {
+		t.Fatalf("the first recovery after %d, want the start set while Open ran, %d", got, set.UnixMilli())
+	}
+}

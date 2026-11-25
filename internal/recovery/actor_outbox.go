@@ -149,7 +149,12 @@ func (a *recoveryActor) answer(ctx context.Context, requestID int, success bool,
 	if ctx.Err() != nil {
 		return
 	}
-	a.postEssential(factAnswered{requestID: requestID, err: answerOf(success, err)})
+	a.postAnswer(requestID, answerOf(success, err))
+}
+
+// postAnswer posts the answer to a request, stamped with when it arrived.
+func (a *recoveryActor) postAnswer(requestID int, err error) {
+	a.postEssential(factAnswered{at: a.clock.Now(), requestID: requestID, err: err})
 }
 
 func (a *recoveryActor) recoveryInfo(producerID int, info types.RecoveryInfo) {

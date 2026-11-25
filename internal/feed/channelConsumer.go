@@ -219,9 +219,10 @@ func (c *ChannelConsumer) SetChannelRestoredHook(fn func()) { c.onChannelRestore
 // calls it once; it is exported so the session's wiring can be exercised without a
 // broker.
 func (c *ChannelConsumer) ReportChannelBound() {
-	if c.onChannelBound != nil {
-		c.onChannelBound()
+	if c.onChannelBound == nil || c.gone.Load() {
+		return
 	}
+	c.onChannelBound()
 }
 
 // SetChannelBoundHook installs the callback Open invokes once the first

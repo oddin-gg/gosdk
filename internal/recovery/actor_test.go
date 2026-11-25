@@ -2,9 +2,11 @@ package recovery
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -1123,10 +1125,11 @@ func blockRecoveryPosts(r *actorRig) {
 
 // An unsubscribed alive received after the API accepted the request gives the recovery
 // up (the producer took it and then said it is not subscribed: it lost it), whether
-// the actor handles the facts as they are posted or has them wait in its queue: an
-// alive does not join a slot queued before the acceptance.
+// the actor handles the facts as they are posted or has them wait in its queue while
+// the clock moves on: an alive does not join a fact queued before the acceptance, and
+// the acceptance counts from when the answer arrived, not from when it was handled.
 func TestActor_UnsubscribedAliveAfterTheAcceptanceIsHandledAfterItWhateverTheActorIsDoing(t *testing.T) {
-	run := func(stalled bool) (abandoned int, inFlight bool) {
+	run := func(stalled bool, lag time.Duration) (abandoned int, inFlight bool) {
 		r := newActorRig(t)
 		blockRecoveryPosts(r)
 		r.startWith(types.AllMessageInterest, 1)
@@ -1139,22 +1142,25 @@ func TestActor_UnsubscribedAliveAfterTheAcceptanceIsHandledAfterItWhateverTheAct
 			r.a.drain()
 		}
 		r.clock.advance(time.Second)
-		r.a.postEssential(factAnswered{requestID: id}) // the API accepted
+		r.a.postAnswer(id, nil) // the API accepted
 		if !stalled {
 			r.a.drain()
 		}
 		r.clock.advance(time.Second)
 		r.postAlive(liveID, false) // received after the acceptance
+		r.clock.advance(lag)       // the actor gets to its queue this much later
 		r.a.drain()
 		return r.a.machine.counters.abandoned, r.a.machine.byID[liveID].active != nil
 	}
-	ab, act := run(false)
-	ab2, act2 := run(true)
+	ab, act := run(false, time.Millisecond)
 	if ab != 1 {
 		t.Fatalf("facts handled as they come: abandoned = %d, want the recovery given up", ab)
 	}
-	if ab != ab2 || act != act2 {
-		t.Fatalf("the same facts give another outcome when they wait: abandoned %d/%d, in flight %v/%v", ab, ab2, act, act2)
+	for _, lag := range []time.Duration{0, time.Millisecond, 3 * time.Second} {
+		ab2, act2 := run(true, lag)
+		if ab != ab2 || act != act2 {
+			t.Fatalf("lag %v: the same facts give another outcome when they wait: abandoned %d/%d, in flight %v/%v", lag, ab, ab2, act, act2)
+		}
 	}
 }
 
@@ -1187,8 +1193,49 @@ func TestActor_AlivesShareAFactOnlyWhileNothingEssentialIsPostedBetweenThem(t *t
 	}
 	r.postAlive(preID, true)
 	r.postAlive(liveID, true)
-	if got := count(); got != 4 {
-		t.Fatalf("an alive of another producer in between: %d facts, want 4", got)
+	if got := count(); got != 3 {
+		t.Fatalf("an alive of another producer in between: %d facts, want 3: it does not end the sharing", got)
+	}
+	r.a.postEssential(factChannelLost{session: sid(1)})
+	r.postAlive(preID, true)
+	r.postAlive(liveID, true)
+	if got := count(); got != 5 {
+		t.Fatalf("alives after another essential fact: %d facts, want 5", got)
+	}
+}
+
+// A stalled actor holds one fact per producer between two essential facts that are not
+// alives, however many alives come and however many producers send them: alternating
+// producers do not end each other's sharing. (Essential facts that are not alives are
+// never dropped, so a lost channel after each alive does grow the queue; that is the
+// feed's own pace.)
+func TestActor_AlivesOfSeveralProducersCostOneFactEachWhileTheActorIsStalled(t *testing.T) {
+	r := newActorRig(t)
+	const n = 20_000
+	for range n {
+		r.postAlive(liveID, true)
+		r.postAlive(preID, true)
+		r.postAlive(mixedID, false)
+	}
+	r.a.essentialMu.Lock()
+	got := len(r.a.essential)
+	r.a.essentialMu.Unlock()
+	if got != 3 {
+		t.Fatalf("%d alives of three producers hold %d facts, want 3", 3*n, got)
+	}
+	// each producer's alives keep their order, and the first unsubscribed one of the
+	// producer that sends unsubscribed alives is given to the machine
+	var mixed []bool
+	r.a.setBeforeHandle(func(f fact) {
+		if al, ok := f.(*factAlives); ok && al.producer == mixedID {
+			for _, a := range al.slot.inOrder() {
+				mixed = append(mixed, a.subscribed)
+			}
+		}
+	})
+	r.drainAll()
+	if len(mixed) == 0 || mixed[0] {
+		t.Fatalf("the machine was given %v of the third producer, want its unsubscribed alive", mixed)
 	}
 }
 
@@ -1534,5 +1581,273 @@ func TestActor_CommandTakenAfterAnEssentialFactWasPostedIsHandledAfterIt(t *test
 	want := []string{"factChannelLost", "*recovery.recoverEventCommand", "*recovery.recoverEventCommand"}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("handled %v, want %v", got, want)
+	}
+}
+
+// Under a random mix of essential facts and alives of three producers, a stalled
+// actor hands the machine every alive after each essential fact posted before it, and
+// each producer's alives in the order posted.
+func TestActor_AlivesKeepTheirOrderAgainstEssentialFactsAndPerProducer(t *testing.T) {
+	r := newActorRig(t)
+	base := r.stamp().Wall()
+	rng := rand.New(rand.NewSource(7))
+	const n = 5000
+	producers := []int{liveID, preID, mixedID}
+	postedAfter := map[uint64]uint64{} // alive seq -> seq of the last essential fact posted before it
+	var lastEssential uint64
+	for i := uint64(1); i <= n; i++ {
+		if rng.Intn(4) == 0 {
+			var sid uuid.UUID
+			binary.BigEndian.PutUint64(sid[8:], i)
+			r.a.postEssential(factChannelLost{session: sid})
+			lastEssential = i
+			continue
+		}
+		at := base.Add(time.Duration(i) * time.Millisecond)
+		r.a.onAlive(producers[rng.Intn(3)], at, Stamp{wall: at, mono: time.Duration(i) * time.Millisecond}, rng.Intn(5) != 0)
+		postedAfter[i] = lastEssential
+	}
+	handledEssential := map[uint64]bool{}
+	lastPerProducer := map[int]uint64{}
+	r.a.setBeforeHandle(func(f fact) {
+		switch f := f.(type) {
+		case factChannelLost:
+			handledEssential[binary.BigEndian.Uint64(f.session[8:])] = true
+		case *factAlives:
+			for _, a := range f.slot.inOrder() {
+				seq := uint64(a.generatedAt.Sub(base) / time.Millisecond)
+				if e := postedAfter[seq]; e != 0 && !handledEssential[e] {
+					t.Errorf("alive %d handled before the essential fact %d posted before it", seq, e)
+				}
+				if seq <= lastPerProducer[f.producer] {
+					t.Errorf("alive %d of producer %d handled after %d", seq, f.producer, lastPerProducer[f.producer])
+				}
+				lastPerProducer[f.producer] = seq
+			}
+		}
+	})
+	r.drainAll()
+}
+
+// ---- the client's start while the manager opens
+
+// A start the client sets between the reading of the seeds and the start of the feed
+// reaches the actor before the start and is the seed; the last of several is.
+func TestActor_StartSetBeforeTheFeedStartsIsTheSeedAndTheLastOfThemWins(t *testing.T) {
+	r := newActorRig(t)
+	first := r.clock.Now().Wall().Add(-20 * time.Minute)
+	last := r.clock.Now().Wall().Add(-10 * time.Minute)
+	r.a.postEssential(factRewind{producer: liveID, to: first})
+	r.a.postEssential(factRewind{producer: liveID, to: last})
+	r.a.postEssential(factRewind{producer: liveID, to: time.Time{}}) // the zero time does nothing
+	r.a.postEssential(factStart{})
+	r.a.postEssential(factOpened{session: sid(1), interest: types.AllMessageInterest, at: r.stamp()})
+	r.a.postEssential(factChannelReopened{session: sid(1)})
+	r.a.drain()
+	r.postAlive(liveID, true)
+	r.a.drain()
+	eventually(t, "the first request", func() bool { return len(r.hits.snapshots()) >= 1 })
+	if got := r.hits.snapshots()[0].afterMillis; got != last.UnixMilli() {
+		t.Fatalf("the first recovery after %d, want the last start set, %d", got, last.UnixMilli())
+	}
+}
+
+// A start set after the start of the feed is a fact the machine handles.
+func TestActor_StartSetAfterTheFeedStartsIsHandledByTheMachine(t *testing.T) {
+	r := newActorRig(t)
+	r.startWith(types.AllMessageInterest, 1)
+	to := r.clock.Now().Wall().Add(-10 * time.Minute)
+	r.a.postEssential(factRewind{producer: liveID, to: to})
+	r.a.drain()
+	r.postAlive(liveID, true)
+	r.a.drain()
+	eventually(t, "the first request", func() bool { return len(r.hits.snapshots()) >= 1 })
+	if got := r.hits.snapshots()[0].afterMillis; got != to.UnixMilli() {
+		t.Fatalf("the first recovery after %d, want %d", got, to.UnixMilli())
+	}
+}
+
+// The relay holds what the client sets while the actor does not exist, in order, and
+// posts it when the actor is attached; after that it posts at once.
+func TestStartRelay_HoldsStartsUntilTheActorIsAttachedAndKeepsTheirOrder(t *testing.T) {
+	r := newActorRig(t)
+	h := r.record()
+	relay := &startRelay{}
+	first := r.clock.Now().Wall().Add(-20 * time.Minute)
+	second := r.clock.Now().Wall().Add(-10 * time.Minute)
+	relay.tell(liveID, first)
+	relay.tell(preID, second)
+	r.a.drain()
+	if len(h.all()) != 0 {
+		t.Fatal("the relay posted before the actor was attached")
+	}
+	relay.attach(r.a)
+	relay.tell(liveID, second)
+	r.a.drain()
+	posted := h.all()
+	got := make([]factRewind, 0, len(posted))
+	for _, f := range posted {
+		got = append(got, f.(factRewind))
+	}
+	if len(got) != 3 || got[0].to != first || got[1].producer != preID || got[2].to != second || got[2].producer != liveID {
+		t.Fatalf("starts posted = %+v, want the two held in order and then the one told after", got)
+	}
+}
+
+// The client's call racing Manager.Open: whatever it sets last before the feed starts is
+// the seed, and nothing it sets is lost.
+func TestManager_StartSetWhileOpenIsRunningIsNeverLost(t *testing.T) {
+	const runs = 300
+	lost := 0
+	for i := range runs {
+		r := newRig(t)
+		if err := r.pm.Open(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		set := r.clock.Now().Wall().Add(-10 * time.Minute)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			for range i % 400 {
+				_ = time.Now()
+			}
+			_ = r.pm.SetProducerRecoveryFromTimestamp(t.Context(), liveID, set)
+		}()
+		r.open()
+		<-done
+		s1 := uuid.New()
+		r.openSession(s1, types.AllMessageInterest)
+		r.alive(liveID)
+		if got := r.waitSnapshots(1)[0].afterMillis; got != set.UnixMilli() {
+			lost++
+		}
+		r.mgr.Close()
+		r.srv.Close()
+	}
+	if lost > 0 {
+		t.Fatalf("the start the client set while Open ran was lost in %d of %d runs", lost, runs)
+	}
+}
+
+// ---- what is left unhandled at the close, from the facts themselves
+
+// The earliest start among several left unhandled counts, a zero one counts for nothing,
+// and the mark of an alive left unhandled takes the point back to it.
+func TestActor_EarliestOfTheStartsAndAlivesLeftUnhandledTakesThePointBack(t *testing.T) {
+	run := func(left func(r *actorRig, base time.Time)) (point, base time.Time) {
+		r := newActorRig(t)
+		blockRecoveryPosts(r)
+		r.startWith(types.AllMessageInterest, 1)
+		r.postAlive(liveID, true)
+		r.a.drain()
+		first := r.a.machine.byID[liveID].active.requestID
+		r.a.handle(factSnapshotComplete{session: sid(1), producer: liveID, requestID: first})
+		r.clock.advance(10 * time.Second)
+		r.postAlive(liveID, true)
+		taken := r.stamp()
+		r.a.postSample(factProcessed{session: sid(1), producer: liveID, generatedAt: taken.Wall(), taken: taken})
+		r.drainAll()
+		base = r.stamp().Wall()
+		r.a.finishWait = 0
+		left(r, base)
+		r.closeBeforeRunning()
+		return r.timestampForRecovery(liveID), base
+	}
+	// several starts: the earliest, not the first or the last
+	point, base := run(func(r *actorRig, base time.Time) {
+		r.a.postEssential(factRewind{producer: liveID, to: base.Add(-20 * time.Minute)})
+		r.a.postEssential(factRewind{producer: liveID, to: base.Add(-30 * time.Minute)})
+		r.a.postEssential(factRewind{producer: liveID, to: base.Add(-10 * time.Minute)})
+	})
+	if want := base.Add(-30 * time.Minute); !point.Equal(want) {
+		t.Fatalf("several starts left: the point = %v, want the earliest, %v", point, want)
+	}
+	// a zero start counts for nothing
+	point, base = run(func(r *actorRig, base time.Time) {
+		r.a.postEssential(factRewind{producer: liveID, to: time.Time{}})
+	})
+	if point.IsZero() || point.Before(base.Add(-time.Minute)) {
+		t.Fatalf("a zero start left took the point to %v", point)
+	}
+	// an alive left unhandled: the point goes back to its mark
+	point, base = run(func(r *actorRig, base time.Time) {
+		at := base.Add(-5 * time.Minute)
+		r.a.onAlive(liveID, at, Stamp{wall: at, mono: r.stamp().mono}, true)
+	})
+	if want := base.Add(-5 * time.Minute); !point.Equal(want) {
+		t.Fatalf("an alive left: the point = %v, want its mark, %v", point, want)
+	}
+}
+
+// A request whose context was cancelled has no outcome, a success included: nothing is
+// posted for it.
+func TestActor_AnswerOfACancelledRequestIsNotPostedWhateverItSays(t *testing.T) {
+	r := newActorRig(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	r.a.answer(ctx, 1, true, nil)
+	r.a.answer(ctx, 2, false, context.Canceled)
+	r.a.answer(ctx, 3, false, nil)
+	r.a.essentialMu.Lock()
+	defer r.a.essentialMu.Unlock()
+	if len(r.a.essential) != 0 {
+		t.Fatalf("%d answers posted for cancelled requests", len(r.a.essential))
+	}
+}
+
+// An alive wakes the actor without the clock's tick.
+func TestActor_AnAliveWakesTheActorWithoutATick(t *testing.T) {
+	r := newActorRig(t)
+	r.a.tickEvery = time.Hour
+	h := r.record()
+	r.run()
+	r.postAlive(liveID, true)
+	eventually(t, "the alive to be handled", func() bool { return len(h.all()) == 1 })
+}
+
+// A full queue of requests is refused at once with its own text, which names no
+// producer's cap, and still matches the module's too-many-pending refusal.
+func TestActor_FullRequestQueueIsRefusedWithItsOwnTextAndMatchesTooManyPending(t *testing.T) {
+	r := newActorRig(t)
+	var err error
+	queued := 0
+	for {
+		c := &recoverEventCommand{producerID: liveID, eventID: matchURN(queued), reply: make(chan recoverEventReply, 1)}
+		if err = r.a.postCommand(context.Background(), c); err != nil {
+			break
+		}
+		queued++
+	}
+	if queued != commandCapacity {
+		t.Fatalf("refused after %d, want %d", queued, commandCapacity)
+	}
+	if !errors.Is(err, errCommandsFull) || !errors.Is(err, ErrTooManyPendingEventRecoveries) {
+		t.Fatalf("err = %v, want errCommandsFull and, inside the module, too many pending", err)
+	}
+	if strings.Contains(err.Error(), "for producer") || !strings.Contains(err.Error(), "request queue") {
+		t.Fatalf("text = %q, want its own: it must not name a producer's cap", err.Error())
+	}
+}
+
+// An unsubscribed alive received before the API's answer arrived is no sign the producer
+// lost the request, even when the actor handles it after the answer: the acceptance
+// counts from the answer's arrival.
+func TestActor_UnsubscribedAliveReceivedBeforeTheAnswerArrivedDoesNotGiveTheRecoveryUp(t *testing.T) {
+	r := newActorRig(t)
+	blockRecoveryPosts(r)
+	r.startWith(types.AllMessageInterest, 1)
+	r.postAlive(liveID, true)
+	r.a.drain()
+	id := r.a.machine.byID[liveID].active.requestID
+	receivedBefore := r.stamp()
+	r.clock.advance(time.Second)
+	r.a.postAnswer(id, nil) // arrives a second later, and is posted first
+	r.a.onAlive(liveID, receivedBefore.Wall(), receivedBefore, false)
+	r.a.drain()
+	if got := r.a.machine.counters.abandoned; got != 0 {
+		t.Fatalf("the recovery was given up by an alive received before the answer arrived (%d)", got)
+	}
+	if r.a.machine.byID[liveID].active == nil {
+		t.Fatal("the recovery is no longer in flight")
 	}
 }

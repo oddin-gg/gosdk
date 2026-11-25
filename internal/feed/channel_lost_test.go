@@ -791,3 +791,19 @@ func TestChannelConsumer_OpenFailureDoesNotReportBound(t *testing.T) {
 		t.Fatalf("bound hook calls = %d, want 0", boundCalls.Load())
 	}
 }
+
+// A consumer that is gone reports no queue bound.
+func TestChannelConsumer_GoneConsumerReportsNoBound(t *testing.T) {
+	c := NewChannelConsumer(newSequencedOpener(0, false), &factory.FeedMessageFactory{}, discardConsumerLogger(), "ex", "od:sport:", 0)
+	var calls atomic.Int32
+	c.SetChannelBoundHook(func() { calls.Add(1) })
+	c.ReportChannelBound()
+	if calls.Load() != 1 {
+		t.Fatalf("bound hook calls = %d, want 1", calls.Load())
+	}
+	c.gone.Store(true)
+	c.ReportChannelBound()
+	if calls.Load() != 1 {
+		t.Fatalf("a gone consumer reported its queue bound (%d calls)", calls.Load())
+	}
+}

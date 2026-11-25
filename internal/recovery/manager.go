@@ -68,6 +68,38 @@ type lifecycleSession struct {
 	releaseHook func()
 }
 
+// startRelay carries the recovery starts the client sets to the actor, from before the
+// actor exists: a start set while the manager opens is held, in order, and posted
+// when the actor is attached.
+type startRelay struct {
+	mu      sync.Mutex
+	actor   *recoveryActor
+	pending []factRewind
+}
+
+// tell is the producer manager's hook.
+func (r *startRelay) tell(id int, at time.Time) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	f := factRewind{producer: id, to: at}
+	if r.actor == nil {
+		r.pending = append(r.pending, f)
+		return
+	}
+	r.actor.postEssential(f)
+}
+
+// attach hands the actor the starts held, and what comes later.
+func (r *startRelay) attach(a *recoveryActor) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.actor = a
+	for _, f := range r.pending {
+		a.postEssential(f)
+	}
+	r.pending = nil
+}
+
 // Manager is the recovery component: the one recovery actor that runs every
 // producer's recovery state machine, the handles of the event recoveries, and
 // the stream of what the client hears. Its methods are thin: they turn what the
@@ -136,6 +168,10 @@ type Manager struct {
 	// than 1s" warn: a stalled consumer or a slow dependency makes every
 	// message slow, which used to mean one line per message.
 	slowProcessingThrottle *log.Throttle
+
+	// afterSeedsRead, when set, runs in Open once the actor has read the seeds and
+	// before it is attached to the starts the client sets. Tests only.
+	afterSeedsRead func()
 
 	// clk stamps the facts the manager itself takes; nil reads the system's
 	// clock, and a test sets another.
@@ -225,12 +261,22 @@ func (m *Manager) Open(ctx context.Context) (<-chan types.RecoveryMessage, error
 	}
 
 	out := make(chan types.RecoveryMessage, 1024)
+	// A start the client sets from here on reaches the actor: it is told before the
+	// seeds are read, held until the actor exists, and handled before the feed starts,
+	// where the last of them is the seed.
+	relay := &startRelay{}
+	release := m.producerManager.SetRecoveryFromHook(relay.tell)
 	actor := newRecoveryActor(mgrCtx, m.cfg, m.apiClient, m.producerManager, m, m.logger, m.clk, producers, m.initialSnapshotTime)
+	if m.afterSeedsRead != nil {
+		m.afterSeedsRead()
+	}
+	relay.attach(actor)
 	sess := &lifecycleSession{
-		ctx:       mgrCtx,
-		cancelCtx: cancel,
-		out:       out,
-		actor:     actor,
+		ctx:         mgrCtx,
+		cancelCtx:   cancel,
+		out:         out,
+		actor:       actor,
+		releaseHook: release,
 	}
 
 	// Publish under lifecycleMu so Close's teardown either runs FIRST
@@ -241,6 +287,7 @@ func (m *Manager) Open(ctx context.Context) (<-chan types.RecoveryMessage, error
 	if m.state.Load() == mgrStateClosed {
 		// Close won the race. Release mu before tearing down locals.
 		m.lifecycleMu.Unlock()
+		release()
 		cancel()
 		close(out)
 		// the actor has not started (no goroutine spawned): just discard it
@@ -250,9 +297,6 @@ func (m *Manager) Open(ctx context.Context) (<-chan types.RecoveryMessage, error
 	// Publish session pointer atomically; concurrent Loaders see the
 	// fully-initialised struct or nil.
 	m.session.Store(sess)
-	sess.releaseHook = m.producerManager.SetRecoveryFromHook(func(id int, at time.Time) {
-		actor.postEssential(factRewind{producer: id, to: at})
-	})
 	go actor.run()
 	actor.start()
 
@@ -532,7 +576,8 @@ func (m *Manager) OnSessionAlive(session uuid.UUID, producerID int, generatedAt 
 }
 
 // OnAliveReceived reports an alive of the SDK's own alive channel: the producer
-// is there. It joins its producer's slot, which the actor takes once, so a full
+// is there. It joins the fact its producer's earlier alives wait in while no other
+// essential fact was posted after it, which the actor takes once, so a full
 // queue can only delay an alive, never drop it. received is when the session
 // took it; the producer's last-message timestamp moves to the one the feed
 // stamped on it.

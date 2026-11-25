@@ -634,3 +634,251 @@ func TestMachineHold_RecoveryCompletingWhileASessionLagsIsNeverToldUp(t *testing
 	}
 	expect(t, f.lastStatus(pre).cause, causeProcessingDelay, "cause")
 }
+
+// ---- what is left unhandled at the close is never later than handling it would be
+
+// A producer whose only handled alives were unsubscribed has a point and no safe point.
+// Left unhandled at the close, a subscribed alive generated at g and an unsubscribed one
+// after it would open a gap from g: the point goes back to g, not where it was, which a
+// message finished after g put later.
+func TestMachineClose_SubscribedAliveLeftUnhandledBeforeAnUnsubscribedOneTakesThePointBackToIt(t *testing.T) {
+	run := func(handle bool) (point, g time.Time) {
+		f := newFeed(t)
+		f.open(1, all)
+		f.startFeed()
+		f.unsubscribed(pre) // the only alive handled is unsubscribed
+		req := f.lastSnapshot(pre)
+		f.accept(req)
+		f.snapshotComplete(1, pre, req.requestID)
+		f.m.publishResumePoints()
+		if !f.m.byID[pre].safePoint.IsZero() {
+			t.Fatal("setup: a safe point")
+		}
+		f.clock.advance(5 * time.Second)
+		g = f.now() // a subscribed alive generated now, still on its way
+		gStamp := f.stamp()
+		f.clock.advance(time.Second)
+		f.live(1, pre, 0) // a live message generated after it, finished by the session
+		f.m.publishResumePoints()
+		f.clock.advance(10 * time.Second)
+		uAt, uStamp := f.now(), f.stamp()
+		f.m.beginClosing()
+		if handle {
+			f.m.alive(pre, g, g, gStamp, true)
+			f.m.alive(pre, uAt, uAt, uStamp, false)
+		} else {
+			f.m.unhandledAtClose(map[int]time.Time{pre: g}) // what the actor takes from the facts left
+		}
+		f.m.publishResumePoints()
+		point, _ = f.out.lastPoint(pre)
+		return point, g
+	}
+	handled, g := run(true)
+	unhandled, _ := run(false)
+	expectTime(t, handled, g, "the point when the facts are handled")
+	if unhandled.After(handled) {
+		t.Fatalf("left unhandled the point is %s, later than %s when handled", fmtTime(unhandled), fmtTime(handled))
+	}
+}
+
+// Whatever is left unhandled, on a producer that is up, the point is never later than
+// handling the same facts would make it.
+func TestMachineClose_NothingLeftUnhandledMakesThePointLaterThanHandlingItWould(t *testing.T) {
+	type step func(f *feed, handle bool, backTo map[int]time.Time)
+	cases := map[string]step{
+		"channel lost": func(f *feed, handle bool, _ map[int]time.Time) {
+			if handle {
+				f.m.channelLost(sid(1))
+			}
+		},
+		"session closed": func(f *feed, handle bool, _ map[int]time.Time) {
+			if handle {
+				f.m.sessionClosed(sid(1))
+			}
+		},
+		"session opened": func(f *feed, handle bool, _ map[int]time.Time) {
+			if handle {
+				f.m.sessionOpening(sid(2), all, f.stamp())
+			}
+		},
+		"rewind earlier": func(f *feed, handle bool, backTo map[int]time.Time) {
+			to := f.now().Add(-time.Hour)
+			if handle {
+				f.m.rewind(pre, to)
+			} else {
+				backTo[pre] = to
+			}
+		},
+		"rewind later": func(f *feed, handle bool, backTo map[int]time.Time) {
+			to := f.now().Add(30 * time.Second)
+			if handle {
+				f.m.rewind(pre, to)
+			} else {
+				backTo[pre] = to
+			}
+		},
+		"unsubscribed alive": func(f *feed, handle bool, backTo map[int]time.Time) {
+			if handle {
+				f.unsubscribed(pre)
+			} else {
+				backTo[pre] = f.now()
+			}
+		},
+		"subscribed alive then an unsubscribed one, safe point handled": func(f *feed, handle bool, backTo map[int]time.Time) {
+			g, gStamp := f.now().Add(-time.Second), f.stamp()
+			uAt, uStamp := f.now(), f.stamp()
+			if handle {
+				f.m.alive(pre, g, g, gStamp, true)
+				f.m.alive(pre, uAt, uAt, uStamp, false)
+			} else {
+				backTo[pre] = g
+			}
+		},
+	}
+	for name, do := range cases {
+		run := func(handle bool) time.Time {
+			f := upWith(t, all)
+			f.clock.advance(10 * time.Second)
+			f.alive(pre)
+			f.clock.advance(3 * time.Second)
+			f.live(1, pre, 0)
+			f.m.publishResumePoints()
+			f.clock.advance(2 * time.Second)
+			f.m.beginClosing()
+			backTo := map[int]time.Time{}
+			do(f, handle, backTo)
+			if !handle {
+				f.m.unhandledAtClose(backTo)
+			}
+			f.m.publishResumePoints()
+			p, _ := f.out.lastPoint(pre)
+			return p
+		}
+		if h, u := run(true), run(false); u.After(h) {
+			t.Errorf("%s: left unhandled %s, later than %s when handled", name, fmtTime(u), fmtTime(h))
+		}
+	}
+}
+
+// ---- a start the client sets, before the producer has recovered
+
+// A start later than the checkpoint a lost queue left does not move the gap past it: the
+// queue's contents are missing whatever the client's start says.
+func TestMachineSeed_StartSetLaterThanTheCheckpointOfALostQueueDoesNotMoveTheGapPastIt(t *testing.T) {
+	f := newFeed(t)
+	f.cat.from[pre] = f.now().Add(-time.Hour)
+	f.open(1, all)
+	f.startFeed()
+	f.alive(pre)
+	f.refuse(f.lastSnapshot(pre)) // the producer has not recovered
+	f.clock.advance(time.Second)
+	f.live(1, pre, 0)
+	c, _ := f.checkpoint(1, pre)
+	f.m.channelLost(sid(1)) // the queue is lost at c
+	f.clock.advance(2 * time.Minute)
+	f.m.rewind(pre, c.Add(time.Minute)) // later than the checkpoint, not in the future
+	f.m.channelReopened(sid(1))
+	f.clock.advance(10 * time.Second)
+	f.alive(pre)
+	f.m.tick()
+	expectTime(t, f.lastSnapshot(pre).after, c, "the recovery starts at the lost queue's checkpoint")
+	// an earlier start still goes earlier than the checkpoint
+	g := newFeed(t)
+	g.cat.from[pre] = g.now().Add(-time.Hour)
+	g.open(1, all)
+	g.startFeed()
+	g.alive(pre)
+	g.refuse(g.lastSnapshot(pre))
+	g.clock.advance(time.Second)
+	g.live(1, pre, 0)
+	c2, _ := g.checkpoint(1, pre)
+	g.m.channelLost(sid(1))
+	g.m.rewind(pre, c2.Add(-30*time.Minute))
+	g.m.channelReopened(sid(1))
+	g.clock.advance(10 * time.Second)
+	g.alive(pre)
+	g.m.tick()
+	expectTime(t, g.lastSnapshot(pre).after, c2.Add(-30*time.Minute), "an earlier start")
+}
+
+// The same start set again once the producer has recovered and a second recovery for it
+// is in flight does not hold the resume point where it is: it is the point already.
+func TestMachineSeed_SameStartSetAgainWhileTheRecoveryForItIsInFlightDoesNotPinTheResumePoint(t *testing.T) {
+	f := newFeed(t)
+	seed := f.now().Add(-30 * time.Minute)
+	f.cat.from[pre] = seed
+	f.open(1, all)
+	f.startFeed()
+	f.alive(pre)
+	first := f.lastSnapshot(pre)
+	to := seed.Add(-time.Hour)
+	f.m.rewind(pre, to)
+	f.accept(first)
+	f.snapshotComplete(1, pre, first.requestID)
+	second := f.lastSnapshot(pre)
+	f.m.rewind(pre, to) // the same again, while the recovery that covers it is in flight
+	if f.m.byID[pre].rewind != nil {
+		t.Fatal("a rewind to the point it is at was opened")
+	}
+	f.accept(second)
+	f.snapshotComplete(1, pre, second.requestID)
+	for range 30 {
+		f.clock.advance(10 * time.Second)
+		f.alive(pre)
+		f.live(1, pre, 0)
+		f.m.tick()
+	}
+	p, _ := f.resume(pre)
+	if p.Equal(to) {
+		t.Fatalf("the resume point is pinned at %s", fmtTime(to))
+	}
+}
+
+// Setting the value the seed already has, while the first recovery is in flight or at any
+// time before it completes, asks for nothing more.
+func TestMachineSeed_StartSetToTheValueTheSeedAlreadyHasDoesNothing(t *testing.T) {
+	f := newFeed(t)
+	seed := f.now().Add(-30 * time.Minute)
+	f.cat.from[pre] = seed
+	f.open(1, all)
+	f.startFeed()
+	f.alive(pre)
+	for range 3 {
+		req := f.lastSnapshot(pre)
+		f.m.rewind(pre, seed)
+		f.accept(req)
+		f.snapshotComplete(1, pre, req.requestID)
+	}
+	expectCalls(t, f, pre, 1, "recoveries for a start the seed already was")
+	expectDown(t, f, pre, false, "the producer")
+}
+
+// A reseed replaces the seed only: it opens no rewind.
+func TestMachineSeed_ReseedOpensNoRewind(t *testing.T) {
+	f := newFeed(t)
+	f.cat.from[pre] = f.now().Add(-30 * time.Minute)
+	f.open(1, all)
+	f.startFeed()
+	f.m.rewind(pre, f.now().Add(-time.Hour))
+	if f.m.byID[pre].rewind != nil {
+		t.Fatal("a reseed opened a rewind")
+	}
+}
+
+// A start later than the point, set while a rewind is already open, is ignored with a
+// warning like any other.
+func TestMachineSeed_LaterStartWhileARewindIsOpenIsIgnoredWithAWarning(t *testing.T) {
+	f := upWith(t, all)
+	f.clock.advance(time.Minute)
+	f.live(1, pre, 0)
+	f.m.rewind(pre, f.now().Add(-time.Hour))
+	if f.m.byID[pre].rewind == nil {
+		t.Fatal("no rewind")
+	}
+	f.logs.take()
+	f.m.rewind(pre, f.now().Add(-30*time.Minute)) // later than the rewind there is
+	lines := f.logs.take()
+	if len(lines) != 1 || !strings.HasPrefix(lines[0], "WARN") {
+		t.Fatalf("log = %v, want one warning", lines)
+	}
+}

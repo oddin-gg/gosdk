@@ -28,8 +28,10 @@ import (
 // leave the state wrong for good: an unsubscribed alive is the only word of a
 // gap. They keep their order. That queue has no capacity of its own: what fills
 // it is bounded by what the feed does and by the producers' own pace, since
-// the alives of a producer wait in one slot and a snapshot_complete of a request
-// the feed never asked for is dropped as it is posted. The commands, the
+// the alives of a producer wait in one fact until another essential fact is posted
+// (so a producer costs one fact between two other essential facts, however many
+// alives it sends) and a snapshot_complete of a request the feed never asked for is
+// dropped as it is posted. The commands, the
 // client's requests for an event recovery, are bounded, and one with no room is
 // refused. The samples, the messages and alives a session finished, are many and
 // each worth little: they are bounded too, and a full queue drops one. The actor
@@ -71,10 +73,12 @@ type recoveryActor struct {
 	commands chan *recoverEventCommand
 	samples  chan fact
 
-	// openAlives is, per producer, the last alives fact queued for it: an alive
-	// joins it only while it is still the last essential fact queued. Guarded by
-	// essentialMu.
+	// openAlives is, per producer, the last alives fact queued for it, and otherSeq
+	// counts the essential facts that are not alives: an alive joins its producer's
+	// fact while it waits in the queue and no other essential fact was posted after
+	// it. Guarded by essentialMu.
 	openAlives map[int]*factAlives
+	otherSeq   uint64
 
 	// issued are the request ids the actor has asked for, oldest first, a
 	// bounded memory: a snapshot_complete of any other is of a request this feed
@@ -167,8 +171,19 @@ const maxPendingEventRecoveries = 128
 var ErrTooManyPendingEventRecoveries = errors.New("recovery: too many pending event recoveries for producer")
 
 // errCommandsFull is why an event recovery is refused when the actor's queue of
-// requests has no room: like too many pending, it is retryable.
-var errCommandsFull = fmt.Errorf("recovery: the actor's request queue is full: %w", ErrTooManyPendingEventRecoveries)
+// requests has no room: the call fails at once, and can be retried.
+var errCommandsFull error = queueFullError{}
+
+// queueFullError is errCommandsFull: its own text, since the queue is the actor's and
+// no producer's cap, and it matches ErrTooManyPendingEventRecoveries inside the module
+// (both are refusals that are retried once there is room).
+type queueFullError struct{}
+
+func (queueFullError) Error() string {
+	return "recovery: the request queue of the recovery actor is full; the request was not accepted, retry it"
+}
+
+func (queueFullError) Is(target error) bool { return target == ErrTooManyPendingEventRecoveries }
 
 // actorManagerOps is the narrow surface the actor needs back into the
 // Manager. Limiting it makes the dependency explicit and keeps test
@@ -258,6 +273,7 @@ func (a *recoveryActor) postEssential(f fact) bool {
 		return false
 	}
 	a.essential = append(a.essential, f)
+	a.otherSeq++
 	a.essentialMu.Unlock()
 	a.signal()
 	return true
@@ -321,11 +337,13 @@ func (a *recoveryActor) isClosed() bool { return a.closing.Load() }
 // start posts the opening of the feed.
 func (a *recoveryActor) start() { a.postEssential(factStart{}) }
 
-// onAlive posts an alive of the SDK's alive channel, never dropped. Alives that
-// arrive one after the other with no essential fact between them share one fact, so
-// a flood of them costs one slot per producer; an essential fact posted after the
-// last of them ends the sharing, so no alive is ever handled before an essential
-// fact posted before it.
+// onAlive posts an alive of the SDK's alive channel, never dropped. An alive joins
+// the fact its producer's earlier alives wait in as long as no essential fact other
+// than an alive was posted after that fact, so a flood of alives costs one fact per
+// producer; an essential fact that is not an alive ends the sharing, so no alive is
+// ever handled before such a fact posted before it. The alives of one producer keep
+// their order; the alives of different producers, which touch no common state, may
+// be handled in another order than they were posted.
 func (a *recoveryActor) onAlive(producerID int, generatedAt time.Time, received Stamp, subscribed bool) {
 	alive := aliveSeen{generatedAt: generatedAt, received: received, subscribed: subscribed}
 	a.essentialMu.Lock()
@@ -333,12 +351,12 @@ func (a *recoveryActor) onAlive(producerID int, generatedAt time.Time, received 
 		a.essentialMu.Unlock()
 		return
 	}
-	if open := a.openAlives[producerID]; open != nil && len(a.essential) > 0 && a.essential[len(a.essential)-1] == fact(open) {
+	if open := a.openAlives[producerID]; open != nil && !open.taken && open.after == a.otherSeq {
 		open.slot.add(alive)
 		a.essentialMu.Unlock()
 		return
 	}
-	f := &factAlives{producer: producerID}
+	f := &factAlives{producer: producerID, after: a.otherSeq}
 	f.slot.add(alive)
 	a.openAlives[producerID] = f
 	a.essential = append(a.essential, f)
@@ -440,6 +458,9 @@ func (a *recoveryActor) takeEssential() (fact, bool) {
 		return nil, false
 	}
 	f := a.essential[0]
+	if alives, ok := f.(*factAlives); ok {
+		alives.taken = true
+	}
 	a.essential[0] = nil
 	a.essential = a.essential[1:]
 	if len(a.essential) == 0 {
@@ -555,9 +576,15 @@ func (a *recoveryActor) handle(f fact) {
 	case factChannelReopened:
 		m.channelReopened(f.session)
 	case factAnswered:
-		m.answered(f.requestID, f.err)
+		m.answeredAt(f.requestID, f.err, f.at.mono)
 	case factRewind:
-		if !f.to.IsZero() {
+		switch {
+		case f.to.IsZero():
+			// the zero time does nothing: what was set before stays the seed
+		case !m.started:
+			// before the feed starts the last start the client set is the seed
+			a.catalog.seeds[f.producer] = f.to
+		default:
 			m.rewind(f.producer, f.to)
 		}
 	case *recoverEventCommand:
@@ -641,17 +668,27 @@ func (a *recoveryActor) finish() {
 	a.machine.beginClosing()
 	if left := a.finishEssential(pending); len(left) > 0 {
 		a.counters.unhandledAtClose.Add(1)
-		starts := make(map[int]time.Time)
+		backTo := make(map[int]time.Time)
+		earliest := func(producer int, at time.Time) {
+			if cur, set := backTo[producer]; !set || at.Before(cur) {
+				backTo[producer] = at
+			}
+		}
 		for _, f := range left {
-			// the start the client set is the one thing the machine cannot guess
-			if r, ok := f.(factRewind); ok && !r.to.IsZero() {
-				if at, set := starts[r.producer]; !set || r.to.Before(at) {
-					starts[r.producer] = r.to
+			switch f := f.(type) {
+			case factRewind:
+				// the start the client set is the one thing the machine cannot guess
+				if !f.to.IsZero() {
+					earliest(f.producer, f.to)
+				}
+			case *factAlives:
+				for _, alive := range f.slot.inOrder() {
+					earliest(f.producer, aliveMark(alive.generatedAt, alive.received))
 				}
 			}
 		}
 		a.guard(func() {
-			a.machine.unhandledAtClose(starts)
+			a.machine.unhandledAtClose(backTo)
 			a.machine.publishResumePoints()
 		})
 	}
