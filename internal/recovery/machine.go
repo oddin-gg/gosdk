@@ -172,16 +172,30 @@ func newMachine(
 
 // ---- the lifecycle
 
-// sessionOpened registers a session, before or after start. A session whose
-// interest has a lane gets one for every producer it covers. openedAt is a
-// reading of the clock taken by the caller before the session's queue is bound,
-// so no message in the queue is older than the lane's checkpoint.
+// sessionOpened registers a session whose queue is bound, before or after
+// start. A session whose interest has a lane gets one for every producer it
+// covers. openedAt is a reading of the clock taken by the caller before the
+// session's queue is bound, so no message in the queue is older than the
+// lane's checkpoint.
 func (m *machine) sessionOpened(id uuid.UUID, interest types.MessageInterest, openedAt Stamp) {
+	m.openSession(id, interest, openedAt, true)
+}
+
+// sessionOpening registers a session whose queue is not bound yet, as
+// sessionOpened does: nothing is asked for its producers, and no event
+// recovery of theirs is sent, until channelReopened says the queue is bound. A
+// recovery asked for before would send its snapshot to a queue that does not
+// exist, and its snapshot_complete with it.
+func (m *machine) sessionOpening(id uuid.UUID, interest types.MessageInterest, openedAt Stamp) {
+	m.openSession(id, interest, openedAt, false)
+}
+
+func (m *machine) openSession(id uuid.UUID, interest types.MessageInterest, openedAt Stamp, bound bool) {
 	if m.session(id) != nil {
 		m.log.Warnf("Session %s opened twice; the second is ignored", id)
 		return
 	}
-	s := &session{id: id, interest: interest}
+	s := &session{id: id, interest: interest, lost: !bound}
 	m.sessions = append(m.sessions, s)
 	if !hasLane(interest) {
 		// a client's alive-only session receives no producer's messages: no
@@ -314,6 +328,41 @@ func (m *machine) close() {
 // sessions close in. A gap opened meanwhile still takes the point back.
 func (m *machine) beginClosing() {
 	m.closing = true
+}
+
+// unhandledAtClose says the actor closed with facts still queued that it did
+// not handle: each published resume point goes back to the producer's last
+// subscribed alive, or to a full snapshot without one. Of those facts only an
+// unsubscribed alive could have taken a point further back, with the gap it
+// opens from that alive, or from a time only the fact has; a session opened
+// among them starts from the point there is or that alive, and a lost queue
+// from a checkpoint, so the rest move nothing back. The point is therefore
+// never ahead of what a fact left could have needed, and it only goes back, as
+// every point does once the feed is closing. A producer with no point
+// published, because the feed never started or no session received it, keeps
+// the client's start.
+func (m *machine) unhandledAtClose() {
+	for _, t := range m.tracks {
+		if t.published == nil {
+			continue
+		}
+		floor := earlierOf(*t.published, t.safePoint)
+		if floor.Equal(*t.published) {
+			continue
+		}
+		m.log.Warnf("The recovery actor closed with facts it could not handle: producer %d resumes from %s",
+			t.id, fmtResume(floor))
+		t.published = &floor
+		m.out.resumePoint(t.id, floor)
+	}
+}
+
+// fmtResume is a resume point for the log.
+func fmtResume(point time.Time) string {
+	if point.IsZero() {
+		return "a full snapshot"
+	}
+	return point.UTC().Format(time.RFC3339Nano)
 }
 
 // rewind lowers the point the next recovery starts from, for a client that sets
@@ -1415,6 +1464,7 @@ func (m *machine) markUp(t *track, given statusCause) {
 // tell reports a status change: the cause-level change always, flagged public
 // when the down flag or the public reason changed.
 func (m *machine) tell(t *track, cause statusCause, public bool) {
+	t.told, t.toldDelayed = true, t.delayed
 	m.out.status(statusChange{
 		producerID: t.id,
 		down:       t.down,
@@ -1549,6 +1599,36 @@ func (m *machine) mono() time.Duration { return m.clock.Now().mono }
 // stamped with none, or with a time before the epoch, moves nothing.
 func validStamp(at time.Time) bool { return at.UnixMilli() > 0 }
 
+// futureSkew is how far ahead of the SDK's wall clock a timestamp may be and
+// still count as the producer's clock being a little fast.
+const futureSkew = time.Minute
+
+// aliveMark is the mark of an alive generated at generatedAt and received at
+// received: what the safe point and a checkpoint are taken from. It is
+// generatedAt, unless that is further ahead of the SDK's clock than futureSkew
+// (a bad value, or a producer far off): then it is the SDK's reading, so one
+// such alive cannot move a point past what the producer has sent.
+func aliveMark(generatedAt time.Time, received Stamp) time.Time {
+	if generatedAt.After(received.wall.Add(futureSkew)) {
+		return received.wall
+	}
+	return generatedAt
+}
+
+// markOf is the mark of a message of the producer generated at generatedAt and
+// taken by a session at the reading at: generatedAt, but no later than the
+// producer's now at that reading, by its last alive. The checkpoint is a running
+// maximum, so a timestamp ahead of the producer's clock would hold it ahead of
+// everything the producer sends for good, and a loss would start its gap there.
+// Before the producer's first alive it is aliveMark's bound.
+func (m *machine) markOf(producerID int, generatedAt time.Time, at Stamp) time.Time {
+	t := m.byID[producerID]
+	if t == nil || !t.hasAlive {
+		return aliveMark(generatedAt, at)
+	}
+	return earlierOf(generatedAt, t.producerNow(at))
+}
+
 func laterOf(a, b time.Time) time.Time {
 	if b.After(a) {
 		return b
@@ -1606,6 +1686,10 @@ type track struct {
 	// rewind is the client's rewind of the recovery timestamp: a gap that
 	// triggers no request.
 	rewind *gap
+	// told says a status of the producer has been told; toldDelayed is the delayed
+	// flag it carried.
+	told        bool
+	toldDelayed bool
 	// clampWarnedFrom is the start of the gap whose recovery was last clamped to
 	// the stateful window and warned of.
 	clampWarnedFrom time.Time
@@ -1675,8 +1759,13 @@ type session struct {
 	interest types.MessageInterest
 	// lanes are the producers it receives.
 	lanes []*lane
-	// lost says its channel was lost and no new one is bound yet.
+	// lost says its channel was lost, or has not been bound yet, and no queue
+	// is bound.
 	lost bool
+	// processing says a message of the client is in processing in the session,
+	// since processingSince on the monotonic clock.
+	processing      bool
+	processingSince time.Duration
 }
 
 func (s *session) lane(producerID int) *lane {
