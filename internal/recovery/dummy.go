@@ -14,7 +14,7 @@ type DummyManager struct {
 }
 
 // OnMessageProcessingStarted ...
-func (d DummyManager) OnMessageProcessingStarted(sessionID uuid.UUID, producerID int, timestamp time.Time) {
+func (d DummyManager) OnMessageProcessingStarted(sessionID uuid.UUID, producerID int, taken Stamp) {
 }
 
 // OnMessageProcessingEnded ...
@@ -22,11 +22,11 @@ func (d DummyManager) OnMessageProcessingEnded(sessionID uuid.UUID, producerID i
 }
 
 // OnAliveReceived ...
-func (d DummyManager) OnAliveReceived(producerID int, timestamp types.MessageTimestamp, isSubscribed bool, messageInterest types.MessageInterest) {
+func (d DummyManager) OnAliveReceived(producerID int, timestamp types.MessageTimestamp, received Stamp, isSubscribed bool) {
 }
 
 // OnSnapshotCompleteReceived ...
-func (d DummyManager) OnSnapshotCompleteReceived(ctx context.Context, session uuid.UUID, producerID int, requestID int, messageInterest types.MessageInterest) error {
+func (d DummyManager) OnSnapshotCompleteReceived(ctx context.Context, session uuid.UUID, producerID int, requestID int) error {
 	return nil
 }
 
@@ -34,16 +34,14 @@ func (d DummyManager) OnSnapshotCompleteReceived(ctx context.Context, session uu
 func (d DummyManager) OnMessageProcessed(uuid.UUID, int, time.Time, Stamp, int) {}
 
 // OnSessionAlive ...
-func (d DummyManager) OnSessionAlive(uuid.UUID, int, time.Time, Stamp, bool, types.MessageInterest) {
+func (d DummyManager) OnSessionAlive(uuid.UUID, int, time.Time, Stamp, bool) {
 }
 
-// OnRecoveryMessageReceived ...
-func (d DummyManager) OnRecoveryMessageReceived(producerID int, requestID int) {}
-
-func (d DummyManager) OnFeedChannelLost(uuid.UUID, types.MessageInterest, time.Time) {}
+// OnFeedChannelLost ...
+func (d DummyManager) OnFeedChannelLost(uuid.UUID) {}
 
 func (d DummyManager) OnFeedChannelRestored(uuid.UUID) {}
 
 func (d DummyManager) OnFeedSessionGone(uuid.UUID) {}
 
-func (d DummyManager) OnClientSessionOpened(uuid.UUID, types.MessageInterest) {}
+func (d DummyManager) OnClientSessionOpened(uuid.UUID, types.MessageInterest, Stamp) {}

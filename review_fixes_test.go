@@ -19,6 +19,7 @@ import (
 	feedXML "github.com/oddin-gg/gosdk/internal/feed/xml"
 	log "github.com/oddin-gg/gosdk/internal/log"
 	"github.com/oddin-gg/gosdk/internal/producer"
+	"github.com/oddin-gg/gosdk/internal/recovery"
 	"github.com/oddin-gg/gosdk/types"
 )
 
@@ -336,40 +337,23 @@ func (f *fakeMessageBuilder) BuildUnparsableMessage(_ context.Context, _ *types.
 
 type recordingRecoveryProcessor struct {
 	endedTimestamp atomic.Pointer[time.Time]
-	recoveryMsgs   atomic.Pointer[[]recoveryMsgSeen]
 }
 
-// recoveryMsgSeen is one OnRecoveryMessageReceived call.
-type recoveryMsgSeen struct{ producerID, requestID int }
-
-func (r *recordingRecoveryProcessor) OnRecoveryMessageReceived(producerID, requestID int) {
-	for {
-		cur := r.recoveryMsgs.Load()
-		var next []recoveryMsgSeen
-		if cur != nil {
-			next = append(next, *cur...)
-		}
-		next = append(next, recoveryMsgSeen{producerID, requestID})
-		if r.recoveryMsgs.CompareAndSwap(cur, &next) {
-			return
-		}
-	}
-}
-
-func (r *recordingRecoveryProcessor) OnMessageProcessingStarted(uuid.UUID, int, time.Time) {}
+func (r *recordingRecoveryProcessor) OnMessageProcessingStarted(uuid.UUID, int, recovery.Stamp) {}
 func (r *recordingRecoveryProcessor) OnMessageProcessingEnded(_ uuid.UUID, _ int, ts time.Time) {
 	r.endedTimestamp.Store(&ts)
 }
-func (r *recordingRecoveryProcessor) OnAliveReceived(int, types.MessageTimestamp, bool, types.MessageInterest) {
+func (r *recordingRecoveryProcessor) OnAliveReceived(int, types.MessageTimestamp, recovery.Stamp, bool) {
 }
-func (r *recordingRecoveryProcessor) OnSnapshotCompleteReceived(context.Context, uuid.UUID, int, int, types.MessageInterest) error {
+func (r *recordingRecoveryProcessor) OnSnapshotCompleteReceived(context.Context, uuid.UUID, int, int) error {
 	return nil
 }
 
-func (r *recordingRecoveryProcessor) OnFeedChannelLost(uuid.UUID, types.MessageInterest, time.Time) {}
-func (r *recordingRecoveryProcessor) OnFeedChannelRestored(uuid.UUID)                               {}
-func (r *recordingRecoveryProcessor) OnFeedSessionGone(uuid.UUID)                                   {}
-func (r *recordingRecoveryProcessor) OnClientSessionOpened(uuid.UUID, types.MessageInterest)        {}
+func (r *recordingRecoveryProcessor) OnFeedChannelLost(uuid.UUID)     {}
+func (r *recordingRecoveryProcessor) OnFeedChannelRestored(uuid.UUID) {}
+func (r *recordingRecoveryProcessor) OnFeedSessionGone(uuid.UUID)     {}
+func (r *recordingRecoveryProcessor) OnClientSessionOpened(uuid.UUID, types.MessageInterest, recovery.Stamp) {
+}
 
 // stubMessage implements every public message interface (OddsChange,
 // BetStop, BetCancel, BetSettlement, FixtureChangeMessage,
@@ -543,19 +527,19 @@ func (s *spyCacheNotifier) OnFeedMessageReceived(*types.FeedMessage) {
 
 type noopRecoveryProcessor struct{}
 
-func (noopRecoveryProcessor) OnRecoveryMessageReceived(int, int)                   {}
-func (noopRecoveryProcessor) OnMessageProcessingStarted(uuid.UUID, int, time.Time) {}
-func (noopRecoveryProcessor) OnMessageProcessingEnded(uuid.UUID, int, time.Time)   {}
-func (noopRecoveryProcessor) OnAliveReceived(int, types.MessageTimestamp, bool, types.MessageInterest) {
+func (noopRecoveryProcessor) OnMessageProcessingStarted(uuid.UUID, int, recovery.Stamp) {}
+func (noopRecoveryProcessor) OnMessageProcessingEnded(uuid.UUID, int, time.Time)        {}
+func (noopRecoveryProcessor) OnAliveReceived(int, types.MessageTimestamp, recovery.Stamp, bool) {
 }
-func (noopRecoveryProcessor) OnSnapshotCompleteReceived(context.Context, uuid.UUID, int, int, types.MessageInterest) error {
+func (noopRecoveryProcessor) OnSnapshotCompleteReceived(context.Context, uuid.UUID, int, int) error {
 	return nil
 }
 
-func (noopRecoveryProcessor) OnFeedChannelLost(uuid.UUID, types.MessageInterest, time.Time) {}
-func (noopRecoveryProcessor) OnFeedChannelRestored(uuid.UUID)                               {}
-func (noopRecoveryProcessor) OnFeedSessionGone(uuid.UUID)                                   {}
-func (noopRecoveryProcessor) OnClientSessionOpened(uuid.UUID, types.MessageInterest)        {}
+func (noopRecoveryProcessor) OnFeedChannelLost(uuid.UUID)     {}
+func (noopRecoveryProcessor) OnFeedChannelRestored(uuid.UUID) {}
+func (noopRecoveryProcessor) OnFeedSessionGone(uuid.UUID)     {}
+func (noopRecoveryProcessor) OnClientSessionOpened(uuid.UUID, types.MessageInterest, recovery.Stamp) {
+}
 
 func TestSession_ProcessFeedMessage_ReplayDoesNotNotifyCache(t *testing.T) {
 	for _, tc := range []struct {
@@ -1778,23 +1762,23 @@ type countingRecoveryProcessor struct {
 	ended   atomic.Int32
 }
 
-func (c *countingRecoveryProcessor) OnRecoveryMessageReceived(int, int) {}
-func (c *countingRecoveryProcessor) OnMessageProcessingStarted(uuid.UUID, int, time.Time) {
+func (c *countingRecoveryProcessor) OnMessageProcessingStarted(uuid.UUID, int, recovery.Stamp) {
 	c.started.Add(1)
 }
 func (c *countingRecoveryProcessor) OnMessageProcessingEnded(uuid.UUID, int, time.Time) {
 	c.ended.Add(1)
 }
-func (c *countingRecoveryProcessor) OnAliveReceived(int, types.MessageTimestamp, bool, types.MessageInterest) {
+func (c *countingRecoveryProcessor) OnAliveReceived(int, types.MessageTimestamp, recovery.Stamp, bool) {
 }
-func (c *countingRecoveryProcessor) OnSnapshotCompleteReceived(context.Context, uuid.UUID, int, int, types.MessageInterest) error {
+func (c *countingRecoveryProcessor) OnSnapshotCompleteReceived(context.Context, uuid.UUID, int, int) error {
 	return nil
 }
 
-func (c *countingRecoveryProcessor) OnFeedChannelLost(uuid.UUID, types.MessageInterest, time.Time) {}
-func (c *countingRecoveryProcessor) OnFeedChannelRestored(uuid.UUID)                               {}
-func (c *countingRecoveryProcessor) OnFeedSessionGone(uuid.UUID)                                   {}
-func (c *countingRecoveryProcessor) OnClientSessionOpened(uuid.UUID, types.MessageInterest)        {}
+func (c *countingRecoveryProcessor) OnFeedChannelLost(uuid.UUID)     {}
+func (c *countingRecoveryProcessor) OnFeedChannelRestored(uuid.UUID) {}
+func (c *countingRecoveryProcessor) OnFeedSessionGone(uuid.UUID)     {}
+func (c *countingRecoveryProcessor) OnClientSessionOpened(uuid.UUID, types.MessageInterest, recovery.Stamp) {
+}
 
 type erroringMessageBuilder struct{}
 

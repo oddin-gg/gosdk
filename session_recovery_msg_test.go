@@ -9,14 +9,15 @@ import (
 	"github.com/google/uuid"
 
 	feedXML "github.com/oddin-gg/gosdk/internal/feed/xml"
+	"github.com/oddin-gg/gosdk/internal/recovery"
 	"github.com/oddin-gg/gosdk/types"
 )
 
-// TestSession_ProcessFeedMessage_ReportsRecoveryRequestIDs: a message that
-// carries a recovery request id is the replay of a recovery, so the session
-// tells the recovery layer — that is what renews the recovery's snapshot-
-// complete deadline. Live messages carry no id and report nothing.
-func TestSession_ProcessFeedMessage_ReportsRecoveryRequestIDs(t *testing.T) {
+// TestSession_ProcessFeedMessage_ProcessedFactCarriesTheRecoveryRequestID: a
+// message that carries a recovery request id is the replay of a recovery, so the
+// processed fact it leaves says so: that is what puts off the recovery's
+// snapshot-complete deadline. Live messages carry no id.
+func TestSession_ProcessFeedMessage_ProcessedFactCarriesTheRecoveryRequestID(t *testing.T) {
 	id := 4242
 	attrs := func(requestID *int) feedXML.MessageAttributes {
 		return feedXML.MessageAttributes{Product: 3, EventID: "od:match:1", RequestID: requestID}
@@ -45,29 +46,24 @@ func TestSession_ProcessFeedMessage_ReportsRecoveryRequestIDs(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			run := func(requestID *int) []recoveryMsgSeen {
-				rec := &recordingRecoveryProcessor{}
-				o := &oddsFeedSessionImpl{
-					cacheManager:             &spyCacheNotifier{},
-					feedMessageFactory:       &fakeMessageBuilder{builtMessage: oddsChangeStub{}},
-					recoveryMessageProcessor: rec,
-					logger:                   discardLogger(),
-					msgCh:                    make(chan sessionEnvelope, 1),
-					sessionID:                uuid.New(),
-				}
+			run := func(requestID *int) []factEvent {
+				l := &factLog{}
+				o := factSession(l, &stepClock{})
 				fm := &types.FeedMessage{Message: tc.msg(requestID)}
 				o.processFeedMessage(context.Background(), fm, types.AllMessageInterest, nil, false, nil)
-				if p := rec.recoveryMsgs.Load(); p != nil {
-					return *p
+				env := <-o.msgCh
+				if env.settled == nil {
+					t.Fatal("no processed fact rides the envelope")
 				}
-				return nil
+				env.settled()
+				return l.of("processed")
 			}
 			got := run(&id)
-			if len(got) != 1 || got[0] != (recoveryMsgSeen{3, id}) {
-				t.Fatalf("recovery message reports = %+v, want one {3 %d}", got, id)
+			if len(got) != 1 || got[0].producer != 3 || got[0].requestID != id {
+				t.Fatalf("processed facts = %+v, want one of producer 3 and request %d", got, id)
 			}
-			if got := run(nil); len(got) != 0 {
-				t.Fatalf("a live message (no request id) reported %+v", got)
+			if got := run(nil); len(got) != 1 || got[0].requestID != 0 {
+				t.Fatalf("a live message (no request id) left %+v, want one with request id 0", got)
 			}
 		})
 	}
@@ -81,7 +77,7 @@ type processingRecorder struct {
 	endedTS        atomic.Pointer[time.Time]
 }
 
-func (p *processingRecorder) OnMessageProcessingStarted(uuid.UUID, int, time.Time) {
+func (p *processingRecorder) OnMessageProcessingStarted(uuid.UUID, int, recovery.Stamp) {
 	p.started.Add(1)
 }
 

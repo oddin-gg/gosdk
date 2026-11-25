@@ -2,6 +2,7 @@ package recovery
 
 import (
 	"math"
+	"sync"
 	"testing"
 )
 
@@ -54,4 +55,38 @@ func TestMaxRequestID_IsInt32Ceiling(t *testing.T) {
 	if maxRequestID != math.MaxInt32 {
 		t.Fatalf("maxRequestID = %d, want math.MaxInt32 (%d)", maxRequestID, math.MaxInt32)
 	}
+}
+
+func TestGenerator_NextMonotonic(t *testing.T) {
+	g := newGenerator(1)
+	prev := g.next()
+	for i := 0; i < 100; i++ {
+		v := g.next()
+		if v != prev+1 {
+			t.Fatalf("non-monotonic: got %d after %d", v, prev)
+		}
+		prev = v
+	}
+}
+
+func TestGenerator_NextConcurrentUnique(t *testing.T) {
+	g := newGenerator(1)
+	var seen sync.Map
+	var wg sync.WaitGroup
+	const goroutines = 16
+	const perG = 256
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			for j := 0; j < perG; j++ {
+				v := g.next()
+				if _, dup := seen.LoadOrStore(v, struct{}{}); dup {
+					t.Errorf("duplicate id %d", v)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
 }

@@ -346,3 +346,48 @@ func TestMachineHold_RefusedRequestOfAStuckSessionStillFailsAndIsAskedAgain(t *t
 	expectCalls(t, f, pre, 2, "a refusal is not held")
 	expect(t, f.recoveryInfo(pre).Successful(), false, "the refused request's outcome")
 }
+
+// ---- a disabled producer, and several sessions that lost their channels
+
+func TestMachineHold_ProducerDisabledDuringARecoveryIsNotAskedForAgain(t *testing.T) {
+	f := newFeed(t)
+	f.open(1, prematch)
+	f.startFeed()
+	f.alive(pre)
+	r := f.lastSnapshot(pre)
+	f.refuse(r)
+	f.cat.disabled[pre] = true
+	f.runWithAlives(2 * time.Minute)
+	expectCalls(t, f, pre, 1, "a disabled producer asked for again after its backoff")
+}
+
+func TestMachineHold_ProducerDisabledAndSilentIsNotTakenDown(t *testing.T) {
+	f := upWith(t, all)
+	statuses := len(f.statusesOf(pre))
+	f.cat.disabled[pre] = true
+	f.clock.advance(time.Minute)
+	f.m.tick()
+	expect(t, len(f.statusesOf(pre)), statuses, "statuses of the disabled producer")
+	expectDown(t, f, pre, false, "the disabled producer")
+	expectDown(t, f, live, true, "the enabled one, silent for a minute")
+}
+
+func TestMachineHold_RecoveryWaitsForEverySessionThatLostItsChannel(t *testing.T) {
+	f := newFeed(t)
+	f.open(1, all)
+	f.open(2, all)
+	f.open(3, all)
+	f.startFeed()
+	f.bothUp(1, 2, 3)
+	calls := len(f.snapshots(live))
+
+	// a connection drop loses several channels at once
+	f.m.channelLost(sid(2))
+	f.m.channelLost(sid(3))
+	f.alive(live)
+	f.m.channelReopened(sid(2))
+	f.alive(live)
+	expect(t, len(f.snapshots(live)), calls, "recoveries asked for while session 3 awaits its queue")
+	f.m.channelReopened(sid(3))
+	expect(t, len(f.snapshots(live)), calls+1, "recoveries asked for once the last queue is bound")
+}

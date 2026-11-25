@@ -46,11 +46,6 @@ var ErrManagerClosed = fmt.Errorf("recovery: manager closed: %w", sdkerr.ErrClos
 // Open has run (e.g., Connect path was never hit).
 var ErrManagerNotOpen = errors.New("recovery: manager not open")
 
-const (
-	initialDelay = 60 * time.Second
-	tickPeriod   = 10 * time.Second
-)
-
 // HandleGCGracePeriod is the default time a completed *Handle stays
 // queryable via LookupHandle before being garbage-collected. NEXT.md
 // §0 left this as a guess; 5 minutes is generous enough for late
@@ -60,27 +55,23 @@ const HandleGCGracePeriod = 5 * time.Minute
 // lifecycleSession bundles every per-Open allocation into a single
 // pointer-sized atomic value. Open builds locally, then publishes the
 // pointer atomically; Close.Swap(nil) atomically takes ownership for
-// teardown. Concurrent readers (findOrSpawn, emitRecoveryMessage)
-// observe a coherent snapshot or nil — never a half-built struct.
+// teardown. Concurrent readers (emitRecoveryMessage) observe a coherent
+// snapshot or nil, never a half-built struct.
 type lifecycleSession struct {
 	ctx       context.Context
 	cancelCtx context.CancelFunc
 	out       chan types.RecoveryMessage
-	closeCh   chan struct{}
-	// tickDone closes when runTickLoop exits; cleanup joins on it
-	// (ctx-bounded) so Close's nil return means the ticker goroutine
-	// has actually exited, not merely been signalled.
-	tickDone chan struct{}
+	// actor runs the recovery state machine of every producer.
+	actor *recoveryActor
+	// releaseHook stops the producer manager telling the actor of a recovery
+	// start the client sets.
+	releaseHook func()
 }
 
-// Manager is the dispatcher that owns the per-producer actor goroutines
-// and the cross-actor singletons (output channel, request id generator,
-// handles registry).
-//
-// Phase 5 v2 actor model (NEXT.md §11): per-producer state lives inside
-// recoveryActor goroutines. Manager methods are thin — they look up
-// the actor and push events to its inbox. The previous mutex-guarded
-// producerRecoveryData + central manager-locks are gone.
+// Manager is the recovery component: the one recovery actor that runs every
+// producer's recovery state machine, the handles of the event recoveries, and
+// the stream of what the client hears. Its methods are thin: they turn what the
+// feed reports into facts for the actor and return, never waiting for it.
 //
 // Lifecycle (state machine in `state`):
 //
@@ -101,23 +92,19 @@ type Manager struct {
 	sequence        *generator
 
 	// initialSnapshotTime is the lookback window for the FIRST snapshot
-	// recovery of a producer with no recovery cursor
-	// (WithInitialSnapshotTime; Java/.NET parity). Zero means "no
-	// window" — request the producer's full history. Passed as a
-	// constructor arg rather than via config.Config, following the
-	// api-timeout / feed-prefetch wiring precedent.
+	// recovery of a producer with no recovery start
+	// (WithInitialSnapshotTime). Zero means "no window": request the
+	// producer's full history.
 	initialSnapshotTime time.Duration
 
 	// state is the explicit lifecycle gate. Only Open transitions
 	// notOpened → open; only Close transitions any → closed. Once
-	// closed, no actors are spawned, no recover-event commands are
-	// accepted, and session callbacks no-op.
+	// closed, no recover-event commands are accepted, and session
+	// callbacks no-op.
 	state atomic.Int32
 
-	// session bundles ctx, cancelCtx, out, closeCh. Atomic-pointer so
-	// readers see a coherent snapshot or nil. Tickers are LOCAL to
-	// runTickLoop (the goroutine spawned at Open publish) — no
-	// manager field for them.
+	// session bundles ctx, cancelCtx, out and the actor. Atomic-pointer so
+	// readers see a coherent snapshot or nil.
 	session atomic.Pointer[lifecycleSession]
 
 	// lifecycleMu serializes Open's publish step with Close's teardown
@@ -125,92 +112,43 @@ type Manager struct {
 	// mutex — they Load the session pointer atomically.
 	lifecycleMu sync.Mutex
 
-	// actors holds one recoveryActor per known producer. Populated at
-	// Open from ActiveProducers and lazily on first message for
-	// previously-unknown producers.
-	actorsMu sync.RWMutex
-	actors   map[int]*recoveryActor
-
 	// handles tracks outstanding *Handle objects keyed by request id.
 	// Inserted by registerHandle, transitioned to terminal by
-	// completeHandle, GC'd by gcCompletedHandles.
+	// completeHandle, GC'd by gcHandles.
 	handlesMu sync.RWMutex
 	handles   map[int]*Handle
 
-	// messageProcessingTimes maps sessionID → processing start time so
-	// OnMessageProcessingEnded can warn on >1s processing.
-	processingMu    sync.Mutex
-	processingTimes map[uuid.UUID]time.Time
+	// processing holds, per session of the client, when the message it is
+	// processing began: the slow-processing warning needs it, and the actor
+	// reads which sessions have been in one for long.
+	processingMu sync.Mutex
+	processing   map[uuid.UUID]Stamp
 
 	// emitMu serializes drop-oldest writes to sess.out so concurrent
-	// actor goroutines never interleave their try-send / drain / push
+	// writers never interleave their try-send / drain / push
 	// triples. Without this, two senders could observe a full channel,
 	// each drain one value, and each push — net effect: the drained
 	// values include one that was just successfully pushed, silently
 	// losing a fresh message instead of an old one.
 	emitMu sync.Mutex
 
-	// tickDrops counts evTick events dropped because the actor's inbox
-	// was full. Pre-v2.x this was silent — under sustained recovery
-	// load the inactivity check could blind itself. The counter is
-	// monotonic across the manager's lifetime; the warn log is rate-
-	// limited per-producer to one entry per tickDropWarnInterval.
-	tickDrops          atomic.Uint64
-	tickDropWarnMu     sync.Mutex
-	tickDropLastWarnAt map[int]time.Time
-
 	// slowProcessingThrottle bounds the "processing message took more
 	// than 1s" warn: a stalled consumer or a slow dependency makes every
 	// message slow, which used to mean one line per message.
 	slowProcessingThrottle *log.Throttle
-
-	// inboxDrops counts residual lossy inbox drops. NOTE the correctness
-	// inputs no longer flow through the lossy path at all:
-	// snapshot_complete uses reliable ctx-bounded admission (sendCtx),
-	// alive uses the coalesced latest-alive mailbox, and processing
-	// start/end call the thread-safe producer setters directly — so this
-	// counter covers only best-effort notifications.
-	inboxDrops atomic.Uint64
-
-	// channelLosses counts OnFeedChannelLost calls (diagnostics).
-	channelLosses atomic.Uint64
-
-	// lostSessions holds the sessions whose consumer channel was lost
-	// and has not re-bound (or gone away) yet, with their interest. A
-	// producer's snapshot recovery is held back while any session in
-	// its scope is here: a replay published before the queue exists
-	// routes nowhere — and its snapshot_complete with it, which would
-	// stall the recovery until MaxRecoveryExecution, or worse, complete
-	// a recovery whose head was lost and discharge the floor.
-	lostMu       sync.Mutex
-	lostSessions map[uuid.UUID]types.MessageInterest
-
-	// clientSessions holds the open sessions of the client (the alive-only
-	// session has no lane and is not one of them): the only places a
-	// snapshot replay can be delivered to, and the facts each reported.
-	// Added when a session opens, before its first delivery; removed when
-	// its consumer is gone.
-	clientMu       sync.Mutex
-	clientSessions map[uuid.UUID]*sessionRecord
 
 	// clk stamps the facts the manager itself takes; nil reads the system's
 	// clock, and a test sets another.
 	clk Clock
 }
 
-// tickDropWarnInterval bounds how often per-producer tick-drop warns are
-// emitted. The tick period is 10s, so 60s allows up to 6 silent drops
-// per producer before a fresh warn — enough to suppress one-off blips
-// while still surfacing sustained backpressure within a minute.
-const tickDropWarnInterval = 60 * time.Second
-
 // slowProcessingWarnInterval bounds the slow-message-processing warn to
 // one line per interval; the line carries the number of warns held back.
 const slowProcessingWarnInterval = time.Minute
 
 // NewManager constructs the recovery manager. Open(ctx) must be called
-// before any actors are spawned. initialSnapshotTime is the lookback
-// window for cursor-less first snapshot recoveries (zero disables).
+// before anything is reported to it. initialSnapshotTime is the lookback
+// window for a first snapshot recovery with no recovery start (zero disables).
 func NewManager(cfg config.Config, producerManager *producer.Manager, apiClient *api.Client, logger *log.Logger, initialSnapshotTime time.Duration) *Manager {
 	return &Manager{
 		cfg:                 cfg,
@@ -219,65 +157,21 @@ func NewManager(cfg config.Config, producerManager *producer.Manager, apiClient 
 		logger:              logger,
 		initialSnapshotTime: initialSnapshotTime,
 		sequence:            newGenerator(1),
-		actors:              make(map[int]*recoveryActor),
 		handles:             make(map[int]*Handle),
-		processingTimes:     make(map[uuid.UUID]time.Time),
-		tickDropLastWarnAt:  make(map[int]time.Time),
+		processing:          make(map[uuid.UUID]Stamp),
 
 		slowProcessingThrottle: log.NewThrottle(slowProcessingWarnInterval, nil),
 	}
 }
 
-// recordTickDrop is invoked by the tick fan-out loop when an actor's
-// inbox is full. Bumps the monotonic counter and emits a per-producer
-// rate-limited warn so operators can see sustained drops without
-// log-spam from transient blips.
-func (m *Manager) recordTickDrop(producerID int) {
-	m.tickDrops.Add(1)
-	now := time.Now()
-	m.tickDropWarnMu.Lock()
-	last, ok := m.tickDropLastWarnAt[producerID]
-	emit := !ok || now.Sub(last) >= tickDropWarnInterval
-	if emit {
-		m.tickDropLastWarnAt[producerID] = now
-	}
-	m.tickDropWarnMu.Unlock()
-	if emit && m.logger != nil {
-		m.logger.WithField("producer_id", producerID).
-			WithField("total_dropped", m.tickDrops.Load()).
-			Warn("recovery: actor inbox full; tick dropped — inactivity check may be delayed")
-	}
-}
-
-// TickDropCount returns the cumulative number of evTick events dropped
-// because actor inboxes were full. Exposed for diagnostics / tests.
-func (m *Manager) TickDropCount() uint64 {
-	return m.tickDrops.Load()
-}
-
-// InboxDropCount returns the cumulative number of non-tick feed events
-// dropped because actor inboxes were full. Retained for diagnostics /
-// tests; since the correctness inputs left the lossy path
-// (snapshot_complete → reliable admission, alive → coalesced mailbox,
-// processing start/end → direct thread-safe setters) nothing increments
-// it in production and it should stay at zero.
-func (m *Manager) InboxDropCount() uint64 {
-	return m.inboxDrops.Load()
-}
-
-// Open spawns one actor per active producer and starts the periodic
-// inactivity tick. Returns the recovery-events channel.
+// Open starts the recovery actor over the active producers and has it start the
+// feed. Returns the recovery-events channel.
 //
 // ctx bounds the bootstrap (active-producer fetch) and is also used
 // to derive the actor-lifetime context internally via WithoutCancel
-// — actor goroutines outlive the caller's Open ctx so a Subscribe
+// — the actor outlives the caller's Open ctx so a Subscribe
 // timeout doesn't tear down the recovery state machine that's
 // supposed to live for the Client's lifetime.
-//
-// Pre-fix the caller (ensureNormal) passed a WithoutCancel-derived
-// ctx for both purposes, so the bootstrap producer-fetch never
-// honored the user's Subscribe timeout. Now the user's ctx flows
-// through; the lifecycle ctx is derived here.
 //
 // Open is one-shot: once a manager has been Open'd (success or failure)
 // and Close'd, the same instance can't be reopened. The gosdk.Client
@@ -310,19 +204,11 @@ func (m *Manager) Open(ctx context.Context) (<-chan types.RecoveryMessage, error
 
 	// Two ctxs in play:
 	//
-	//   - bootCtx (== ctx): the caller's ctx, used to bound the
-	//     ActiveProducers HTTP fetch below. Honors the user's
-	//     Subscribe timeout.
-	//   - mgrCtx: derived from WithoutCancel(ctx) so the actor
-	//     lifetimes outlive the caller's Open call. Cancelled by
-	//     Manager.Close (via cleanup → sess.cancelCtx).
-	//
-	// Pre-fix both purposes used the caller-provided ctx, but the
-	// caller (ensureNormal) had already WithoutCancel'd it — making
-	// the bootstrap fetch effectively un-cancellable from the user's
-	// Subscribe ctx. The split here lets the user's timeout bound
-	// only the boot work while the actors get a properly
-	// caller-severed lifecycle ctx.
+	//   - ctx: the caller's, used to bound the ActiveProducers HTTP fetch
+	//     below. Honors the user's Subscribe timeout.
+	//   - mgrCtx: derived from WithoutCancel(ctx) so the actor lives past
+	//     the caller's Open call. Cancelled by Manager.Close (via cleanup →
+	//     sess.cancelCtx).
 	mgrCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 
 	activeProducers, err := m.producerManager.ActiveProducers(ctx)
@@ -333,24 +219,18 @@ func (m *Manager) Open(ctx context.Context) (<-chan types.RecoveryMessage, error
 	if len(activeProducers) == 0 {
 		m.logger.Warn("no active producers")
 	}
+	producers := make([]types.Producer, 0, len(activeProducers))
+	for _, p := range activeProducers {
+		producers = append(producers, p)
+	}
 
 	out := make(chan types.RecoveryMessage, 1024)
-	closeCh := make(chan struct{})
-	tickDone := make(chan struct{})
+	actor := newRecoveryActor(mgrCtx, m.cfg, m.apiClient, m.producerManager, m, m.logger, m.clk, producers, m.initialSnapshotTime)
 	sess := &lifecycleSession{
 		ctx:       mgrCtx,
 		cancelCtx: cancel,
 		out:       out,
-		closeCh:   closeCh,
-		tickDone:  tickDone,
-	}
-
-	// Build the actor map locally. We don't insert into m.actors yet —
-	// a concurrent findOrSpawn would observe state==Opening and bail.
-	localActors := make(map[int]*recoveryActor, len(activeProducers))
-	for id := range activeProducers {
-		a := newRecoveryActor(mgrCtx, id, m.cfg, m.apiClient, m.producerManager, m, m.logger, 256, m.initialSnapshotTime)
-		localActors[id] = a
+		actor:     actor,
 	}
 
 	// Publish under lifecycleMu so Close's teardown either runs FIRST
@@ -362,29 +242,19 @@ func (m *Manager) Open(ctx context.Context) (<-chan types.RecoveryMessage, error
 		// Close won the race. Release mu before tearing down locals.
 		m.lifecycleMu.Unlock()
 		cancel()
-		close(closeCh)
 		close(out)
-		// localActors haven't started yet (no goroutines spawned) —
-		// just discard the map.
+		// the actor has not started (no goroutine spawned): just discard it
 		return nil, ErrManagerClosed
 	}
 
 	// Publish session pointer atomically; concurrent Loaders see the
 	// fully-initialised struct or nil.
 	m.session.Store(sess)
-	// Move actors into the manager-visible map.
-	m.actorsMu.Lock()
-	for id, a := range localActors {
-		m.actors[id] = a
-	}
-	m.actorsMu.Unlock()
-	for _, a := range localActors {
-		go a.run() //nolint:contextcheck // actor uses lifetime ctx (a.ctx) wired in newRecoveryActor; per-request ctx flows through evRecoverEvent.ctx and is composed with a.ctx via context.AfterFunc inside dispatch.
-	}
-	go func() {
-		defer close(tickDone)
-		m.runTickLoop(closeCh)
-	}()
+	sess.releaseHook = m.producerManager.SetRecoveryFromHook(func(id int, at time.Time) {
+		actor.postEssential(factRewind{producer: id, to: at})
+	})
+	go actor.run()
+	actor.start()
 
 	// Final CAS Opening → Open under mu. Guaranteed to succeed since
 	// state==Opening when we entered the critical section and Close
@@ -396,7 +266,7 @@ func (m *Manager) Open(ctx context.Context) (<-chan types.RecoveryMessage, error
 		// Defensive — shouldn't be reachable under mu. Tear down via
 		// the same cleanup path Close would use. WithoutCancel: the
 		// teardown must run even if the caller's ctx already fired
-		// (unbounded is fine — the actors were allocated moments ago
+		// (unbounded is fine — the actor was started moments ago
 		// and cannot be wedged yet).
 		m.cleanup(context.WithoutCancel(ctx))
 		m.lifecycleMu.Unlock()
@@ -407,31 +277,31 @@ func (m *Manager) Open(ctx context.Context) (<-chan types.RecoveryMessage, error
 	return out, nil
 }
 
-// Close terminates all actors and the tick loop. Idempotent. Pending
-// handles are failed so callers blocked on Done() unblock.
+// Close terminates the actor. Idempotent. Pending handles are failed so callers
+// blocked on Done() unblock.
 //
 // Race ordering:
 //   - Close marks state==Closed first so late session callbacks
-//     observe Closed and no-op (avoids spawning actors during shutdown).
+//     observe Closed and no-op.
 //   - Cleanup runs under lifecycleMu so a direct Open/Close race —
-//     Close runs while Open is still allocating cancelCtx/out/actors —
-//     resolves cleanly: Close's cleanup sees an empty manager, then
+//     Close runs while Open is still allocating — resolves cleanly:
+//     Close's cleanup sees an empty manager, then
 //     Open's CAS-Opening-to-Open fails and the same cleanup helper
 //     tears down the resources Open just allocated.
 func (m *Manager) Close() {
 	m.CloseCtx(context.Background())
 }
 
-// CloseCtx is Close with the actor joins BOUNDED by ctx, so a wedged
+// CloseCtx is Close with the actor join BOUNDED by ctx, so a wedged
 // actor (stuck handler) can't pin the caller's shutdown budget. Reports
-// whether every actor actually exited; on false the stragglers leak
-// harmlessly — their lifetime ctx and shutdown channel were already
-// signalled, so they exit as soon as whatever they're blocked on
-// unwinds.
+// whether the actor actually exited; on false it leaks
+// harmlessly — its lifetime ctx and shutdown channel were already
+// signalled, so it exits as soon as whatever it's blocked on
+// unwinds. The deadline of ctx is also the actor's own for what it still
+// handles as it closes: the resume points are final when this returns.
 func (m *Manager) CloseCtx(ctx context.Context) bool {
-	// Mark Closed *before* tearing down: late callbacks (session
-	// shutdown racing with Close) observe state==Closed and no-op
-	// instead of spawning new actors.
+	// Mark Closed *before* tearing down: late callbacks
+	// (session shutdown racing with Close) observe state==Closed and no-op.
 	m.state.Store(mgrStateClosed)
 	m.lifecycleMu.Lock()
 	complete := m.cleanup(ctx)
@@ -445,41 +315,30 @@ func (m *Manager) CloseCtx(ctx context.Context) bool {
 // the previous cleanup ran are still cleaned up by the second call —
 // because the second call sees the new session pointer Open published.
 //
-// The ticker is local to runTickLoop (not a manager field) and stops
-// itself when its closeCh closes, so cleanup doesn't need to touch it.
+// The feed is told it is closing before anything else closes: the actor handles
+// the facts it holds with the resume points only going back, then closes the
+// machine. A session that closes after this is no fact of the actor's, so the
+// point a client reads once Close returns does not depend on the order the
+// sessions close in.
 //
-// MUST be called with lifecycleMu held. The actor joins are bounded by
-// ctx; the return reports whether every actor actually exited.
+// MUST be called with lifecycleMu held. The actor join is bounded by ctx; the
+// return reports whether the actor actually exited.
 func (m *Manager) cleanup(ctx context.Context) bool {
 	complete := true
 	if sess := m.session.Swap(nil); sess != nil {
+		if sess.releaseHook != nil {
+			sess.releaseHook()
+		}
+		// cancelled before the actor is told to stop: its requests abort at once
 		if sess.cancelCtx != nil {
 			sess.cancelCtx()
 		}
-		if sess.closeCh != nil {
-			close(sess.closeCh)
-		}
-		// Join the ticker goroutine (ctx-bounded): cancel-without-join
-		// let it briefly outlive Close's nil return, breaking shutdown
-		// determinism. It exits promptly on closeCh; the bound is
-		// belt-and-braces.
-		if sess.tickDone != nil {
-			select {
-			case <-sess.tickDone:
-			case <-ctx.Done():
-				select {
-				case <-sess.tickDone:
-				default:
-					complete = false
-				}
-			}
-		}
-		// out is closed last, after actors have been stopped (below).
+		// out is closed last, after the actor has stopped (below).
 		// The close runs under emitMu, paired with emitRecoveryMessage's
 		// session re-check under the same lock: an emitter mid-push
 		// delays the close until it finishes, and an emitter arriving
-		// after the Swap(nil) above bails on the re-check. Actors are
-		// the sole writers to sess.out (via emitRecoveryMessage).
+		// after the Swap(nil) above bails on the re-check. The actor is
+		// the sole writer to sess.out (via emitRecoveryMessage).
 		defer func() {
 			if sess.out != nil {
 				m.emitMu.Lock()
@@ -487,19 +346,7 @@ func (m *Manager) cleanup(ctx context.Context) bool {
 				m.emitMu.Unlock()
 			}
 		}()
-	}
-
-	// Stop every actor (idempotent). Reset the map so a subsequent
-	// cleanup() doesn't re-stop the same actors.
-	m.actorsMu.Lock()
-	actors := make([]*recoveryActor, 0, len(m.actors))
-	for _, a := range m.actors {
-		actors = append(actors, a)
-	}
-	m.actors = make(map[int]*recoveryActor)
-	m.actorsMu.Unlock()
-	for _, a := range actors {
-		if !a.stopBounded(ctx) {
+		if sess.actor != nil && !sess.actor.stopBounded(ctx) {
 			complete = false
 		}
 	}
@@ -515,488 +362,204 @@ func (m *Manager) cleanup(ctx context.Context) bool {
 	return complete
 }
 
-// runTickLoop drives the periodic inactivity check by fanning out
-// evTick events to every actor. Lossy: if an actor's inbox is full
-// (which would only happen if it's blocked on the API), the tick is
-// dropped — the next tick arrives in tickPeriod.
-//
-// closeCh is captured at goroutine spawn time (passed by Open). The
-// ticker is local — the loop owns it via defer. No manager fields
-// shared with cleanup(), so the loop is race-isolated from teardown.
-func (m *Manager) runTickLoop(closeCh <-chan struct{}) {
-	// Start ticking immediately rather than after initialDelay: the tick
-	// also drives MaxRecoveryExecution expiry (actor.expireStuckEventRecoveries),
-	// and a full initialDelay before the FIRST scan would let a short
-	// recovery overshoot its cap by up to that delay (~60s). The
-	// producer-down inactivity check still needs the warm-up — no alive
-	// baseline exists yet — so it stays gated by inactivityArmed until
-	// initialDelay has elapsed. Net: expiry lag is bounded by tickPeriod,
-	// producer-down timing is unchanged.
-	ticker := time.NewTicker(tickPeriod)
-	defer ticker.Stop()
-	start := time.Now()
-	for {
-		select {
-		case <-ticker.C:
-			now := time.Now()
-			inactivityArmed := now.Sub(start) >= initialDelay
-			m.actorsMu.RLock()
-			actors := make([]*recoveryActor, 0, len(m.actors))
-			for _, a := range m.actors {
-				actors = append(actors, a)
-			}
-			m.actorsMu.RUnlock()
-			for _, a := range actors {
-				if !a.send(evTick{now: now, inactivityArmed: inactivityArmed}) {
-					// Inbox full — actor is wedged on a slow handler or
-					// flooded with alives/recovery events. Ticks are
-					// designed to be lossy (next tick arrives in 10s),
-					// but a sustained drop blinds the inactivity check.
-					// Surface a rate-limited warn + counter so operators
-					// can see it, instead of dropping silently.
-					m.recordTickDrop(a.producerID)
-				}
-			}
-			m.gcCompletedHandles(now)
-		case <-closeCh:
-			return
-		}
+// actor is the running actor, nil before Open and once the manager has closed.
+func (m *Manager) actor() *recoveryActor {
+	if m.state.Load() != mgrStateOpen {
+		return nil
 	}
+	if sess := m.session.Load(); sess != nil {
+		return sess.actor
+	}
+	return nil
 }
 
 // ProducerStatus returns the most recent producer-status snapshot
-// recorded by the per-producer actor, or (nil, false) if no actor
-// exists for the id or the actor has not yet emitted a status. The
-// snapshot survives lossy-channel drops on RecoveryEvents.
+// the actor published, or (nil, false) if it has published none for the
+// id. The snapshot survives lossy-channel drops on RecoveryEvents.
 func (m *Manager) ProducerStatus(producerID int) (types.ProducerStatus, bool) {
-	m.actorsMu.RLock()
-	a, ok := m.actors[producerID]
-	m.actorsMu.RUnlock()
-	if !ok {
+	sess := m.session.Load()
+	if sess == nil || sess.actor == nil {
 		return nil, false
 	}
-	if s := a.currentStatus(); s != nil {
+	if s := sess.actor.currentStatus(producerID); s != nil {
 		return s, true
 	}
 	return nil, false
 }
 
-// findOrSpawn returns the actor for producerID, lazily spawning one
-// if a message arrives for a producer not in the initial set. Returns
-// nil when the manager has been Closed (or hasn't yet been Open'd) —
-// callers must handle this explicitly to avoid spawning actors that
-// will never be cleaned up.
-func (m *Manager) findOrSpawn(producerID int) *recoveryActor {
-	if m.state.Load() != mgrStateOpen {
-		return nil
-	}
-	m.actorsMu.RLock()
-	a, ok := m.actors[producerID]
-	m.actorsMu.RUnlock()
-	if ok {
-		return a
-	}
-	m.actorsMu.Lock()
-	defer m.actorsMu.Unlock()
-	// Re-check state under the write lock to close the race with Close
-	// observing actorsMu while iterating actors to stop them.
-	if m.state.Load() != mgrStateOpen {
-		return nil
-	}
-	if a, ok = m.actors[producerID]; ok {
-		return a
-	}
-	// Snapshot the session pointer atomically. State==Open implies
-	// session was published (Open assigns session before the final
-	// CAS). A concurrent Close could Swap(nil) between our state
-	// check and this Load, in which case we bail.
-	sess := m.session.Load()
-	if sess == nil {
-		return nil
-	}
-	a = newRecoveryActor(sess.ctx, producerID, m.cfg, m.apiClient, m.producerManager, m, m.logger, 256, m.initialSnapshotTime)
-	m.actors[producerID] = a
-	go a.run()
-	return a
-}
-
 // --- Inbound feed events (called from session.go on the AMQP path) ---
 
-// OnMessageProcessingStarted records the per-session start time and
-// dispatches to the actor. Called for the sessions of the client only: the
-// SDK's own alive-only session is not the client's processing and reports
-// nothing (the processed cursor and the in-processing count mean "how far
-// the client got"). No-op when the manager has been Closed
+// OnMessageProcessingStarted records when the session began a message of the
+// client and moves the producer's last-message timestamp. Called for the
+// sessions of the client only: the SDK's own alive-only session is not the
+// client's processing and reports nothing. No-op when the manager is not open
 // (callbacks may fire from sessions racing with shutdown).
-func (m *Manager) OnMessageProcessingStarted(sessionID uuid.UUID, producerID int, timestamp time.Time) {
+func (m *Manager) OnMessageProcessingStarted(sessionID uuid.UUID, producerID int, taken Stamp) {
 	m.processingMu.Lock()
-	m.processingTimes[sessionID] = timestamp
+	m.processing[sessionID] = taken
 	m.processingMu.Unlock()
 
-	if a := m.findOrSpawn(producerID); a != nil {
-		// Direct call, no inbox: the handler touches only thread-safe
-		// producer.Manager setters, and routing it through the inbox let
-		// a full inbox PERMANENTLY drop this correctness input — leaving
-		// recovery cursors / liveness stale under pressure.
-		a.onMessageProcessingStarted(timestamp)
+	if m.actor() == nil {
+		return
+	}
+	if taken.Wall().IsZero() {
+		m.logger.WithField("producer_id", producerID).Warn("recovery: processing started with zero timestamp")
+		return
+	}
+	if err := m.producerManager.SetProducerLastMessageTimestamp(producerID, taken.Wall()); err != nil {
+		m.logger.WithError(err).WithField("producer_id", producerID).Error("recovery: set producer last message timestamp")
 	}
 }
 
-// OnRecoveryMessageReceived records that a feed message carrying a
-// recovery request id arrived for the producer: the recovery is alive, so
-// its snapshot-complete deadline restarts. Direct thread-safe call, no
-// inbox (a full inbox must not make a live recovery look silent); a no-op
-// when the manager is closed. Called for every message with a request id,
-// before the message is built, so a slow build cannot delay the signal.
-func (m *Manager) OnRecoveryMessageReceived(producerID int, requestID int) {
-	if a := m.findOrSpawn(producerID); a != nil {
-		a.noteRecoveryMessage(requestID, time.Now())
-	}
-}
-
-// OnMessageProcessingEnded warns on >1s processing and dispatches the
-// gen timestamp to the actor.
+// OnMessageProcessingEnded warns on >1s processing and moves the producer's
+// last-processed timestamp to the message's gen timestamp; a zero timestamp (a
+// message whose build or send failed) moves nothing, but the message is out of
+// processing all the same.
 func (m *Manager) OnMessageProcessingEnded(sessionID uuid.UUID, producerID int, timestamp time.Time) {
-	if a := m.findOrSpawn(producerID); a != nil {
-		// Direct call — same rationale as OnMessageProcessingStarted. A
-		// zero timestamp (a message whose build or send failed) reaches the
-		// actor too: it advances no cursor, but the message is out of
-		// processing.
-		a.onMessageProcessingEnded(timestamp)
-	}
-
 	m.processingMu.Lock()
-	start, ok := m.processingTimes[sessionID]
-	delete(m.processingTimes, sessionID)
+	started, ok := m.processing[sessionID]
+	delete(m.processing, sessionID)
 	m.processingMu.Unlock()
 
+	if m.actor() != nil && !timestamp.IsZero() {
+		if err := m.producerManager.SetLastProcessedMessageGenTimestamp(producerID, timestamp); err != nil {
+			m.logger.WithError(err).WithField("producer_id", producerID).Error("recovery: set last processed gen timestamp")
+		}
+	}
+
+	elapsed := m.clock().Now().Mono() - started.Mono()
 	switch {
-	case !ok || start.IsZero():
+	case !ok:
 		m.logger.Warn("message processing ended, but was not started")
-	case time.Since(start).Milliseconds() > 1000:
+	case elapsed.Milliseconds() > 1000:
 		if suppressed, ok := m.slowProcessingThrottle.Allow(); ok {
 			l := m.logger
 			if suppressed > 0 {
 				l = l.WithField("suppressed", suppressed)
 			}
-			l.Warnf("processing message took more than 1s - %d ms", time.Since(start).Milliseconds())
+			l.Warnf("processing message took more than 1s - %d ms", elapsed.Milliseconds())
 		}
 	}
 }
 
-// OnFeedChannelLost tells the known producer actors that a live consumer
-// channel — and with it its exclusive, auto-delete queue — was lost at
-// lostAt, whether with the whole AMQP connection or alone on a
-// channel-level exception. Everything published until the consumer
-// re-binds is gone from the broker; each affected actor flags its
-// producer down (ConnectionDown) and floors its recovery at the
-// earlier of its current recovery cursor and lostAt, so the next system
-// alive starts a snapshot recovery that covers the gap — whatever order
-// this notice and that alive arrive in.
-//
-// Scope: only producers the lost session could have been receiving —
-// messageInterest.IsProducerInScope, the same filter the session applies
-// to deliveries. A LiveOnly session's loss must not fail a prematch
-// producer's in-flight event recoveries or force it through a snapshot
-// it does not need. The alive-only session's loss counts for EVERY
-// producer: a connection drop kills its channel too, and its consumer is
-// never parked behind a slow reader, so it is the promptest signal of a
-// drop — at the price of one snapshot recovery when only the alive
-// channel dies alone. A producer whose catalog entry cannot be read is
-// flagged anyway (the conservative answer). Only actors that exist are
-// told — an actor is spawned by the first alive/message of its producer,
-// and a producer never seen has never recovered, so its first alive
-// recovers regardless. A no-op before Open (replay-only clients never
-// open the recovery manager).
-//
-// Runs on the consumer's goroutine between losing the queue and
-// re-binding it, so it must not do I/O: the catalog read is the cached
-// one.
-func (m *Manager) OnFeedChannelLost(session uuid.UUID, messageInterest types.MessageInterest, lostAt time.Time) {
-	m.channelLosses.Add(1)
-	if m.state.Load() != mgrStateOpen {
-		return
+// processingSince is the sessions that have a message of the client in
+// processing, and since when on the monotonic clock.
+func (m *Manager) processingSince() map[uuid.UUID]time.Duration {
+	m.processingMu.Lock()
+	defer m.processingMu.Unlock()
+	out := make(map[uuid.UUID]time.Duration, len(m.processing))
+	for id, taken := range m.processing {
+		out[id] = taken.Mono()
 	}
-	// Register the loss BEFORE any actor can react to it, so an alive
-	// processed right after the flag-down already sees the rebind as
-	// pending.
-	m.lostMu.Lock()
-	if m.lostSessions == nil {
-		m.lostSessions = make(map[uuid.UUID]types.MessageInterest)
-	}
-	m.lostSessions[session] = messageInterest
-	m.lostMu.Unlock()
-
-	m.actorsMu.RLock()
-	actors := make([]*recoveryActor, 0, len(m.actors))
-	for _, a := range m.actors {
-		actors = append(actors, a)
-	}
-	m.actorsMu.RUnlock()
-	for _, a := range actors {
-		if prod, err := m.producerManager.GetProducerCached(a.producerID); err == nil && !messageInterest.IsProducerInScope(prod) {
-			continue
-		}
-		a.enqueueChannelLost(lostAt)
-	}
+	return out
 }
 
-// ChannelLossCount reports how many consumer-channel losses were
-// signalled to the manager over its lifetime (opened or not).
-func (m *Manager) ChannelLossCount() uint64 { return m.channelLosses.Load() }
-
-// OnFeedChannelRestored reports that a lost session's consumer has
-// re-declared and re-bound its queue: recoveries held back for the
-// producers in its scope may now start.
-func (m *Manager) OnFeedChannelRestored(session uuid.UUID) { m.sessionQueueSettled(session) }
-
-// OnFeedSessionGone reports that a session's consumer exited for good.
-// It needs no queue, so it must not hold recoveries back.
-func (m *Manager) OnFeedSessionGone(session uuid.UUID) {
-	m.clientMu.Lock()
-	delete(m.clientSessions, session)
-	m.clientMu.Unlock()
-	m.sessionQueueSettled(session)
-}
-
-// OnClientSessionOpened registers a session of the client with its
-// interest and the producers it covers:
-// from now on its scope counts as one a replay can reach. A session
-// registers before its consumer starts, so before its first delivery.
+// OnClientSessionOpened registers a session of the client with its interest,
+// before its consumer starts and so before its first delivery. openedAt is a
+// reading of the clock taken before the session's queue is bound: no message in
+// the queue is older than it. The session awaits its queue until
+// OnFeedChannelRestored says it is bound; nothing is asked for its producers
+// before.
 //
 // A session with the alive-only interest is never registered: it has no
 // lane, receives no replay and takes no snapshot_complete, so it holds no
 // recovery and loses nothing. That is the SDK's own alive session and a
 // client's alive-only subscription alike.
-func (m *Manager) OnClientSessionOpened(session uuid.UUID, messageInterest types.MessageInterest) {
+func (m *Manager) OnClientSessionOpened(session uuid.UUID, messageInterest types.MessageInterest, openedAt Stamp) {
 	if !hasLane(messageInterest) {
 		return
 	}
-	producers := m.producersOfInterest(messageInterest)
-	m.clientMu.Lock()
-	if m.clientSessions == nil {
-		m.clientSessions = make(map[uuid.UUID]*sessionRecord)
+	if a := m.actor(); a != nil {
+		a.postEssential(factOpened{session: session, interest: messageInterest, at: openedAt})
 	}
-	m.clientSessions[session] = &sessionRecord{
-		id:               session,
-		interest:         messageInterest,
-		producers:        producers,
-		processed:        make(map[int]processedFact),
-		alive:            make(map[int]aliveFact),
-		snapshotComplete: make(map[int]snapshotCompleteFact),
-	}
-	m.clientMu.Unlock()
 }
 
-// clientSessionsCanComplete reports whether the open client sessions can
-// complete the recovery of the producer: whether its snapshot_complete
-// can reach the client in a form the recovery accepts. That is so when a
-// session with the producer in scope needs no per-scope validation (any
-// interest but LiveOnly and PrematchOnly: one snapshot_complete ends the
-// recovery), or when the LiveOnly and PrematchOnly sessions in scope
-// together cover every scope of the producer, since such a recovery ends
-// only once each of its scopes has had its own snapshot_complete. A
-// mixed live|prematch producer with only a LiveOnly session open is
-// therefore not completable: its replay arrives, the prematch half is
-// dropped, and a re-request would change nothing. A producer missing
-// from the catalog is the catalog's placeholder, which has both scopes,
-// so it is judged like a mixed producer, as the sessions filter it; only
-// when the catalog cannot be read at all (before Open) does any open
-// session count as able to complete it (the conservative answer: keep
-// re-requesting rather than give up).
-func (m *Manager) clientSessionsCanComplete(producerID int) bool {
-	interests := m.clientInterests()
-	if len(interests) == 0 {
-		return false
+// OnFeedChannelLost reports that a session's consumer channel, and with it its
+// exclusive, auto-delete queue, was lost, whether with the whole AMQP
+// connection or alone on a channel-level exception. Everything published until
+// the consumer re-binds is gone from the broker: the producers the session
+// receives are down until a recovery brings it back. Runs on the consumer's
+// goroutine between losing the queue and re-binding it, so it only posts. The
+// SDK's own alive channel is no session of the actor's: losing it alone opens no
+// gap.
+func (m *Manager) OnFeedChannelLost(session uuid.UUID) {
+	if a := m.actor(); a != nil {
+		a.postEssential(factChannelLost{session: session})
 	}
-	prod, err := m.producerManager.GetProducerCached(producerID)
-	if err != nil {
-		return true
-	}
-	covered := make(map[types.MessageInterest]bool, 2)
-	inScope := false
-	for _, mi := range interests {
-		if !mi.IsProducerInScope(prod) {
-			continue
-		}
-		inScope = true
-		if !snapshotValidationNeeded(mi) {
-			return true
-		}
-		covered[mi] = true
-	}
-	if !inScope {
-		return false
-	}
-	for _, scope := range prod.ProducerScopes() {
-		want, ok := scopeSnapshotInterest(scope)
-		if !ok {
-			return true
-		}
-		if !covered[want] {
-			return false
-		}
-	}
-	return true
 }
 
-// clientInterests copies the interests of the open client sessions, so
-// the producer catalog is asked without the registry locked.
-func (m *Manager) clientInterests() []types.MessageInterest {
-	m.clientMu.Lock()
-	defer m.clientMu.Unlock()
-	out := make([]types.MessageInterest, 0, len(m.clientSessions))
-	for _, rec := range m.clientSessions {
-		out = append(out, rec.interest)
+// OnFeedChannelRestored reports that a session's queue is bound: after its
+// first open, and after a loss, when its consumer has re-declared and re-bound
+// it. What the session's producers miss is asked for from now on.
+func (m *Manager) OnFeedChannelRestored(session uuid.UUID) {
+	if a := m.actor(); a != nil {
+		a.postEssential(factChannelReopened{session: session})
 	}
-	return out
 }
 
-func (m *Manager) sessionQueueSettled(session uuid.UUID) {
-	m.lostMu.Lock()
-	mi, wasLost := m.lostSessions[session]
-	delete(m.lostSessions, session)
-	m.lostMu.Unlock()
-	if !wasLost || m.state.Load() != mgrStateOpen {
+// OnFeedSessionGone reports that a session's consumer exited for good, or never
+// opened. It needs no queue, so it must not hold recoveries back.
+func (m *Manager) OnFeedSessionGone(session uuid.UUID) {
+	if a := m.actor(); a != nil {
+		a.postEssential(factClosed{session: session})
+	}
+}
+
+// OnMessageProcessed reports that the session has finished with a message of the
+// producer: the client holds it and its ack has run (an ack that failed
+// is logged, and the fact is posted all the same). It is a sample: posted when
+// the delivery is settled, not when the session has merely read it, and dropped
+// when the actor's sample queue is full.
+//
+// generatedAt is the message's timestamp by the producer's clock, taken is
+// when the session began processing it, and requestID the recovery it
+// belongs to (0 for a live message).
+func (m *Manager) OnMessageProcessed(session uuid.UUID, producerID int, generatedAt time.Time, taken Stamp, requestID int) {
+	if a := m.actor(); a != nil {
+		a.postSample(factProcessed{session: session, producer: producerID, generatedAt: generatedAt, taken: taken, requestID: requestID})
+	}
+}
+
+// OnSessionAlive reports an alive of the producer that a session of the client
+// has finished, with the instant it was taken: the sign the client side is
+// getting messages. The alive-only session reports its alives through
+// OnAliveReceived, which is the alive channel of the SDK and bound to no
+// session. A sample, like OnMessageProcessed.
+func (m *Manager) OnSessionAlive(session uuid.UUID, producerID int, generatedAt time.Time, taken Stamp, isSubscribed bool) {
+	if a := m.actor(); a != nil {
+		a.postSample(factSessionAlive{session: session, producer: producerID, generatedAt: generatedAt, taken: taken, subscribed: isSubscribed})
+	}
+}
+
+// OnAliveReceived reports an alive of the SDK's own alive channel: the producer
+// is there. It joins its producer's slot, which the actor takes once, so a full
+// queue can only delay an alive, never drop it. received is when the session
+// took it; the producer's last-message timestamp moves to the one the feed
+// stamped on it.
+func (m *Manager) OnAliveReceived(producerID int, timestamp types.MessageTimestamp, received Stamp, isSubscribed bool) {
+	a := m.actor()
+	if a == nil {
 		return
 	}
-	m.actorsMu.RLock()
-	actors := make([]*recoveryActor, 0, len(m.actors))
-	for _, a := range m.actors {
-		actors = append(actors, a)
-	}
-	m.actorsMu.RUnlock()
-	for _, a := range actors {
-		if prod, err := m.producerManager.GetProducerCached(a.producerID); err == nil && !mi.IsProducerInScope(prod) {
-			continue
+	if enabled, err := m.producerManager.IsProducerEnabled(a.ctx, producerID); err == nil && enabled {
+		if err := m.producerManager.SetProducerLastMessageTimestamp(producerID, timestamp.Received); err != nil {
+			m.logger.WithError(err).WithField("producer_id", producerID).Error("recovery: set producer last message timestamp")
 		}
-		a.send(evChannelRebound{}) // lossy nudge; the tick is the fallback
 	}
+	a.onAlive(producerID, timestamp.Created, received, isSubscribed)
 }
 
-// clientProcessingStalled reports whether a client session that can
-// receive the producer's replay has had one message in processing for
-// longer than stalledAfter at now (the SDK's alive-only session reports
-// none). A busy client always has some message in processing; only one
-// that has stayed there that long says the session's queue is stuck
-// behind it. A session whose interest has not the producer in scope
-// drains its own queue, whatever the stuck one holds, so it does not
-// count: a LiveOnly session stuck on a live message must not hold the
-// deadline of a prematch producer replaying to a healthy session. A
-// session missing from the registry counts, and so does every stalled
-// session while the catalog cannot be read (the conservative answer:
-// hold the deadline).
-//
-// The two registries have their own mutexes and are never locked
-// together, nor while the producer catalog is asked: the stalled
-// sessions are copied out of one, then looked up in the other.
-func (m *Manager) clientProcessingStalled(producerID int, now time.Time, stalledAfter time.Duration) bool {
-	m.processingMu.Lock()
-	var stalled []uuid.UUID
-	for session, started := range m.processingTimes {
-		if !started.IsZero() && now.Sub(started) > stalledAfter {
-			stalled = append(stalled, session)
-		}
+// OnSnapshotCompleteReceived admits a snapshot_complete a session took to the
+// actor. It is a correctness event, never dropped: it returns nil once it is in
+// (or when it is of a request this feed never asked for, which completes nothing),
+// and the delivery may be acked; a non-nil error says the manager is closed, and
+// the caller must leave the delivery unacked for the broker to redeliver.
+func (m *Manager) OnSnapshotCompleteReceived(_ context.Context, session uuid.UUID, producerID int, requestID int) error {
+	a := m.actor()
+	if a == nil {
+		return ErrManagerClosed
 	}
-	m.processingMu.Unlock()
-	if len(stalled) == 0 {
-		return false
-	}
-
-	interests := make([]types.MessageInterest, 0, len(stalled))
-	m.clientMu.Lock()
-	for _, session := range stalled {
-		rec, ok := m.clientSessions[session]
-		if !ok {
-			m.clientMu.Unlock()
-			return true
-		}
-		interests = append(interests, rec.interest)
-	}
-	m.clientMu.Unlock()
-
-	prod, err := m.producerManager.GetProducerCached(producerID)
-	if err != nil {
-		return true
-	}
-	for _, mi := range interests {
-		if mi.IsProducerInScope(prod) {
-			return true
-		}
-	}
-	return false
-}
-
-// rebindPending reports whether any lost session whose interest covers
-// producerID has not re-bound its queue yet. A producer the catalog
-// cannot describe is treated as covered (the conservative answer: hold
-// the recovery rather than replay into a missing queue).
-func (m *Manager) rebindPending(producerID int) bool {
-	m.lostMu.Lock()
-	defer m.lostMu.Unlock()
-	if len(m.lostSessions) == 0 {
-		return false
-	}
-	prod, err := m.producerManager.GetProducerCached(producerID)
-	for _, mi := range m.lostSessions {
-		if err != nil || mi.IsProducerInScope(prod) {
-			return true
-		}
-	}
-	return false
-}
-
-// OnAliveReceived dispatches to the producer's actor via the COALESCED
-// latest-alive mailbox: a full inbox can only delay an alive, never
-// permanently drop it (pre-fix a dropped alive left liveness stale, and
-// a tick admitted after a slot opened could falsely flag the producer
-// down before the fresh state arrived).
-func (m *Manager) OnAliveReceived(producerID int, timestamp types.MessageTimestamp, isSubscribed bool, messageInterest types.MessageInterest) {
-	if a := m.findOrSpawn(producerID); a != nil {
-		a.enqueueAlive(evAlive{
-			timestamp:       timestamp,
-			isSubscribed:    isSubscribed,
-			messageInterest: messageInterest,
-		})
-	}
-}
-
-// OnSnapshotCompleteReceived admits a snapshot-complete to the producer's
-// actor with ctx-bounded backpressure — it is a correctness event, not a
-// lossy observability one, so it must NOT be silently dropped when the
-// inbox is full. Returns nil once the event is admitted (delivery may be
-// acked), or a non-nil error when ctx cancels or the manager is shutting
-// down (caller must leave the delivery unacked for redelivery).
-//
-// An unknown producer is a no-op success: there is no recovery to
-// complete, so the delivery can be acked.
-func (m *Manager) OnSnapshotCompleteReceived(ctx context.Context, session uuid.UUID, producerID int, requestID int, messageInterest types.MessageInterest) error {
-	err := m.admitSnapshotComplete(ctx, producerID, requestID, messageInterest)
-	if err == nil {
-		m.recordSnapshotComplete(session, producerID, requestID)
-	}
-	return err
-}
-
-func (m *Manager) admitSnapshotComplete(ctx context.Context, producerID int, requestID int, messageInterest types.MessageInterest) error {
-	m.actorsMu.RLock()
-	a, ok := m.actors[producerID]
-	m.actorsMu.RUnlock()
-	if !ok {
-		// Distinguish "genuinely unknown producer" (no recovery to
-		// complete → safe to ack) from "actor map already reset by
-		// shutdown" (completion unprocessable → must NOT be acked).
-		// CloseCtx stores mgrStateClosed BEFORE cleanup resets the map
-		// (and the map reset's actorsMu section orders that store before
-		// our RLock read), so a lookup that misses because of teardown
-		// always observes a non-Open state here; the delivery then stays
-		// unacked and the broker redelivers it.
-		if m.state.Load() != mgrStateOpen {
-			return ErrManagerClosed
-		}
-		return nil // unknown producer; nothing to validate, safe to ack
-	}
-	return a.sendCtx(ctx, evSnapshotComplete{requestID: requestID, messageInterest: messageInterest})
+	return a.onSnapshotComplete(session, producerID, requestID)
 }
 
 // --- Synchronous commands ---
@@ -1015,74 +578,50 @@ func (m *Manager) InitiateEventStatefulRecoveryHandle(ctx context.Context, produ
 func (m *Manager) dispatchRecoverEvent(ctx context.Context, producerID int, eventID types.URN, stateful bool) (*Handle, error) {
 	switch m.state.Load() {
 	case mgrStateNotOpened, mgrStateOpening:
-		// Opening is "not yet ready" — fields the actor would touch
-		// (m.ctx, m.out, …) might be half-initialized. Return
-		// ErrManagerNotOpen consistently so callers retry rather than
-		// fail terminally.
+		// Opening is "not yet ready": return ErrManagerNotOpen
+		// consistently so callers retry rather than fail terminally.
 		return nil, ErrManagerNotOpen
 	case mgrStateClosed:
 		return nil, ErrManagerClosed
 	}
-	// Validate catalog membership BEFORE spawning: findOrSpawn
-	// allocates a 256-slot inbox, registers the actor in the map, and
-	// starts its goroutine — pre-fix an invalid producer id did all of
-	// that, the recover command then failed with ErrProducerNotFound
-	// inside the actor, and the dead-weight actor (map entry,
-	// goroutine, tick work, post-warm-up error logging) lived until
-	// Client shutdown. Repeated calls with distinct invalid ids grew
-	// all of it without bound.
+	// Validate catalog membership BEFORE queueing: an invalid producer id must
+	// not cost the actor a command.
 	if _, err := m.producerManager.GetProducer(ctx, producerID); err != nil {
 		return nil, fmt.Errorf("recovery: validate producer %d: %w", producerID, err)
 	}
-	a := m.findOrSpawn(producerID) //nolint:contextcheck // findOrSpawn may spawn an actor; the actor uses its own lifetime ctx, not this caller's. Per-request ctx flows via evRecoverEvent.ctx below and is composed with the actor lifetime ctx inside dispatch.
+	a := m.actor()
 	if a == nil {
-		// Manager raced into Closed between the state check and
-		// findOrSpawn — surface the same error.
+		// Manager raced into Closed between the state check and the actor lookup.
 		return nil, ErrManagerClosed
 	}
-	reply := make(chan recoverEventReply, 1)
-	// sendCtxCommand, not sendCtx: a successful admission of the
-	// recover COMMAND is acceptance — the reply/actor-done wait below
-	// resolves whether it ran (handle) or was stranded by shutdown
-	// (ErrManagerClosed, then truthfully nothing was issued). The
-	// conservative post-admission shutdown re-check in sendCtx is for
-	// idempotent redeliverable notifications only; applied here it
-	// could report ErrManagerClosed for a command the shutdown drain
-	// still dispatches — handle registered, POST potentially issued —
-	// and a retrying caller would duplicate the recovery.
-	if err := a.sendCtxCommand(ctx, evRecoverEvent{
-		ctx:              ctx,
-		eventID:          eventID,
-		statefulRecovery: stateful,
-		reply:            reply,
-	}); err != nil {
+	cmd := &recoverEventCommand{
+		producerID: producerID,
+		eventID:    eventID,
+		stateful:   stateful,
+		reply:      make(chan recoverEventReply, 1),
+	}
+	// Admission: a nil error is acceptance, and the wait below resolves whether the
+	// command ran (a handle) or was refused by the close (ErrManagerClosed,
+	// truthfully nothing was issued).
+	if err := a.postCommand(ctx, cmd); err != nil {
 		return nil, err
 	}
-	// Admission succeeded — from here the reply is GUARANTEED and prompt:
-	// onRecoverEvent replies synchronously into the buffered chan before
-	// dispatching the (detached) API call, every other handler is
-	// short (no inline I/O), and run() drains admitted events even when
-	// shutdown races the admission. Deliberately NO ctx.Done() arm here:
-	// the caller's ctx bounds ADMISSION only. Honoring it in this wait
-	// made "nil handle + ctx.Err()" a lie — the actor registered the
-	// recovery and started the detached POST anyway (rooted at the actor
-	// lifetime, by design), so a caller retrying after the cancellation
-	// initiated a DUPLICATE recovery, contradicting the documented
-	// "error ⇒ recovery was not accepted" contract. Post-admission
-	// cancellation now returns the live handle instead.
+	// Admission succeeded: from here the reply is GUARANTEED and prompt: the
+	// actor answers a command synchronously, before the REST request goes out,
+	// and its close answers the ones it did not run. Deliberately NO ctx.Done()
+	// arm here: the caller's ctx bounds ADMISSION only. Honoring it in this wait
+	// would make "nil handle + ctx.Err()" a lie, since the actor registers the
+	// recovery and starts the request anyway, and a caller retrying after the
+	// cancellation would start a DUPLICATE recovery, contradicting the documented
+	// "error means the recovery was not accepted" contract.
 	select {
-	case r := <-reply:
+	case r := <-cmd.reply:
 		return r.handle, r.err
 	case <-a.done:
-		// Actor exited. Its shutdown drain dispatches admitted events
-		// before run() returns, so the reply is normally already
-		// buffered — drain it non-blocking; the handle (if any) has been
-		// failed by failPendingHandles/cleanup. An empty reply chan means
-		// the drain-vs-admission race was resolved by sendCtx reporting
-		// ErrManagerClosed, so this arm is belt-and-braces for a caller
-		// with a non-cancellable ctx racing client.Close.
+		// The actor exited. Its close answers every command it took, so the
+		// reply is normally already buffered: drain it non-blocking.
 		select {
-		case r := <-reply:
+		case r := <-cmd.reply:
 			return r.handle, r.err
 		default:
 			return nil, ErrManagerClosed
@@ -1122,7 +661,7 @@ func (m *Manager) completeHandle(requestID int, status types.RecoveryRequestStat
 	return h
 }
 
-func (m *Manager) gcCompletedHandles(now time.Time) {
+func (m *Manager) gcHandles(now time.Time) {
 	m.handlesMu.Lock()
 	defer m.handlesMu.Unlock()
 	for id, h := range m.handles {
@@ -1149,7 +688,7 @@ func (m *Manager) failPendingHandles(err error) {
 	}
 }
 
-// --- actorManagerOps ---
+// --- what the actor uses of the manager ---
 
 // nextRequestID is the actorManagerOps method backed by the shared
 // generator. Generator is internally locked.

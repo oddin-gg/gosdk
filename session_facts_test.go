@@ -61,17 +61,14 @@ func (l *factLog) of(kind string) []factEvent {
 	return out
 }
 
-func (l *factLog) OnFeedChannelLost(uuid.UUID, types.MessageInterest, time.Time) {}
-func (l *factLog) OnFeedChannelRestored(uuid.UUID)                               {}
-func (l *factLog) OnFeedSessionGone(s uuid.UUID)                                 { l.add(factEvent{kind: "gone", session: s}) }
-func (l *factLog) OnClientSessionOpened(s uuid.UUID, mi types.MessageInterest) {
-	l.add(factEvent{kind: "opened", session: s, interest: mi})
+func (l *factLog) OnFeedChannelLost(uuid.UUID)     {}
+func (l *factLog) OnFeedChannelRestored(uuid.UUID) {}
+func (l *factLog) OnFeedSessionGone(s uuid.UUID)   { l.add(factEvent{kind: "gone", session: s}) }
+func (l *factLog) OnClientSessionOpened(s uuid.UUID, mi types.MessageInterest, at recovery.Stamp) {
+	l.add(factEvent{kind: "opened", session: s, interest: mi, taken: at})
 }
-func (l *factLog) OnRecoveryMessageReceived(p, r int) {
-	l.add(factEvent{kind: "recovery-message", producer: p, requestID: r})
-}
-func (l *factLog) OnMessageProcessingStarted(s uuid.UUID, p int, _ time.Time) {
-	l.add(factEvent{kind: "started", session: s, producer: p})
+func (l *factLog) OnMessageProcessingStarted(s uuid.UUID, p int, taken recovery.Stamp) {
+	l.add(factEvent{kind: "started", session: s, producer: p, taken: taken})
 }
 func (l *factLog) OnMessageProcessingEnded(s uuid.UUID, p int, ts time.Time) {
 	l.add(factEvent{kind: "ended", session: s, producer: p, generatedAt: ts})
@@ -79,14 +76,14 @@ func (l *factLog) OnMessageProcessingEnded(s uuid.UUID, p int, ts time.Time) {
 func (l *factLog) OnMessageProcessed(s uuid.UUID, p int, gen time.Time, taken recovery.Stamp, req int) {
 	l.add(factEvent{kind: "processed", session: s, producer: p, generatedAt: gen, taken: taken, requestID: req})
 }
-func (l *factLog) OnSessionAlive(s uuid.UUID, p int, gen time.Time, taken recovery.Stamp, subscribed bool, mi types.MessageInterest) {
-	l.add(factEvent{kind: "session-alive", session: s, producer: p, generatedAt: gen, taken: taken, subscribed: subscribed, interest: mi})
+func (l *factLog) OnSessionAlive(s uuid.UUID, p int, gen time.Time, taken recovery.Stamp, subscribed bool) {
+	l.add(factEvent{kind: "session-alive", session: s, producer: p, generatedAt: gen, taken: taken, subscribed: subscribed})
 }
-func (l *factLog) OnAliveReceived(p int, ts types.MessageTimestamp, subscribed bool, mi types.MessageInterest) {
-	l.add(factEvent{kind: "system-alive", producer: p, generatedAt: ts.Created, subscribed: subscribed, interest: mi})
+func (l *factLog) OnAliveReceived(p int, ts types.MessageTimestamp, received recovery.Stamp, subscribed bool) {
+	l.add(factEvent{kind: "system-alive", producer: p, generatedAt: ts.Created, taken: received, subscribed: subscribed})
 }
-func (l *factLog) OnSnapshotCompleteReceived(_ context.Context, s uuid.UUID, p, req int, mi types.MessageInterest) error {
-	l.add(factEvent{kind: "snapshot-complete", session: s, producer: p, requestID: req, interest: mi})
+func (l *factLog) OnSnapshotCompleteReceived(_ context.Context, s uuid.UUID, p, req int) error {
+	l.add(factEvent{kind: "snapshot-complete", session: s, producer: p, requestID: req})
 	return nil
 }
 
@@ -142,7 +139,7 @@ func TestSession_ProcessedFactRidesTheEnvelopeWithIdsAndStamp(t *testing.T) {
 	if env.settled == nil {
 		t.Fatal("the envelope of a message handed to the client carries no processed fact")
 	}
-	if got, want := l.kinds(), []string{"started", "recovery-message", "ended"}; fmt.Sprint(got) != fmt.Sprint(want) {
+	if got, want := l.kinds(), []string{"started", "ended"}; fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("calls before the ack = %v, want %v", got, want)
 	}
 
@@ -229,7 +226,7 @@ func TestSession_AliveOfAClientSessionIsASessionFact(t *testing.T) {
 		t.Fatalf("session alive facts = %d, want 1", len(got))
 	}
 	a := got[0]
-	if a.session != o.sessionID || a.producer != 2 || !a.generatedAt.Equal(created) || !a.subscribed || a.interest != types.LiveOnlyMessageInterest {
+	if a.session != o.sessionID || a.producer != 2 || !a.generatedAt.Equal(created) || !a.subscribed {
 		t.Fatalf("session alive = %+v", a)
 	}
 	if a.taken.Mono() != time.Millisecond {
@@ -286,7 +283,7 @@ func TestSession_SnapshotCompleteCarriesTheSessionID(t *testing.T) {
 	fm := &types.FeedMessage{Message: &feedXML.SnapshotComplete{ProductID: 3, RequestID: 42}}
 	o.processFeedMessage(t.Context(), fm, types.PrematchOnlyMessageInterest, nil, false, nil)
 	got := l.of("snapshot-complete")
-	if len(got) != 1 || got[0].session != o.sessionID || got[0].producer != 3 || got[0].requestID != 42 || got[0].interest != types.PrematchOnlyMessageInterest {
+	if len(got) != 1 || got[0].session != o.sessionID || got[0].producer != 3 || got[0].requestID != 42 {
 		t.Fatalf("snapshot complete = %+v", got)
 	}
 }

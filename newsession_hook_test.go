@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	log "github.com/oddin-gg/gosdk/internal/log"
+	"github.com/oddin-gg/gosdk/internal/recovery"
 	"github.com/oddin-gg/gosdk/types"
 )
 
@@ -17,37 +18,30 @@ import (
 type lossRecordingProcessor struct {
 	mu      sync.Mutex
 	session uuid.UUID
-	calls   []struct {
-		interest types.MessageInterest
-		lostAt   time.Time
-	}
+	calls   int
 }
 
-func (p *lossRecordingProcessor) OnFeedChannelLost(session uuid.UUID, mi types.MessageInterest, lostAt time.Time) {
+func (p *lossRecordingProcessor) OnFeedChannelLost(session uuid.UUID) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.session = session
-	p.calls = append(p.calls, struct {
-		interest types.MessageInterest
-		lostAt   time.Time
-	}{mi, lostAt})
+	p.calls++
 }
-func (*lossRecordingProcessor) OnFeedChannelRestored(uuid.UUID)                        {}
-func (*lossRecordingProcessor) OnFeedSessionGone(uuid.UUID)                            {}
-func (*lossRecordingProcessor) OnClientSessionOpened(uuid.UUID, types.MessageInterest) {}
-func (*lossRecordingProcessor) OnRecoveryMessageReceived(int, int)                     {}
-func (*lossRecordingProcessor) OnMessageProcessingStarted(uuid.UUID, int, time.Time)   {}
-func (*lossRecordingProcessor) OnMessageProcessingEnded(uuid.UUID, int, time.Time)     {}
-func (*lossRecordingProcessor) OnAliveReceived(int, types.MessageTimestamp, bool, types.MessageInterest) {
+func (*lossRecordingProcessor) OnFeedChannelRestored(uuid.UUID) {}
+func (*lossRecordingProcessor) OnFeedSessionGone(uuid.UUID)     {}
+func (*lossRecordingProcessor) OnClientSessionOpened(uuid.UUID, types.MessageInterest, recovery.Stamp) {
 }
-func (*lossRecordingProcessor) OnSnapshotCompleteReceived(context.Context, uuid.UUID, int, int, types.MessageInterest) error {
+func (*lossRecordingProcessor) OnMessageProcessingStarted(uuid.UUID, int, recovery.Stamp)         {}
+func (*lossRecordingProcessor) OnMessageProcessingEnded(uuid.UUID, int, time.Time)                {}
+func (*lossRecordingProcessor) OnAliveReceived(int, types.MessageTimestamp, recovery.Stamp, bool) {}
+func (*lossRecordingProcessor) OnSnapshotCompleteReceived(context.Context, uuid.UUID, int, int) error {
 	return nil
 }
 
 // TestNewSession_ChannelLostHookDelegatesToRecovery pins the one line of
 // wiring between a lost consumer queue and the recovery that closes its
 // gap: a live session's consumer reports a channel loss to the recovery
-// processor, with the loss instant; a replay session's consumer reports
+// processor, under the session's id; a replay session's consumer reports
 // nothing (historical traffic has no live gap to recover, and flagging
 // live producers down for a replay queue rebind would force spurious
 // snapshot recoveries).
@@ -73,15 +67,11 @@ func TestNewSession_ChannelLostHookDelegatesToRecovery(t *testing.T) {
 			if r, g := impl.channelConsumer.ChannelLifecycleHooksInstalled(); r != (tc.wantCalls > 0) || g != (tc.wantCalls > 0) {
 				t.Fatalf("restored/gone hooks installed = %v/%v, want %v", r, g, tc.wantCalls > 0)
 			}
-			lost := time.Now().Add(-time.Second)
-			impl.channelConsumer.ReportChannelLost(lost)
+			impl.channelConsumer.ReportChannelLost(time.Now().Add(-time.Second))
 			rec.mu.Lock()
 			defer rec.mu.Unlock()
-			if len(rec.calls) != tc.wantCalls {
-				t.Fatalf("recovery processor calls = %d, want %d", len(rec.calls), tc.wantCalls)
-			}
-			if tc.wantCalls == 1 && !rec.calls[0].lostAt.Equal(lost) {
-				t.Fatalf("lostAt = %v, want %v passed through unchanged", rec.calls[0].lostAt, lost)
+			if rec.calls != tc.wantCalls {
+				t.Fatalf("recovery processor calls = %d, want %d", rec.calls, tc.wantCalls)
 			}
 			if tc.wantCalls == 1 && rec.session != impl.sessionID {
 				t.Fatalf("hook reported session %s, want the session's own id %s", rec.session, impl.sessionID)
