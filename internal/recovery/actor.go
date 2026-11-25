@@ -717,7 +717,7 @@ func (a *recoveryActor) stopBounded(ctx context.Context) bool {
 	// Join the REST requests' goroutines too (bounded). The API's in-flight slot
 	// is released when the response body closes, before the goroutine's tail, so
 	// without this join Close could return while one still runs. Adds happen only
-	// on the (now exited) actor goroutine, so this Wait cannot race an Add.
+	// on the actor goroutine, which has exited by this point, so this Wait cannot race an Add.
 	detachedDone := make(chan struct{})
 	go func() {
 		a.detached.Wait()
