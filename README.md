@@ -409,10 +409,12 @@ One recovery actor runs every producer's recovery state. The rules, per producer
   against the offset taken from its alives) for `WithStaleMessageWindow` (default
   1 minute) is too far behind: the broker's queue for it holds a backlog that
   only grows. The SDK first asks for a recovery of every producer the
-  subscription receives, from the subscription's checkpoint, and once the API has
-  accepted them all it replaces the subscription's AMQP channel, which drops the
-  queue and what it held. The recoveries are then asked for again, as after a lost
-  queue, so nothing is missing afterwards. The producers the subscription receives
+  subscription receives that is enabled, from the subscription's checkpoint, and
+  once the API has accepted them all it replaces the subscription's AMQP channel,
+  which drops the queue and what it held. The recoveries are then asked for again,
+  as after a lost queue, so nothing is missing afterwards; a recovery of those
+  producers that is still in flight then was asked before the reset, cannot cover
+  what the reset dropped, and is given up and asked for again in the same step. The producers the subscription receives
   are down with `ProcessingQueueDelayViolationProducerStatusReason` while this
   runs, and the subscription's `snapshot_complete`s that arrive meanwhile are
   ignored, since they come from the queue being replaced. A reset drops what the
@@ -423,11 +425,22 @@ One recovery actor runs every producer's recovery state. The rules, per producer
   three times in ten minutes, with 1, 2 and 4 minutes between the resets; after
   that it is only logged as lagging (a WARN) until it catches up or the first reset
   ages out, and the processing delay below keeps its producers down for as long as
-  it is late. A request of the net's that the API refuses, a producer that is
-  disabled in the meantime, and a `snapshot_complete` of the subscription's own for
-  one of its recoveries (it has what the recovery sent) cancel the reset; the net
-  then waits before it tries again, 1, 2 or 4 minutes by the number of resets it
-  has made in the last ten minutes, as between resets. It does not reset a
+  it is late. The net starts only when every enabled producer the subscription
+  receives can be asked for now: a producer that is silent, in backoff or waiting
+  for its slow retry, with a recovery in flight, or held back by another
+  subscription without a queue, holds the net back for every subscription that
+  receives it, whatever the others are doing. A reset drops the backlog of all of
+  them, and a recovery that could only start later would start from a window that
+  has moved on and repeat nothing of it. The net then waits, with no request,
+  lagging or backoff, and acts on a later sample. A recovery the net asked for
+  that ends before the reset is made, however it ends (the API refuses it or it
+  times out, it is given up, completes, or a connection or channel is lost), a
+  producer that is disabled in the meantime, one that is enabled in the meantime,
+  and a `snapshot_complete` of the subscription's own for one of its recoveries (it
+  has what the recovery sent) cancel the reset. The net then waits before it tries
+  again, 1, 2 or 4 minutes by the number of resets it has made in the last ten
+  minutes, as between resets, unless a lost connection or channel cancelled it: that
+  is no failure of the net's. It does not reset a
   subscription whose backlog reaches past the producer's stateful recovery window
   (its checkpoint of any enabled producer it receives is older than the start a
   recovery could have, or lies within ten minutes of it, at most half the window,
@@ -439,7 +452,8 @@ One recovery actor runs every producer's recovery state. The rules, per producer
   queue or has a reset under way: the recovery of that producer cannot be asked for
   until the other queue is back, and the window may move on meanwhile; the net
   waits and acts on a later sample, and a reset waiting for the API is cancelled if
-  it happens then. The net is off while the offset of the
+  it happens then. A subscription that is behind past the window margin lags and
+  is not reset. The net is off while the offset of the
   producer's clock is stale, and paused for a producer while a recovery of it is in
   flight or a gap is open, since a snapshot ahead of a live message makes it old on
   every subscription. Time with a stale offset is no stale time: a window that
