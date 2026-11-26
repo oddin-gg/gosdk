@@ -1733,3 +1733,46 @@ func (n *netFeed) freshLiveOf(producer int) {
 	at := n.now()
 	n.m.processed(sid(1), producer, at, at, n.stamp(), 0)
 }
+
+// ---- the pause after a cancelled reset
+
+// A cancelled reset pauses the net for 1, 2 or 4 minutes, by the resets made in the
+// cool-down (none, one, two), as between resets. The stale window is ten seconds, so
+// only the pause holds the net back: blocked until the second before the deadline,
+// asking at the deadline.
+func TestNet_CancelledResetPausesTheNetForAsLongAsTheResetsMadeInTheCooldownSet(t *testing.T) {
+	for _, tc := range []struct {
+		made  int
+		pause time.Duration
+	}{{0, time.Minute}, {1, 2 * time.Minute}, {2, 4 * time.Minute}} {
+		t.Run(tc.pause.String(), func(t *testing.T) {
+			settings := defaultSettings()
+			settings.staleWindow = 10 * time.Second
+			base := newFeedWith(t, settings, statefulWindow)
+			base.open(1, all)
+			base.startFeed()
+			base.bothUp(1)
+			f := &netFeed{feed: base}
+			for range tc.made {
+				before := f.calls()
+				f.stale(1, oldAge, 10*time.Minute, f.untilAsked(before))
+				f.accept(f.lastSnapshot(pre))
+				f.accept(f.lastSnapshot(live))
+				f.resetDone()
+				f.complete(f.lastSnapshot(pre), 1)
+				f.complete(f.lastSnapshot(live), 1)
+			}
+			before := f.calls()
+			f.stale(1, oldAge, 10*time.Minute, f.untilAsked(before))
+			preReq, liveReq := f.lastSnapshot(pre), f.lastSnapshot(live)
+			f.accept(liveReq)
+			f.refuse(preReq)
+			expect(t, f.m.counters.resetRequestsFailed, 1, "net requests failed")
+			f.complete(liveReq, 1)
+			after := f.calls()
+			want := int(tc.pause / time.Second)
+			expect(t, f.stale(1, oldAge, time.Duration(want-1)*time.Second, f.untilAsked(after)), -1, "a request before the deadline")
+			expect(t, f.stale(1, oldAge, time.Second, f.untilAsked(after)), 1, "seconds from the second before the deadline to the request")
+		})
+	}
+}
