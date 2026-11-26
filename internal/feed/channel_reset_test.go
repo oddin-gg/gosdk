@@ -805,7 +805,7 @@ func TestChannelReset_ALossTheWatcherToldBeforeTheResetIsRestored(t *testing.T) 
 	c, _ := newResetConsumer(t, o, nil)
 	var log eventLog
 	log.install(c, 0)
-	out := openResetConsumer(t, c)
+	openResetConsumer(t, c)
 
 	// the loop takes the delivery and parks handing it over
 	select {
@@ -815,9 +815,7 @@ func TestChannelReset_ALossTheWatcherToldBeforeTheResetIsRestored(t *testing.T) 
 	}
 	o.channel(0).fireBrokerClose()
 	waitFor(t, "the watcher's loss", func() bool { return len(log.get()) == 1 })
-	c.Reset(5)
-	env := <-out // releases the handoff
-	env.Ack()
+	c.Reset(5) // releases the parked handoff
 
 	waitFor(t, "the reset to be done", func() bool { return len(log.get()) >= 3 })
 	time.Sleep(60 * time.Millisecond)
@@ -846,4 +844,85 @@ func TestChannelReset_AnAckTakenBeforeTheResetIsDebugOnly(t *testing.T) {
 	if !strings.Contains(text, "ack after a channel reset") || strings.Contains(text, "level=WARN") {
 		t.Fatalf("a late ack of a delivery taken before the reset must be debug only:\n%s", text)
 	}
+}
+
+func unsettled(c *ChannelConsumer) int {
+	c.settleMu.Lock()
+	defer c.settleMu.Unlock()
+	return c.unsettledN
+}
+
+func TestChannelReset_ParkedHandoffDoesNotHoldTheReset(t *testing.T) {
+	o := newResetOpener()
+	c, p := newResetConsumer(t, o, nil)
+	out := openResetConsumer(t, c)
+	old := o.channel(0)
+
+	// A delivery is taken and nobody reads the outgoing channel: the loop is
+	// parked in the handoff.
+	ack := &countingAcknowledger{}
+	select {
+	case old.deliveries <- testDelivery(ack):
+	case <-time.After(3 * time.Second):
+		t.Fatal("the consumer takes no delivery")
+	}
+	waitFor(t, "the handoff to park", func() bool { return unsettled(c) == 1 })
+
+	c.Reset(3)
+	if got := p.waitDone(t); got != (resetDone{3, true}) {
+		t.Fatalf("done = %+v, want number 3 replaced", got)
+	}
+	waitFor(t, "the dropped envelope to settle", func() bool { return unsettled(c) == 0 })
+	// the envelope of the closed channel is not delivered later
+	select {
+	case env := <-out:
+		t.Fatalf("the parked envelope was delivered after the reset: %+v", env)
+	case <-time.After(60 * time.Millisecond):
+	}
+	if p.lost.Load() != 0 {
+		t.Fatalf("a reset was reported as a loss %d times", p.lost.Load())
+	}
+	p.noMoreDone(t)
+	// the replacement works, and a second reset with a parked handoff works too
+	env := sendDelivery(t, o.channel(1), out, &countingAcknowledger{})
+	env.Ack()
+	waitFor(t, "the ack to settle", func() bool { return unsettled(c) == 0 })
+	select {
+	case o.channel(1).deliveries <- testDelivery(&countingAcknowledger{}):
+	case <-time.After(3 * time.Second):
+		t.Fatal("the replacement takes no delivery")
+	}
+	waitFor(t, "the handoff to park again", func() bool { return unsettled(c) == 1 })
+	c.Reset(4)
+	if got := p.waitDone(t); got != (resetDone{4, true}) {
+		t.Fatalf("second done = %+v", got)
+	}
+}
+
+func TestChannelReset_ALossWithAParkedHandoffIsAsBefore(t *testing.T) {
+	o := newResetOpener()
+	c, p := newResetConsumer(t, o, nil)
+	channelReopenBackoff = 20 * time.Millisecond
+	out := openResetConsumer(t, c)
+	old := o.channel(0)
+	select {
+	case old.deliveries <- testDelivery(&countingAcknowledger{}):
+	case <-time.After(3 * time.Second):
+		t.Fatal("the consumer takes no delivery")
+	}
+	waitFor(t, "the handoff to park", func() bool { return unsettled(c) == 1 })
+
+	old.fireBrokerClose()
+	// still parked: a loss does not interrupt the handoff
+	time.Sleep(100 * time.Millisecond)
+	if unsettled(c) != 1 || o.calls.Load() != 1 {
+		t.Fatalf("unsettled=%d calls=%d: a loss must leave the parked handoff as it is", unsettled(c), o.calls.Load())
+	}
+	env := <-out // the envelope is still delivered
+	env.Ack()
+	waitFor(t, "the reopen", func() bool { return p.restored.Load() == 1 })
+	if p.lost.Load() != 1 {
+		t.Fatalf("lost = %d, want 1", p.lost.Load())
+	}
+	p.noMoreDone(t)
 }

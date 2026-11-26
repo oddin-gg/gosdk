@@ -187,6 +187,13 @@ type ChannelConsumer struct {
 	// when the count has moved. Atomic.
 	resetEpoch atomic.Uint64
 
+	// resetSig is closed by the Reset that begins a round, and replaced
+	// (by nil, made again on demand) when that round's replacement is
+	// installed. It belongs to one channel generation: a handoff of a
+	// delivery of that channel that is still parked when it closes is
+	// dropped, so run() can go on to bind the replacement. Guarded by mu.
+	resetSig chan struct{}
+
 	// shutdown is set, under mu, when Close's shutdown begins. An Open
 	// that finds it set creates no channel and starts no loop. Guarded
 	// by mu.
@@ -775,6 +782,7 @@ func (c *ChannelConsumer) Reset(number uint64) {
 	ch := c.current
 	if !joined {
 		c.resetEpoch.Add(1)
+		close(c.resetSignalLocked())
 	}
 	c.mu.Unlock()
 	if joined {
@@ -786,6 +794,22 @@ func (c *ChannelConsumer) Reset(number uint64) {
 	if ch != nil {
 		c.closeLostChannel(ch)
 	}
+}
+
+// resetSignalLocked returns the reset signal of the current channel
+// generation, made on demand. Call with mu held.
+func (c *ChannelConsumer) resetSignalLocked() chan struct{} {
+	if c.resetSig == nil {
+		c.resetSig = make(chan struct{})
+	}
+	return c.resetSig
+}
+
+// resetSignal is the reset signal of the current channel generation.
+func (c *ChannelConsumer) resetSignal() <-chan struct{} {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.resetSignalLocked()
 }
 
 func (c *ChannelConsumer) reportResetDone(number uint64, replaced bool) {
@@ -984,6 +1008,7 @@ func (c *ChannelConsumer) run(ctx context.Context, deliveries <-chan amqp.Delive
 		c.current = ch
 		finished := c.resetting
 		c.resetting = nil
+		c.resetSig = nil
 		c.mu.Unlock()
 		// A drain that overtook the reopen drops the reset too: the consumer
 		// exits and reports gone, and shutdown closes the replacement.
@@ -1049,6 +1074,7 @@ func (c *ChannelConsumer) consume(ctx context.Context, deliveries <-chan amqp.De
 			// touch the AMQP Acknowledger; ack ownership travels with
 			// the envelope, nack on abort is admit's responsibility.
 			epoch := c.resetEpoch.Load()
+			sig := c.resetSignal()
 			qm := c.processDelivery(ctx, d)
 
 			// Manual ack semantics (NEXT.md §0.6 / §8): the delivery is
@@ -1062,7 +1088,7 @@ func (c *ChannelConsumer) consume(ctx context.Context, deliveries <-chan amqp.De
 			// not-admitted paths settle explicitly below since their ack
 			// closure never fires.
 			c.addUnsettled()
-			if !c.admit(ctx, d, QueueEnvelope{Msg: qm, Ack: c.ackFunc(d, epoch)}) {
+			if !c.admit(ctx, sig, d, QueueEnvelope{Msg: qm, Ack: c.ackFunc(d, epoch)}) {
 				c.settleOne()
 				return
 			}
@@ -1140,10 +1166,18 @@ func (c *ChannelConsumer) draining() bool {
 // leaves the delivery unacked, and broker prefetch provides the
 // backpressure; the slow-consumer warning is emitted by the
 // subscription pump, which watches the actual public-buffer send.
-func (c *ChannelConsumer) admit(ctx context.Context, d amqp.Delivery, env QueueEnvelope) bool {
+//
+// reset is the signal of the channel the delivery came from: when a Reset
+// closes it while the handoff is parked, the envelope is dropped. It was not
+// delivered and is not acked; its channel is closed and with it the queue,
+// and the recovery that follows the reset repeats it. The caller leaves the
+// loop, which then reopens and reports the reset done.
+func (c *ChannelConsumer) admit(ctx context.Context, reset <-chan struct{}, d amqp.Delivery, env QueueEnvelope) bool {
 	select {
 	case c.outgoing <- env:
 		return true
+	case <-reset:
+		return false
 	case <-ctx.Done():
 		if err := d.Nack(false, false); err != nil {
 			c.logger.WithError(err).
