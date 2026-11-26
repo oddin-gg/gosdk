@@ -1841,14 +1841,12 @@ func (m *machine) reset(s *session, p *pendingReset) {
 	s.underwayProducer = p.producerID
 	s.underwayAge = p.age
 	for _, l := range s.lanes {
-		if l.gap != nil {
-			l.gap.pendingReset = false
-		} else {
-			// what the reset drops starts here, before any sample of the new
-			// channel moves the checkpoint
-			m.loseLane(l)
-		}
-		l.above = false
+		// what the reset drops starts here, before any sample of the new channel
+		// moves the checkpoint; the gap, with its earlier start kept, is a new one,
+		// so a recovery asked before the reset (one of a producer the net did not ask
+		// for, say) does not cover it and cannot bring the producer up while the
+		// queue is replaced
+		m.loseLane(l)
 	}
 	m.log.Warnf("The safety net resets session %s, %s behind producer %d", s.id, p.age, p.producerID)
 	m.out.reset(s.id, p.number)

@@ -1560,3 +1560,66 @@ func TestNet_MarginIsAtMostHalfTheWindowOfAShortWindow(t *testing.T) {
 	expect(t, len(g.out.resets), 0, "resets")
 	expect(t, g.lagging(1), true, "the session lags")
 }
+
+// ---- a recovery asked before the reset
+
+// A producer the net skipped (its retries are spent, it waits for its slow retry)
+// asks on its own while the reset waits for the acceptance of the other. The
+// resetting session sees its snapshot_complete before the reset, another session
+// after the reset has begun: that recovery is of the old queue and must not bring the
+// producer up. Once the reset is done the producer is asked for again.
+func TestNet_RecoveryAskedBeforeTheResetDoesNotBringAProducerUpWhileTheQueueIsReplaced(t *testing.T) {
+	f := &netFeed{feed: newFeed(t)}
+	f.open(1, all)
+	f.open(2, all)
+	f.startFeed()
+	f.bothUp(1, 2)
+	// the live producer's retries spent, with a gap of both sessions
+	for _, n := range []int{1, 2} {
+		f.m.channelLost(sid(n))
+		f.m.channelReopened(sid(n))
+	}
+	f.complete(f.lastSnapshot(pre), 1, 2)
+	for range 4 {
+		f.refuse(f.lastSnapshot(live))
+		f.runWithAlives(20 * time.Second)
+	}
+	f.expectCause(live, causeRecoveryFailed, "the live producer's cause")
+
+	// the net asks for prematch only; the live producer's slow retry goes out meanwhile
+	preBefore := len(f.snapshots(pre))
+	for seconds := 0; len(f.snapshots(pre)) == preBefore && seconds < 600; seconds++ {
+		f.stale(1, oldAge, time.Second, func() bool { return false })
+		if liveReq := f.lastSnapshot(live); f.inFlight(live) == liveReq.requestID {
+			f.refuse(liveReq)
+		}
+	}
+	liveBefore := len(f.snapshots(live))
+	for seconds := 0; f.inFlight(live) == 0 && seconds < 600; seconds++ {
+		f.stale(1, oldAge, time.Second, func() bool { return false })
+	}
+	if len(f.snapshots(pre)) != preBefore+1 || len(f.snapshots(live)) != liveBefore+1 {
+		t.Fatalf("recoveries asked: prematch %d (want %d), live %d (want %d)",
+			len(f.snapshots(pre)), preBefore+1, len(f.snapshots(live)), liveBefore+1)
+	}
+	if f.m.session(sid(1)).pending == nil {
+		t.Fatal("the net's reset is not waiting for the API")
+	}
+	liveReq := f.lastSnapshot(live)
+	f.accept(liveReq)
+	f.snapshotComplete(1, live, liveReq.requestID)
+	f.accept(f.lastSnapshot(pre))
+	expectSessions(t, f.resetSessions(), []int{1}, "resets")
+
+	f.snapshotComplete(2, live, liveReq.requestID)
+	f.expectCause(live, causeSafetyNetReset, "the live producer while the queue is replaced: not recovered by a recovery of the old queue")
+
+	f.resetDone()
+	again := f.lastSnapshot(live)
+	if again.requestID == liveReq.requestID {
+		t.Fatal("the live producer was not asked for again")
+	}
+	f.complete(again, 1, 2)
+	f.complete(f.lastSnapshot(pre), 1, 2)
+	f.expectCause(live, causeProcessingDelay, "the live producer recovered by the new recovery, but its session still processes it late")
+}
