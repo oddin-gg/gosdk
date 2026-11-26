@@ -1486,3 +1486,20 @@ func TestNet_StaleWindowDoesNotCountTheTimeOfARecoveryThatTookNoSampleOfTheLane(
 	after := f.calls()
 	expect(t, f.stale(1, oldAge, 3*time.Minute, f.untilAsked(after)), 61, "seconds from the completion to the net's request")
 }
+
+// A producer the net cannot ask for now has its backlog dropped by the reset too, and
+// its later recovery is clamped to its window: the session is not reset either.
+func TestNet_BacklogBeyondTheWindowOfAProducerThatCannotBeAskedIsNotReset(t *testing.T) {
+	f := upNetWithWindow(t, 60)
+	f.runFor(70 * time.Minute)
+	// the session is up to date with prematch, and has taken nothing of live
+	at := f.now()
+	f.m.processed(sid(1), pre, at, at, f.stamp(), 0)
+	f.noLiveAlives = true
+	before := f.calls()
+	expect(t, f.stale(1, oldAge, 3*time.Minute, f.untilAsked(before)), -1, "a request")
+	expect(t, f.calls(), before, "requests")
+	expect(t, len(f.out.resets), 0, "resets")
+	expect(t, f.lagging(1), true, "the session lags")
+	expect(t, f.logCount(notResetOutsideWindow), 1, "warnings of the net not resetting it")
+}

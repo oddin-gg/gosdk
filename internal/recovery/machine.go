@@ -105,8 +105,8 @@ import (
 // snapshot_completes of a session whose reset is under way are ignored, since they
 // come from the queue being replaced.
 //
-// A session is not reset when the checkpoint of a producer it would ask for lies
-// before where that producer's recovery would start, clamped to its stateful
+// A session is not reset when its checkpoint of any producer the catalog has enabled
+// lies before where that producer's recovery would start, clamped to its stateful
 // recovery window: what the reset drops of it no recovery repeats. It is lagging
 // instead, with a warning of its own for the episode, and nothing is asked. The same
 // check is made when the last acceptance arrives, since the window moves on; a reset
@@ -1131,7 +1131,7 @@ func (m *machine) accepted(t *track, a *active, mono time.Duration) {
 			}
 			delete(p.unaccepted, t.id)
 			if len(p.unaccepted) == 0 {
-				if id, ok := m.producerOutsideWindow(s, p.producers); ok {
+				if id, ok := m.producerOutsideWindow(s); ok {
 					m.resetNotMadeOutsideWindow(s, id, mono)
 					continue
 				}
@@ -1714,13 +1714,7 @@ func (m *machine) trigger(s *session, t *track, age time.Duration, mono time.Dur
 			return
 		}
 	}
-	askable := make(map[int]bool)
-	for _, l := range s.lanes {
-		if other := m.byID[l.producer]; m.catalog.enabled(other.id) && m.canRequest(other, mono) {
-			askable[other.id] = true
-		}
-	}
-	if id, outside := m.producerOutsideWindow(s, askable); outside {
+	if id, outside := m.producerOutsideWindow(s); outside {
 		if !s.lagging {
 			s.lagging = true
 			m.counters.lagging++
@@ -1787,14 +1781,17 @@ func (m *machine) cancelResetWaitingForDisabledProducer(s *session, mono time.Du
 	return false
 }
 
-// producerOutsideWindow finds, among the producers, one of the session's whose
-// checkpoint lies before where a recovery would start now, clamped to the
-// producer's stateful recovery window: what a reset drops of it is out of reach of
-// any recovery. A lane with no checkpoint is asked for from the start, which is not
+// producerOutsideWindow finds, among the producers the session receives that the
+// catalog has enabled, one whose checkpoint for the session lies before where a
+// recovery of it would start now, clamped to its stateful recovery window. A reset
+// replaces the whole queue, so it drops the backlog of a producer that cannot be
+// asked for now (silent, in backoff) as well, and that producer's later recovery
+// starts from the checkpoint, clamped just the same: what lies before the window is
+// out of reach. A lane with no checkpoint is asked for from the start, which is not
 // clamped.
-func (m *machine) producerOutsideWindow(s *session, producers map[int]bool) (int, bool) {
+func (m *machine) producerOutsideWindow(s *session) (int, bool) {
 	for _, l := range s.lanes {
-		if !producers[l.producer] || l.checkpoint.IsZero() {
+		if !m.catalog.enabled(l.producer) || l.checkpoint.IsZero() {
 			continue
 		}
 		if start, ok := m.windowStart(m.byID[l.producer]); ok && l.checkpoint.Before(start) {

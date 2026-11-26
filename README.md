@@ -429,7 +429,7 @@ One recovery actor runs every producer's recovery state. The rules, per producer
   then waits before it tries again, 1, 2 or 4 minutes by the number of resets it
   has made in the last ten minutes, as between resets. It does not reset a
   subscription whose backlog reaches past the producer's stateful recovery window
-  (the checkpoint of any producer it would ask for is older than the start a
+  (its checkpoint of any enabled producer it receives is older than the start a
   recovery could have): the recovery could not repeat what the reset would drop,
   so the subscription is logged as lagging (one WARN) and nothing is asked, until
   it catches up. The net is off while the offset of the
