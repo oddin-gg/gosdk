@@ -28,6 +28,8 @@ type Config struct {
 	snapshotCompleteDeadline time.Duration
 	snapshotDeadlineSet      bool
 	initialSnapshotTime      time.Duration
+	staleMessageLimit        time.Duration
+	staleMessageWindow       time.Duration
 	httpClientTimeout        time.Duration
 	messagingPort            int
 	sdkNodeID                *int
@@ -62,10 +64,10 @@ const redactedToken = "[REDACTED]"
 // through this redacted rendering.
 func (c Config) String() string {
 	return fmt.Sprintf(
-		"gosdk.Config{accessToken:%s env:%v region:%q defaultLocale:%s preloadLocales:%v node:%v apiHost:%q mqHost:%q port:%d exchange:%q replayExchange:%q maxInactivity:%v maxRecoveryExecution:%v snapshotCompleteDeadline:%v httpTimeout:%v shutdownTimeout:%v strategy:%v extendedData:%v apiLog:%v prefetch:%d subBuffer:%d messageNames:%t}",
+		"gosdk.Config{accessToken:%s env:%v region:%q defaultLocale:%s preloadLocales:%v node:%v apiHost:%q mqHost:%q port:%d exchange:%q replayExchange:%q maxInactivity:%v maxRecoveryExecution:%v snapshotCompleteDeadline:%v staleMessageLimit:%v staleMessageWindow:%v httpTimeout:%v shutdownTimeout:%v strategy:%v extendedData:%v apiLog:%v prefetch:%d subBuffer:%d messageNames:%t}",
 		redactedToken, c.selectedEnvironment, c.selectedRegion, c.defaultLocale, c.preloadLocales,
 		c.sdkNodeID, c.forcedAPIHost, c.forcedMQHost, c.messagingPort, c.exchangeName,
-		c.replayExchangeName, c.maxInactivity, c.maxRecoveryExecution, c.snapshotCompleteDeadline, c.httpClientTimeout,
+		c.replayExchangeName, c.maxInactivity, c.maxRecoveryExecution, c.snapshotCompleteDeadline, c.staleMessageLimit, c.staleMessageWindow, c.httpClientTimeout,
 		c.shutdownTimeout, c.exceptionStrategy, c.reportExtendedData, c.apiCallLogging,
 		c.amqpPrefetch, c.subscriptionBuffer, c.messageNameResolution,
 	)
@@ -119,15 +121,20 @@ const (
 	// within seconds; five minutes without a sign of life means the
 	// request or its snapshot_complete was lost.
 	defaultSnapshotCompleteDeadline = 5 * time.Minute
-	defaultHTTPClientTimeoutPub     = 30 * time.Second
-	defaultMessagingPort            = 5672
-	defaultExchangeName             = "oddinfeed"
-	defaultReplayExchangeName       = "oddinreplay"
-	defaultSportIDPrefix            = "od:sport:"
-	defaultAPIBodyLimitBytes        = 64 * 1024
-	defaultAMQPPrefetch             = 1000
-	defaultSubscriptionBuffer       = 256
-	defaultShutdownTimeout          = 5 * time.Second
+	// defaultStaleMessageLimit and defaultStaleMessageWindow: a subscription
+	// whose messages are two minutes old for a whole minute is too far
+	// behind for the broker's queue to be worth keeping.
+	defaultStaleMessageLimit    = 2 * time.Minute
+	defaultStaleMessageWindow   = time.Minute
+	defaultHTTPClientTimeoutPub = 30 * time.Second
+	defaultMessagingPort        = 5672
+	defaultExchangeName         = "oddinfeed"
+	defaultReplayExchangeName   = "oddinreplay"
+	defaultSportIDPrefix        = "od:sport:"
+	defaultAPIBodyLimitBytes    = 64 * 1024
+	defaultAMQPPrefetch         = 1000
+	defaultSubscriptionBuffer   = 256
+	defaultShutdownTimeout      = 5 * time.Second
 )
 
 // NewConfig constructs an SDK Config. The required arguments are the access
@@ -140,6 +147,8 @@ func NewConfig(token string, env types.Environment, opts ...Option) Config {
 		maxInactivity:            defaultMaxInactivity,
 		maxRecoveryExecution:     defaultMaxRecoveryExecution,
 		snapshotCompleteDeadline: defaultSnapshotCompleteDeadline,
+		staleMessageLimit:        defaultStaleMessageLimit,
+		staleMessageWindow:       defaultStaleMessageWindow,
 		httpClientTimeout:        defaultHTTPClientTimeoutPub,
 		messagingPort:            defaultMessagingPort,
 		exchangeName:             defaultExchangeName,
@@ -332,6 +341,38 @@ func WithSnapshotCompleteDeadline(d time.Duration) Option {
 	}
 }
 
+// WithStaleMessageLimit sets how old a subscription's live messages may be, by
+// the producer's clock, before the SDK counts it as too far behind (default 2m).
+// d must be more than 10s and at most 24h; New rejects any other value as
+// ErrInvalidConfig.
+//
+// A subscription whose messages stay older than d for WithStaleMessageWindow is
+// behind by a backlog that only grows in the broker's queue for it. The SDK then
+// asks for a recovery of every producer the subscription receives, and once the
+// API has accepted them all it replaces the subscription's AMQP channel: the
+// queue and what it held are dropped, and the recovery repeats what was dropped.
+// Messages that were prefetched but not delivered yet (up to WithAMQPPrefetch,
+// 1000 by default) are dropped with the queue, and the recovery repeats them too,
+// so a client may see a message twice, never a hole. A subscription is reset at
+// most three times in ten minutes, with a pause of 1, 2 and 4 minutes between the
+// resets; after that it is only logged as lagging until it catches up or the
+// first reset ages out. The producers it receives are down with
+// ProcessingQueueDelayViolation while a reset is made.
+//
+// Age is measured against the offset of the producer's clock taken from its
+// alives, and the net is off while that offset is stale.
+func WithStaleMessageLimit(d time.Duration) Option {
+	return func(c *Config) { c.staleMessageLimit = d }
+}
+
+// WithStaleMessageWindow sets how long a subscription's live messages have to stay
+// older than WithStaleMessageLimit before the SDK acts on it (default 1m). d must
+// be at least 1s, the SDK's own clock tick, and at most 24h; New rejects any other
+// value as ErrInvalidConfig.
+func WithStaleMessageWindow(d time.Duration) Option {
+	return func(c *Config) { c.staleMessageWindow = d }
+}
+
 // WithInitialSnapshotTime sets the duration to look back when issuing the
 // first snapshot recovery of a producer that has no recovery start (see
 // Client.SetProducerRecoveryFromTimestamp). Zero leaves the default, the
@@ -499,6 +540,12 @@ func (c Config) MaxRecoveryExecution() time.Duration { return c.maxRecoveryExecu
 // SnapshotCompleteDeadline returns the configured snapshot-complete
 // deadline.
 func (c Config) SnapshotCompleteDeadline() time.Duration { return c.snapshotCompleteDeadline }
+
+// StaleMessageLimit returns the configured stale-message limit.
+func (c Config) StaleMessageLimit() time.Duration { return c.staleMessageLimit }
+
+// StaleMessageWindow returns the configured stale-message window.
+func (c Config) StaleMessageWindow() time.Duration { return c.staleMessageWindow }
 
 // ShutdownTimeout returns the configured graceful-shutdown cap.
 func (c Config) ShutdownTimeout() time.Duration { return c.shutdownTimeout }

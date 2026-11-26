@@ -32,6 +32,10 @@ func (a *configAdapter) MaxRecoveryExecution() time.Duration { return a.cfg.maxR
 func (a *configAdapter) SnapshotCompleteDeadline() time.Duration {
 	return a.cfg.snapshotCompleteDeadline
 }
+
+func (a *configAdapter) StaleMessageLimit() time.Duration  { return a.cfg.staleMessageLimit }
+func (a *configAdapter) StaleMessageWindow() time.Duration { return a.cfg.staleMessageWindow }
+
 func (a *configAdapter) MessagingPort() int { return a.cfg.messagingPort }
 func (a *configAdapter) SdkNodeID() *int    { return a.cfg.SdkNodeID() }
 
