@@ -1869,3 +1869,37 @@ func TestNet_StaleWindowDoesNotCountTheTimeTheOffsetWasNotFresh(t *testing.T) {
 		"seconds from the fresh alive to the request: a full window")
 }
 
+// ---- the gaps of a reset and of a real loss
+
+// A lane's gap joined by a real loss is the lane's, whatever the net does with its
+// own: a cancelled reset leaves it open, and the recovery asked for after the queue
+// is back covers it.
+func TestNet_GapOfARealLossJoiningTheNetsStaysAfterTheResetIsCancelled(t *testing.T) {
+	f := upNet(t, all)
+	before := f.calls()
+	f.stale(1, oldAge, 5*time.Minute, f.untilAsked(before))
+	s := f.m.session(sid(1))
+	l := s.lane(pre)
+	expect(t, l.gap != nil && l.gap.pendingReset, true, "the net's gap open")
+	checkpoint := l.checkpoint
+	f.m.channelLost(sid(1))
+	expect(t, l.gap != nil, true, "a gap after the loss")
+	expect(t, l.gap.pendingReset, false, "the gap is not the net's after a real loss joined it")
+	f.m.cancelReset(s, f.m.mono())
+	expect(t, l.gap != nil, true, "a gap after the net's cancel")
+	f.m.channelReopened(sid(1))
+	expectTime(t, f.lastSnapshot(pre).after, checkpoint, "where the recovery after the loss starts")
+}
+
+// A gap that is open already when the net opens its own is not the net's.
+func TestNet_GapOpenBeforeTheNetOpensItsOwnIsNotTheNets(t *testing.T) {
+	f := upNet(t, all)
+	s := f.m.session(sid(1))
+	l := s.lane(pre)
+	l.gap = f.m.openGap(nil, l.checkpoint, false)
+	f.m.trigger(s, f.m.byID[pre], oldAge, f.m.mono())
+	expect(t, l.gap != nil, true, "a gap after the trigger")
+	expect(t, l.gap.pendingReset, false, "the gap is not the net's after it joined a real one")
+	f.m.cancelReset(s, f.m.mono())
+	expect(t, l.gap != nil, true, "a gap after the net's cancel")
+}
