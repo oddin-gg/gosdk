@@ -99,7 +99,7 @@ func (r *actorRig) drainAll() {
 // the facts queued are those the close finds.
 func (r *actorRig) closeBeforeRunning() {
 	r.t.Helper()
-	r.a.shutdownOnce.Do(func() { close(r.a.shutdown) })
+	r.a.signalStop()
 	go r.a.run()
 	if !r.stop() {
 		r.t.Fatal("the actor did not stop")
@@ -1934,7 +1934,52 @@ func TestActor_CloseSignalledDuringTheDrainLeavesTheQueuedClosuresToTheClose(t *
 	r.a.postEssential(factClosed{session: sid(1)})
 	r.a.postEssential(factClosed{session: sid(2)})
 	// the close is signalled while the drain is under way, before it takes the first closure
-	r.a.beforeEssential = func() { r.a.shutdownOnce.Do(func() { close(r.a.shutdown) }) }
+	r.a.beforeEssential = r.a.signalStop
+	r.a.drain()
+	if r.a.machine.session(sid(1)) == nil {
+		t.Fatal("the drain handled a session's closure after the close was signalled")
+	}
+	if got := r.timestampForRecovery(liveID); !got.Equal(behind.Wall()) {
+		t.Fatalf("the drain moved the point to %v after the close was signalled, want it where it was, %v", got, behind.Wall())
+	}
+
+	go r.a.run()
+	if !r.stop() {
+		t.Fatal("the actor did not stop")
+	}
+	if got := r.timestampForRecovery(liveID); !got.Equal(behind.Wall()) {
+		t.Fatalf("closing moved the point to %v, want it where it was, %v", got, behind.Wall())
+	}
+}
+
+// A close signalled after the drain has looked at it and before it takes the
+// next fact is still the close's: the closure queued is not handled as an
+// ordinary one, which would take the slowest session out and carry the resume
+// point forward.
+func TestActor_CloseSignalledBetweenTheLookAndTheTakeLeavesTheClosureToTheClose(t *testing.T) {
+	r := newActorRig(t)
+	r.startWith(types.AllMessageInterest, 1, 2)
+	r.postAlive(liveID, true)
+	r.a.drain()
+	first := r.a.machine.byID[liveID].active.requestID
+	r.a.handle(factSnapshotComplete{session: sid(1), producer: liveID, requestID: first})
+	r.a.handle(factSnapshotComplete{session: sid(2), producer: liveID, requestID: first})
+	r.clock.advance(10 * time.Second)
+	r.postAlive(liveID, true)
+	behind := r.stamp()
+	r.a.postSample(factProcessed{session: sid(1), producer: liveID, generatedAt: behind.Wall(), taken: behind})
+	r.clock.advance(10 * time.Second)
+	r.postAlive(liveID, true)
+	ahead := r.stamp()
+	r.a.postSample(factProcessed{session: sid(2), producer: liveID, generatedAt: ahead.Wall(), taken: ahead})
+	r.drainAll()
+	if got := r.timestampForRecovery(liveID); !got.Equal(behind.Wall()) {
+		t.Fatalf("resume point before the close = %v, want the session that is behind, %v", got, behind.Wall())
+	}
+
+	r.a.postEssential(factClosed{session: sid(1)})
+	// the close is signalled after the drain decided to go on, right before the take
+	r.a.afterEssentialCheck = r.a.signalStop
 	r.a.drain()
 	if r.a.machine.session(sid(1)) == nil {
 		t.Fatal("the drain handled a session's closure after the close was signalled")

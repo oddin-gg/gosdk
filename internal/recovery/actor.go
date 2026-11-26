@@ -68,6 +68,11 @@ type recoveryActor struct {
 	essentialMu sync.Mutex
 	essential   []fact
 	closed      bool
+	// stopRequested says the close has been signalled: the ordinary drain takes no
+	// essential fact from then on, and what is queued is the close's. Set, together
+	// with the close of shutdown, under essentialMu, so a take either happened
+	// before the close was signalled or sees it. Guarded by essentialMu.
+	stopRequested bool
 	// wake nudges the actor's goroutine: one pending nudge says there is something to take.
 	wake     chan struct{}
 	commands chan *recoverEventCommand
@@ -129,6 +134,9 @@ type recoveryActor struct {
 	beforeCommand func()
 	// beforeEssential is the same before each take from the essential queue.
 	beforeEssential func()
+	// afterEssentialCheck runs in the ordinary drain between its look at the close
+	// and its take from the essential queue. Tests only; set before the actor runs.
+	afterEssentialCheck func()
 }
 
 // setBeforeHandle sets what runs inside the handling of each fact. Tests only.
@@ -473,10 +481,12 @@ func (a *recoveryActor) drain() {
 	}
 }
 
+// takeEssential takes the next essential fact for the ordinary drain; none once
+// the close is signalled, the check and the take being one hold of the lock.
 func (a *recoveryActor) takeEssential() (fact, bool) {
 	a.essentialMu.Lock()
 	defer a.essentialMu.Unlock()
-	if len(a.essential) == 0 {
+	if a.stopRequested || len(a.essential) == 0 {
 		return nil, false
 	}
 	f := a.essential[0]
@@ -497,7 +507,19 @@ func (a *recoveryActor) hasEssential() bool {
 	return len(a.essential) > 0
 }
 
-// stopping reports whether the close has been signalled.
+// signalStop signals the close: the flag and the close of shutdown are one hold
+// of the lock, so no ordinary take follows the flag, and the channel is closed
+// whenever the flag is seen.
+func (a *recoveryActor) signalStop() {
+	a.essentialMu.Lock()
+	defer a.essentialMu.Unlock()
+	a.stopRequested = true
+	a.shutdownOnce.Do(func() { close(a.shutdown) })
+}
+
+// stopping reports whether the close has been signalled. Only an early exit for
+// the drains of the commands and the samples: what the essential queue yields
+// rests on the flag takeEssential reads.
 func (a *recoveryActor) stopping() bool {
 	select {
 	case <-a.shutdown:
@@ -519,6 +541,9 @@ func (a *recoveryActor) drainEssential() {
 		}
 		if a.stopping() {
 			return
+		}
+		if a.afterEssentialCheck != nil {
+			a.afterEssentialCheck()
 		}
 		f, ok := a.takeEssential()
 		if !ok {
@@ -812,7 +837,7 @@ func (a *recoveryActor) stopBounded(ctx context.Context) bool {
 	if deadline, ok := ctx.Deadline(); ok {
 		a.closeBy.CompareAndSwap(nil, &deadline)
 	}
-	a.shutdownOnce.Do(func() { close(a.shutdown) })
+	a.signalStop()
 	select {
 	case <-a.done:
 	case <-ctx.Done():
