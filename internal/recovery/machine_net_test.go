@@ -1337,9 +1337,9 @@ func TestNet_BacklogBeyondTheRecoveryWindowIsNotResetButLags(t *testing.T) {
 
 func TestNet_BacklogInsideTheRecoveryWindowIsResetAsBefore(t *testing.T) {
 	f := upNetWithWindow(t, 60)
-	f.runFor(50 * time.Minute)
+	f.runFor(45 * time.Minute)
 	before := f.calls()
-	f.stale(1, 50*time.Minute, 5*time.Minute, f.untilAsked(before))
+	f.stale(1, 45*time.Minute, 5*time.Minute, f.untilAsked(before))
 	f.accept(f.lastSnapshot(pre))
 	f.accept(f.lastSnapshot(live))
 	expectSessions(t, f.resetSessions(), []int{1}, "resets")
@@ -1351,9 +1351,9 @@ func TestNet_BacklogInsideTheRecoveryWindowIsResetAsBefore(t *testing.T) {
 // last acceptance is not reset either.
 func TestNet_CheckpointThatLeavesTheWindowBeforeTheLastAcceptanceCancelsTheReset(t *testing.T) {
 	f := upNetWithWindow(t, 60)
-	f.runFor(55 * time.Minute)
+	f.runFor(45 * time.Minute)
 	before := f.calls()
-	f.stale(1, 55*time.Minute, 5*time.Minute, f.untilAsked(before))
+	f.stale(1, 45*time.Minute, 5*time.Minute, f.untilAsked(before))
 	preReq, liveReq := f.lastSnapshot(pre), f.lastSnapshot(live)
 	f.accept(preReq)
 	f.clock.advance(10 * time.Minute)
@@ -1502,4 +1502,61 @@ func TestNet_BacklogBeyondTheWindowOfAProducerThatCannotBeAskedIsNotReset(t *tes
 	expect(t, len(f.out.resets), 0, "resets")
 	expect(t, f.lagging(1), true, "the session lags")
 	expect(t, f.logCount(notResetOutsideWindow), 1, "warnings of the net not resetting it")
+}
+
+// freshLive is session 1 taking a live message of the live producer as of now: its
+// checkpoint of that producer is as young as can be.
+func (n *netFeed) freshLive() {
+	at := n.now().Add(-n.liveSkew)
+	n.m.processed(sid(1), live, at, at, n.stamp(), 0)
+}
+
+// ---- the window's margin
+
+// A checkpoint that lies inside the window, but within the margin the net keeps
+// from its edge, is not reset: by the time the replacement recovery is asked for
+// into the new queue the window has moved past it.
+func TestNet_CheckpointInsideTheWindowButWithinTheMarginIsNotResetButLags(t *testing.T) {
+	f := upNetWithWindow(t, 60)
+	f.runFor(55 * time.Minute)
+	f.freshLive()
+	before := f.calls()
+	expect(t, f.stale(1, 55*time.Minute, 5*time.Minute, f.untilAsked(before)), -1, "a request")
+	expect(t, f.calls(), before, "requests")
+	expect(t, len(f.out.resets), 0, "resets")
+	expect(t, f.lagging(1), true, "the session lags")
+	expect(t, f.logCount(notResetOutsideWindow), 1, "warnings of the net not resetting it")
+}
+
+func TestNet_CheckpointJustOutsideTheMarginIsReset(t *testing.T) {
+	f := upNetWithWindow(t, 60)
+	f.runFor(55 * time.Minute)
+	f.freshLive()
+	before := f.calls()
+	f.stale(1, 49*time.Minute, 5*time.Minute, f.untilAsked(before))
+	f.accept(f.lastSnapshot(pre))
+	f.accept(f.lastSnapshot(live))
+	expectSessions(t, f.resetSessions(), []int{1}, "resets")
+	expect(t, f.lagging(1), false, "the session lags")
+}
+
+// The margin is at most half the producer's window: with a window of 6 minutes it
+// is 3, not 10, so a checkpoint 2.5 minutes old is reset and one 3.5 minutes old is not.
+func TestNet_MarginIsAtMostHalfTheWindowOfAShortWindow(t *testing.T) {
+	f := upNetWithWindow(t, 6)
+	f.runFor(10 * time.Minute)
+	f.freshLive()
+	before := f.calls()
+	f.stale(1, 150*time.Second, 5*time.Minute, f.untilAsked(before))
+	f.accept(f.lastSnapshot(pre))
+	f.accept(f.lastSnapshot(live))
+	expectSessions(t, f.resetSessions(), []int{1}, "resets with a checkpoint 2.5 minutes old")
+
+	g := upNetWithWindow(t, 6)
+	g.runFor(10 * time.Minute)
+	g.freshLive()
+	before = g.calls()
+	expect(t, g.stale(1, 210*time.Second, 5*time.Minute, g.untilAsked(before)), -1, "a request with one 3.5 minutes old")
+	expect(t, len(g.out.resets), 0, "resets")
+	expect(t, g.lagging(1), true, "the session lags")
 }

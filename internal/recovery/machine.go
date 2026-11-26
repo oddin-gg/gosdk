@@ -107,10 +107,12 @@ import (
 //
 // A session is not reset when its checkpoint of any producer the catalog has enabled
 // lies before where that producer's recovery would start, clamped to its stateful
-// recovery window: what the reset drops of it no recovery repeats. It is lagging
+// recovery window, or within resetWindowMargin of that start (at most half the
+// window): what the reset drops of it no recovery repeats. The margin covers the
+// time from the last acceptance to the recovery asked into the new queue, during
+// which the window moves on; it is a margin, not a proof. The session is lagging
 // instead, with a warning of its own for the episode, and nothing is asked. The same
-// check is made when the last acceptance arrives, since the window moves on; a reset
-// that fails it is cancelled. Once the feed is closing the resets waiting for the API
+// check is made when the last acceptance arrives; a reset that fails it is cancelled. Once the feed is closing the resets waiting for the API
 // are cancelled, and an acceptance handled after that makes none.
 //
 // The stale window counts only time spent stale: one that began before the last
@@ -1781,9 +1783,18 @@ func (m *machine) cancelResetWaitingForDisabledProducer(s *session, mono time.Du
 	return false
 }
 
+// windowMargin is how far inside the producer's recovery window a checkpoint must
+// lie for a reset: resetWindowMargin, at most half the window.
+func windowMargin(t *track) time.Duration {
+	window := time.Duration(t.producer.StatefulRecoveryWindowInMinutes()) * time.Minute
+	return min(resetWindowMargin, window/2)
+}
+
 // producerOutsideWindow finds, among the producers the session receives that the
 // catalog has enabled, one whose checkpoint for the session lies before where a
-// recovery of it would start now, clamped to its stateful recovery window. A reset
+// recovery of it would start now, clamped to its stateful recovery window, plus the
+// margin (windowMargin): the window moves on before the recovery asked into the new
+// queue, and a checkpoint at its edge would be outside it by then. A reset
 // replaces the whole queue, so it drops the backlog of a producer that cannot be
 // asked for now (silent, in backoff) as well, and that producer's later recovery
 // starts from the checkpoint, clamped just the same: what lies before the window is
@@ -1794,7 +1805,7 @@ func (m *machine) producerOutsideWindow(s *session) (int, bool) {
 		if !m.catalog.enabled(l.producer) || l.checkpoint.IsZero() {
 			continue
 		}
-		if start, ok := m.windowStart(m.byID[l.producer]); ok && l.checkpoint.Before(start) {
+		if start, ok := m.windowStart(m.byID[l.producer]); ok && l.checkpoint.Before(start.Add(windowMargin(m.byID[l.producer]))) {
 			return l.producer, true
 		}
 	}

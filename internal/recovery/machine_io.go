@@ -41,6 +41,13 @@ const (
 	// after the first reset; it doubles for each reset made within the cool-down:
 	// 1 min, 2 min, 4 min.
 	firstResetBackoff = time.Minute
+	// resetWindowMargin is how far inside a producer's recovery window a session's
+	// checkpoint of it must lie for the net to reset the session: the time from the
+	// acceptance of the last recovery to the recovery asked into the new queue (the
+	// channel is closed and bound again, a producer that was in backoff asks later),
+	// during which the window moves on. It is a margin, not a proof; capped at half
+	// the producer's window.
+	resetWindowMargin = 10 * time.Minute
 )
 
 // recoverySettings are the client's settings the recovery rules use.

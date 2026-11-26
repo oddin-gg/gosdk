@@ -430,9 +430,11 @@ One recovery actor runs every producer's recovery state. The rules, per producer
   has made in the last ten minutes, as between resets. It does not reset a
   subscription whose backlog reaches past the producer's stateful recovery window
   (its checkpoint of any enabled producer it receives is older than the start a
-  recovery could have): the recovery could not repeat what the reset would drop,
-  so the subscription is logged as lagging (one WARN) and nothing is asked, until
-  it catches up. The net is off while the offset of the
+  recovery could have, or lies within ten minutes of it, at most half the window,
+  since the window moves on before the recovery asked into the new queue): the
+  recovery could not repeat what the reset would drop, so the subscription is
+  logged as lagging (one WARN) and nothing is asked, until it catches up. The
+  margin is a margin, not a proof. The net is off while the offset of the
   producer's clock is stale, and paused for a producer while a recovery of it is in
   flight or a gap is open, since a snapshot ahead of a live message makes it old on
   every subscription. It acts on a backlog old enough to reach the limit: a broker
