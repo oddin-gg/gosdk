@@ -1905,3 +1905,49 @@ func TestActor_UnsubscribedAliveReceivedBeforeTheAnswerArrivedDoesNotGiveTheReco
 		t.Fatal("the recovery is no longer in flight")
 	}
 }
+
+// A close signalled while the actor drains stops the drain: the session closures
+// still queued are the close's to handle, once the machine knows the feed is
+// closing, so the one that is behind does not leave first and carry the resume
+// point forward.
+func TestActor_CloseSignalledDuringTheDrainLeavesTheQueuedClosuresToTheClose(t *testing.T) {
+	r := newActorRig(t)
+	r.startWith(types.AllMessageInterest, 1, 2)
+	r.postAlive(liveID, true)
+	r.a.drain()
+	first := r.a.machine.byID[liveID].active.requestID
+	r.a.handle(factSnapshotComplete{session: sid(1), producer: liveID, requestID: first})
+	r.a.handle(factSnapshotComplete{session: sid(2), producer: liveID, requestID: first})
+	r.clock.advance(10 * time.Second)
+	r.postAlive(liveID, true)
+	behind := r.stamp()
+	r.a.postSample(factProcessed{session: sid(1), producer: liveID, generatedAt: behind.Wall(), taken: behind})
+	r.clock.advance(10 * time.Second)
+	r.postAlive(liveID, true)
+	ahead := r.stamp()
+	r.a.postSample(factProcessed{session: sid(2), producer: liveID, generatedAt: ahead.Wall(), taken: ahead})
+	r.drainAll()
+	if got := r.timestampForRecovery(liveID); !got.Equal(behind.Wall()) {
+		t.Fatalf("resume point before the close = %v, want the session that is behind, %v", got, behind.Wall())
+	}
+
+	r.a.postEssential(factClosed{session: sid(1)})
+	r.a.postEssential(factClosed{session: sid(2)})
+	// the close is signalled while the drain is under way, before it takes the first closure
+	r.a.beforeEssential = func() { r.a.shutdownOnce.Do(func() { close(r.a.shutdown) }) }
+	r.a.drain()
+	if r.a.machine.session(sid(1)) == nil {
+		t.Fatal("the drain handled a session's closure after the close was signalled")
+	}
+	if got := r.timestampForRecovery(liveID); !got.Equal(behind.Wall()) {
+		t.Fatalf("the drain moved the point to %v after the close was signalled, want it where it was, %v", got, behind.Wall())
+	}
+
+	go r.a.run()
+	if !r.stop() {
+		t.Fatal("the actor did not stop")
+	}
+	if got := r.timestampForRecovery(liveID); !got.Equal(behind.Wall()) {
+		t.Fatalf("closing moved the point to %v, want it where it was, %v", got, behind.Wall())
+	}
+}

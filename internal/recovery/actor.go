@@ -127,6 +127,8 @@ type recoveryActor struct {
 	beforeSample func()
 	// beforeCommand is beforeSample for the commands.
 	beforeCommand func()
+	// beforeEssential is the same before each take from the essential queue.
+	beforeEssential func()
 }
 
 // setBeforeHandle sets what runs inside the handling of each fact. Tests only.
@@ -495,8 +497,29 @@ func (a *recoveryActor) hasEssential() bool {
 	return len(a.essential) > 0
 }
 
+// stopping reports whether the close has been signalled.
+func (a *recoveryActor) stopping() bool {
+	select {
+	case <-a.shutdown:
+		return true
+	default:
+		return false
+	}
+}
+
+// drainEssential handles the essential facts queued, until the close is
+// signalled: what is left then is the close's to handle, once the machine knows
+// the feed is closing. A session's closure handled before that would take the
+// slowest session out and move a resume point forward, which the close cannot
+// take back.
 func (a *recoveryActor) drainEssential() {
 	for {
+		if a.beforeEssential != nil {
+			a.beforeEssential()
+		}
+		if a.stopping() {
+			return
+		}
 		f, ok := a.takeEssential()
 		if !ok {
 			return
@@ -506,9 +529,13 @@ func (a *recoveryActor) drainEssential() {
 }
 
 // drainCommands takes up to commandsPerTurn requests, yielding to the essential
-// facts; it reports whether it stopped with more waiting.
+// facts; it reports whether it stopped with more waiting. Once the close is
+// signalled it takes no more: the close refuses what is queued.
 func (a *recoveryActor) drainCommands() bool {
 	for n := 0; n < commandsPerTurn; n++ {
+		if a.stopping() {
+			return false
+		}
 		if a.hasEssential() {
 			return true
 		}
@@ -519,6 +546,12 @@ func (a *recoveryActor) drainCommands() bool {
 		case c := <-a.commands:
 			// what was posted before this request is handled before it
 			a.drainEssential()
+			if a.stopping() {
+				// the facts before it are the close's now, so it is refused, as the
+				// ones still queued are
+				c.reply <- recoverEventReply{err: ErrManagerClosed}
+				return false
+			}
 			a.handle(c)
 		default:
 			return false
@@ -534,6 +567,9 @@ func (a *recoveryActor) drainCommands() bool {
 // checkpoint before the loss of the old one is known.
 func (a *recoveryActor) drainSamples() bool {
 	for n := 0; n < samplesPerTurn; n++ {
+		if a.stopping() {
+			return false
+		}
 		if a.hasEssential() {
 			return true
 		}
@@ -543,6 +579,10 @@ func (a *recoveryActor) drainSamples() bool {
 		select {
 		case f := <-a.samples:
 			a.drainEssential()
+			if a.stopping() {
+				// dropped, as the close drops the samples still queued
+				return false
+			}
 			a.handle(f)
 		default:
 			return false
