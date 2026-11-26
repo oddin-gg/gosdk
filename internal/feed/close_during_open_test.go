@@ -271,7 +271,7 @@ func TestChannelConsumer_OpenCloseRace(t *testing.T) {
 		start := make(chan struct{})
 		opened := make(chan gateOpenResult, 1)
 		closers := 1 + rand.IntN(3)
-		closeDone := make(chan struct{}, closers)
+		closeDone := make(chan error, closers)
 		go func() {
 			<-start
 			for range rand.IntN(50) {
@@ -289,14 +289,15 @@ func TestChannelConsumer_OpenCloseRace(t *testing.T) {
 				}
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()
-				_ = c.Close(ctx)
-				closeDone <- struct{}{}
+				closeDone <- c.Close(ctx)
 			}()
 		}
 		close(start)
 		res := <-opened
 		for range closers {
-			<-closeDone
+			if err := <-closeDone; err != nil {
+				t.Fatalf("iteration %d: Close: %v", i, err)
+			}
 		}
 
 		if res.err != nil {
