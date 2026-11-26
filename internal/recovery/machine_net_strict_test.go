@@ -257,3 +257,94 @@ func TestNet_StaleSampleAtTheRetryDeadlineOfAnOpenGapStartsNoReset(t *testing.T)
 	expect(t, f.lastSnapshot(pre).requestID, f.inFlight(pre), "the retry of the prematch producer in flight")
 	expect(t, f.m.session(sid(1)).pending == nil, true, "a reset pending after the tick")
 }
+
+// The triggering producer is disabled by a client callback on the very sample that
+// would start the net: nothing of that sample counts, and the net does not reset for
+// the producers left.
+func TestNet_TriggeringProducerDisabledOnTheSampleStartsNothing(t *testing.T) {
+	f := upNet(t, all)
+	before := f.calls()
+	f.stale(1, oldAge, 60*time.Second, f.untilAsked(before))
+	expect(t, f.calls(), before, "requests before the window is over")
+	f.cat.disabled[pre] = true
+	f.stale(1, oldAge, 3*time.Second, f.untilAsked(before))
+	expect(t, f.calls(), before, "requests")
+	expect(t, f.m.session(sid(1)).pending == nil, true, "a reset pending")
+	expect(t, f.lagging(1), false, "the session lags")
+	expect(t, f.m.session(sid(1)).nextResetAt, time.Duration(0), "the net's backoff")
+}
+
+// Both producers can be asked; the session's messages of one are stale and its
+// checkpoint of it lies inside the window, while its checkpoint of the other lies
+// outside it: the session lags and nothing is asked.
+func TestNet_BacklogBeyondTheWindowOfAnotherProducerThanTheSampledOneMakesTheSessionLag(t *testing.T) {
+	f := upNetWithWindow(t, 60)
+	f.runFor(70 * time.Minute)
+	at := f.now()
+	f.m.processed(sid(1), pre, at, at, f.stamp(), 0)
+	before := f.calls()
+	expect(t, f.stale(1, oldAge, 3*time.Minute, f.untilAsked(before)), -1, "a request")
+	expect(t, f.calls(), before, "requests")
+	expect(t, len(f.out.resets), 0, "resets")
+	expect(t, f.lagging(1), true, "the session lags")
+	expect(t, f.logCount(notResetOutsideWindow), 1, "warnings of the net not resetting it")
+}
+
+// An accepted recovery of the net's times out while the other is not accepted yet: the
+// reset is cancelled once, with the net's backoff, and the other's acceptance makes none.
+func TestNet_TimeoutOfAnAcceptedRecoveryWhileTheOtherIsNotAcceptedCancelsTheReset(t *testing.T) {
+	f := upNet(t, all)
+	before := f.calls()
+	f.stale(1, oldAge, 5*time.Minute, f.untilAsked(before))
+	preReq, liveReq := f.lastSnapshot(pre), f.lastSnapshot(live)
+	f.accept(preReq)
+	f.runWithAlives(4*time.Minute + 50*time.Second)
+	// something of the live recovery puts off its own deadline
+	f.processed(1, live, f.now(), liveReq.requestID)
+	expect(t, f.m.counters.timedOut, 0, "recoveries timed out so far")
+	f.runWithAlives(30 * time.Second)
+	expect(t, f.m.counters.timedOut, 1, "recoveries timed out")
+	s := f.m.session(sid(1))
+	expect(t, s.pending == nil, true, "a reset pending")
+	expect(t, f.m.counters.resetRequestsFailed, 1, "net requests failed")
+	expect(t, s.nextResetAt > f.m.mono(), true, "the net waits before it tries again")
+	f.accept(liveReq)
+	expect(t, len(f.out.resets), 0, "resets")
+	expect(t, f.m.counters.resetRequestsFailed, 1, "net requests failed after the last acceptance")
+}
+
+// A producer with a real gap that is not the sampled one holds the net back, and its
+// retry, due at the stale sample, is the ordinary one: the net asks for nothing of its
+// own, and proceeds once that recovery is complete and a full window has passed.
+func TestNet_ProducerWithAGapHoldsTheNetBackAndItsOrdinaryRetryGoesFirst(t *testing.T) {
+	f := &netFeed{feed: withSettings(t, func(s *recoverySettings) { s.staleWindow = 2 * time.Second })}
+	f.open(1, all)
+	f.startFeed()
+	f.bothUp(1)
+	f.unsubscribed(live)
+	f.refuse(f.lastSnapshot(live))
+	before := f.calls()
+	sample := func() {
+		at := f.now().Add(-oldAge)
+		f.m.processed(sid(1), pre, at, at, f.stamp(), 0)
+	}
+	for range 4 {
+		f.clock.advance(time.Second)
+		sample()
+		f.m.tick()
+	}
+	expect(t, f.calls(), before, "requests during the backoff")
+	f.clock.advance(time.Second)
+	sample() // the retry is due, the tick that sends it not yet run
+	expect(t, f.calls(), before, "requests after the sample at the deadline")
+	expect(t, f.m.session(sid(1)).pending == nil, true, "a reset pending")
+	f.m.tick()
+	expect(t, f.calls(), before+1, "requests after the tick: the ordinary retry")
+	expect(t, f.m.session(sid(1)).pending == nil, true, "a reset pending after the tick")
+	f.complete(f.lastSnapshot(live), 1)
+	after := f.calls()
+	if f.stale(1, oldAge, time.Minute, f.untilAsked(after)) < 0 {
+		t.Fatal("the net did not act once the live producer was recovered")
+	}
+	expect(t, f.calls(), after+2, "requests: both producers")
+}

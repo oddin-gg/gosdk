@@ -265,7 +265,7 @@ func TestNet_WaitsWhileAnotherProducerOfTheSessionHasARecoveryInFlight(t *testin
 // A producer whose retries are spent, waiting for its slow retry, holds the net
 // back: a reset would drop the session's backlog of it, and its recovery could not
 // repeat that before the window moves on. The net waits, with no request, gap,
-// lagging or backoff, until the retry is due: then both are asked for at once.
+// lagging or backoff, until the retry has gone out and been recovered: then both are asked for.
 func TestNet_ProducerWithItsCapSpentHoldsTheNetBackUntilItsRetryIsDue(t *testing.T) {
 	f := upNet(t, all)
 	f.unsubscribed(live)
@@ -288,11 +288,18 @@ func TestNet_ProducerWithItsCapSpentHoldsTheNetBackUntilItsRetryIsDue(t *testing
 	expect(t, f.m.session(sid(1)).pending == nil, true, "a reset pending")
 	expect(t, f.m.session(sid(1)).nextResetAt, time.Duration(0), "the net's backoff")
 
-	// the retry is due: both are asked for, the live producer's by the net
+	// the retry is due: only the ordinary retry goes out, the net waits for the gap
 	if f.stale(1, oldAge, 20*time.Second, f.untilAsked(before)) < 0 {
-		t.Fatal("the net did not act once the live producer's retry was due")
+		t.Fatal("the live producer's retry did not go out")
 	}
-	expect(t, f.calls(), before+2, "requests: both producers")
+	expect(t, f.calls(), before+1, "requests: the live producer's retry only")
+	expect(t, f.m.session(sid(1)).pending == nil, true, "a reset pending")
+	f.complete(f.lastSnapshot(live), 1)
+	after := f.calls()
+	if f.stale(1, oldAge, 3*time.Minute, f.untilAsked(after)) < 0 {
+		t.Fatal("the net did not act once the live producer was recovered")
+	}
+	expect(t, f.calls(), after+2, "requests: both producers")
 	f.accept(f.lastSnapshot(pre))
 	f.accept(f.lastSnapshot(live))
 	expectSessions(t, f.resetSessions(), []int{1}, "resets")
@@ -1229,6 +1236,7 @@ func TestNet_RecoveryGivenUpWhileItsResetWaitsCancelsTheReset(t *testing.T) {
 		f.advance(time.Second)
 	}
 	expect(t, f.m.counters.abandoned, 2, "recoveries given up: both producers fell silent")
+	expect(t, f.m.session(sid(1)).nextResetAt > f.m.mono(), true, "the net waits before it tries again: a silent producer is no loss")
 	f.alive(pre)
 	f.alive(live)
 	f.accept(f.lastSnapshot(pre))
@@ -1626,8 +1634,8 @@ func TestNet_CancelledResetPausesByTheResetsLeftInTheCooldown(t *testing.T) {
 
 // A producer in backoff holds the net back, the same: the session's messages of the
 // other producer are stale for longer than the window while the retry waits, and the
-// net does not ask for the one that could be asked. It asks for both once the retry
-// is due.
+// net does not ask for the one that could be asked, nor for the retry itself. It asks
+// for both once the retry has gone out and been recovered.
 func TestNet_ProducerInBackoffHoldsTheNetBackUntilItsRetryIsDue(t *testing.T) {
 	f := &netFeed{feed: withSettings(t, func(s *recoverySettings) { s.staleWindow = 2 * time.Second })}
 	f.open(1, all)
@@ -1643,11 +1651,18 @@ func TestNet_ProducerInBackoffHoldsTheNetBackUntilItsRetryIsDue(t *testing.T) {
 	expect(t, f.lagging(1), false, "the session lags")
 	expect(t, f.m.session(sid(1)).nextResetAt, time.Duration(0), "the net's backoff")
 
-	// the retry is due: the stale sample that finds it so starts the net, which asks for both
+	// the retry is due: only the ordinary retry goes out, the net waits for the gap
 	if f.stale(1, oldAge, 2*time.Second, f.untilAsked(before)) < 0 {
-		t.Fatal("the net did not act once the live producer's retry was due")
+		t.Fatal("the live producer's retry did not go out")
 	}
-	expect(t, f.calls(), before+2, "requests: both producers")
+	expect(t, f.calls(), before+1, "requests: the live producer's retry only")
+	expect(t, f.m.session(sid(1)).pending == nil, true, "a reset pending")
+	f.complete(f.lastSnapshot(live), 1)
+	after := f.calls()
+	if f.stale(1, oldAge, time.Minute, f.untilAsked(after)) < 0 {
+		t.Fatal("the net did not act once the live producer was recovered")
+	}
+	expect(t, f.calls(), after+2, "requests: both producers")
 	expect(t, f.m.session(sid(1)).pending != nil, true, "a reset waiting for the API")
 }
 

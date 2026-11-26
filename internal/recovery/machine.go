@@ -1212,6 +1212,8 @@ func (m *machine) lastAcceptance(s *session, p *pendingReset, mono time.Duration
 			continue
 		}
 		t := m.byID[l.producer]
+		// asked == nil is a producer enabled since; the other two are guards no sequence
+		// reaches, since a recovery that ends cancels the reset before anything else runs
 		if asked := p.asked[l.producer]; asked == nil || t.active != asked || !asked.accepted {
 			m.resetNotMadeForChangedProducer(s, l.producer, mono)
 			return
@@ -1786,13 +1788,18 @@ func (m *machine) hasDownGaps(t *track) bool {
 //
 // It starts only when every one of those producers can be asked for now: none has a
 // recovery in flight, none is in backoff or waiting for its slow retry, silent or
-// waiting for an alive, and no session that receives one has no queue bound. A
-// reset drops the backlog of every producer the session receives, and the
+// waiting for an alive, no session that receives one has no queue bound, and none has
+// a gap open (its own recovery starts at that older gap, not at the checkpoint the
+// window check compares, and goes first). A reset drops the backlog of every producer the session receives, and the
 // recovery of one that could not be asked for now would start later, from a window
 // that has moved on, and repeat nothing of it. So the net waits, with no request,
 // gap, lagging or backoff, and tries again at a later stale sample. Not once the
 // feed is closing: a reset then drops what the shutdown is about to settle.
 func (m *machine) trigger(s *session, t *track, age time.Duration, mono time.Duration) {
+	if !m.catalog.enabled(t.id) {
+		// a client callback disabled it on this very sample: nothing of it counts
+		return
+	}
 	m.pruneResets(s, mono)
 	if len(s.resets) >= safetyNetResets {
 		if !s.lagging {
@@ -1809,7 +1816,7 @@ func (m *machine) trigger(s *session, t *track, age time.Duration, mono time.Dur
 	var asked []*track
 	for _, l := range s.lanes {
 		if other := m.byID[l.producer]; m.catalog.enabled(other.id) {
-			if !m.canRequest(other, mono) {
+			if !m.canRequest(other, mono) || m.hasGaps(other) {
 				return
 			}
 			asked = append(asked, other)
