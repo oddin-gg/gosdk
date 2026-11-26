@@ -427,7 +427,8 @@ One recovery actor runs every producer's recovery state. The rules, per producer
   ages out, and the processing delay below keeps its producers down for as long as
   it is late. The net starts only when every enabled producer the subscription
   receives can be asked for now: a producer that is silent, in backoff or waiting
-  for its slow retry, with a recovery in flight, or held back by another
+  for its slow retry, with a recovery in flight, with a gap open (its own recovery,
+  which starts at that older gap, goes first), or held back by another
   subscription without a queue, holds the net back for every subscription that
   receives it, whatever the others are doing. A reset drops the backlog of all of
   them, and a recovery that could only start later would start from a window that
