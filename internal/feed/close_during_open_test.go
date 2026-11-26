@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math/rand/v2"
 	"runtime"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -40,6 +41,24 @@ func (o *gateOpener) CreateChannel(context.Context, []string, string, int) (<-ch
 		<-o.release
 	}
 	return o.del, o.ch, nil
+}
+
+// ctxBoundOpener parks CreateChannel until its context is done, like a
+// CreateChannel waiting for a broker that never comes back.
+type ctxBoundOpener struct {
+	entered chan struct{}
+	once    sync.Once
+	ch      *recordingChannel
+}
+
+func newCtxBoundOpener() *ctxBoundOpener {
+	return &ctxBoundOpener{entered: make(chan struct{}), ch: &recordingChannel{seq: new(atomic.Int32)}}
+}
+
+func (o *ctxBoundOpener) CreateChannel(ctx context.Context, _ []string, _ string, _ int) (<-chan amqp.Delivery, amqpChannel, error) {
+	o.once.Do(func() { close(o.entered) })
+	<-ctx.Done()
+	return nil, nil, ctx.Err()
 }
 
 // lifecycleHooks counts every lifecycle hook invocation.
@@ -291,5 +310,82 @@ func TestChannelConsumer_OpenCloseRace(t *testing.T) {
 			continue
 		}
 		assertTornDown(t, c, o.ch, h, res.out)
+	}
+}
+
+// Close while Open is parked in CreateChannel under a context that never
+// ends: the shutdown cuts the setup short instead of waiting for it. Open
+// fails with errConsumerClosed, nothing survives and no hook fires.
+func TestChannelConsumer_CloseCutsShortOpenSetup(t *testing.T) {
+	o := newCtxBoundOpener()
+	c := NewChannelConsumer(o, &factory.FeedMessageFactory{}, discardConsumerLogger(), "ex", "od:sport:", 0)
+	h := &lifecycleHooks{}
+	h.install(c)
+
+	opened := startOpen(c)
+	select {
+	case <-o.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Open never reached CreateChannel")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	begin := time.Now()
+	if err := c.Close(ctx); err != nil {
+		t.Fatalf("Close did not complete: the shutdown is waiting for Open: %v", err)
+	}
+	if took := time.Since(begin); took > 500*time.Millisecond {
+		t.Errorf("Close took %v, want prompt", took)
+	}
+
+	select {
+	case res := <-opened:
+		if !errors.Is(res.err, errConsumerClosed) || res.out != nil {
+			t.Fatalf("Open = (%v, %v), want (nil, errConsumerClosed)", res.out, res.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Open is still blocked after Close returned")
+	}
+	if o.ch.closedAt.Load() != 0 || c.outgoing != nil {
+		t.Error("a channel or outgoing stream survived the cut-short Open")
+	}
+	c.wg.Wait()
+	if h.gone.Load() != 0 || h.lost.Load() != 0 || h.restored.Load() != 0 {
+		t.Errorf("hooks fired: gone=%d lost=%d restored=%d", h.gone.Load(), h.lost.Load(), h.restored.Load())
+	}
+
+	again, cancelAgain := context.WithTimeout(context.Background(), time.Second)
+	defer cancelAgain()
+	begin = time.Now()
+	if err := c.Close(again); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+	if took := time.Since(begin); took > 100*time.Millisecond {
+		t.Errorf("second Close took %v, want immediate", took)
+	}
+}
+
+// A cancellation of the caller's own context still surfaces as that
+// context's error, not as a closed consumer.
+func TestChannelConsumer_OpenCallerCancelIsNotClosed(t *testing.T) {
+	o := newCtxBoundOpener()
+	c := NewChannelConsumer(o, &factory.FeedMessageFactory{}, discardConsumerLogger(), "ex", "od:sport:", 0)
+	ctx, cancel := context.WithCancel(context.Background())
+	mi := types.LiveOnlyMessageInterest
+	res := make(chan error, 1)
+	go func() {
+		_, err := c.Open(ctx, []string{"k"}, &mi)
+		res <- err
+	}()
+	<-o.entered
+	cancel()
+	select {
+	case err := <-res:
+		if !errors.Is(err, context.Canceled) || errors.Is(err, errConsumerClosed) {
+			t.Fatalf("Open = %v, want the caller's context error", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Open did not return after the caller cancelled")
 	}
 }

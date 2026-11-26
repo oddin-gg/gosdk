@@ -151,6 +151,12 @@ type ChannelConsumer struct {
 	// Guarded by mu.
 	opening chan struct{}
 
+	// cancelOpen cancels the context Open derived for the initial channel
+	// setup. Close's shutdown calls it before waiting on opening, so an
+	// Open parked in CreateChannel cannot hold the shutdown. Set with
+	// opening, guarded by mu.
+	cancelOpen context.CancelFunc
+
 	// shutdown is set, under mu, when Close's shutdown begins. An Open
 	// that finds it set creates no channel and starts no loop. Guarded
 	// by mu.
@@ -394,11 +400,19 @@ func (c *ChannelConsumer) Open(ctx context.Context, routingKeys []string, messag
 	c.messageInterest = messageInterest
 	opening := make(chan struct{})
 	c.opening = opening
+	// The setup runs under its own cancellable context, so Close's
+	// shutdown can cut it short. The loop context below derives from the
+	// caller's ctx, not from this one, so releasing it on return does not
+	// touch the consume loop.
+	setupCtx, cancelSetup := context.WithCancel(ctx)
+	c.cancelOpen = cancelSetup
 	c.mu.Unlock()
 	defer func() {
 		c.mu.Lock()
 		c.opening = nil
+		c.cancelOpen = nil
 		c.mu.Unlock()
+		cancelSetup()
 		close(opening)
 	}()
 
@@ -411,8 +425,18 @@ func (c *ChannelConsumer) Open(ctx context.Context, routingKeys []string, messag
 	// to the struct on failure, so a fresh Open can retry. Reconnect
 	// after a LATER connection drop is still handled asynchronously by
 	// run() (transient errors retried there).
-	deliveries, ch, err := c.client.CreateChannel(ctx, c.routingKeys, c.exchangeName, c.prefetch)
+	deliveries, ch, err := c.client.CreateChannel(setupCtx, c.routingKeys, c.exchangeName, c.prefetch)
 	if err != nil {
+		// A setup cut short by Close's shutdown is a refused Open. The
+		// caller's own cancellation still surfaces as its context error.
+		if ctx.Err() == nil && setupCtx.Err() != nil {
+			c.mu.Lock()
+			shutdown := c.shutdown
+			c.mu.Unlock()
+			if shutdown {
+				return nil, errConsumerClosed
+			}
+		}
 		return nil, fmt.Errorf("feed: open consumer channel (interest=%s, keys=%d): %w", *messageInterest, len(routingKeys), err)
 	}
 
@@ -554,8 +578,13 @@ func (c *ChannelConsumer) runShutdown() {
 	c.mu.Lock()
 	c.shutdown = true
 	opening := c.opening
+	cancelOpen := c.cancelOpen
 	c.mu.Unlock()
 	if opening != nil {
+		// Cut the running Open's channel setup short before waiting for it.
+		if cancelOpen != nil {
+			cancelOpen()
+		}
 		<-opening
 	}
 	c.mu.Lock()
