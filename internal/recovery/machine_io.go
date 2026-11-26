@@ -31,6 +31,16 @@ const (
 	// completing are remembered: each sends a snapshot of its own at most, so the
 	// traffic that puts off a deadline stays bounded.
 	endedRemembered = 8
+	// safetyNetResets is how many times the safety net resets one session within
+	// safetyNetCooldown; once spent, the session is lagging and is not reset again
+	// until the oldest of them has aged out.
+	safetyNetResets = 3
+	// safetyNetCooldown is how long a reset counts against safetyNetResets.
+	safetyNetCooldown = 10 * time.Minute
+	// firstResetBackoff is the pause before the net may reset a session again
+	// after the first reset; it doubles for each reset made within the cool-down:
+	// 1 min, 2 min, 4 min.
+	firstResetBackoff = time.Minute
 )
 
 // recoverySettings are the client's settings the recovery rules use.
@@ -47,6 +57,13 @@ type recoverySettings struct {
 	// initialSnapshot is how far back a cold start with no recovery point asks
 	// for; 0 for a full snapshot.
 	initialSnapshot time.Duration
+	// staleLimit is how old, by the producer's clock, a session's live messages
+	// of a producer may be before they count as stale; zero switches the safety
+	// net off.
+	staleLimit time.Duration
+	// staleWindow is how long a session's messages have to stay stale before the
+	// safety net acts.
+	staleWindow time.Duration
 	// nodeID is the node id the recovery info carries.
 	nodeID *int
 }
@@ -170,6 +187,9 @@ const (
 	// causeRecoveryFailed: recovery failed as many times in a row as it is
 	// re-issued with backoff; it is asked for at a slow pace until it succeeds.
 	causeRecoveryFailed
+	// causeSafetyNetReset: a session that was too far behind has its channel
+	// replaced, and what its queue held with it.
+	causeSafetyNetReset
 )
 
 var causeDescriptions = map[statusCause]string{
@@ -184,6 +204,7 @@ var causeDescriptions = map[statusCause]string{
 	causeChannelLost:            "a session's channel was lost",
 	causeSessionOpened:          "a session opened that has a recovery to make",
 	causeRecoveryFailed:         "recovery failed too often in a row",
+	causeSafetyNetReset:         "a session too far behind was reset",
 }
 
 // String is the cause in a few words, for the log.
@@ -198,7 +219,7 @@ func (c statusCause) reason() types.ProducerStatusReason {
 		return types.ReturnedFromInactivityProducerStatusReason
 	case causeAliveIntervalViolation:
 		return types.AliveIntervalViolationProducerStatusReason
-	case causeProcessingDelay:
+	case causeProcessingDelay, causeSafetyNetReset:
 		return types.ProcessingQueueDelayViolationProducerStatusReason
 	case causeConnectionLost, causeChannelLost:
 		return types.ConnectionDownProducerStatusReason

@@ -47,6 +47,7 @@ func (m *machine) stalledAmong(awaited, seen map[uuid.UUID]bool, mono time.Durat
 // Event recoveries expire here, and the deferred ones.
 func (m *machine) tick() {
 	mono := m.mono()
+	m.cancelResetsWaitingForDisabledProducers(mono)
 	for _, t := range m.tracks {
 		if !m.catalog.enabled(t.id) {
 			continue
@@ -63,7 +64,8 @@ func (m *machine) tick() {
 			case mono-a.issuedMono > m.settings.maxRecoveryTime:
 				m.counters.timedOut++
 				m.failed(t, a, mono, "no snapshot complete within "+m.settings.maxRecoveryTime.String())
-			case mono-a.heardAt > m.settings.snapshotCompleteTimeout:
+			case mono-a.heardAt > m.settings.snapshotCompleteTimeout && !m.underwayFor(t):
+				// a reset underway gives it up once done; else its snapshot_complete is lost
 				m.counters.timedOut++
 				m.failed(t, a, mono,
 					"no snapshot complete, nor anything on its way, within "+m.settings.snapshotCompleteTimeout.String())

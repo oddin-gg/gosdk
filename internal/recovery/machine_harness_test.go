@@ -89,14 +89,25 @@ type fakeOutbox struct {
 	// ended is the id of every snapshot request that left flight, in order.
 	ended    []int
 	outcomes []eventOutcome
+	// resets are the sessions the machine asked to reset, with the numbers of
+	// the resets, in order.
+	resets       []uuid.UUID
+	resetNumbers []uint64
+	// onRequest, when set, is called for every snapshot request as it is sent.
+	onRequest func(snapshotRequest)
 }
 
 func newFakeOutbox() *fakeOutbox {
 	return &fakeOutbox{down: map[int]bool{}}
 }
 
-func (o *fakeOutbox) request(call snapshotRequest) { o.calls = append(o.calls, call) }
-func (o *fakeOutbox) requestEnded(id int)          { o.ended = append(o.ended, id) }
+func (o *fakeOutbox) request(call snapshotRequest) {
+	o.calls = append(o.calls, call)
+	if o.onRequest != nil {
+		o.onRequest(call)
+	}
+}
+func (o *fakeOutbox) requestEnded(id int) { o.ended = append(o.ended, id) }
 func (o *fakeOutbox) recoveryInfo(id int, info types.RecoveryInfo) {
 	o.infos = append(o.infos, publishedInfo{producerID: id, info: info})
 }
@@ -105,7 +116,10 @@ func (o *fakeOutbox) resumePoint(id int, point time.Time) {
 }
 func (o *fakeOutbox) eventRequest(call eventRequest)  { o.events = append(o.events, call) }
 func (o *fakeOutbox) eventEnded(outcome eventOutcome) { o.outcomes = append(o.outcomes, outcome) }
-func (o *fakeOutbox) reset(uuid.UUID, uint64)         {}
+func (o *fakeOutbox) reset(session uuid.UUID, number uint64) {
+	o.resets = append(o.resets, session)
+	o.resetNumbers = append(o.resetNumbers, number)
+}
 func (o *fakeOutbox) status(change statusChange) {
 	o.statuses = append(o.statuses, change)
 	o.down[change.producerID] = change.down
@@ -191,6 +205,8 @@ type feed struct {
 	// opened are the sessions open, for the alives in their queues.
 	opened []int
 	ids    int
+	// seenLogs are the log lines taken so far by logCount.
+	seenLogs []string
 }
 
 func defaultSettings() recoverySettings {
@@ -199,6 +215,8 @@ func defaultSettings() recoverySettings {
 		maxInactivity:           20 * time.Second,
 		maxRecoveryTime:         360 * time.Minute,
 		snapshotCompleteTimeout: 5 * time.Minute,
+		staleLimit:              2 * time.Minute,
+		staleWindow:             time.Minute,
 		nodeID:                  &node,
 	}
 }
