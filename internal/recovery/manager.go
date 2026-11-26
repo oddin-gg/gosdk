@@ -129,6 +129,11 @@ type Manager struct {
 	// producer's full history.
 	initialSnapshotTime time.Duration
 
+	// resetters are the handles the sessions registered, for the resets of
+	// their channels.
+	resettersMu sync.Mutex
+	resetters   map[uuid.UUID]Resetter
+
 	// state is the explicit lifecycle gate. Only Open transitions
 	// notOpened → open; only Close transitions any → closed. Once
 	// closed, no recover-event commands are accepted, and session
@@ -541,9 +546,49 @@ func (m *Manager) OnFeedChannelRestored(session uuid.UUID) {
 	}
 }
 
+// OnFeedChannelResetDone reports the end of a reset of a session's channel,
+// started by Resetter.Reset with the same number: replaced when the channel was
+// closed and a new one is bound. Posted as a fact, whatever the order.
+func (m *Manager) OnFeedChannelResetDone(session uuid.UUID, number uint64, replaced bool) {
+	if a := m.actor(); a != nil {
+		a.postEssential(factResetDone{session: session, number: number, replaced: replaced})
+	}
+}
+
+// Resetter is the handle on a session's consumer that the recovery manager
+// resets the channel through.
+type Resetter interface {
+	// Reset replaces the session's channel, waiting for the broker as long as
+	// that takes. Its end is reported to OnFeedChannelResetDone with the same
+	// number, once.
+	Reset(number uint64)
+}
+
+// RegisterSessionResetter gives the manager the handle to reset the session's
+// channel through. It is dropped when the session is gone. A session with no
+// handle is not reset: the reset ends at once, not replaced.
+func (m *Manager) RegisterSessionResetter(session uuid.UUID, r Resetter) {
+	m.resettersMu.Lock()
+	defer m.resettersMu.Unlock()
+	if m.resetters == nil {
+		m.resetters = make(map[uuid.UUID]Resetter)
+	}
+	m.resetters[session] = r
+}
+
+// resetterOf is the session's handle, nil for none.
+func (m *Manager) resetterOf(session uuid.UUID) Resetter {
+	m.resettersMu.Lock()
+	defer m.resettersMu.Unlock()
+	return m.resetters[session]
+}
+
 // OnFeedSessionGone reports that a session's consumer exited for good, or never
 // opened. It needs no queue, so it must not hold recoveries back.
 func (m *Manager) OnFeedSessionGone(session uuid.UUID) {
+	m.resettersMu.Lock()
+	delete(m.resetters, session)
+	m.resettersMu.Unlock()
 	if a := m.actor(); a != nil {
 		a.postEssential(factClosed{session: session})
 	}

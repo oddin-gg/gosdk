@@ -34,7 +34,9 @@ func (p *lossRecordingProcessor) OnFeedChannelRestored(session uuid.UUID) {
 	defer p.mu.Unlock()
 	p.restored = append(p.restored, session)
 }
-func (*lossRecordingProcessor) OnFeedSessionGone(uuid.UUID) {}
+func (*lossRecordingProcessor) RegisterSessionResetter(uuid.UUID, recovery.Resetter) {}
+func (*lossRecordingProcessor) OnFeedChannelResetDone(uuid.UUID, uint64, bool)       {}
+func (*lossRecordingProcessor) OnFeedSessionGone(uuid.UUID)                          {}
 func (*lossRecordingProcessor) OnClientSessionOpened(uuid.UUID, types.MessageInterest, recovery.Stamp) {
 }
 func (*lossRecordingProcessor) OnMessageProcessingStarted(uuid.UUID, int, recovery.Stamp)         {}

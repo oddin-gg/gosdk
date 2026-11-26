@@ -7,6 +7,8 @@ import (
 	"slices"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/oddin-gg/gosdk/types"
 )
 
@@ -138,6 +140,26 @@ func (a *recoveryActor) eventRequest(r eventRequest) {
 			success, err = a.api.PostEventOddsRecovery(ctx, r.producer, r.eventID, r.requestID, nodeID)
 		}
 		a.answer(ctx, r.requestID, success, err)
+	}()
+}
+
+// reset hands the session's channel reset to a goroutine of its own: closing a
+// channel talks to the broker, which the actor's goroutine never waits for. The
+// end of the reset comes back as a fact, once: from the session's consumer, or
+// from here, not replaced, when the session has no consumer to reset.
+func (a *recoveryActor) reset(session uuid.UUID, number uint64) {
+	if a.isClosed() {
+		return
+	}
+	r := a.mgr.resetterOf(session)
+	a.detached.Add(1) // joined (bounded) by stopBounded
+	go func() {
+		defer a.detached.Done()
+		if r == nil {
+			a.postEssential(factResetDone{session: session, number: number})
+			return
+		}
+		r.Reset(number)
 	}()
 }
 

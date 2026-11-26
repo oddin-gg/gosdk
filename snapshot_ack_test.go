@@ -31,9 +31,11 @@ func (f *fakeSnapshotProcessor) OnSnapshotCompleteReceived(context.Context, uuid
 	return f.err
 }
 
-func (f *fakeSnapshotProcessor) OnFeedChannelLost(uuid.UUID)     {}
-func (f *fakeSnapshotProcessor) OnFeedChannelRestored(uuid.UUID) {}
-func (f *fakeSnapshotProcessor) OnFeedSessionGone(uuid.UUID)     {}
+func (f *fakeSnapshotProcessor) OnFeedChannelLost(uuid.UUID)                          {}
+func (f *fakeSnapshotProcessor) OnFeedChannelRestored(uuid.UUID)                      {}
+func (f *fakeSnapshotProcessor) RegisterSessionResetter(uuid.UUID, recovery.Resetter) {}
+func (f *fakeSnapshotProcessor) OnFeedChannelResetDone(uuid.UUID, uint64, bool)       {}
+func (f *fakeSnapshotProcessor) OnFeedSessionGone(uuid.UUID)                          {}
 func (f *fakeSnapshotProcessor) OnClientSessionOpened(uuid.UUID, types.MessageInterest, recovery.Stamp) {
 }
 

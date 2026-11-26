@@ -213,6 +213,9 @@ type actorManagerOps interface {
 	processingSince() map[uuid.UUID]time.Duration
 	// gcHandles forgets the handles that ended long enough ago.
 	gcHandles(now time.Time)
+	// resetterOf is the handle a session registered to reset its channel
+	// through, nil for none.
+	resetterOf(session uuid.UUID) Resetter
 }
 
 // newRecoveryActor builds the actor and its machine, over the producers the
@@ -660,6 +663,8 @@ func (a *recoveryActor) handle(f fact) {
 		m.channelLost(f.session)
 	case factChannelReopened:
 		m.channelReopened(f.session)
+	case factResetDone:
+		m.resetDone(f.session, f.number, f.replaced)
 	case factAnswered:
 		m.answeredAt(f.requestID, f.err, f.at.mono)
 	case factRewind:

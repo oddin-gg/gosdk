@@ -130,6 +130,13 @@ type recoveryMessageProcessor interface {
 	// for good, or never opened; it needs no queue and must not hold
 	// recoveries back.
 	OnFeedSessionGone(session uuid.UUID)
+	// RegisterSessionResetter gives the recovery manager the handle that
+	// resets the session's channel; OnFeedSessionGone drops it.
+	RegisterSessionResetter(session uuid.UUID, resetter recovery.Resetter)
+	// OnFeedChannelResetDone reports the end of a reset the handle was asked
+	// for, with the number it was given: replaced when the channel was
+	// closed and a new one is bound, and not when there was none to close.
+	OnFeedChannelResetDone(session uuid.UUID, number uint64, replaced bool)
 	// OnClientSessionOpened reports a session of the client about to
 	// consume with the given interest; OnFeedSessionGone ends it. openedAt is
 	// a reading of the clock taken before the session's queue is bound, so no
@@ -256,6 +263,7 @@ func (o *oddsFeedSessionImpl) Open(
 	// and leave a closed session registered. Replay sessions (no hooks)
 	// are not part of the live feed.
 	if !o.isReplay {
+		o.recoveryMessageProcessor.RegisterSessionResetter(o.sessionID, o.channelConsumer)
 		o.recoveryMessageProcessor.OnClientSessionOpened(o.sessionID, *messageInterest, o.stamp())
 	}
 	ch, err := o.channelConsumer.Open(ctx, routingKeys, messageInterest)
@@ -826,6 +834,9 @@ func newSession(
 		consumer.SetChannelBoundHook(func() { recoverMessageProcessor.OnFeedChannelRestored(sessionID) })
 		consumer.SetChannelRestoredHook(func() { recoverMessageProcessor.OnFeedChannelRestored(sessionID) })
 		consumer.SetConsumerGoneHook(func() { recoverMessageProcessor.OnFeedSessionGone(sessionID) })
+		consumer.SetChannelResetDoneHook(func(number uint64, replaced bool) {
+			recoverMessageProcessor.OnFeedChannelResetDone(sessionID, number, replaced)
+		})
 	}
 	return &oddsFeedSessionImpl{
 		channelConsumer:          consumer,

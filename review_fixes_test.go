@@ -349,9 +349,11 @@ func (r *recordingRecoveryProcessor) OnSnapshotCompleteReceived(context.Context,
 	return nil
 }
 
-func (r *recordingRecoveryProcessor) OnFeedChannelLost(uuid.UUID)     {}
-func (r *recordingRecoveryProcessor) OnFeedChannelRestored(uuid.UUID) {}
-func (r *recordingRecoveryProcessor) OnFeedSessionGone(uuid.UUID)     {}
+func (r *recordingRecoveryProcessor) OnFeedChannelLost(uuid.UUID)                          {}
+func (r *recordingRecoveryProcessor) OnFeedChannelRestored(uuid.UUID)                      {}
+func (r *recordingRecoveryProcessor) RegisterSessionResetter(uuid.UUID, recovery.Resetter) {}
+func (r *recordingRecoveryProcessor) OnFeedChannelResetDone(uuid.UUID, uint64, bool)       {}
+func (r *recordingRecoveryProcessor) OnFeedSessionGone(uuid.UUID)                          {}
 func (r *recordingRecoveryProcessor) OnClientSessionOpened(uuid.UUID, types.MessageInterest, recovery.Stamp) {
 }
 
@@ -535,9 +537,11 @@ func (noopRecoveryProcessor) OnSnapshotCompleteReceived(context.Context, uuid.UU
 	return nil
 }
 
-func (noopRecoveryProcessor) OnFeedChannelLost(uuid.UUID)     {}
-func (noopRecoveryProcessor) OnFeedChannelRestored(uuid.UUID) {}
-func (noopRecoveryProcessor) OnFeedSessionGone(uuid.UUID)     {}
+func (noopRecoveryProcessor) OnFeedChannelLost(uuid.UUID)                          {}
+func (noopRecoveryProcessor) OnFeedChannelRestored(uuid.UUID)                      {}
+func (noopRecoveryProcessor) RegisterSessionResetter(uuid.UUID, recovery.Resetter) {}
+func (noopRecoveryProcessor) OnFeedChannelResetDone(uuid.UUID, uint64, bool)       {}
+func (noopRecoveryProcessor) OnFeedSessionGone(uuid.UUID)                          {}
 func (noopRecoveryProcessor) OnClientSessionOpened(uuid.UUID, types.MessageInterest, recovery.Stamp) {
 }
 
@@ -1774,9 +1778,11 @@ func (c *countingRecoveryProcessor) OnSnapshotCompleteReceived(context.Context, 
 	return nil
 }
 
-func (c *countingRecoveryProcessor) OnFeedChannelLost(uuid.UUID)     {}
-func (c *countingRecoveryProcessor) OnFeedChannelRestored(uuid.UUID) {}
-func (c *countingRecoveryProcessor) OnFeedSessionGone(uuid.UUID)     {}
+func (c *countingRecoveryProcessor) OnFeedChannelLost(uuid.UUID)                          {}
+func (c *countingRecoveryProcessor) OnFeedChannelRestored(uuid.UUID)                      {}
+func (c *countingRecoveryProcessor) RegisterSessionResetter(uuid.UUID, recovery.Resetter) {}
+func (c *countingRecoveryProcessor) OnFeedChannelResetDone(uuid.UUID, uint64, bool)       {}
+func (c *countingRecoveryProcessor) OnFeedSessionGone(uuid.UUID)                          {}
 func (c *countingRecoveryProcessor) OnClientSessionOpened(uuid.UUID, types.MessageInterest, recovery.Stamp) {
 }
 
