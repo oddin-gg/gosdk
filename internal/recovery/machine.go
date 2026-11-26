@@ -991,6 +991,7 @@ func (m *machine) publishInfo(t *track, a *active, successful bool) {
 // with none, the producer is up.
 func (m *machine) complete(t *track, a *active, mono time.Duration) {
 	t.active = nil
+	m.out.requestEnded(a.requestID)
 	if t.gap != nil && t.gap.seq <= a.covers {
 		t.gap = nil
 	}
@@ -1101,6 +1102,7 @@ func (m *machine) giveUp(t *track, mono time.Duration, reason string) {
 // sent may still be on its way, ahead of the snapshot of the next one asked for.
 func (m *machine) ended(t *track, a *active) {
 	t.active = nil
+	m.out.requestEnded(a.requestID)
 	t.remember(ended{requestID: a.requestID, seq: a.seq})
 }
 

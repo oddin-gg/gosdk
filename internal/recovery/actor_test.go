@@ -445,16 +445,18 @@ func TestActor_FloodOfStraySnapshotCompletesQueuesNothingAndLogsNothingAtWarn(t 
 }
 
 // A snapshot_complete of a request the actor asked for is queued, once per
-// delivery, and one of an id it has forgotten is a stray; the ids in flight are
-// remembered up to the cap.
+// delivery, and one of an id it has forgotten is a stray; the ids of the requests
+// that ended are remembered up to the cap.
 func TestActor_AskedForRequestsAreRememberedUpToTheCap(t *testing.T) {
 	r := newActorRig(t)
 	r.a.issuedKept = 3
 	for id := 1; id <= 5; id++ {
 		r.a.remember(id)
+		r.a.requestEnded(id)
 	}
-	r.a.remember(5) // twice changes nothing
-	for id, want := range map[int]bool{1: false, 2: false, 3: true, 4: true, 5: true, 6: false} {
+	r.a.remember(6)     // still in flight
+	r.a.requestEnded(5) // twice changes nothing
+	for id, want := range map[int]bool{1: false, 2: false, 3: true, 4: true, 5: true, 6: true, 7: false} {
 		if got := r.a.wasIssued(id); got != want {
 			t.Errorf("wasIssued(%d) = %v, want %v", id, got, want)
 		}
@@ -467,6 +469,58 @@ func TestActor_AskedForRequestsAreRememberedUpToTheCap(t *testing.T) {
 	r.a.essentialMu.Unlock()
 	if queued != 1 {
 		t.Fatalf("facts queued for a request asked for = %d, want 1", queued)
+	}
+}
+
+// A recovery that is still in flight is not forgotten, however many requests are
+// asked for and end after it: its snapshot_complete is queued, not dropped as a
+// stray. Only the ids of the requests that ended are bounded.
+func TestActor_RequestInFlightIsRememberedWhileLaterOnesEnd(t *testing.T) {
+	r := newActorRig(t)
+	const inFlight = 1_000_000
+	r.a.remember(inFlight)
+	for id := 1; id <= issuedKept+500; id++ {
+		r.a.remember(id)
+		r.a.eventEnded(eventOutcome{producerID: liveID, requestID: id, status: types.RecoveryStatusFailed})
+	}
+	if err := r.a.onSnapshotComplete(sid(1), liveID, inFlight); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.a.counters.strayCompletions.Load(); got != 0 {
+		t.Fatalf("the snapshot_complete of a request in flight was taken for a stray (%d strays)", got)
+	}
+	r.a.essentialMu.Lock()
+	queued := len(r.a.essential)
+	r.a.essentialMu.Unlock()
+	if queued != 1 {
+		t.Fatalf("facts queued for the request in flight = %d, want 1", queued)
+	}
+	// the ended ones are bounded: the oldest is forgotten, the in-flight one stays
+	if r.a.wasIssued(1) {
+		t.Fatal("the id of the oldest request that ended is still remembered past the cap")
+	}
+	r.a.issuedMu.Lock()
+	kept := len(r.a.issued)
+	r.a.issuedMu.Unlock()
+	if kept != issuedKept+1 {
+		t.Fatalf("ids remembered = %d, want %d ended and the one in flight", kept, issuedKept+1)
+	}
+}
+
+// Every way a request ends moves its id out of the ones in flight: a snapshot
+// recovery that completes, fails or is given up, and an event recovery that is
+// refused or ends.
+func TestActor_EveryEndOfARequestLeavesNoIdInFlight(t *testing.T) {
+	r := newActorRig(t)
+	r.a.requestEnded(1) // never asked for: ignored
+	r.a.remember(1)
+	r.a.requestEnded(1)
+	r.a.remember(2)
+	r.a.eventEnded(eventOutcome{producerID: liveID, requestID: 2, status: types.RecoveryStatusTimedOut})
+	r.a.issuedMu.Lock()
+	defer r.a.issuedMu.Unlock()
+	if len(r.a.inFlight) != 0 || len(r.a.endedOrder) != 2 {
+		t.Fatalf("in flight %v, ended %v; want none in flight and two ended", r.a.inFlight, r.a.endedOrder)
 	}
 }
 

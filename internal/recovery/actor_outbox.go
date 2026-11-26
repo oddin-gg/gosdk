@@ -203,6 +203,7 @@ func (a *recoveryActor) status(c statusChange) {
 }
 
 func (a *recoveryActor) eventEnded(o eventOutcome) {
+	a.requestEnded(o.requestID)
 	if cancel := a.eventCancels[o.requestID]; cancel != nil {
 		// a recovery that ended, by expiry say, does not keep its request running
 		cancel()

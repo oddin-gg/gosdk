@@ -80,14 +80,18 @@ type recoveryActor struct {
 	openAlives map[int]*factAlives
 	otherSeq   uint64
 
-	// issued are the request ids the actor has asked for, oldest first, a
-	// bounded memory: a snapshot_complete of any other is of a request this feed
-	// never made (another instance's, which the broker routes here too).
-	issuedMu    sync.Mutex
-	issued      map[int]struct{}
-	issuedOrder []int
-	issuedKept  int
-	strayTold   atomic.Bool
+	// issued are the request ids the actor has asked for: a snapshot_complete of
+	// any other is of a request this feed never made (another instance's, which
+	// the broker routes here too). The ids of the requests in flight are all
+	// kept, so a snapshot_complete that comes hours after its request is not
+	// taken for a stray; the ids of the requests that ended are a bounded
+	// memory, endedOrder the oldest first, issuedKept of them at most.
+	issuedMu   sync.Mutex
+	issued     map[int]struct{}
+	inFlight   map[int]struct{}
+	endedOrder []int
+	issuedKept int
+	strayTold  atomic.Bool
 
 	shutdown     chan struct{}
 	shutdownOnce sync.Once
@@ -148,9 +152,9 @@ const (
 	// queue before it looks at the clock and the other queues again.
 	samplesPerTurn  = 1_000
 	commandsPerTurn = 1_000
-	// issuedKept is how many request ids the actor remembers, in flight and ended
-	// together: far more than can be in flight, a recovery per producer and at
-	// most maxPendingEventRecoveries event recoveries each.
+	// issuedKept is how many ids of requests that ended the actor remembers, for
+	// a snapshot_complete that is late. The ids of the requests in flight are
+	// kept for as long as they are, and are not counted.
 	issuedKept = 10_000
 	// finishWait is how long the actor spends at most on the essential facts
 	// queued when it closes.
@@ -230,6 +234,7 @@ func newRecoveryActor(
 		samples:         make(chan fact, sampleCapacity),
 		openAlives:      make(map[int]*factAlives),
 		issued:          make(map[int]struct{}),
+		inFlight:        make(map[int]struct{}),
 		issuedKept:      issuedKept,
 		shutdown:        make(chan struct{}),
 		done:            make(chan struct{}),
@@ -388,19 +393,34 @@ func (a *recoveryActor) onSnapshotComplete(session uuid.UUID, producerID, reques
 	return nil
 }
 
-// remember notes a request id the actor asked for, forgetting the oldest one past
-// issuedKept.
+// remember notes a request id the actor asked for. It is kept until the request
+// ends, and then as long as it is among the last issuedKept that ended.
 func (a *recoveryActor) remember(requestID int) {
 	a.issuedMu.Lock()
 	defer a.issuedMu.Unlock()
-	if _, ok := a.issued[requestID]; ok {
+	a.issued[requestID] = struct{}{}
+	a.inFlight[requestID] = struct{}{}
+}
+
+// requestEnded says the request is no longer in flight: its id moves to the
+// bounded memory of ended ones, and the oldest of those is forgotten past
+// issuedKept. An id that was never remembered is ignored.
+func (a *recoveryActor) requestEnded(requestID int) {
+	a.issuedMu.Lock()
+	defer a.issuedMu.Unlock()
+	if _, ok := a.inFlight[requestID]; !ok {
 		return
 	}
-	a.issued[requestID] = struct{}{}
-	a.issuedOrder = append(a.issuedOrder, requestID)
-	if len(a.issuedOrder) > a.issuedKept {
-		delete(a.issued, a.issuedOrder[0])
-		a.issuedOrder = a.issuedOrder[1:]
+	delete(a.inFlight, requestID)
+	a.endedOrder = append(a.endedOrder, requestID)
+	for len(a.endedOrder) > a.issuedKept {
+		oldest := a.endedOrder[0]
+		a.endedOrder = a.endedOrder[1:]
+		// the machine asks for an id again only once it has forgotten it, so the
+		// id may be in flight again by now: that one stays
+		if _, live := a.inFlight[oldest]; !live {
+			delete(a.issued, oldest)
+		}
 	}
 }
 

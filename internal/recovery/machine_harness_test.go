@@ -85,7 +85,9 @@ type fakeOutbox struct {
 	points []publishedPoint
 	down   map[int]bool
 	// events are the event recovery requests, and outcomes how each ended, in order.
-	events   []eventRequest
+	events []eventRequest
+	// ended is the id of every snapshot request that left flight, in order.
+	ended    []int
 	outcomes []eventOutcome
 }
 
@@ -94,6 +96,7 @@ func newFakeOutbox() *fakeOutbox {
 }
 
 func (o *fakeOutbox) request(call snapshotRequest) { o.calls = append(o.calls, call) }
+func (o *fakeOutbox) requestEnded(id int)          { o.ended = append(o.ended, id) }
 func (o *fakeOutbox) recoveryInfo(id int, info types.RecoveryInfo) {
 	o.infos = append(o.infos, publishedInfo{producerID: id, info: info})
 }

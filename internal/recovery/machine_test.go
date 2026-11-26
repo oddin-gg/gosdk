@@ -1,6 +1,7 @@
 package recovery
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -1917,4 +1918,29 @@ func TestMachine_ResumePointIsPublishedOnlyWhenItMoves(t *testing.T) {
 	expect(t, len(f.out.pointsOf(pre)), published+1, "publications after the checkpoint moved")
 	got := f.out.pointsOf(pre)
 	expectTime(t, got[len(got)-1], f.now(), "the new point")
+}
+
+// Every way a snapshot recovery leaves flight is told to the outbox once: it
+// completes, the API refuses it, or it is given up with a lost queue.
+func TestMachine_SnapshotRecoveryThatLeavesFlightIsToldToTheOutboxOnce(t *testing.T) {
+	f := newFeed(t)
+	f.open(1, all)
+	f.startFeed()
+	f.alive(pre)
+	first := f.lastSnapshot(pre)
+	expect(t, len(f.out.ended), 0, "ended while in flight")
+	f.complete(first, 1)
+	expect(t, fmt.Sprint(f.out.ended), fmt.Sprint([]int{first.requestID}), "ended after the completion")
+
+	f.m.connectionDown()
+	f.m.connectionUp()
+	f.alive(pre)
+	lost := f.lastSnapshot(pre)
+	f.accept(lost)
+	f.m.connectionDown()
+	f.m.connectionUp()
+	f.alive(pre)
+	again := f.lastSnapshot(pre)
+	f.refuse(again)
+	expect(t, fmt.Sprint(f.out.ended), fmt.Sprint([]int{first.requestID, lost.requestID, again.requestID}), "ended after a lost queue and a refusal")
 }
