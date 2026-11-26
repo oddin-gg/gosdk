@@ -100,6 +100,8 @@ gosdk.NewConfig(token, types.IntegrationEnvironment,
     gosdk.WithPreloadLocales(types.EnLocale, types.RuLocale),
     gosdk.WithMaxInactivity(20*time.Second),
     gosdk.WithMaxRecoveryExecution(6*time.Hour),
+    gosdk.WithStaleMessageLimit(2*time.Minute),
+    gosdk.WithStaleMessageWindow(time.Minute),
     gosdk.WithShutdownTimeout(5*time.Second),
     gosdk.WithLogger(slog.Default()),
     gosdk.WithAPICallLogging(gosdk.APILogMetadata),
@@ -402,6 +404,34 @@ One recovery actor runs every producer's recovery state. The rules, per producer
   processing delay, an alive interval, an unsubscribed alive) does not end it. One asked for while a subscription
   is waiting for its queue to be bound waits for it. At most 128 per producer are
   pending; an identical request while one is in flight is that one.
+- **The safety net.** A subscription whose live messages stay older than
+  `WithStaleMessageLimit` (default 2 minutes, by the producer's clock, measured
+  against the offset taken from its alives) for `WithStaleMessageWindow` (default
+  1 minute) is too far behind: the broker's queue for it holds a backlog that
+  only grows. The SDK first asks for a recovery of every producer the
+  subscription receives, from the subscription's checkpoint, and once the API has
+  accepted them all it replaces the subscription's AMQP channel, which drops the
+  queue and what it held. The recoveries are then asked for again, as after a lost
+  queue, so nothing is missing afterwards. The producers the subscription receives
+  are down with `ProcessingQueueDelayViolationProducerStatusReason` while this
+  runs, and the subscription's `snapshot_complete`s that arrive meanwhile are
+  ignored, since they come from the queue being replaced. A reset drops what the
+  broker had delivered ahead of the client but not yet handed over, up to
+  `WithAMQPPrefetch` messages (default 1000), and what is still in the
+  subscription's buffer is delivered all the same: the recovery repeats those, so a
+  client may see a message twice, never a hole. A subscription is reset at most
+  three times in ten minutes, with 1, 2 and 4 minutes between the resets; after
+  that it is only logged as lagging (a WARN) until it catches up or the first reset
+  ages out, and the processing delay below keeps its producers down for as long as
+  it is late. A request of the net's that the API refuses, a producer that is
+  disabled in the meantime, and a `snapshot_complete` of the subscription's own for
+  one of its recoveries (it has what the recovery sent) cancel the reset; the net
+  waits a minute before it tries again. The net is off while the offset of the
+  producer's clock is stale, and paused for a producer while a recovery of it is in
+  flight or a gap is open, since a snapshot ahead of a live message makes it old on
+  every subscription. It acts on a backlog old enough to reach the limit: a broker
+  queue length limit that drops the oldest messages first can keep the age under
+  it, so size such a limit against `WithAMQPPrefetch` and the limit.
 - **Processing delay.** Each subscription is judged on its own: a subscription
   that handles messages more than `WithMaxInactivity` after the producer
   generated them, or takes nothing for that long while alives flow, takes the
@@ -456,6 +486,12 @@ What a client that relied on the earlier behaviour will see differently:
   the last system alive's time, which skips what was queued but not yet handled.
   Is: the oldest point a subscription may still be missing, from the settled
   deliveries.
+- **A subscription that stays far behind is reset.** Was: nothing bounded how far
+  a subscription could fall behind; its queue grew on the broker until the
+  broker dropped messages or the queue was lost. Is: see the safety net above
+  (`WithStaleMessageLimit`, `WithStaleMessageWindow`). Up to `WithAMQPPrefetch`
+  prefetched messages (1000 by default) are dropped with the queue at a reset, and
+  the recovery repeats them.
 - **Processing delay per subscription, and no recovery for it.** Was: one
   producer-wide maximum, so a slow subscription next to a fast one went unseen. Is:
   each subscription is judged on its own.
