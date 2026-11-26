@@ -531,6 +531,12 @@ func (m *machine) channelReopened(id uuid.UUID) {
 	m.releaseDeferred()
 }
 
+// resetDone says a reset of the session's channel ended: replaced when the channel
+// was closed and a new one is bound. Nothing asks for a reset yet, so none is
+// awaited and the report is ignored; the safety net, which asks through the
+// outbox, takes it from here.
+func (m *machine) resetDone(uuid.UUID, uint64, bool) {}
+
 // loseLane opens the lane's gap from its checkpoint, and remembers where the loss
 // began: a start the client sets later replaces the seed, never this.
 func (m *machine) loseLane(l *lane) {

@@ -60,6 +60,15 @@ type factChannelLost struct{ session uuid.UUID }
 // factChannelReopened is a session's queue bound: after its first open, and after a loss.
 type factChannelReopened struct{ session uuid.UUID }
 
+// factResetDone is the end of a reset of a session's channel: replaced says the
+// channel was closed and a new one is bound, and not when there was no channel to
+// close.
+type factResetDone struct {
+	session  uuid.UUID
+	number   uint64
+	replaced bool
+}
+
 // factAnswered is a REST worker's answer to a request: err is nil when the API
 // accepted it. at is when it arrived.
 type factAnswered struct {
@@ -130,6 +139,7 @@ func (factAlives) isFact()           {}
 func (factSnapshotComplete) isFact() {}
 func (factChannelLost) isFact()      {}
 func (factChannelReopened) isFact()  {}
+func (factResetDone) isFact()        {}
 func (factAnswered) isFact()         {}
 func (factRewind) isFact()           {}
 func (*recoverEventCommand) isFact() {}

@@ -62,9 +62,11 @@ func (l *factLog) of(kind string) []factEvent {
 	return out
 }
 
-func (l *factLog) OnFeedChannelLost(uuid.UUID)     {}
-func (l *factLog) OnFeedChannelRestored(uuid.UUID) {}
-func (l *factLog) OnFeedSessionGone(s uuid.UUID)   { l.add(factEvent{kind: "gone", session: s}) }
+func (l *factLog) OnFeedChannelLost(uuid.UUID)                          {}
+func (l *factLog) OnFeedChannelRestored(uuid.UUID)                      {}
+func (l *factLog) RegisterSessionResetter(uuid.UUID, recovery.Resetter) {}
+func (l *factLog) OnFeedChannelResetDone(uuid.UUID, uint64, bool)       {}
+func (l *factLog) OnFeedSessionGone(s uuid.UUID)                        { l.add(factEvent{kind: "gone", session: s}) }
 func (l *factLog) OnClientSessionOpened(s uuid.UUID, mi types.MessageInterest, at recovery.Stamp) {
 	l.add(factEvent{kind: "opened", session: s, interest: mi, taken: at})
 }

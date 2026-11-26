@@ -42,6 +42,12 @@ func (d DummyManager) OnFeedChannelLost(uuid.UUID) {}
 
 func (d DummyManager) OnFeedChannelRestored(uuid.UUID) {}
 
+// RegisterSessionResetter ...
+func (d DummyManager) RegisterSessionResetter(uuid.UUID, Resetter) {}
+
+// OnFeedChannelResetDone ...
+func (d DummyManager) OnFeedChannelResetDone(uuid.UUID, uint64, bool) {}
+
 func (d DummyManager) OnFeedSessionGone(uuid.UUID) {}
 
 func (d DummyManager) OnClientSessionOpened(uuid.UUID, types.MessageInterest, Stamp) {}

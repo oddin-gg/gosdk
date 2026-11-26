@@ -455,7 +455,7 @@ func TestCloseGracefulChannel_ClosesDespiteAbandonedDelivery(t *testing.T) {
 	// A late ack now skips d.Ack (channel/queue gone) instead of touching
 	// the closed channel.
 	ack := &countingAcknowledger{}
-	c.ackFunc(testDelivery(ack))()
+	c.ackFunc(testDelivery(ack), c.resetEpoch.Load())()
 	if ack.acks.Load() != 0 {
 		t.Fatalf("late ack after chClosed: acks = %d, want 0 (must skip d.Ack)", ack.acks.Load())
 	}

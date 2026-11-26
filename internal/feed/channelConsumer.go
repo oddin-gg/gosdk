@@ -125,6 +125,15 @@ type ChannelConsumer struct {
 	// is gone needs no queue, so it must stop holding recoveries back.
 	onConsumerGone func()
 
+	// onResetDone, when set, is called once for every Reset, with the
+	// number it was given. replaced is true when the channel was closed
+	// and a new one is declared and bound, and false when there was no
+	// channel to close (never opened, closed, shutting down or draining),
+	// in which case nothing was reopened. For true it runs on run()'s
+	// goroutine after the queue is bound again and before the new
+	// channel's watcher is armed; for false it runs on Reset's caller.
+	onResetDone func(number uint64, replaced bool)
+
 	// Channel-loss log throttle, guarded by lossMu (the watcher and run
 	// goroutines both report). A peer that cancels the consumer as fast
 	// as it is re-declared would otherwise drive one Warn per round
@@ -161,6 +170,29 @@ type ChannelConsumer struct {
 	// Open parked in CreateChannel cannot hold the shutdown. Set with
 	// opening, guarded by mu.
 	cancelOpen context.CancelFunc
+
+	// current is the AMQP channel the loop consumes from, nil while it is
+	// being replaced. Reset closes it. Guarded by mu.
+	current amqpChannel
+
+	// resetting holds the numbers of the resets under way, oldest first;
+	// empty when none is. While it is not empty the closing of the channel
+	// is the consumer's own: neither the watcher nor run() reports it as a
+	// loss, and run() reopens without the dwell backoff. run() empties it
+	// once the replacement is bound. Guarded by mu.
+	resetting []uint64
+
+	// resetEpoch counts the channels Reset closed. A delivery remembers the
+	// count it was taken at: its late ack on a closed channel is expected
+	// when the count has moved. Atomic.
+	resetEpoch atomic.Uint64
+
+	// resetSig is closed by the Reset that begins a round, and replaced
+	// (by nil, made again on demand) when that round's replacement is
+	// installed. It belongs to one channel generation: a handoff of a
+	// delivery of that channel that is still parked when it closes is
+	// dropped, so run() can go on to bind the replacement. Guarded by mu.
+	resetSig chan struct{}
 
 	// shutdown is set, under mu, when Close's shutdown begins. An Open
 	// that finds it set creates no channel and starts no loop. Guarded
@@ -256,6 +288,12 @@ func (c *ChannelConsumer) SetChannelBoundHook(fn func()) { c.onChannelBound = fn
 // final exit (see onConsumerGone). Must be called before Open.
 func (c *ChannelConsumer) SetConsumerGoneHook(fn func()) { c.onConsumerGone = fn }
 
+// SetChannelResetDoneHook installs the callback that reports the end of a
+// Reset (see onResetDone). Must be called before Open.
+func (c *ChannelConsumer) SetChannelResetDoneHook(fn func(number uint64, replaced bool)) {
+	c.onResetDone = fn
+}
+
 // ChannelLostHookInstalled reports whether a channel-lost hook is set —
 // the one seam between a lost queue and the recovery that closes its gap.
 func (c *ChannelConsumer) ChannelLostHookInstalled() bool { return c.onChannelLost != nil }
@@ -310,6 +348,8 @@ var (
 	minChannelDwell         = 10 * time.Second
 	channelReopenBackoff    = 500 * time.Millisecond
 	channelLossWarnInterval = 30 * time.Second
+	// channelReopenRetry is the pause between failed attempts to reopen.
+	channelReopenRetry = 500 * time.Millisecond
 )
 
 // channelWatch is the per-channel loss detector: a goroutine parked on
@@ -319,6 +359,8 @@ var (
 // a once that makes the report idempotent between the watcher and run().
 type channelWatch struct {
 	once sync.Once
+	// told is set once the watcher or run() has reported the loss.
+	told atomic.Bool
 	stop chan struct{}
 	// done closes when the watcher goroutine has returned — after any
 	// report it was already making has completed. stopAndJoin waits on
@@ -329,9 +371,13 @@ type channelWatch struct {
 	done chan struct{}
 }
 
-// report reports the loss exactly once per channel.
+// report reports the loss exactly once per channel. The caller has checked
+// that no reset is under way.
 func (w *channelWatch) report(c *ChannelConsumer, lostAt time.Time) {
-	w.once.Do(func() { c.ReportChannelLost(lostAt) })
+	w.once.Do(func() {
+		w.told.Store(true)
+		c.ReportChannelLost(lostAt)
+	})
 }
 
 // stopAndJoin signals the watcher and waits for it to return. Safe on a
@@ -345,7 +391,7 @@ func (w *channelWatch) stopAndJoin() {
 	<-w.done
 }
 
-// watchChannel starts the watcher for ch. Drain and ctx suppress the
+// watchChannel starts the watcher for ch. Drain, ctx and a reset suppress the
 // report (a close we initiated is not a loss); a wake-up that races
 // either re-checks them before reporting. Returns nil when there is no
 // channel to watch or no hook to report to.
@@ -369,6 +415,11 @@ func (c *ChannelConsumer) watchChannel(ctx context.Context, ch amqpChannel) *cha
 		case <-cancelled:
 		}
 		if ctx.Err() != nil || c.draining() {
+			return
+		}
+		if c.isResetting() {
+			// The close is the reset's: run() reopens and reports the
+			// reset done, and the replacement gets a watcher of its own.
 			return
 		}
 		w.report(c, time.Now())
@@ -469,6 +520,7 @@ func (c *ChannelConsumer) Open(ctx context.Context, routingKeys []string, messag
 	// buffer (the envelope carries the ack), so nothing parked in this
 	// pipeline is ever falsely acknowledged.
 	c.outgoing = make(chan QueueEnvelope)
+	c.current = ch
 
 	// Loop ctx must outlive the caller's Open ctx (which bounded the
 	// first channel setup only). WithoutCancel propagates caller metadata
@@ -694,6 +746,78 @@ func (c *ChannelConsumer) closeLostChannel(ch amqpChannel) {
 	}()
 }
 
+// isResetting reports whether a Reset is under way.
+func (c *ChannelConsumer) isResetting() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.resetting) > 0
+}
+
+// Reset replaces the consumer's AMQP channel, and with it the exclusive
+// auto-delete queue and what the queue held: the channel is closed through the
+// ack-safe path, and run() declares and binds a new one. The close is the
+// consumer's own, so it reports no loss and the reopen skips the dwell backoff.
+// The end is reported through the reset-done hook, with number, once: after the
+// replacement is bound, or at once with replaced=false when there was no
+// channel to close because the consumer is not open, is closed or shutting down,
+// or is draining; nothing is reopened then.
+//
+// A Reset while another is under way joins it: the channel is replaced once
+// and each number is reported done, replaced=true, when it is. A real loss of
+// the channel during the reset is still the reset. A reopen that fails is
+// retried as for a loss, and the report waits for it. A consumer that exits
+// meanwhile reports gone and no reset done.
+//
+// Reset closes the channel, which talks to the broker: call it from a
+// goroutine that may wait for that.
+func (c *ChannelConsumer) Reset(number uint64) {
+	c.mu.Lock()
+	if c.outgoing == nil || c.shutdown || c.gone.Load() || c.draining() {
+		c.mu.Unlock()
+		c.reportResetDone(number, false)
+		return
+	}
+	joined := len(c.resetting) > 0
+	c.resetting = append(c.resetting, number)
+	ch := c.current
+	if !joined {
+		c.resetEpoch.Add(1)
+		close(c.resetSignalLocked())
+	}
+	c.mu.Unlock()
+	if joined {
+		return
+	}
+	// The mark is set before the close, so a wake-up the close causes finds it.
+	// With no channel the loop is already replacing one, and that reopen ends
+	// the reset.
+	if ch != nil {
+		c.closeLostChannel(ch)
+	}
+}
+
+// resetSignalLocked returns the reset signal of the current channel
+// generation, made on demand. Call with mu held.
+func (c *ChannelConsumer) resetSignalLocked() chan struct{} {
+	if c.resetSig == nil {
+		c.resetSig = make(chan struct{})
+	}
+	return c.resetSig
+}
+
+// resetSignal is the reset signal of the current channel generation.
+func (c *ChannelConsumer) resetSignal() <-chan struct{} {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.resetSignalLocked()
+}
+
+func (c *ChannelConsumer) reportResetDone(number uint64, replaced bool) {
+	if c.onResetDone != nil {
+		c.onResetDone(number, replaced)
+	}
+}
+
 // run is the single consumer goroutine. It consumes the initial channel
 // (created synchronously in Open), and on delivery-channel close
 // (connection drop) reopens a fresh channel — retrying transient errors —
@@ -764,12 +888,26 @@ func (c *ChannelConsumer) run(ctx context.Context, deliveries <-chan amqp.Delive
 		// blocking RPC during which a sibling channel on the same
 		// connection can still deliver an alive, and before any delivery
 		// on the new channel can be processed (see onChannelLost).
-		if watch != nil {
+		c.mu.Lock()
+		resetNow := len(c.resetting) > 0
+		c.current = nil
+		c.mu.Unlock()
+		switch {
+		case resetNow:
+			// The consumer closed this channel itself: not a loss. One the
+			// watcher told before the reset began stays told.
+		case watch != nil:
 			watch.report(c, time.Now())
-		} else if c.onChannelLost != nil {
+		case c.onChannelLost != nil:
 			c.ReportChannelLost(time.Now())
 		}
 		stopWatch()
+		// Read after the join: the watcher may have been mid-report. Without
+		// a watcher the loss is run()'s to tell, unless this is a reset.
+		lossTold := !resetNow
+		if watch != nil {
+			lossTold = watch.told.Load()
+		}
 		watch = nil // stopped; the deferred stopWatch must not close it again
 		// Serialized against an in-flight ack like the other closes: the
 		// delivery channel also closes on a broker consumer cancel, which
@@ -783,7 +921,7 @@ func (c *ChannelConsumer) run(ctx context.Context, deliveries <-chan amqp.Delive
 		// A channel that died within its dwell is being cancelled as fast
 		// as it is re-declared: back off before re-declaring so the loop
 		// cannot spin at the broker's round-trip rate. Drain/ctx-aware.
-		if time.Since(opened) < minChannelDwell {
+		if !resetNow && time.Since(opened) < minChannelDwell {
 			select {
 			case <-ctx.Done():
 				return
@@ -843,7 +981,7 @@ func (c *ChannelConsumer) run(ctx context.Context, deliveries <-chan amqp.Delive
 					return false
 				case <-c.drainCh:
 					return false
-				case <-time.After(500 * time.Millisecond):
+				case <-time.After(channelReopenRetry):
 				}
 			}
 		}
@@ -853,9 +991,33 @@ func (c *ChannelConsumer) run(ctx context.Context, deliveries <-chan amqp.Delive
 			return
 		}
 		opened = time.Now()
+		// The replacement is installed, and the resets that waited for it are
+		// taken, in one step: a Reset that comes later closes this channel and
+		// is the next round's. Whether a Close has begun is read in the same
+		// step: shutdown is set under mu before the loop context is cancelled,
+		// so a replacement that lands in between must not be reported as a
+		// success. It is closed, and the consumer exits through its gone path
+		// with no reset done.
+		c.mu.Lock()
+		if c.shutdown || ctx.Err() != nil {
+			c.resetting = nil
+			c.mu.Unlock()
+			c.closeGracefulChannel(ch)
+			return
+		}
+		c.current = ch
+		finished := c.resetting
+		c.resetting = nil
+		c.resetSig = nil
+		c.mu.Unlock()
+		// A drain that overtook the reopen drops the reset too: the consumer
+		// exits and reports gone, and shutdown closes the replacement.
+		if c.draining() {
+			finished = nil
+		}
 		// The replacement queue is declared and bound: whatever is
-		// published from now on reaches this consumer, so a recovery
-		// held back for it may start. Report that BEFORE arming the
+		// published from now on reaches this consumer, so a recovery held
+		// back for it may start. Report that BEFORE arming the
 		// replacement's watcher: the loss bookkeeping is keyed by
 		// session, not by channel generation, so a replacement that dies
 		// at once must not have its loss reported ahead of this restore
@@ -863,8 +1025,13 @@ func (c *ChannelConsumer) run(ctx context.Context, deliveries <-chan amqp.Delive
 		// per-channel once would keep run() from reporting it again.
 		// Arming late loses nothing: NotifyClose on an already-closed
 		// channel is signalled immediately, and run() reports too.
-		if c.onChannelRestored != nil {
+		// A reset alone told no loss, so there is nothing to restore; its own
+		// report follows the same rule.
+		if lossTold && c.onChannelRestored != nil {
 			c.onChannelRestored()
+		}
+		for _, number := range finished {
+			c.reportResetDone(number, true)
 		}
 		watch = c.watchChannel(ctx, ch)
 	}
@@ -906,6 +1073,8 @@ func (c *ChannelConsumer) consume(ctx context.Context, deliveries <-chan amqp.De
 			// successful decode) builds and returns one. It does NOT
 			// touch the AMQP Acknowledger; ack ownership travels with
 			// the envelope, nack on abort is admit's responsibility.
+			epoch := c.resetEpoch.Load()
+			sig := c.resetSignal()
 			qm := c.processDelivery(ctx, d)
 
 			// Manual ack semantics (NEXT.md §0.6 / §8): the delivery is
@@ -919,7 +1088,7 @@ func (c *ChannelConsumer) consume(ctx context.Context, deliveries <-chan amqp.De
 			// not-admitted paths settle explicitly below since their ack
 			// closure never fires.
 			c.addUnsettled()
-			if !c.admit(ctx, d, QueueEnvelope{Msg: qm, Ack: c.ackFunc(d)}) {
+			if !c.admit(ctx, sig, d, QueueEnvelope{Msg: qm, Ack: c.ackFunc(d, epoch)}) {
 				c.settleOne()
 				return
 			}
@@ -945,7 +1114,11 @@ func (c *ChannelConsumer) consume(ctx context.Context, deliveries <-chan amqp.De
 // Close waited for it; a wedged write is failed with ErrClosed by the
 // connection teardown, which is benign for the same reason. Logged at
 // Debug (not Warn) so clean shutdowns stay quiet.
-func (c *ChannelConsumer) ackFunc(d amqp.Delivery) func() {
+//
+// epoch is the reset count read when the delivery was received, before it was
+// processed: a Reset that closes the channel while the delivery is in hand
+// must still count as one that happened after the delivery was taken.
+func (c *ChannelConsumer) ackFunc(d amqp.Delivery, epoch uint64) func() {
 	return func() {
 		defer c.settleOne() // settle: terminal disposition reached
 		// Serialize against the graceful-teardown Close (see ackMu). If
@@ -969,6 +1142,10 @@ func (c *ChannelConsumer) ackFunc(d amqp.Delivery) func() {
 			log.Debug("feed: ack after graceful drain raced channel close (benign; exclusive queue already deleted)")
 			return
 		}
+		if errors.Is(err, amqp.ErrClosed) && c.resetEpoch.Load() != epoch {
+			log.Debug("feed: ack after a channel reset hit the closed channel (benign; its exclusive queue is deleted)")
+			return
+		}
 		log.Warn("feed: ack failed")
 	}
 }
@@ -989,10 +1166,18 @@ func (c *ChannelConsumer) draining() bool {
 // leaves the delivery unacked, and broker prefetch provides the
 // backpressure; the slow-consumer warning is emitted by the
 // subscription pump, which watches the actual public-buffer send.
-func (c *ChannelConsumer) admit(ctx context.Context, d amqp.Delivery, env QueueEnvelope) bool {
+//
+// reset is the signal of the channel the delivery came from: when a Reset
+// closes it while the handoff is parked, the envelope is dropped. It was not
+// delivered and is not acked; its channel is closed and with it the queue,
+// and the recovery that follows the reset repeats it. The caller leaves the
+// loop, which then reopens and reports the reset done.
+func (c *ChannelConsumer) admit(ctx context.Context, reset <-chan struct{}, d amqp.Delivery, env QueueEnvelope) bool {
 	select {
 	case c.outgoing <- env:
 		return true
+	case <-reset:
+		return false
 	case <-ctx.Done():
 		if err := d.Nack(false, false); err != nil {
 			c.logger.WithError(err).

@@ -105,6 +105,7 @@ func (o *fakeOutbox) resumePoint(id int, point time.Time) {
 }
 func (o *fakeOutbox) eventRequest(call eventRequest)  { o.events = append(o.events, call) }
 func (o *fakeOutbox) eventEnded(outcome eventOutcome) { o.outcomes = append(o.outcomes, outcome) }
+func (o *fakeOutbox) reset(uuid.UUID, uint64)         {}
 func (o *fakeOutbox) status(change statusChange) {
 	o.statuses = append(o.statuses, change)
 	o.down[change.producerID] = change.down

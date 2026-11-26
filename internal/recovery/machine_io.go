@@ -3,6 +3,8 @@ package recovery
 import (
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/oddin-gg/gosdk/types"
 )
 
@@ -82,6 +84,9 @@ type outbox interface {
 	// eventEnded reports that an event recovery ended: completed, failed or
 	// timed out. Once per recovery, whatever it ended by.
 	eventEnded(eventOutcome)
+	// reset replaces the session's channel, and its queue with what it held. The
+	// number identifies the reset: its end comes back as a fact carrying it, once.
+	reset(session uuid.UUID, number uint64)
 }
 
 // snapshotRequest is one recovery request.

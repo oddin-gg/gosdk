@@ -37,6 +37,8 @@ func (r *sessionHookRecorder) OnClientSessionOpened(s uuid.UUID, mi types.Messag
 	r.events = append(r.events, sessionHookEvent{kind: "opened", session: s, interest: mi, at: at})
 }
 
+func (r *sessionHookRecorder) RegisterSessionResetter(uuid.UUID, recovery.Resetter) {}
+func (r *sessionHookRecorder) OnFeedChannelResetDone(uuid.UUID, uint64, bool)       {}
 func (r *sessionHookRecorder) OnFeedSessionGone(s uuid.UUID) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -63,6 +65,12 @@ func (*sessionHookRecorder) OnSnapshotCompleteReceived(context.Context, uuid.UUI
 // (the context is already done, so no broker is needed) and returns the
 // session id with the error of Open.
 func openFailing(t *testing.T, rec *sessionHookRecorder, isReplay bool, interest types.MessageInterest) (uuid.UUID, error) {
+	t.Helper()
+	return openFailingWith(t, rec, isReplay, interest)
+}
+
+// openFailingWith is openFailing for any recovery processor.
+func openFailingWith(t *testing.T, rec recoveryMessageProcessor, isReplay bool, interest types.MessageInterest) (uuid.UUID, error) {
 	t.Helper()
 	logger := log.New(nil)
 	s := newSession(feed.NewClient(nil, nil, logger), nil, nil, nil, rec, "ex", "od:sport:", isReplay, logger, StrategyCatch, 0)
