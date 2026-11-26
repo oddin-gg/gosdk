@@ -99,10 +99,23 @@ import (
 // producer later than the maximum inactivity keeps it down for that delay all the
 // same). A request of the net's that the API does not accept, or a producer that is
 // disabled before its request is accepted, cancels the reset, and the net waits
-// before it tries again. So does a snapshot_complete of the session's own for one
+// before it tries again: 1, 2 or 4 minutes, by the resets already made within the
+// cool-down, as between resets. So does a snapshot_complete of the session's own for one
 // of the recoveries it waits for: the session has what it sent. The
 // snapshot_completes of a session whose reset is under way are ignored, since they
 // come from the queue being replaced.
+//
+// A session is not reset when the checkpoint of a producer it would ask for lies
+// before where that producer's recovery would start, clamped to its stateful
+// recovery window: what the reset drops of it no recovery repeats. It is lagging
+// instead, with a warning of its own for the episode, and nothing is asked. The same
+// check is made when the last acceptance arrives, since the window moves on; a reset
+// that fails it is cancelled. Once the feed is closing the resets waiting for the API
+// are cancelled, and an acceptance handled after that makes none.
+//
+// The stale window counts only time spent stale: one that began before the last
+// recovery of the producer ended starts again, a recovery that took no sample of the
+// session included.
 //
 // The zero time.Time stands for "none" where a time is optional, and for "a
 // full snapshot" where it is a gap's start or a request's.
@@ -359,8 +372,18 @@ func (m *machine) close() {
 // the point; at shutdown that would move the point past its unprocessed
 // messages, and the point the client persists would depend on the order the
 // sessions close in. A gap opened meanwhile still takes the point back.
+//
+// The resets that wait for the API are cancelled: an acceptance still queued is
+// handled as the recovery's, and drops nothing, since a reset then would take what
+// the shutdown is about to settle.
 func (m *machine) beginClosing() {
 	m.closing = true
+	mono := m.mono()
+	for _, s := range m.sessions {
+		if s.pending != nil {
+			m.cancelReset(s, mono)
+		}
+	}
 }
 
 // unhandledAtClose says the actor closed with facts still queued that it did not
@@ -796,7 +819,9 @@ func (m *machine) sample(s *session, l *lane, t *track, generatedAt time.Time, t
 		}
 		return
 	}
-	if !l.above {
+	if !l.above || l.aboveSince <= t.pausedUntil {
+		// a window that began before the last recovery of the producer ended
+		// counts its time: it starts again
 		l.above = true
 		l.aboveSince = taken.mono
 	} else if taken.mono-l.aboveSince >= m.settings.staleWindow {
@@ -1065,11 +1090,21 @@ func (m *machine) oldestGap(t *track) time.Time {
 // time asks for a full snapshot.
 func (m *machine) after(t *track, oldestGap time.Time) time.Time {
 	after := oldestGap
-	if window := time.Duration(t.producer.StatefulRecoveryWindowInMinutes()) * time.Minute; !after.IsZero() && window > 0 {
-		// the window counts back from now by the producer's clock, as the gaps' starts are
-		after = laterOf(after, t.producerNow(m.clock.Now()).Add(-window))
+	if start, ok := m.windowStart(t); ok && !after.IsZero() {
+		after = laterOf(after, start)
 	}
 	return m.capped(t, after)
+}
+
+// windowStart is the earliest start a recovery of the producer may have now: the
+// producer's now less its stateful recovery window, by the producer's clock, as the
+// gaps' starts are. Not ok when the producer has no window.
+func (m *machine) windowStart(t *track) (time.Time, bool) {
+	window := time.Duration(t.producer.StatefulRecoveryWindowInMinutes()) * time.Minute
+	if window <= 0 {
+		return time.Time{}, false
+	}
+	return t.producerNow(m.clock.Now()).Add(-window), true
 }
 
 // capped is point, but no later than the producer's now (the SDK's, corrected
@@ -1091,8 +1126,15 @@ func (m *machine) accepted(t *track, a *active, mono time.Duration) {
 	m.publishInfo(t, a, true)
 	for _, s := range m.sessions {
 		if p := s.pending; p != nil && p.unaccepted[t.id] {
+			if m.cancelResetWaitingForDisabledProducer(s, mono) {
+				continue
+			}
 			delete(p.unaccepted, t.id)
 			if len(p.unaccepted) == 0 {
+				if id, ok := m.producerOutsideWindow(s, p.producers); ok {
+					m.resetNotMadeOutsideWindow(s, id, mono)
+					continue
+				}
 				m.reset(s, p)
 			}
 		}
@@ -1672,6 +1714,22 @@ func (m *machine) trigger(s *session, t *track, age time.Duration, mono time.Dur
 			return
 		}
 	}
+	askable := make(map[int]bool)
+	for _, l := range s.lanes {
+		if other := m.byID[l.producer]; m.catalog.enabled(other.id) && m.canRequest(other, mono) {
+			askable[other.id] = true
+		}
+	}
+	if id, outside := m.producerOutsideWindow(s, askable); outside {
+		if !s.lagging {
+			s.lagging = true
+			m.counters.lagging++
+			m.log.Warnf("Session %s is %s behind producer %d and its backlog of producer %d reaches back past the producer's recovery window of %d minutes:"+
+				" the safety net does not reset it, as a recovery could not repeat what the reset would drop; it lags",
+				s.id, age, t.id, id, m.byID[id].producer.StatefulRecoveryWindowInMinutes())
+		}
+		return
+	}
 	unaccepted := make(map[int]bool)
 	var asked []*track
 	for _, l := range s.lanes {
@@ -1710,16 +1768,50 @@ func (m *machine) trigger(s *session, t *track, age time.Duration, mono time.Dur
 // recovery of a producer that has since been disabled: it would wait for ever.
 func (m *machine) cancelResetsWaitingForDisabledProducers(mono time.Duration) {
 	for _, s := range m.sessions {
-		if s.pending == nil {
-			continue
-		}
-		for _, l := range s.lanes {
-			if s.pending.unaccepted[l.producer] && !m.catalog.enabled(l.producer) {
-				m.resetNotMadeForDisabledProducer(s, l.producer, mono)
-				break
-			}
+		m.cancelResetWaitingForDisabledProducer(s, mono)
+	}
+}
+
+// cancelResetWaitingForDisabledProducer gives up the session's pending reset when
+// a recovery it waits for is of a producer that has been disabled; whether it did.
+func (m *machine) cancelResetWaitingForDisabledProducer(s *session, mono time.Duration) bool {
+	if s.pending == nil {
+		return false
+	}
+	for _, l := range s.lanes {
+		if s.pending.unaccepted[l.producer] && !m.catalog.enabled(l.producer) {
+			m.resetNotMadeForDisabledProducer(s, l.producer, mono)
+			return true
 		}
 	}
+	return false
+}
+
+// producerOutsideWindow finds, among the producers, one of the session's whose
+// checkpoint lies before where a recovery would start now, clamped to the
+// producer's stateful recovery window: what a reset drops of it is out of reach of
+// any recovery. A lane with no checkpoint is asked for from the start, which is not
+// clamped.
+func (m *machine) producerOutsideWindow(s *session, producers map[int]bool) (int, bool) {
+	for _, l := range s.lanes {
+		if !producers[l.producer] || l.checkpoint.IsZero() {
+			continue
+		}
+		if start, ok := m.windowStart(m.byID[l.producer]); ok && l.checkpoint.Before(start) {
+			return l.producer, true
+		}
+	}
+	return 0, false
+}
+
+// resetNotMadeOutsideWindow cancels a reset whose recoveries were accepted, but
+// whose session's backlog of the producer has meanwhile reached past the window.
+func (m *machine) resetNotMadeOutsideWindow(s *session, producerID int, mono time.Duration) {
+	m.cancelReset(s, mono)
+	m.counters.resetRequestsFailed++
+	m.log.Warnf("The safety net did not reset session %s: its backlog of producer %d reaches back past the producer's recovery window of %d minutes,"+
+		" where a recovery could not repeat what the reset would drop",
+		s.id, producerID, m.byID[producerID].producer.StatefulRecoveryWindowInMinutes())
 }
 
 func (m *machine) resetNotMadeForDisabledProducer(s *session, producerID int, mono time.Duration) {
@@ -1758,7 +1850,7 @@ func (m *machine) reset(s *session, p *pendingReset) {
 }
 
 // cancelReset says a reset will not be made: the gaps it opened close, and the net
-// waits before it tries again.
+// waits before it tries again, as long as after the resets already made.
 func (m *machine) cancelReset(s *session, mono time.Duration) {
 	s.pending = nil
 	s.nextResetAt = mono + backoff(firstResetBackoff, len(s.resets)+1)
