@@ -80,7 +80,7 @@ func (m *machine) tick() {
 				t.inactive = true
 				m.openProducerGap(t, t.lastAliveMark)
 				// a producer that went silent while a recovery was in flight may have lost it
-				m.giveUp(t, mono, "the producer sent no alive for "+m.settings.maxInactivity.String())
+				m.giveUp(t, mono, "the producer sent no alive for "+m.settings.maxInactivity.String(), false)
 				m.markDown(t, causeAliveIntervalViolation)
 			}
 			m.checkDelay(t, mono)

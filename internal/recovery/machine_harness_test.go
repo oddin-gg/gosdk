@@ -95,6 +95,8 @@ type fakeOutbox struct {
 	resetNumbers []uint64
 	// onRequest, when set, is called for every snapshot request as it is sent.
 	onRequest func(snapshotRequest)
+	// onReset, when set, is called for every reset as it is asked of the transport.
+	onReset func(uuid.UUID, uint64)
 }
 
 func newFakeOutbox() *fakeOutbox {
@@ -119,6 +121,9 @@ func (o *fakeOutbox) eventEnded(outcome eventOutcome) { o.outcomes = append(o.ou
 func (o *fakeOutbox) reset(session uuid.UUID, number uint64) {
 	o.resets = append(o.resets, session)
 	o.resetNumbers = append(o.resetNumbers, number)
+	if o.onReset != nil {
+		o.onReset(session, number)
+	}
 }
 func (o *fakeOutbox) status(change statusChange) {
 	o.statuses = append(o.statuses, change)

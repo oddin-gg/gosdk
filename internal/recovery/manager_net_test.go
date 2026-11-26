@@ -10,9 +10,9 @@ import (
 )
 
 // A session whose live messages stay three minutes old is reset: the manager asks
-// for a recovery of the producer, replaces the session's channel once the API has
-// accepted it, asks again once the transport has made the reset, and brings the
-// producer up when the new recovery completes. The consumer here reports as a real
+// for a recovery of each producer the session receives, replaces the session's
+// channel once the API has accepted them, asks again once the transport has made the
+// reset, and brings the producers up when the new recoveries complete. The consumer here reports as a real
 // one does: the reset is done after the old queue's snapshot_complete has come.
 func TestManager_StaleSessionIsResetOnceItsRecoveryIsAcceptedAndRecoveredAgain(t *testing.T) {
 	r := newRig(t)
@@ -22,10 +22,14 @@ func TestManager_StaleSessionIsResetOnceItsRecoveryIsAcceptedAndRecoveredAgain(t
 	r.mgr.RegisterSessionResetter(s1, consumer)
 	r.openSession(s1, types.LiveOnlyMessageInterest)
 	r.alive(liveID)
+	r.alive(mixedID)
 	requestedAt := r.clock.Now().Wall()
-	first := r.waitSnapshots(1)[0]
-	r.snapshotComplete(s1, liveID, first.requestID)
+	for _, first := range r.waitSnapshots(2) {
+		id := map[string]int{"live": liveID, "mixed": mixedID}[first.producer]
+		r.snapshotComplete(s1, id, first.requestID)
+	}
 	eventually(t, "the live producer up", func() bool { s, ok := r.status(liveID); return ok && !s.IsDown() })
+	eventually(t, "the mixed producer up", func() bool { s, ok := r.status(mixedID); return ok && !s.IsDown() })
 
 	// the messages are three minutes old by the producer's clock, for the window; they
 	// are older than what the first recovery brought, so the session's checkpoint is
@@ -34,14 +38,15 @@ func TestManager_StaleSessionIsResetOnceItsRecoveryIsAcceptedAndRecoveredAgain(t
 		r.clock.advance(time.Second)
 		if second%10 == 0 {
 			r.alive(liveID)
+			r.alive(mixedID)
 		}
 		now := r.clock.Now()
 		r.mgr.OnMessageProcessed(s1, liveID, now.Wall().Add(-3*time.Minute), now, 0)
 		r.tick()
 		r.sync()
 	}
-	asked := r.waitSnapshots(2)
-	second := asked[1]
+	asked := r.waitSnapshots(4)
+	second := lastOf(asked, "live")
 	if second.afterMillis != requestedAt.UnixMilli() {
 		t.Fatalf("the net's request starts at %d, want the session's checkpoint %d", second.afterMillis, requestedAt.UnixMilli())
 	}
@@ -61,8 +66,8 @@ func TestManager_StaleSessionIsResetOnceItsRecoveryIsAcceptedAndRecoveredAgain(t
 	// the old queue's snapshot_complete comes while the transport resets: it is ignored
 	r.snapshotComplete(s1, liveID, second.requestID)
 	r.sync()
-	if got := len(r.hits.snapshots()); got != 2 {
-		t.Fatalf("recoveries asked for before the reset is done: %d, want 2", got)
+	if got := len(r.hits.snapshots()); got != 4 {
+		t.Fatalf("recoveries asked for before the reset is done: %d, want 4", got)
 	}
 	if !r.isDown(liveID) {
 		t.Fatal("the producer came up on a snapshot_complete of the queue being replaced")
@@ -70,7 +75,7 @@ func TestManager_StaleSessionIsResetOnceItsRecoveryIsAcceptedAndRecoveredAgain(t
 
 	// the channel is replaced: the same recovery is asked for again
 	r.mgr.OnFeedChannelResetDone(s1, numbers[0], true)
-	third := r.waitSnapshots(3)[2]
+	third := lastOf(r.waitSnapshots(6), "live")
 	if third.requestID == second.requestID {
 		t.Fatal("the recovery was asked for again under the same request id")
 	}
@@ -84,11 +89,22 @@ func TestManager_StaleSessionIsResetOnceItsRecoveryIsAcceptedAndRecoveredAgain(t
 	r.tick()
 	r.sync()
 	r.snapshotComplete(s1, liveID, third.requestID)
+	r.snapshotComplete(s1, mixedID, lastOf(r.hits.snapshots(), "mixed").requestID)
 	eventually(t, "the live producer up again", func() bool { s, ok := r.status(liveID); return ok && !s.IsDown() })
 	if got := consumer.asked(); len(got) != 1 {
 		t.Fatalf("resets asked of the consumer: %v, want one", got)
 	}
-	if got := len(r.hits.snapshots()); got != 3 {
-		t.Fatalf("recoveries asked for: %d, want 3", got)
+	if got := len(r.hits.snapshots()); got != 6 {
+		t.Fatalf("recoveries asked for: %d, want 6", got)
 	}
+}
+
+// lastOf is the last of the requests of the producer of that name.
+func lastOf(requests []recordedRequest, producer string) recordedRequest {
+	for i := len(requests) - 1; i >= 0; i-- {
+		if requests[i].producer == producer {
+			return requests[i]
+		}
+	}
+	return recordedRequest{}
 }

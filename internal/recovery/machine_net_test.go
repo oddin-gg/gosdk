@@ -262,50 +262,73 @@ func TestNet_WaitsWhileAnotherProducerOfTheSessionHasARecoveryInFlight(t *testin
 	expect(t, f.calls(), before+2, "requests")
 }
 
-// SafetyNetTest: aProducerWithItsCapSpentDoesNotHoldTheNetBack
-func TestNet_ProducerWithItsCapSpentDoesNotHoldTheNetBack(t *testing.T) {
+// A producer whose retries are spent, waiting for its slow retry, holds the net
+// back: a reset would drop the session's backlog of it, and its recovery could not
+// repeat that before the window moves on. The net waits, with no request, gap,
+// lagging or backoff, until the retry is due: then both are asked for at once.
+func TestNet_ProducerWithItsCapSpentHoldsTheNetBackUntilItsRetryIsDue(t *testing.T) {
 	f := upNet(t, all)
 	f.unsubscribed(live)
 	f.refuse(f.lastSnapshot(live))
-	preBefore := len(f.snapshots(pre))
 	// the live producer's recovery is refused each time it is asked for again, until
-	// it is at its slow retry
-	seconds := 0
-	for len(f.snapshots(pre)) == preBefore && seconds < 180 {
+	// it is at its slow retry, and the session is stale all along
+	for seconds := 0; f.m.byID[live].failures <= recoveryReissues && seconds < 200; seconds++ {
 		f.stale(1, oldAge, time.Second, func() bool { return false })
-		seconds++
-		liveReq := f.lastSnapshot(live)
-		if f.inFlight(live) == liveReq.requestID {
+		if liveReq := f.lastSnapshot(live); f.inFlight(live) == liveReq.requestID {
 			f.refuse(liveReq)
 		}
 	}
-	expect(t, seconds, 61, "seconds to the net's request: the window")
-	expect(t, f.m.counters.failed, 4, "the live producer's retries spent by then")
-	liveAsked := len(f.snapshots(live))
+	expect(t, f.m.byID[live].failures > recoveryReissues, true, "the live producer's retries spent")
+	before := f.calls()
+	// the slow retry is a minute off: the session has been stale for the window
+	f.stale(1, oldAge, 50*time.Second, func() bool { return false })
+	expect(t, f.calls(), before, "requests while the live producer waits for its slow retry")
+	expect(t, len(f.out.resets), 0, "resets")
+	expect(t, f.lagging(1), false, "the session lags")
+	expect(t, f.m.session(sid(1)).pending == nil, true, "a reset pending")
+	expect(t, f.m.session(sid(1)).nextResetAt, time.Duration(0), "the net's backoff")
+
+	// the retry is due: both are asked for, the live producer's by the net
+	if f.stale(1, oldAge, 20*time.Second, f.untilAsked(before)) < 0 {
+		t.Fatal("the net did not act once the live producer's retry was due")
+	}
+	expect(t, f.calls(), before+2, "requests: both producers")
 	f.accept(f.lastSnapshot(pre))
-	expectSessions(t, f.resetSessions(), []int{1}, "the one producer it could ask for accepted")
-	f.resetDone()
-	expect(t, len(f.snapshots(live)), liveAsked, "the live producer, waiting for its slow retry, waits")
+	f.accept(f.lastSnapshot(live))
+	expectSessions(t, f.resetSessions(), []int{1}, "resets")
 }
 
-// SafetyNetTest: aSilentProducerDoesNotHoldTheNetBackAndIsAskedForOnceItSpeaksAgain
-func TestNet_SilentProducerDoesNotHoldTheNetBackAndIsAskedForOnceItSpeaksAgain(t *testing.T) {
+// A producer that is silent holds the net back, the same: nothing is asked, the
+// session does not lag, and the net's backoff does not start. Once the producer
+// speaks again, and is recovered if it missed anything, the net asks for both.
+func TestNet_SilentProducerHoldsTheNetBackUntilItSpeaksAgain(t *testing.T) {
 	f := upNet(t, all)
 	before := f.calls()
 	f.noLiveAlives = true
-	expect(t, f.stale(1, oldAge, 3*time.Minute, f.untilAsked(before)), 61, "seconds to the net's request, the live producer silent since 20 s")
+	expect(t, f.stale(1, oldAge, 4*time.Minute, f.untilAsked(before)), -1, "a request while the live producer is silent")
 	f.expectCause(live, causeAliveIntervalViolation, "the live producer's cause")
-	expect(t, f.calls(), before+1, "requests: the prematch producer only")
-	liveCheckpoint, _ := f.checkpoint(1, live)
-	f.accept(f.lastSnapshot(pre))
-	expectSessions(t, f.resetSessions(), []int{1}, "resets")
-	f.resetDone()
-	expect(t, len(f.snapshots(pre)), 3, "recoveries of the prematch producer: asked for again after the reset")
+	expect(t, f.calls(), before, "requests")
+	expect(t, len(f.out.resets), 0, "resets")
+	expect(t, f.lagging(1), false, "the session lags")
+	expect(t, f.m.session(sid(1)).pending == nil, true, "a reset pending")
+	expect(t, f.m.session(sid(1)).nextResetAt, time.Duration(0), "the net's backoff")
+	for _, l := range f.m.session(sid(1)).lanes {
+		expect(t, l.gap == nil, true, "a gap of the lane")
+	}
 
 	f.noLiveAlives = false
 	f.alive(live)
-	expectTime(t, f.lastSnapshot(live).after, liveCheckpoint,
-		"the live producer misses what the reset dropped of it, and what it missed while silent")
+	if id := f.inFlight(live); id != 0 {
+		f.complete(f.lastSnapshot(live), 1)
+	}
+	after := f.calls()
+	if f.stale(1, oldAge, 3*time.Minute, f.untilAsked(after)) < 0 {
+		t.Fatal("the net did not act once the live producer spoke again")
+	}
+	expect(t, f.calls(), after+2, "requests: both producers")
+	f.accept(f.lastSnapshot(pre))
+	f.accept(f.lastSnapshot(live))
+	expectSessions(t, f.resetSessions(), []int{1}, "resets")
 }
 
 // SafetyNetTest: aProducerIsNotUpWhileALowPrioritySessionIsBeingReset
@@ -390,43 +413,25 @@ func TestNet_ResetTheTransportCouldNotTakeCountsAgainstNeitherTheCapNorTheBackof
 	expect(t, f.now().Sub(start), 4*61*time.Second, "time the four rounds took")
 }
 
-// SafetyNetTest: whatTheResetDropsOfAProducerItCouldNotAskForStartsWhereItWasWhenTheResetWasMade
-func TestNet_WhatTheResetDropsOfAProducerItCouldNotAskForStartsWhereItWasWhenTheResetWasMade(t *testing.T) {
-	f := &netFeed{feed: newFeed(t)}
-	f.open(1, all)
-	f.open(2, liveOnly)
-	f.startFeed()
-	f.bothUp(1, 2)
-	// the live producer's retries spent, for a gap of session 2 that starts far ahead
-	ahead := f.now().Add(time.Hour)
-	f.m.processed(sid(2), live, ahead, ahead, f.stamp(), 0)
-	f.m.channelLost(sid(2))
-	f.m.channelReopened(sid(2))
-	for range 4 {
-		f.refuse(f.lastSnapshot(live))
-		f.runWithAlives(20 * time.Second)
-	}
-	f.expectCause(live, causeRecoveryFailed, "the live producer's cause")
-
-	// its slow retry goes out now and then, and is refused each time
-	preBefore := len(f.snapshots(pre))
-	for seconds := 0; len(f.snapshots(pre)) == preBefore && seconds < 300; seconds++ {
-		f.stale(1, oldAge, time.Second, func() bool { return false })
-		if liveReq := f.lastSnapshot(live); f.inFlight(live) == liveReq.requestID {
-			f.refuse(liveReq)
-		}
-	}
-	expect(t, len(f.snapshots(pre)), preBefore+1, "recoveries of the prematch producer")
-	atReset, _ := f.checkpoint(1, live)
+// What the reset drops starts where the session was when it was made, for every
+// producer: a message the new channel delivers before the transport reports the
+// reset done moves no checkpoint the follow-up starts from.
+func TestNet_WhatTheResetDropsStartsWhereTheSessionWasWhenTheResetWasMade(t *testing.T) {
+	f := upNet(t, all)
+	before := f.calls()
+	f.stale(1, oldAge, 5*time.Minute, f.untilAsked(before))
+	preAt, _ := f.checkpoint(1, pre)
+	liveAt, _ := f.checkpoint(1, live)
 	f.accept(f.lastSnapshot(pre))
+	f.accept(f.lastSnapshot(live))
 	expectSessions(t, f.resetSessions(), []int{1}, "resets")
 	// the new channel delivers before the transport reports the reset done
 	later := f.now().Add(2 * time.Hour)
 	f.m.sessionAlive(sid(1), live, later, later, f.stamp(), true, false)
 	f.resetDone()
 
-	f.runWithAlives(10 * time.Minute)
-	expectTime(t, f.lastSnapshot(live).after, atReset, "from where session 1 was when the reset was made")
+	expectTime(t, f.lastSnapshot(pre).after, preAt, "prematch from where session 1 was when the reset was made")
+	expectTime(t, f.lastSnapshot(live).after, liveAt, "live from where session 1 was when the reset was made")
 }
 
 // SafetyNetTest: aSessionNoOneTakesSnapshotCompletesForIsResetOnceTheApiAcceptedEveryRecovery
@@ -632,21 +637,6 @@ func TestNet_ExpiredDeferredEventRecoveriesFreeTheirPlaces(t *testing.T) {
 	expect(t, f.m.counters.eventRefused, 0, "event recoveries refused: a place again")
 	f.resetDone()
 	expect(t, len(f.out.events), 1, "event requests")
-}
-
-// SafetyNetTest: aSnapshotCompleteOfARecoveryTheResetDidNotAskForLeavesItWaiting
-func TestNet_SnapshotCompleteOfARecoveryTheResetDidNotAskForLeavesItWaiting(t *testing.T) {
-	f := upNet(t, all)
-	before := f.calls()
-	f.noLiveAlives = true
-	f.stale(1, oldAge, 3*time.Minute, f.untilAsked(before))
-	expect(t, f.calls(), before+1, "requests: the prematch producer only")
-	// the silent producer speaks while the reset waits for the API, and is recovered on its own
-	f.noLiveAlives = false
-	f.alive(live)
-	f.complete(f.lastSnapshot(live), 1)
-	f.accept(f.lastSnapshot(pre))
-	expectSessions(t, f.resetSessions(), []int{1}, "resets: a completion of a recovery it did not ask for")
 }
 
 // SafetyNetTest: aReportOfNoResetUnderWayChangesNothing
@@ -1044,6 +1034,9 @@ func TestNet_LostConnectionWhileAResetWaitsMakesNone(t *testing.T) {
 	f.accept(f.lastSnapshot(pre))
 	f.accept(f.lastSnapshot(live))
 	expect(t, len(f.out.resets), 0, "resets")
+	expect(t, f.m.session(sid(1)).pending == nil, true, "a reset pending")
+	// a lost connection is no failure of the net's: its backoff does not start
+	expect(t, f.m.session(sid(1)).nextResetAt, time.Duration(0), "the net's backoff after the loss")
 }
 
 // ---- RecoveryClockTest: the safety net
@@ -1487,9 +1480,10 @@ func TestNet_StaleWindowDoesNotCountTheTimeOfARecoveryThatTookNoSampleOfTheLane(
 	expect(t, f.stale(1, oldAge, 3*time.Minute, f.untilAsked(after)), 61, "seconds from the completion to the net's request")
 }
 
-// A producer the net cannot ask for now has its backlog dropped by the reset too, and
-// its later recovery is clamped to its window: the session is not reset either.
-func TestNet_BacklogBeyondTheWindowOfAProducerThatCannotBeAskedIsNotReset(t *testing.T) {
+// A producer that cannot be asked holds the net back before the window is looked
+// at: no lagging while it is silent, though its checkpoint reaches past the window.
+// Once it has spoken and been recovered, its checkpoint is where the recovery put it.
+func TestNet_BacklogBeyondTheWindowOfASilentProducerHoldsTheNetBackWithoutLagging(t *testing.T) {
 	f := upNetWithWindow(t, 60)
 	f.runFor(70 * time.Minute)
 	// the session is up to date with prematch, and has taken nothing of live
@@ -1499,9 +1493,19 @@ func TestNet_BacklogBeyondTheWindowOfAProducerThatCannotBeAskedIsNotReset(t *tes
 	before := f.calls()
 	expect(t, f.stale(1, oldAge, 3*time.Minute, f.untilAsked(before)), -1, "a request")
 	expect(t, f.calls(), before, "requests")
-	expect(t, len(f.out.resets), 0, "resets")
-	expect(t, f.lagging(1), true, "the session lags")
-	expect(t, f.logCount(notResetOutsideWindow), 1, "warnings of the net not resetting it")
+	expect(t, f.lagging(1), false, "the session lags while the live producer is silent")
+	expect(t, f.logCount(notResetOutsideWindow), 0, "warnings of the net not resetting it")
+
+	f.noLiveAlives = false
+	f.alive(live)
+	if f.inFlight(live) != 0 {
+		f.complete(f.lastSnapshot(live), 1)
+	}
+	after := f.calls()
+	if f.stale(1, oldAge, 3*time.Minute, f.untilAsked(after)) < 0 {
+		t.Fatal("the net did not act once the live producer had spoken and been recovered")
+	}
+	expect(t, f.calls(), after+2, "requests: both producers")
 }
 
 // freshLive is session 1 taking a live message of the live producer as of now: its
@@ -1563,67 +1567,6 @@ func TestNet_MarginIsAtMostHalfTheWindowOfAShortWindow(t *testing.T) {
 
 // ---- a recovery asked before the reset
 
-// A producer the net skipped (its retries are spent, it waits for its slow retry)
-// asks on its own while the reset waits for the acceptance of the other. The
-// resetting session sees its snapshot_complete before the reset, another session
-// after the reset has begun: that recovery is of the old queue and must not bring the
-// producer up. Once the reset is done the producer is asked for again.
-func TestNet_RecoveryAskedBeforeTheResetDoesNotBringAProducerUpWhileTheQueueIsReplaced(t *testing.T) {
-	f := &netFeed{feed: newFeed(t)}
-	f.open(1, all)
-	f.open(2, all)
-	f.startFeed()
-	f.bothUp(1, 2)
-	// the live producer's retries spent, with a gap of both sessions
-	for _, n := range []int{1, 2} {
-		f.m.channelLost(sid(n))
-		f.m.channelReopened(sid(n))
-	}
-	f.complete(f.lastSnapshot(pre), 1, 2)
-	for range 4 {
-		f.refuse(f.lastSnapshot(live))
-		f.runWithAlives(20 * time.Second)
-	}
-	f.expectCause(live, causeRecoveryFailed, "the live producer's cause")
-
-	// the net asks for prematch only; the live producer's slow retry goes out meanwhile
-	preBefore := len(f.snapshots(pre))
-	for seconds := 0; len(f.snapshots(pre)) == preBefore && seconds < 600; seconds++ {
-		f.stale(1, oldAge, time.Second, func() bool { return false })
-		if liveReq := f.lastSnapshot(live); f.inFlight(live) == liveReq.requestID {
-			f.refuse(liveReq)
-		}
-	}
-	liveBefore := len(f.snapshots(live))
-	for seconds := 0; f.inFlight(live) == 0 && seconds < 600; seconds++ {
-		f.stale(1, oldAge, time.Second, func() bool { return false })
-	}
-	if len(f.snapshots(pre)) != preBefore+1 || len(f.snapshots(live)) != liveBefore+1 {
-		t.Fatalf("recoveries asked: prematch %d (want %d), live %d (want %d)",
-			len(f.snapshots(pre)), preBefore+1, len(f.snapshots(live)), liveBefore+1)
-	}
-	if f.m.session(sid(1)).pending == nil {
-		t.Fatal("the net's reset is not waiting for the API")
-	}
-	liveReq := f.lastSnapshot(live)
-	f.accept(liveReq)
-	f.snapshotComplete(1, live, liveReq.requestID)
-	f.accept(f.lastSnapshot(pre))
-	expectSessions(t, f.resetSessions(), []int{1}, "resets")
-
-	f.snapshotComplete(2, live, liveReq.requestID)
-	f.expectCause(live, causeSafetyNetReset, "the live producer while the queue is replaced: not recovered by a recovery of the old queue")
-
-	f.resetDone()
-	again := f.lastSnapshot(live)
-	if again.requestID == liveReq.requestID {
-		t.Fatal("the live producer was not asked for again")
-	}
-	f.complete(again, 1, 2)
-	f.complete(f.lastSnapshot(pre), 1, 2)
-	f.expectCause(live, causeProcessingDelay, "the live producer recovered by the new recovery, but its session still processes it late")
-}
-
 // ---- the reset history at the end of a reset
 
 // The first of the resets in the cool-down ages out while the third is under way:
@@ -1681,23 +1624,31 @@ func TestNet_CancelledResetPausesByTheResetsLeftInTheCooldown(t *testing.T) {
 
 // ---- the check at the last acceptance covers a producer the net did not ask
 
-// The live producer is silent, so the net asks for prematch only; its backlog of the
-// live producer, inside the window when the net selects, ages out of it while the
-// prematch request is pending: the acceptance makes no reset.
-func TestNet_CheckpointOfAProducerTheNetDidNotAskAgesOutBeforeTheLastAcceptanceMakesNoReset(t *testing.T) {
-	f := upNetWithWindow(t, 60)
-	f.runFor(40 * time.Minute)
-	f.noLiveAlives = true
+// A producer in backoff holds the net back, the same: the session's messages of the
+// other producer are stale for longer than the window while the retry waits, and the
+// net does not ask for the one that could be asked. It asks for both once the retry
+// is due.
+func TestNet_ProducerInBackoffHoldsTheNetBackUntilItsRetryIsDue(t *testing.T) {
+	f := &netFeed{feed: withSettings(t, func(s *recoverySettings) { s.staleWindow = 2 * time.Second })}
+	f.open(1, all)
+	f.startFeed()
+	f.bothUp(1)
+	f.unsubscribed(live)
+	f.refuse(f.lastSnapshot(live))
 	before := f.calls()
-	f.stale(1, oldAge, 5*time.Minute, f.untilAsked(before))
-	expect(t, f.calls(), before+1, "requests: prematch only, the live producer is silent")
-	expect(t, f.m.session(sid(1)).pending != nil, true, "a reset waiting for the API")
-	f.clock.advance(10 * time.Minute)
-	f.accept(f.lastSnapshot(pre))
-	expect(t, len(f.out.resets), 0, "resets")
+	// the backoff is five seconds: the window of two has passed twice over
+	f.stale(1, oldAge, 4*time.Second, func() bool { return false })
+	expect(t, f.calls(), before, "requests during the backoff")
 	expect(t, f.m.session(sid(1)).pending == nil, true, "a reset pending")
-	expect(t, f.m.counters.resetRequestsFailed, 1, "net requests failed")
-	expect(t, f.logCount("WARN The safety net did not reset session"), 1, "warnings of the reset not made")
+	expect(t, f.lagging(1), false, "the session lags")
+	expect(t, f.m.session(sid(1)).nextResetAt, time.Duration(0), "the net's backoff")
+
+	// the retry is due: the stale sample that finds it so starts the net, which asks for both
+	if f.stale(1, oldAge, 2*time.Second, f.untilAsked(before)) < 0 {
+		t.Fatal("the net did not act once the live producer's retry was due")
+	}
+	expect(t, f.calls(), before+2, "requests: both producers")
+	expect(t, f.m.session(sid(1)).pending != nil, true, "a reset waiting for the API")
 }
 
 // ---- lagging with two lanes above the limit
