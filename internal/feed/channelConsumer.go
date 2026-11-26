@@ -969,14 +969,25 @@ func (c *ChannelConsumer) run(ctx context.Context, deliveries <-chan amqp.Delive
 		opened = time.Now()
 		// The replacement is installed, and the resets that waited for it are
 		// taken, in one step: a Reset that comes later closes this channel and
-		// is the next round's. A reset that a Close or a drain overtook is
-		// dropped: the consumer exits and reports gone.
+		// is the next round's. Whether a Close has begun is read in the same
+		// step: shutdown is set under mu before the loop context is cancelled,
+		// so a replacement that lands in between must not be reported as a
+		// success. It is closed, and the consumer exits through its gone path
+		// with no reset done.
 		c.mu.Lock()
+		if c.shutdown || ctx.Err() != nil {
+			c.resetting = nil
+			c.mu.Unlock()
+			c.closeGracefulChannel(ch)
+			return
+		}
 		c.current = ch
 		finished := c.resetting
 		c.resetting = nil
 		c.mu.Unlock()
-		if ctx.Err() != nil || c.draining() {
+		// A drain that overtook the reopen drops the reset too: the consumer
+		// exits and reports gone, and shutdown closes the replacement.
+		if c.draining() {
 			finished = nil
 		}
 		// The replacement queue is declared and bound: whatever is

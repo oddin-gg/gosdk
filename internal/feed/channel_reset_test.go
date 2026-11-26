@@ -109,6 +109,9 @@ type resetOpener struct {
 	fail     atomic.Int32
 	gate     chan struct{}
 	entered  chan struct{}
+	// afterOpen, when set, runs on the consumer's goroutine for every
+	// successful open after the first, with the channel about to be returned.
+	afterOpen func(call int32, rc *resetChannel)
 }
 
 func newResetOpener() *resetOpener {
@@ -135,6 +138,9 @@ func (o *resetOpener) CreateChannel(ctx context.Context, _ []string, _ string, _
 	o.mu.Lock()
 	o.channels = append(o.channels, rc)
 	o.mu.Unlock()
+	if n > 1 && o.afterOpen != nil {
+		o.afterOpen(n, rc)
+	}
 	return rc.deliveries, rc, nil
 }
 
@@ -648,5 +654,62 @@ func TestChannelReset_AResetAfterARealLossRestoresAndReportsDone(t *testing.T) {
 	}
 	if p.lost.Load() != 1 {
 		t.Fatalf("lost = %d, want 1", p.lost.Load())
+	}
+}
+
+// waitFor polls until cond holds.
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// A Close that has begun, but has not cancelled the loop yet, when the
+// replacement arrives: the reset is not a success.
+func TestChannelReset_ReplacementLandingDuringShutdownIsNotASuccess(t *testing.T) {
+	o := newResetOpener()
+	c, p := newResetConsumer(t, o, nil)
+	o.afterOpen = func(int32, *resetChannel) {
+		c.mu.Lock()
+		c.shutdown = true // runShutdown's first step; the loop is not cancelled yet
+		c.mu.Unlock()
+	}
+	openResetConsumer(t, c)
+
+	c.Reset(1)
+	waitFor(t, "the consumer to exit", func() bool { return p.gone.Load() == 1 })
+	waitFor(t, "the late channel to be closed", func() bool { return o.created() == 2 && o.channel(1).effective.Load() == 1 })
+	p.noMoreDone(t)
+	if p.lost.Load() != 0 || p.restored.Load() != 0 {
+		t.Fatalf("lost=%d restored=%d, want none", p.lost.Load(), p.restored.Load())
+	}
+}
+
+// A Close that cancels the loop after the reopen succeeded: no done-report,
+// gone once, and the new channel is closed, not left open.
+func TestChannelReset_CloseOvertakingASuccessfulReopenReportsNoDone(t *testing.T) {
+	o := newResetOpener()
+	c, p := newResetConsumer(t, o, nil)
+	o.afterOpen = func(int32, *resetChannel) {
+		c.mu.Lock()
+		cancel := c.closeFn
+		c.mu.Unlock()
+		cancel()
+	}
+	openResetConsumer(t, c)
+
+	c.Reset(1)
+	waitFor(t, "the consumer to exit", func() bool { return p.gone.Load() == 1 })
+	waitFor(t, "the new channel to be closed", func() bool { return o.created() == 2 && o.channel(1).effective.Load() == 1 })
+	closeNow(t, c)
+	waitWaitGroup(t, c)
+	p.noMoreDone(t)
+	if p.gone.Load() != 1 {
+		t.Fatalf("gone fired %d times, want 1", p.gone.Load())
 	}
 }
