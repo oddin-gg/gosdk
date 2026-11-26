@@ -569,9 +569,12 @@ func (m *Manager) OnMessageProcessed(session uuid.UUID, producerID int, generate
 // getting messages. The alive-only session reports its alives through
 // OnAliveReceived, which is the alive channel of the SDK and bound to no
 // session. A sample, like OnMessageProcessed.
-func (m *Manager) OnSessionAlive(session uuid.UUID, producerID int, generatedAt time.Time, taken Stamp, isSubscribed bool) {
+//
+// held says a message of the session handed to the client has not settled: the
+// alive is heard as usual, but it does not move the session's checkpoint.
+func (m *Manager) OnSessionAlive(session uuid.UUID, producerID int, generatedAt time.Time, taken Stamp, isSubscribed, held bool) {
 	if a := m.actor(); a != nil {
-		a.postSample(factSessionAlive{session: session, producer: producerID, generatedAt: generatedAt, taken: taken, subscribed: isSubscribed})
+		a.postSample(factSessionAlive{session: session, producer: producerID, generatedAt: generatedAt, taken: taken, subscribed: isSubscribed, held: held})
 	}
 }
 

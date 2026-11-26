@@ -670,7 +670,13 @@ func (m *machine) processed(id uuid.UUID, producerID int, generatedAt, markAt ti
 // everything the producer sent before it is done, so a subscribed one moves the
 // session's checkpoint. One without a positive timestamp is ignored, as alive
 // ignores it. The checkpoint is taken from markAt, as processed takes it.
-func (m *machine) sessionAlive(id uuid.UUID, producerID int, generatedAt, markAt time.Time, taken Stamp, subscribed bool) {
+//
+// held says a message of the session that was handed to the client has not
+// settled yet: its delivery is not acked, and a restart from a point past it
+// would skip it. The alive is heard all the same, for liveness and for the age of
+// the session, but it moves no checkpoint; the next alive, or the message when it
+// settles, does.
+func (m *machine) sessionAlive(id uuid.UUID, producerID int, generatedAt, markAt time.Time, taken Stamp, subscribed, held bool) {
 	if !validStamp(generatedAt) {
 		return
 	}
@@ -680,7 +686,7 @@ func (m *machine) sessionAlive(id uuid.UUID, producerID int, generatedAt, markAt
 	}
 	l.lastAt, l.taken = taken.mono, true
 	m.heard(t, id, generatedAt, 0)
-	if subscribed {
+	if subscribed && !held {
 		l.checkpoint = laterOf(l.checkpoint, markAt)
 	}
 	m.sample(l, t, generatedAt, taken)

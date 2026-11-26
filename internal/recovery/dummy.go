@@ -34,7 +34,7 @@ func (d DummyManager) OnSnapshotCompleteReceived(ctx context.Context, session uu
 func (d DummyManager) OnMessageProcessed(uuid.UUID, int, time.Time, Stamp, int) {}
 
 // OnSessionAlive ...
-func (d DummyManager) OnSessionAlive(uuid.UUID, int, time.Time, Stamp, bool) {
+func (d DummyManager) OnSessionAlive(uuid.UUID, int, time.Time, Stamp, bool, bool) {
 }
 
 // OnFeedChannelLost ...

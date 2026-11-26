@@ -98,7 +98,7 @@ func (f *feed) expectNoEventState() {
 
 // sessionAliveAt is an alive of the session's queue generated at at.
 func (f *feed) sessionAliveAt(n, p int, at time.Time) {
-	f.m.sessionAlive(sid(n), p, at, at, f.stamp(), true)
+	f.m.sessionAlive(sid(n), p, at, at, f.stamp(), true, false)
 }
 
 // ---- the request and its completion

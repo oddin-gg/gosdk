@@ -588,7 +588,7 @@ func (a *recoveryActor) handle(f fact) {
 	case factProcessed:
 		m.processed(f.session, f.producer, f.generatedAt, m.markOf(f.producer, f.generatedAt, f.taken), f.taken, f.requestID)
 	case factSessionAlive:
-		m.sessionAlive(f.session, f.producer, f.generatedAt, m.markOf(f.producer, f.generatedAt, f.taken), f.taken, f.subscribed)
+		m.sessionAlive(f.session, f.producer, f.generatedAt, m.markOf(f.producer, f.generatedAt, f.taken), f.taken, f.subscribed, f.held)
 	case factSnapshotComplete:
 		m.snapshotComplete(f.session, f.producer, f.requestID)
 	case factChannelLost:

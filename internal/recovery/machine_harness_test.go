@@ -262,7 +262,7 @@ func (f *feed) processed(n, p int, at time.Time, requestID int) {
 }
 
 func (f *feed) sessionAlive(n, p int) {
-	f.m.sessionAlive(sid(n), p, f.now(), f.now(), f.stamp(), true)
+	f.m.sessionAlive(sid(n), p, f.now(), f.now(), f.stamp(), true, false)
 }
 
 func (f *feed) snapshotComplete(n, p, requestID int) { f.m.snapshotComplete(sid(n), p, requestID) }

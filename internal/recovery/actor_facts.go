@@ -112,6 +112,10 @@ type factSessionAlive struct {
 	generatedAt time.Time
 	taken       Stamp
 	subscribed  bool
+	// held says a message of the session handed to the client had not settled
+	// when the alive was finished: the alive counts as heard, but it does not
+	// move the session's checkpoint past that message.
+	held bool
 }
 
 // ---- the clock

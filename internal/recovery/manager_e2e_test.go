@@ -577,7 +577,7 @@ func TestManager_SessionAliveAndProcessedMessagesMoveTheResumePoint(t *testing.T
 	r.clock.advance(10 * time.Second)
 	r.alive(liveID)
 	now := r.clock.Now()
-	r.mgr.OnSessionAlive(s1, liveID, now.Wall(), now, true)
+	r.mgr.OnSessionAlive(s1, liveID, now.Wall(), now, true, false)
 	r.processed(s2, liveID)
 	r.sync()
 	if got := r.timestampForRecovery(liveID); !got.Equal(now.Wall()) {
@@ -588,7 +588,7 @@ func TestManager_SessionAliveAndProcessedMessagesMoveTheResumePoint(t *testing.T
 	r.clock.advance(10 * time.Second)
 	later := r.clock.Now()
 	r.alive(liveID)
-	r.mgr.OnSessionAlive(s1, liveID, later.Wall(), later, true)
+	r.mgr.OnSessionAlive(s1, liveID, later.Wall(), later, true, false)
 	r.sync()
 	if got := r.timestampForRecovery(liveID); !got.Equal(now.Wall()) {
 		t.Fatalf("resume point = %v, want session 2's older checkpoint %v", got, now.Wall())
@@ -633,7 +633,7 @@ func TestManager_FeedCallbacksBeforeOpenAreNoOps(t *testing.T) {
 	r.mgr.OnFeedChannelRestored(s1)
 	r.mgr.OnFeedSessionGone(s1)
 	r.mgr.OnMessageProcessed(s1, liveID, now.Wall(), now, 0)
-	r.mgr.OnSessionAlive(s1, liveID, now.Wall(), now, true)
+	r.mgr.OnSessionAlive(s1, liveID, now.Wall(), now, true, false)
 	r.mgr.OnAliveReceived(liveID, types.MessageTimestamp{Created: now.Wall(), Received: now.Wall()}, now, true)
 	if _, ok := r.mgr.ProducerStatus(liveID); ok {
 		t.Fatal("a status exists before Open")

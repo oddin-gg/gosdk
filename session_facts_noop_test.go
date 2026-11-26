@@ -12,27 +12,27 @@ import (
 // facts take them and drop them.
 
 func (*lossRecordingProcessor) OnMessageProcessed(uuid.UUID, int, time.Time, recovery.Stamp, int) {}
-func (*lossRecordingProcessor) OnSessionAlive(uuid.UUID, int, time.Time, recovery.Stamp, bool) {
+func (*lossRecordingProcessor) OnSessionAlive(uuid.UUID, int, time.Time, recovery.Stamp, bool, bool) {
 }
 
 func (*fakeSnapshotProcessor) OnMessageProcessed(uuid.UUID, int, time.Time, recovery.Stamp, int) {}
-func (*fakeSnapshotProcessor) OnSessionAlive(uuid.UUID, int, time.Time, recovery.Stamp, bool) {
+func (*fakeSnapshotProcessor) OnSessionAlive(uuid.UUID, int, time.Time, recovery.Stamp, bool, bool) {
 }
 
 func (*recordingRecoveryProcessor) OnMessageProcessed(uuid.UUID, int, time.Time, recovery.Stamp, int) {
 }
-func (*recordingRecoveryProcessor) OnSessionAlive(uuid.UUID, int, time.Time, recovery.Stamp, bool) {
+func (*recordingRecoveryProcessor) OnSessionAlive(uuid.UUID, int, time.Time, recovery.Stamp, bool, bool) {
 }
 
 func (noopRecoveryProcessor) OnMessageProcessed(uuid.UUID, int, time.Time, recovery.Stamp, int) {}
-func (noopRecoveryProcessor) OnSessionAlive(uuid.UUID, int, time.Time, recovery.Stamp, bool) {
+func (noopRecoveryProcessor) OnSessionAlive(uuid.UUID, int, time.Time, recovery.Stamp, bool, bool) {
 }
 
 func (*countingRecoveryProcessor) OnMessageProcessed(uuid.UUID, int, time.Time, recovery.Stamp, int) {
 }
-func (*countingRecoveryProcessor) OnSessionAlive(uuid.UUID, int, time.Time, recovery.Stamp, bool) {
+func (*countingRecoveryProcessor) OnSessionAlive(uuid.UUID, int, time.Time, recovery.Stamp, bool, bool) {
 }
 
 func (*sessionHookRecorder) OnMessageProcessed(uuid.UUID, int, time.Time, recovery.Stamp, int) {}
-func (*sessionHookRecorder) OnSessionAlive(uuid.UUID, int, time.Time, recovery.Stamp, bool) {
+func (*sessionHookRecorder) OnSessionAlive(uuid.UUID, int, time.Time, recovery.Stamp, bool, bool) {
 }

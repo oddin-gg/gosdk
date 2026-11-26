@@ -432,9 +432,9 @@ func TestMachine_CheckpointIsTheMostRecentLiveMessageOrSubscribedAliveTheSession
 	check(at.Add(-10*time.Second), "an older message")
 	f.m.processed(sid(1), pre, at, at, f.stamp(), f.lastSnapshot(pre).requestID)
 	check(at.Add(-10*time.Second), "a snapshot message")
-	f.m.sessionAlive(sid(1), pre, at.Add(-5*time.Second), at.Add(-5*time.Second), f.stamp(), false)
+	f.m.sessionAlive(sid(1), pre, at.Add(-5*time.Second), at.Add(-5*time.Second), f.stamp(), false, false)
 	check(at.Add(-10*time.Second), "an unsubscribed alive")
-	f.m.sessionAlive(sid(1), pre, at.Add(-5*time.Second), at.Add(-5*time.Second), f.stamp(), true)
+	f.m.sessionAlive(sid(1), pre, at.Add(-5*time.Second), at.Add(-5*time.Second), f.stamp(), true, false)
 	check(at.Add(-5*time.Second), "a subscribed alive")
 	other, _ := f.checkpoint(1, live)
 	expectTime(t, other, requestedAt, "the other producer")
@@ -462,7 +462,7 @@ func TestMachine_SessionAliveStampedAheadOfItsProducerMovesTheCheckpointOnlyToIt
 	f := upWith(t, all)
 	f.clock.advance(time.Minute)
 	at := f.now()
-	f.m.sessionAlive(sid(1), pre, at.Add(10*time.Minute), at, f.stamp(), true)
+	f.m.sessionAlive(sid(1), pre, at.Add(10*time.Minute), at, f.stamp(), true, false)
 	cp, _ := f.checkpoint(1, pre)
 	expectTime(t, cp, at, "the checkpoint")
 
@@ -495,7 +495,7 @@ func TestMachine_MessageNotAheadOfItsProducerMovesTheCheckpointToItsOwnStamp(t *
 	f.processed(1, pre, at.Add(-10*time.Second), 0)
 	cp, _ := f.checkpoint(1, pre)
 	expectTime(t, cp, at.Add(-10*time.Second), "after a message")
-	f.m.sessionAlive(sid(1), pre, at.Add(-5*time.Second), at.Add(-5*time.Second), f.stamp(), true)
+	f.m.sessionAlive(sid(1), pre, at.Add(-5*time.Second), at.Add(-5*time.Second), f.stamp(), true, false)
 	cp, _ = f.checkpoint(1, pre)
 	expectTime(t, cp, at.Add(-5*time.Second), "after an alive")
 }
@@ -1943,4 +1943,35 @@ func TestMachine_SnapshotRecoveryThatLeavesFlightIsToldToTheOutboxOnce(t *testin
 	again := f.lastSnapshot(pre)
 	f.refuse(again)
 	expect(t, fmt.Sprint(f.out.ended), fmt.Sprint([]int{first.requestID, lost.requestID, again.requestID}), "ended after a lost queue and a refusal")
+}
+
+// An alive of a session that finished while a message of the session handed to the
+// client had not settled counts as heard but moves no
+// checkpoint and so no resume point; the next alive, with nothing held, does.
+func TestMachine_SessionAliveWhileAMessageIsHeldIsHeardButMovesNoCheckpoint(t *testing.T) {
+	f := upWith(t, all)
+	f.clock.advance(time.Minute)
+	before, _ := f.checkpoint(1, pre)
+	pointBefore, _ := f.resume(pre)
+
+	f.clock.advance(10 * time.Second)
+	at := f.now()
+	taken := f.stamp()
+	f.m.sessionAlive(sid(1), pre, at, at, taken, true, true)
+	f.m.publishResumePoints()
+	got, _ := f.checkpoint(1, pre)
+	expectTime(t, got, before, "the checkpoint after an alive with a message held")
+	pointHeld, _ := f.resume(pre)
+	expectTime(t, pointHeld, pointBefore, "the resume point after an alive with a message held")
+	l := f.m.session(sid(1)).lane(pre)
+	expect(t, l.lastAt, taken.mono, "the session was heard at")
+
+	f.clock.advance(10 * time.Second)
+	next := f.now()
+	f.m.sessionAlive(sid(1), pre, next, next, f.stamp(), true, false)
+	f.m.publishResumePoints()
+	got, _ = f.checkpoint(1, pre)
+	expectTime(t, got, next, "the checkpoint after the next alive")
+	pointNext, _ := f.resume(pre)
+	expectTime(t, pointNext, next, "the resume point after the next alive")
 }

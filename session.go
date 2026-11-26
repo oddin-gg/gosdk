@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -152,13 +153,17 @@ type recoveryMessageProcessor interface {
 	//
 	// An alive is acknowledged by the session itself, not by the pump, so
 	// it may be reported before the message handed over just before it has
-	// been acknowledged: by one envelope at most, the one the pump holds.
+	// been acknowledged. The session counts the messages it handed to the pump
+	// that have not settled, and an alive reported meanwhile says so (held):
+	// it counts as heard, but it moves no checkpoint past the message.
 	OnMessageProcessed(sessionID uuid.UUID, producerID int, generatedAt time.Time, taken recovery.Stamp, requestID int)
 	// OnSessionAlive reports an alive that a session of the client has
-	// handled, with the instant it was taken. The alives of the alive-only
+	// handled, with the instant it was taken. held says a message of the session
+	// handed to the client has not settled yet: the alive is heard as usual, but it
+	// moves no checkpoint. The alives of the alive-only
 	// interest (the SDK's own alive session, or a client subscription of
 	// that interest) are not the session's: they go to OnAliveReceived.
-	OnSessionAlive(sessionID uuid.UUID, producerID int, generatedAt time.Time, taken recovery.Stamp, isSubscribed bool)
+	OnSessionAlive(sessionID uuid.UUID, producerID int, generatedAt time.Time, taken recovery.Stamp, isSubscribed, held bool)
 	// OnAliveReceived reports an alive of the SDK's own alive channel, taken
 	// by the session at received.
 	OnAliveReceived(producerID int, timestamp types.MessageTimestamp, received recovery.Stamp, isSubscribed bool)
@@ -196,6 +201,13 @@ type oddsFeedSessionImpl struct {
 	// provides the happens-before). Stays false when the abrupt Close
 	// consumed the Once first — an abrupt close is never a settled drain.
 	gracefulSettled bool
+
+	// unsettled counts the envelopes handed to the subscription pump with a
+	// settled func that has not run: incremented before the hand-over, decremented
+	// when settled runs, or at once when the envelope is not handed over (a
+	// cancelled send). An envelope the pump drops on its stop is never settled, and
+	// stays counted: its delivery is not acked, so no checkpoint passes it.
+	unsettled atomic.Int64
 
 	errMu sync.RWMutex
 	err   error
@@ -517,7 +529,12 @@ func (o *oddsFeedSessionImpl) processFeedMessage(ctx context.Context, feedMessag
 			// posts no fact of a session's.
 			o.recoveryMessageProcessor.OnAliveReceived(producerID, feedMessage.Timestamp, taken, subscribed)
 		} else {
-			o.recoveryMessageProcessor.OnSessionAlive(o.sessionID, producerID, feedMessage.Timestamp.Created, taken, subscribed)
+			// A message handed to the pump that has not settled is not acked
+			// yet: the alive must not carry the checkpoint past it. Read
+			// without a lock; an alive that sees it unsettled a moment before
+			// it settles only leaves the checkpoint to the next one.
+			held := o.unsettled.Load() > 0
+			o.recoveryMessageProcessor.OnSessionAlive(o.sessionID, producerID, feedMessage.Timestamp.Created, taken, subscribed, held)
 		}
 		endProcessing(feedMessage.Timestamp.Created)
 		// Terminal handling: consumed by the recovery machinery, never
@@ -599,19 +616,19 @@ func (o *oddsFeedSessionImpl) processFeedMessage(ctx context.Context, feedMessag
 	var admitted bool
 	switch msg := message.(type) {
 	case types.OddsChange:
-		admitted = o.send(ctx, sessionEnvelope{msg: types.SessionMessage{EventMessage: types.EventMessage{OddsChange: msg}}, ack: ack, settled: settled})
+		admitted = o.sendFinal(ctx, sessionEnvelope{msg: types.SessionMessage{EventMessage: types.EventMessage{OddsChange: msg}}, ack: ack, settled: settled})
 	case types.BetStop:
-		admitted = o.send(ctx, sessionEnvelope{msg: types.SessionMessage{EventMessage: types.EventMessage{BetStop: msg}}, ack: ack, settled: settled})
+		admitted = o.sendFinal(ctx, sessionEnvelope{msg: types.SessionMessage{EventMessage: types.EventMessage{BetStop: msg}}, ack: ack, settled: settled})
 	case types.BetCancel:
-		admitted = o.send(ctx, sessionEnvelope{msg: types.SessionMessage{EventMessage: types.EventMessage{BetCancel: msg}}, ack: ack, settled: settled})
+		admitted = o.sendFinal(ctx, sessionEnvelope{msg: types.SessionMessage{EventMessage: types.EventMessage{BetCancel: msg}}, ack: ack, settled: settled})
 	case types.BetSettlement:
-		admitted = o.send(ctx, sessionEnvelope{msg: types.SessionMessage{EventMessage: types.EventMessage{BetSettlement: msg}}, ack: ack, settled: settled})
+		admitted = o.sendFinal(ctx, sessionEnvelope{msg: types.SessionMessage{EventMessage: types.EventMessage{BetSettlement: msg}}, ack: ack, settled: settled})
 	case types.FixtureChangeMessage:
-		admitted = o.send(ctx, sessionEnvelope{msg: types.SessionMessage{EventMessage: types.EventMessage{FixtureChange: msg}}, ack: ack, settled: settled})
+		admitted = o.sendFinal(ctx, sessionEnvelope{msg: types.SessionMessage{EventMessage: types.EventMessage{FixtureChange: msg}}, ack: ack, settled: settled})
 	case types.RollbackBetSettlement:
-		admitted = o.send(ctx, sessionEnvelope{msg: types.SessionMessage{EventMessage: types.EventMessage{RollbackBetSettlement: msg}}, ack: ack, settled: settled})
+		admitted = o.sendFinal(ctx, sessionEnvelope{msg: types.SessionMessage{EventMessage: types.EventMessage{RollbackBetSettlement: msg}}, ack: ack, settled: settled})
 	case types.RollbackBetCancel:
-		admitted = o.send(ctx, sessionEnvelope{msg: types.SessionMessage{EventMessage: types.EventMessage{RollbackBetCancel: msg}}, ack: ack, settled: settled})
+		admitted = o.sendFinal(ctx, sessionEnvelope{msg: types.SessionMessage{EventMessage: types.EventMessage{RollbackBetCancel: msg}}, ack: ack, settled: settled})
 	default:
 		// Unrecognized built type: treat as unparsable and DO NOT
 		// advance the cursor — we can't claim we processed a message
@@ -677,6 +694,26 @@ func (o *oddsFeedSessionImpl) send(ctx context.Context, env sessionEnvelope) boo
 	case <-ctx.Done():
 		return false
 	}
+}
+
+// sendFinal is send for the envelope that ends a delivery: while one with a
+// settled func is on its way to the client and not settled, it is counted in
+// unsettled, which the alives the session reports read.
+func (o *oddsFeedSessionImpl) sendFinal(ctx context.Context, env sessionEnvelope) bool {
+	if env.settled == nil {
+		return o.send(ctx, env)
+	}
+	o.unsettled.Add(1)
+	settled := env.settled
+	env.settled = func() {
+		defer o.unsettled.Add(-1)
+		settled()
+	}
+	if o.send(ctx, env) {
+		return true
+	}
+	o.unsettled.Add(-1)
+	return false
 }
 
 // sendRawSideChannel publishes the extended-data raw envelope with a nil
