@@ -199,7 +199,7 @@ func TestManager_GcCompletedHandles(t *testing.T) {
 	pending := NewHandle(3, 1, *urn, time.Now().Add(-2*HandleGCGracePeriod))
 	m.registerHandle(pending)
 
-	m.gcCompletedHandles(time.Now())
+	m.gcHandles(time.Now())
 
 	if _, ok := m.LookupHandle(1); ok {
 		t.Error("old completed handle should have been GC'd")

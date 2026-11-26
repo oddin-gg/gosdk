@@ -59,17 +59,21 @@ func (c *testClock) Advance(d time.Duration) {
 func TestManager_SlowProcessingWarnIsThrottled(t *testing.T) {
 	sink := &lockedBuffer{}
 	clk := &testClock{t: time.Unix(5000, 0)}
+	now := newFakeClock()
 	m := &Manager{
 		logger:                 debugLogger(sink),
-		processingTimes:        map[uuid.UUID]time.Time{},
+		processing:             map[uuid.UUID]Stamp{},
 		slowProcessingThrottle: log.NewThrottle(slowProcessingWarnInterval, clk.Now),
+		clk:                    now,
 	}
 
 	slowMessage := func() {
 		sid := uuid.New()
-		m.processingTimes[sid] = time.Now().Add(-2 * time.Second)
-		// A zero gen timestamp skips the actor dispatch; only the
-		// duration check is under test.
+		started := now.Now()
+		m.processing[sid] = started
+		now.advance(2 * time.Second)
+		// A zero gen timestamp moves no timestamp; only the duration check is
+		// under test.
 		m.OnMessageProcessingEnded(sid, 1, time.Time{})
 	}
 
@@ -88,38 +92,5 @@ func TestManager_SlowProcessingWarnIsThrottled(t *testing.T) {
 	}
 	if !strings.Contains(out, "suppressed=6") {
 		t.Fatalf("second line does not carry suppressed=6\n%s", out)
-	}
-}
-
-// TestActor_SnapshotResultLostOnShutdownIsNotAWarn: closing the client
-// while a snapshot recovery POST is in flight is ordinary; the "result
-// lost" line used to be a WARN there. Every exit of sendCtx (ctx
-// cancelled, shutdown before admission, shutdown after admission, ctx
-// done while waiting, shutdown while waiting) is a shutdown, so a close
-// logs it at DEBUG only.
-func TestActor_SnapshotResultLostOnShutdownIsNotAWarn(t *testing.T) {
-	srv, hits := fixtureSrv(t)
-	defer srv.Close()
-	a := newWiredActor(t, srv, newFakeManagerOps())
-	sink := &lockedBuffer{}
-	a.logger = debugLogger(sink)
-
-	// The actor is shutting down: the detached POST finishes and its
-	// result cannot be delivered.
-	close(a.shutdown)
-	if err := a.makeSnapshotRecovery(time.Time{}); err != nil {
-		t.Fatal(err)
-	}
-	waitRecoverHits(t, hits, 1)
-	waitDetachedDone(t, a, 3*time.Second)
-
-	out := sink.String()
-	if !strings.Contains(out, "snapshot recovery API result lost") {
-		t.Fatalf("expected the result-lost line at debug level\n%s", out)
-	}
-	for line := range strings.SplitSeq(out, "\n") {
-		if strings.Contains(line, "snapshot recovery API result lost") && !strings.Contains(line, "level=DEBUG") {
-			t.Fatalf("result-lost line is not DEBUG on shutdown: %s", line)
-		}
 	}
 }

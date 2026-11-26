@@ -14,7 +14,7 @@ import (
 )
 
 // machine is every producer's recovery state and the rules that change it: the
-// state machine the recovery actor will run. Each method is one fact, handled
+// state machine the recovery actor runs. Each method is one fact, handled
 // to the end before the next. What the machine decides goes out through the
 // outbox, and the outcome of a request comes back as another fact. Nothing
 // here blocks, locks, reads the time on its own or calls the client.
@@ -32,7 +32,7 @@ import (
 // recovery that covers it completes, so asking again starts from the same
 // point as the first time. The oldest of the open gaps' starts and the
 // sessions' checkpoints is the producer's resume point: where a client that
-// restarts resumes to miss nothing, published through publishResumePoints.
+// restarts resumes from, published through publishResumePoints.
 //
 // Recoveries. A producer has at most one recovery in flight; whatever happens
 // meanwhile joins it. A recovery covers the gaps open when it was asked for. It
@@ -172,16 +172,30 @@ func newMachine(
 
 // ---- the lifecycle
 
-// sessionOpened registers a session, before or after start. A session whose
-// interest has a lane gets one for every producer it covers. openedAt is a
-// reading of the clock taken by the caller before the session's queue is bound,
-// so no message in the queue is older than the lane's checkpoint.
+// sessionOpened registers a session whose queue is bound, before or after
+// start. A session whose interest has a lane gets one for every producer it
+// covers. openedAt is a reading of the clock taken by the caller before the
+// session's queue is bound, so no message in the queue is older than the
+// lane's checkpoint.
 func (m *machine) sessionOpened(id uuid.UUID, interest types.MessageInterest, openedAt Stamp) {
+	m.openSession(id, interest, openedAt, true)
+}
+
+// sessionOpening registers a session whose queue is not bound yet, as
+// sessionOpened does: nothing is asked for its producers, and no event
+// recovery of theirs is sent, until channelReopened says the queue is bound. A
+// recovery asked for before would send its snapshot to a queue that does not
+// exist, and its snapshot_complete with it.
+func (m *machine) sessionOpening(id uuid.UUID, interest types.MessageInterest, openedAt Stamp) {
+	m.openSession(id, interest, openedAt, false)
+}
+
+func (m *machine) openSession(id uuid.UUID, interest types.MessageInterest, openedAt Stamp, bound bool) {
 	if m.session(id) != nil {
 		m.log.Warnf("Session %s opened twice; the second is ignored", id)
 		return
 	}
-	s := &session{id: id, interest: interest}
+	s := &session{id: id, interest: interest, lost: !bound}
 	m.sessions = append(m.sessions, s)
 	if !hasLane(interest) {
 		// a client's alive-only session receives no producer's messages: no
@@ -286,6 +300,7 @@ func (m *machine) start() {
 	for _, s := range m.sessions {
 		for _, l := range s.lanes {
 			l.gap = m.openGap(nil, m.seed(m.byID[l.producer]))
+			l.hasLoss = false
 			// the start it got (an initial interval counted back from now, say)
 			// is where a later loss starts too, while the session has processed
 			// nothing to move it
@@ -316,14 +331,68 @@ func (m *machine) beginClosing() {
 	m.closing = true
 }
 
-// rewind lowers the point the next recovery starts from, for a client that sets
-// the producer's recovery timestamp after the feed has started. It opens no
-// request by itself: it is a gap that does not trigger one, folded into the
-// start of the next request and into the published resume point, and closed
-// only when a recovery that covers it completes, so a failed request keeps it.
-// A point later than the one the producer is at is ignored.
+// unhandledAtClose says the actor closed with facts still queued that it did not
+// handle: each published resume point goes back to the producer's last subscribed
+// alive, and to the earliest time among the facts left that could have taken it back
+// further (backTo, by producer): the start the client set, and the mark of an alive,
+// whichever alive it is, since an unsubscribed alive opens its gap from the safe point
+// there is, a subscribed alive left before it moves that safe point, and with none the
+// gap starts from the alive's own mark. Nothing else left can take a point back: a
+// session opened among them starts from the point there is, and a lost queue from a
+// checkpoint. The rule gives the point the facts would, or an earlier one: it is never
+// later than handling them would have made it, and where it cannot tell it goes
+// earlier, as every point only goes back once the feed is closing. A producer with no
+// point published, because the feed never started or no session received it, keeps the
+// client's start.
+func (m *machine) unhandledAtClose(backTo map[int]time.Time) {
+	for _, t := range m.tracks {
+		if t.published == nil {
+			continue
+		}
+		floor := *t.published
+		if !t.safePoint.IsZero() {
+			floor = earlierOf(floor, t.safePoint)
+		}
+		if at, ok := backTo[t.id]; ok {
+			floor = earlierOf(floor, at)
+		}
+		if floor.Equal(*t.published) {
+			continue
+		}
+		m.log.Warnf("The recovery actor closed with facts it could not handle: producer %d resumes from %s",
+			t.id, fmtResume(floor))
+		t.published = &floor
+		m.out.resumePoint(t.id, floor)
+	}
+}
+
+// fmtResume is a resume point for the log.
+func fmtResume(point time.Time) string {
+	if point.IsZero() {
+		return "a full snapshot"
+	}
+	return point.UTC().Format(time.RFC3339Nano)
+}
+
+// rewind is the client setting the producer's recovery start after the feed has
+// started; the zero time never reaches it, it does nothing.
 //
-// Before the start the client's value is the seed, read at start.
+// Until the producer has completed a first recovery its start is the seed, and a value
+// the client sets replaces it: the lanes that got the seed gap start from the new
+// value, unless a loss of their queue opened the gap from an earlier checkpoint, which
+// a start never moves, and so does every lane opened later. A value the seed already
+// has does nothing. The recovery that is in flight, if any, keeps what it asked for,
+// and does not close the new start: one more is asked for from it.
+//
+// Once the producer has recovered, the point the client sets only lowers the next
+// recovery's start: it opens no request by itself, it is a gap that does not trigger
+// one, folded into the start of the next request and into the published resume point,
+// and closed only when a recovery that covers it completes, so a failed request keeps
+// it. A point later than the one the producer is at is ignored, with a warning, and
+// the point it is at, which the client set already or a loss left, does nothing.
+//
+// Before the start the client's value is the seed, which the actor reads as the feed
+// opens.
 func (m *machine) rewind(producerID int, to time.Time) {
 	if !m.started {
 		return
@@ -332,17 +401,51 @@ func (m *machine) rewind(producerID int, to time.Time) {
 	if t == nil {
 		return
 	}
-	if t.rewind != nil && !to.Before(t.rewind.from) {
-		// not lower than the rewind there is: the same point again, set while the
-		// recovery that covers it is in flight, must not outlive that recovery
+	if !t.everRecovered {
+		m.reseed(t, to)
 		return
 	}
-	if current := m.currentPoint(t); to.After(current) {
+	current := m.currentPoint(t)
+	if to.After(current) {
 		m.log.Warnf("The recovery timestamp of producer %d, %s, is later than the point it is at, %s: ignored",
 			t.id, to.UTC().Format(time.RFC3339Nano), current.UTC().Format(time.RFC3339Nano))
 		return
 	}
+	if to.Equal(current) {
+		// nothing to lower: a rewind to the point it is at would outlive the recovery
+		// that covers it, and hold the resume point there
+		return
+	}
 	t.rewind = m.openGap(t.rewind, to)
+}
+
+// reseed replaces the seed of a producer that has not completed a first recovery: what
+// its lanes got from the old one (the gap, and the checkpoint that no message moved)
+// becomes the new one.
+func (m *machine) reseed(t *track, to time.Time) {
+	if m.seed(t).Equal(to) {
+		return
+	}
+	t.seeded = &to
+	for _, s := range m.sessions {
+		l := s.lane(t.id)
+		if l == nil || l.gap == nil {
+			continue
+		}
+		from := to
+		if l.hasLoss {
+			// the queue was lost at a checkpoint: what it held is missing whatever the start
+			from = earlierOf(to, l.lossFrom)
+		}
+		if l.checkpoint.Equal(l.gap.from) {
+			// no message moved it past the seed
+			l.checkpoint = from
+		}
+		// a new number, so a recovery already asked for does not close it: it
+		// covered what the old seed said
+		m.gapSeq++
+		l.gap.from, l.gap.seq = from, m.gapSeq
+	}
 }
 
 // currentPoint is where the producer is for a rewind to be before: its resume
@@ -373,7 +476,7 @@ func (m *machine) connectionDown() {
 	}
 	for _, s := range m.sessions {
 		for _, l := range s.lanes {
-			l.gap = m.openGap(l.gap, l.checkpoint)
+			m.loseLane(l)
 		}
 	}
 	m.giveUpEvents(nil)
@@ -428,12 +531,23 @@ func (m *machine) channelReopened(id uuid.UUID) {
 	m.releaseDeferred()
 }
 
+// loseLane opens the lane's gap from its checkpoint, and remembers where the loss
+// began: a start the client sets later replaces the seed, never this.
+func (m *machine) loseLane(l *lane) {
+	l.gap = m.openGap(l.gap, l.checkpoint)
+	if l.hasLoss {
+		l.lossFrom = earlierOf(l.lossFrom, l.checkpoint)
+	} else {
+		l.hasLoss, l.lossFrom = true, l.checkpoint
+	}
+}
+
 // queueLost says the session's queue lost what it held: it misses everything
 // after its checkpoints, and a recovery that waited for its snapshot_complete
 // will not see it.
 func (m *machine) queueLost(s *session, cause statusCause, mono time.Duration) {
 	for _, l := range s.lanes {
-		l.gap = m.openGap(l.gap, l.checkpoint)
+		m.loseLane(l)
 	}
 	for _, l := range s.lanes {
 		m.markDown(m.byID[l.producer], cause)
@@ -556,7 +670,13 @@ func (m *machine) processed(id uuid.UUID, producerID int, generatedAt, markAt ti
 // everything the producer sent before it is done, so a subscribed one moves the
 // session's checkpoint. One without a positive timestamp is ignored, as alive
 // ignores it. The checkpoint is taken from markAt, as processed takes it.
-func (m *machine) sessionAlive(id uuid.UUID, producerID int, generatedAt, markAt time.Time, taken Stamp, subscribed bool) {
+//
+// held says a message of the session that was handed to the client has not
+// settled yet: its delivery is not acked, and a restart from a point past it
+// would skip it. The alive is heard all the same, for liveness and for the age of
+// the session, but it moves no checkpoint; the next alive, or the message when it
+// settles, does.
+func (m *machine) sessionAlive(id uuid.UUID, producerID int, generatedAt, markAt time.Time, taken Stamp, subscribed, held bool) {
 	if !validStamp(generatedAt) {
 		return
 	}
@@ -566,7 +686,7 @@ func (m *machine) sessionAlive(id uuid.UUID, producerID int, generatedAt, markAt
 	}
 	l.lastAt, l.taken = taken.mono, true
 	m.heard(t, id, generatedAt, 0)
-	if subscribed {
+	if subscribed && !held {
 		l.checkpoint = laterOf(l.checkpoint, markAt)
 	}
 	m.sample(l, t, generatedAt, taken)
@@ -575,8 +695,6 @@ func (m *machine) sessionAlive(id uuid.UUID, producerID int, generatedAt, markAt
 // sample records how old the session's last live message or alive was: its
 // taken time against its timestamp by the producer's clock. It is unknown when
 // the offset is not fresh.
-//
-// Seam for the safety net: it judges the sample here.
 func (m *machine) sample(l *lane, t *track, generatedAt time.Time, taken Stamp) {
 	if !m.offsetFresh(t, m.mono()) {
 		l.hasAge = false
@@ -631,6 +749,14 @@ func (m *machine) snapshotComplete(id uuid.UUID, producerID, requestID int) {
 
 // answered is a request's outcome: accepted when err is nil.
 func (m *machine) answered(requestID int, err error) {
+	m.answeredAt(requestID, err, m.mono())
+}
+
+// answeredAt is answered for an answer that arrived at arrived, on the monotonic clock,
+// and was handled later: an alive received after the API accepted a request is judged
+// against when the answer arrived, not when it was handled, however far behind the
+// actor was.
+func (m *machine) answeredAt(requestID int, err error, arrived time.Duration) {
 	mono := m.mono()
 	if e := m.eventRecoveries[requestID]; e != nil {
 		m.eventAnswered(e, err, mono)
@@ -646,7 +772,7 @@ func (m *machine) answered(requestID int, err error) {
 			// a snapshot_complete came first and said the API took it: the answer changes nothing
 			m.log.Debugf("Request %d answered after a snapshot complete of it", requestID)
 		case err == nil:
-			m.accepted(t, a, mono)
+			m.accepted(t, a, min(arrived, mono))
 		default:
 			m.failed(t, a, mono, "the API did not accept it: "+err.Error())
 		}
@@ -871,6 +997,7 @@ func (m *machine) publishInfo(t *track, a *active, successful bool) {
 // with none, the producer is up.
 func (m *machine) complete(t *track, a *active, mono time.Duration) {
 	t.active = nil
+	m.out.requestEnded(a.requestID)
 	if t.gap != nil && t.gap.seq <= a.covers {
 		t.gap = nil
 	}
@@ -884,6 +1011,7 @@ func (m *machine) complete(t *track, a *active, mono time.Duration) {
 		}
 		if l.gap != nil && l.gap.seq <= a.covers {
 			l.gap = nil
+			l.hasLoss = false
 		}
 		if a.seen[s.id] {
 			// the snapshot is as of the request, and what came after was in the queue before it
@@ -980,6 +1108,7 @@ func (m *machine) giveUp(t *track, mono time.Duration, reason string) {
 // sent may still be on its way, ahead of the snapshot of the next one asked for.
 func (m *machine) ended(t *track, a *active) {
 	t.active = nil
+	m.out.requestEnded(a.requestID)
 	t.remember(ended{requestID: a.requestID, seq: a.seq})
 }
 
@@ -988,7 +1117,10 @@ func (m *machine) ended(t *track, a *active) {
 var (
 	// errEventRecoveryConnectionDown is why an event recovery is refused while the
 	// connection is down: its snapshot would go to queues that are gone, or not bound
-	// yet, and nothing would give it up.
+	// yet, and nothing would give it up. The transport tells the machine nothing
+	// about the connection as a whole: the actor reports it up at the start, and what
+	// a drop loses is told per session, as a lost channel. The refusal stays for a
+	// transport that reports the connection as a whole.
 	errEventRecoveryConnectionDown = errors.New("recovery: the connection is not up")
 	// errFeedClosing is why an event recovery is refused once the feed is
 	// closing, and why one in flight ends when the feed closes.
@@ -1328,8 +1460,12 @@ func (m *machine) publishResumePoints() {
 }
 
 // seed is the client's recovery start, or the zero time for a full snapshot:
-// what the client set before the feed opened.
+// what the client set before the feed opened, or since while the producer had not
+// recovered.
 func (m *machine) seed(t *track) time.Time {
+	if t.seeded != nil {
+		return *t.seeded
+	}
 	return m.catalog.recoveryFrom(t.id)
 }
 
@@ -1415,6 +1551,7 @@ func (m *machine) markUp(t *track, given statusCause) {
 // tell reports a status change: the cause-level change always, flagged public
 // when the down flag or the public reason changed.
 func (m *machine) tell(t *track, cause statusCause, public bool) {
+	t.told, t.toldDelayed = true, t.delayed
 	m.out.status(statusChange{
 		producerID: t.id,
 		down:       t.down,
@@ -1549,6 +1686,36 @@ func (m *machine) mono() time.Duration { return m.clock.Now().mono }
 // stamped with none, or with a time before the epoch, moves nothing.
 func validStamp(at time.Time) bool { return at.UnixMilli() > 0 }
 
+// futureSkew is how far ahead of the SDK's wall clock a timestamp may be and
+// still count as the producer's clock being a little fast.
+const futureSkew = time.Minute
+
+// aliveMark is the mark of an alive generated at generatedAt and received at
+// received: what the safe point and a checkpoint are taken from. It is
+// generatedAt, unless that is further ahead of the SDK's clock than futureSkew
+// (a bad value, or a producer far off): then it is the SDK's reading, so one
+// such alive cannot move a point past what the producer has sent.
+func aliveMark(generatedAt time.Time, received Stamp) time.Time {
+	if generatedAt.After(received.wall.Add(futureSkew)) {
+		return received.wall
+	}
+	return generatedAt
+}
+
+// markOf is the mark of a message of the producer generated at generatedAt and
+// taken by a session at the reading at: generatedAt, but no later than the
+// producer's now at that reading, by its last alive. The checkpoint is a running
+// maximum, so a timestamp ahead of the producer's clock would hold it ahead of
+// everything the producer sends for good, and a loss would start its gap there.
+// Before the producer's first alive it is aliveMark's bound.
+func (m *machine) markOf(producerID int, generatedAt time.Time, at Stamp) time.Time {
+	t := m.byID[producerID]
+	if t == nil || !t.hasAlive {
+		return aliveMark(generatedAt, at)
+	}
+	return earlierOf(generatedAt, t.producerNow(at))
+}
+
 func laterOf(a, b time.Time) time.Time {
 	if b.After(a) {
 		return b
@@ -1606,9 +1773,16 @@ type track struct {
 	// rewind is the client's rewind of the recovery timestamp: a gap that
 	// triggers no request.
 	rewind *gap
+	// told says a status of the producer has been told; toldDelayed is the delayed
+	// flag it carried.
+	told        bool
+	toldDelayed bool
 	// clampWarnedFrom is the start of the gap whose recovery was last clamped to
 	// the stateful window and warned of.
 	clampWarnedFrom time.Time
+	// seeded is the start the client set after the feed opened, which replaced the
+	// seed of a producer that had not recovered; nil for none.
+	seeded *time.Time
 	// published is the resume point last published, nil for none.
 	published *time.Time
 
@@ -1675,8 +1849,13 @@ type session struct {
 	interest types.MessageInterest
 	// lanes are the producers it receives.
 	lanes []*lane
-	// lost says its channel was lost and no new one is bound yet.
+	// lost says its channel was lost, or has not been bound yet, and no queue
+	// is bound.
 	lost bool
+	// processing says a message of the client is in processing in the session,
+	// since processingSince on the monotonic clock.
+	processing      bool
+	processingSince time.Duration
 }
 
 func (s *session) lane(producerID int) *lane {
@@ -1694,6 +1873,10 @@ type lane struct {
 	// checkpoint is the running maximum of what it finished, zero for nothing.
 	checkpoint time.Time
 	gap        *gap
+	// hasLoss says a loss of the session's queue opened the lane's gap, and lossFrom is
+	// where the earliest began: the checkpoint it had then.
+	hasLoss  bool
+	lossFrom time.Time
 	// age is the last sample's age, when hasAge.
 	age    time.Duration
 	hasAge bool

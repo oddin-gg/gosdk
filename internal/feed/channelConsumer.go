@@ -102,9 +102,9 @@ type ChannelConsumer struct {
 	// other than drain/ctx, BEFORE the channel is torn down and BEFORE
 	// the reopen starts. The exclusive auto-delete queue died with the
 	// channel and everything published until the rebind is lost; the
-	// recovery layer flags the producers this consumer serves down and
-	// floors the recovery cursor at lostAt, so no alive processed after
-	// the loss can move the recovery past the gap.
+	// recovery layer takes the producers this consumer serves down and
+	// recovers from what the session had finished, so no alive processed
+	// after the loss can move the recovery past the gap.
 	onChannelLost func(mi types.MessageInterest, lostAt time.Time)
 
 	// onChannelRestored, when set, is called from run() right after a
@@ -114,6 +114,11 @@ type ChannelConsumer struct {
 	// has reported this: a replay published before the queue exists
 	// routes nowhere, and its snapshot_complete with it.
 	onChannelRestored func()
+
+	// onChannelBound, when set, is called once from Open, after the first
+	// channel is created and before the loop that can lose it starts: the
+	// queue is bound, and no loss is reported before this returns.
+	onChannelBound func()
 
 	// onConsumerGone, when set, is called once when run() exits for
 	// good (close, drain, or a reopen abandoned on ctx). A consumer that
@@ -231,6 +236,21 @@ func (c *ChannelConsumer) SetChannelLostHook(fn func(mi types.MessageInterest, l
 // lost channel has been re-declared and re-bound (see onChannelRestored).
 // Must be called before Open.
 func (c *ChannelConsumer) SetChannelRestoredHook(fn func()) { c.onChannelRestored = fn }
+
+// ReportChannelBound tells the bound hook that the consumer's queue is bound. Open
+// calls it once; it is exported so the session's wiring can be exercised without a
+// broker.
+func (c *ChannelConsumer) ReportChannelBound() {
+	if c.onChannelBound == nil || c.gone.Load() {
+		return
+	}
+	c.onChannelBound()
+}
+
+// SetChannelBoundHook installs the callback Open invokes once the first
+// channel's queue is declared and bound, before the loop that can report its
+// loss starts. Must be called before Open.
+func (c *ChannelConsumer) SetChannelBoundHook(fn func()) { c.onChannelBound = fn }
 
 // SetConsumerGoneHook installs the callback run() invokes once on its
 // final exit (see onConsumerGone). Must be called before Open.
@@ -459,6 +479,9 @@ func (c *ChannelConsumer) Open(ctx context.Context, routingKeys []string, messag
 	out := c.outgoing
 	c.mu.Unlock()
 
+	// Told before the loop starts: a loss of this channel is then reported after
+	// the queue was, never before.
+	c.ReportChannelBound()
 	c.wg.Go(func() { c.run(loopCtx, deliveries, ch) })
 	return out, nil
 }

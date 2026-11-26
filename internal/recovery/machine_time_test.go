@@ -545,7 +545,7 @@ func TestMachineTime_AliveSentBeforeTheRequestPutsOffTheDeadlineForItsSnapshotCo
 	requestedAt := f.now()
 	// a slow session takes nothing but alives from before the request
 	f.minutes(6, func() {
-		f.m.sessionAlive(sid(1), pre, requestedAt.Add(-time.Second), requestedAt.Add(-time.Second), f.stamp(), true)
+		f.m.sessionAlive(sid(1), pre, requestedAt.Add(-time.Second), requestedAt.Add(-time.Second), f.stamp(), true, false)
 	})
 	expect(t, f.m.counters.timedOut, 0, "six minutes in, still coming")
 	f.runWithAlives(5 * time.Minute)
@@ -562,8 +562,8 @@ func TestMachineTime_SessionAliveWithoutAPositiveStampDoesNotPutOffTheDeadline(t
 	f.alive(pre)
 	f.accept(f.lastSnapshot(pre))
 	f.minutes(4, func() {
-		f.m.sessionAlive(sid(1), pre, time.UnixMilli(0), time.UnixMilli(0), f.stamp(), true)
-		f.m.sessionAlive(sid(1), pre, time.UnixMilli(-3_600_000), time.UnixMilli(-3_600_000), f.stamp(), true)
+		f.m.sessionAlive(sid(1), pre, time.UnixMilli(0), time.UnixMilli(0), f.stamp(), true, false)
+		f.m.sessionAlive(sid(1), pre, time.UnixMilli(-3_600_000), time.UnixMilli(-3_600_000), f.stamp(), true, false)
 	})
 	expect(t, f.m.counters.timedOut, 0, "four minutes in")
 	f.runWithAlives(defaultSettings().snapshotCompleteTimeout - 4*time.Minute + time.Second)
@@ -999,7 +999,7 @@ func TestMachineClock_MessageTakenAfterAStepIsNotAgedByTheStepBeforeTheNextAlive
 		// the producer's clock did not move: its message, taken now, is as old as it was sent. A
 		// session's copy of an alive is handled before the alive channel's copy measures the offset anew
 		producerNow := f.now().Add(-step)
-		f.m.sessionAlive(sid(1), pre, producerNow, producerNow, f.stamp(), true)
+		f.m.sessionAlive(sid(1), pre, producerNow, producerNow, f.stamp(), true, false)
 		f.m.processed(sid(1), live, producerNow, producerNow, f.stamp(), 0)
 		f.m.tick()
 
@@ -1238,7 +1238,7 @@ func TestMachineClock_MessageGeneratedBeforeARequestPutsOffItsDeadlineAndOneGene
 				if liveMessage {
 					f.m.processed(sid(1), pre, generatedAt, generatedAt, f.stamp(), 0)
 				} else {
-					f.m.sessionAlive(sid(1), pre, generatedAt, generatedAt, f.stamp(), true)
+					f.m.sessionAlive(sid(1), pre, generatedAt, generatedAt, f.stamp(), true, false)
 				}
 				f.monoSeconds(290)
 				expect(t, f.m.counters.timedOut, 0, "at the deadline of its request")

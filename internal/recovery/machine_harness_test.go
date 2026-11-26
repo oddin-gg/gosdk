@@ -85,7 +85,9 @@ type fakeOutbox struct {
 	points []publishedPoint
 	down   map[int]bool
 	// events are the event recovery requests, and outcomes how each ended, in order.
-	events   []eventRequest
+	events []eventRequest
+	// ended is the id of every snapshot request that left flight, in order.
+	ended    []int
 	outcomes []eventOutcome
 }
 
@@ -94,6 +96,7 @@ func newFakeOutbox() *fakeOutbox {
 }
 
 func (o *fakeOutbox) request(call snapshotRequest) { o.calls = append(o.calls, call) }
+func (o *fakeOutbox) requestEnded(id int)          { o.ended = append(o.ended, id) }
 func (o *fakeOutbox) recoveryInfo(id int, info types.RecoveryInfo) {
 	o.infos = append(o.infos, publishedInfo{producerID: id, info: info})
 }
@@ -259,7 +262,7 @@ func (f *feed) processed(n, p int, at time.Time, requestID int) {
 }
 
 func (f *feed) sessionAlive(n, p int) {
-	f.m.sessionAlive(sid(n), p, f.now(), f.now(), f.stamp(), true)
+	f.m.sessionAlive(sid(n), p, f.now(), f.now(), f.stamp(), true, false)
 }
 
 func (f *feed) snapshotComplete(n, p, requestID int) { f.m.snapshotComplete(sid(n), p, requestID) }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/oddin-gg/gosdk/internal/api"
@@ -28,6 +29,9 @@ type Manager struct {
 	logger      *log.Logger
 	mu          sync.RWMutex
 	producerMap map[int]*data
+	// recoveryFromHook is told of a recovery start the client sets; see
+	// SetRecoveryFromHook.
+	recoveryFromHook atomic.Pointer[func(id int, timestamp time.Time)]
 }
 
 func (m *Manager) producers(ctx context.Context) (map[int]*data, error) {
@@ -232,7 +236,7 @@ func (m *Manager) SetProducerDown(id int, flaggedDown bool) error {
 	})
 }
 
-// The three "latest observed" cursors below are MONOTONIC: multiple
+// The two "latest observed" cursors below are MONOTONIC: multiple
 // subscriptions share one producer manager and their processing
 // interleaves, so a slow subscription finishing an OLDER message can
 // call a setter after a faster one already stored a NEWER timestamp.
@@ -296,67 +300,46 @@ func (m *Manager) SetLastProcessedMessageGenTimestamp(id int, timestamp time.Tim
 	})
 }
 
-// SetLastAliveReceivedGenTimestamp advances the alive-gen freshness
-// cursor; older timestamps are ignored (see monotonicity note above), and
-// implausibly-future ones are rejected (see grosslyFutureGenCursor).
-func (m *Manager) SetLastAliveReceivedGenTimestamp(id int, timestamp time.Time) error {
-	if m.grosslyFutureGenCursor(id, "last_alive_gen", timestamp) {
-		return nil
-	}
+// SetProducerResumePoint publishes the point a client that restarts resumes
+// from: the oldest time a session of the client may still be missing messages
+// from, as the recovery machine knows it. The zero time is everything. From the
+// first one on, TimestampForRecovery reports it. Not monotonic: the point moves
+// back as a loss opens a gap, and forward as a recovery closes it.
+func (m *Manager) SetProducerResumePoint(id int, point time.Time) error {
 	return m.mutateProducerByID(id, func(p *data) error {
-		if timestamp.After(p.lastAliveReceivedGenTimestamp) {
-			p.previousAliveReceivedGenTimestamp = p.lastAliveReceivedGenTimestamp
-			p.lastAliveReceivedGenTimestamp = timestamp
-		}
+		p.resumePoint = point
+		p.resumePublished = true
 		return nil
 	})
 }
 
-// LossAnchor returns the point a snapshot recovery must reach back to
-// after the producer's consumer queue was lost: the recovery cursor as
-// it stood BEFORE the most recent alive, or an explicit rewind when one
-// is in force. Zero means the producer has no cursor yet.
-//
-// The most recent alive is deliberately not trusted. It arrives on the
-// alive session's own channel and may have been generated after the
-// broker deleted a consumer's queue but before the loss was seen
-// locally; a cursor advanced by it would start the recovery past
-// messages that died with the queue. The alive before it is at least
-// one alive interval older — far more than the detection latency — so
-// it is safely pre-loss. The price is one interval of already-received
-// replay, which the recovery contract tolerates.
-//
-// Cached read, no I/O; safe from any goroutine.
-func (m *Manager) LossAnchor(id int) (time.Time, error) {
+// RecoveryFromTimestamp is the recovery start the client set for the producer,
+// the zero time for none: what a feed that opens recovers from, whatever the
+// resume point has become since. Cached read, no I/O.
+func (m *Manager) RecoveryFromTimestamp(id int) (time.Time, error) {
 	d, err := m.producerCached(id)
 	if err != nil {
 		return time.Time{}, err
 	}
 	d.mu.RLock()
 	defer d.mu.RUnlock()
-	if d.recoveryFromExplicit {
-		return d.recoveryFromTimestamp, nil
-	}
-	switch {
-	case !d.previousAliveReceivedGenTimestamp.IsZero():
-		return d.previousAliveReceivedGenTimestamp, nil
-	case !d.lastAliveReceivedGenTimestamp.IsZero():
-		return d.lastAliveReceivedGenTimestamp, nil
-	}
 	return d.recoveryFromTimestamp, nil
 }
 
-// SetProducerRecoveryInfo records the summary of a snapshot recovery. It
-// also CONSUMES the one-shot explicit recovery-cursor override (see
-// recoveryFromExplicit): a recovery has now been recorded, so subsequent
-// recoveries must resume from the freshest alive cursor rather than
-// re-rewinding to the same explicit point forever. Consuming on
-// successful recording (not on recovery start) keeps the override alive
-// across a failed PostRecovery so the rewind still takes effect on retry.
+// SetRecoveryFromHook sets what is told of a recovery start the client sets
+// after the recovery machine is opened: the producer and the start (the zero time
+// too, which the machine ignores). It is called on the goroutine of the setter, after
+// the producer is changed and no lock is held. The result removes the hook, and
+// does nothing when another has replaced it since.
+func (m *Manager) SetRecoveryFromHook(hook func(id int, timestamp time.Time)) (release func()) {
+	m.recoveryFromHook.Store(&hook)
+	return func() { m.recoveryFromHook.CompareAndSwap(&hook, nil) }
+}
+
+// SetProducerRecoveryInfo records the summary of a snapshot recovery.
 func (m *Manager) SetProducerRecoveryInfo(id int, recoveryInfo types.RecoveryInfo) error {
 	return m.mutateProducerByID(id, func(p *data) error {
 		p.lastRecoveryInfo = recoveryInfo
-		p.recoveryFromExplicit = false
 		return nil
 	})
 }
@@ -491,9 +474,14 @@ func (m *Manager) SetProducerState(ctx context.Context, id int, enabled bool) er
 // consumer's host and the SDK host), anything beyond is rejected.
 const recoveryFromMaxSkew = time.Minute
 
-// SetProducerRecoveryFromTimestamp ...
+// SetProducerRecoveryFromTimestamp sets the start the client wants recovery to
+// resume from. Before the recovery machine is opened it is the seed of the first
+// recovery, and the zero time clears it. Once it is opened, the machine is told: the
+// start replaces the seed of a producer that has not completed a first recovery, and
+// lowers the start of the next recovery of one that has, if it is earlier than the
+// resume point; the zero time does nothing.
 func (m *Manager) SetProducerRecoveryFromTimestamp(ctx context.Context, id int, timestamp time.Time) error {
-	return m.mutateProducerByIDCtx(ctx, id, func(p *data) error {
+	err := m.mutateProducerByIDCtx(ctx, id, func(p *data) error {
 		// statefulRecoveryWindowInMinutes is immutable after
 		// construction; safe to read under the data write lock.
 		maxRequestMinutes := p.statefulRecoveryWindowInMinutes
@@ -511,12 +499,15 @@ func (m *Manager) SetProducerRecoveryFromTimestamp(ctx context.Context, id int, 
 			return errors.New("recovery timestamp is in the future (check clock/units)")
 		}
 		p.recoveryFromTimestamp = timestamp
-		// Mark it an explicit override so TimestampForRecovery honors it
-		// over any alive cursor for the next recovery (rewind intent). A
-		// zero timestamp clears the override (revert to alive precedence).
-		p.recoveryFromExplicit = !timestamp.IsZero()
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	if hook := m.recoveryFromHook.Load(); hook != nil {
+		(*hook)(id, timestamp)
+	}
+	return nil
 }
 
 // IsProducerEnabled ...

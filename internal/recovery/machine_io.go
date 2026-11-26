@@ -66,6 +66,9 @@ type producerCatalog interface {
 type outbox interface {
 	// request sends one snapshot recovery request to a REST worker.
 	request(snapshotRequest)
+	// requestEnded reports that a snapshot recovery request is no longer in
+	// flight: completed, failed, timed out or given up. Once per request.
+	requestEnded(requestID int)
 	// recoveryInfo publishes the outcome of a request: asked for and accepted, or
 	// failed.
 	recoveryInfo(producerID int, info types.RecoveryInfo)

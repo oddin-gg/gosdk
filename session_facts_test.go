@@ -30,6 +30,7 @@ type factEvent struct {
 	taken       recovery.Stamp
 	requestID   int
 	subscribed  bool
+	held        bool
 	interest    types.MessageInterest
 }
 
@@ -61,17 +62,14 @@ func (l *factLog) of(kind string) []factEvent {
 	return out
 }
 
-func (l *factLog) OnFeedChannelLost(uuid.UUID, types.MessageInterest, time.Time) {}
-func (l *factLog) OnFeedChannelRestored(uuid.UUID)                               {}
-func (l *factLog) OnFeedSessionGone(s uuid.UUID)                                 { l.add(factEvent{kind: "gone", session: s}) }
-func (l *factLog) OnClientSessionOpened(s uuid.UUID, mi types.MessageInterest) {
-	l.add(factEvent{kind: "opened", session: s, interest: mi})
+func (l *factLog) OnFeedChannelLost(uuid.UUID)     {}
+func (l *factLog) OnFeedChannelRestored(uuid.UUID) {}
+func (l *factLog) OnFeedSessionGone(s uuid.UUID)   { l.add(factEvent{kind: "gone", session: s}) }
+func (l *factLog) OnClientSessionOpened(s uuid.UUID, mi types.MessageInterest, at recovery.Stamp) {
+	l.add(factEvent{kind: "opened", session: s, interest: mi, taken: at})
 }
-func (l *factLog) OnRecoveryMessageReceived(p, r int) {
-	l.add(factEvent{kind: "recovery-message", producer: p, requestID: r})
-}
-func (l *factLog) OnMessageProcessingStarted(s uuid.UUID, p int, _ time.Time) {
-	l.add(factEvent{kind: "started", session: s, producer: p})
+func (l *factLog) OnMessageProcessingStarted(s uuid.UUID, p int, taken recovery.Stamp) {
+	l.add(factEvent{kind: "started", session: s, producer: p, taken: taken})
 }
 func (l *factLog) OnMessageProcessingEnded(s uuid.UUID, p int, ts time.Time) {
 	l.add(factEvent{kind: "ended", session: s, producer: p, generatedAt: ts})
@@ -79,14 +77,14 @@ func (l *factLog) OnMessageProcessingEnded(s uuid.UUID, p int, ts time.Time) {
 func (l *factLog) OnMessageProcessed(s uuid.UUID, p int, gen time.Time, taken recovery.Stamp, req int) {
 	l.add(factEvent{kind: "processed", session: s, producer: p, generatedAt: gen, taken: taken, requestID: req})
 }
-func (l *factLog) OnSessionAlive(s uuid.UUID, p int, gen time.Time, taken recovery.Stamp, subscribed bool, mi types.MessageInterest) {
-	l.add(factEvent{kind: "session-alive", session: s, producer: p, generatedAt: gen, taken: taken, subscribed: subscribed, interest: mi})
+func (l *factLog) OnSessionAlive(s uuid.UUID, p int, gen time.Time, taken recovery.Stamp, subscribed, held bool) {
+	l.add(factEvent{kind: "session-alive", session: s, producer: p, generatedAt: gen, taken: taken, subscribed: subscribed, held: held})
 }
-func (l *factLog) OnAliveReceived(p int, ts types.MessageTimestamp, subscribed bool, mi types.MessageInterest) {
-	l.add(factEvent{kind: "system-alive", producer: p, generatedAt: ts.Created, subscribed: subscribed, interest: mi})
+func (l *factLog) OnAliveReceived(p int, ts types.MessageTimestamp, received recovery.Stamp, subscribed bool) {
+	l.add(factEvent{kind: "system-alive", producer: p, generatedAt: ts.Created, taken: received, subscribed: subscribed})
 }
-func (l *factLog) OnSnapshotCompleteReceived(_ context.Context, s uuid.UUID, p, req int, mi types.MessageInterest) error {
-	l.add(factEvent{kind: "snapshot-complete", session: s, producer: p, requestID: req, interest: mi})
+func (l *factLog) OnSnapshotCompleteReceived(_ context.Context, s uuid.UUID, p, req int) error {
+	l.add(factEvent{kind: "snapshot-complete", session: s, producer: p, requestID: req})
 	return nil
 }
 
@@ -142,7 +140,7 @@ func TestSession_ProcessedFactRidesTheEnvelopeWithIdsAndStamp(t *testing.T) {
 	if env.settled == nil {
 		t.Fatal("the envelope of a message handed to the client carries no processed fact")
 	}
-	if got, want := l.kinds(), []string{"started", "recovery-message", "ended"}; fmt.Sprint(got) != fmt.Sprint(want) {
+	if got, want := l.kinds(), []string{"started", "ended"}; fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("calls before the ack = %v, want %v", got, want)
 	}
 
@@ -229,7 +227,7 @@ func TestSession_AliveOfAClientSessionIsASessionFact(t *testing.T) {
 		t.Fatalf("session alive facts = %d, want 1", len(got))
 	}
 	a := got[0]
-	if a.session != o.sessionID || a.producer != 2 || !a.generatedAt.Equal(created) || !a.subscribed || a.interest != types.LiveOnlyMessageInterest {
+	if a.session != o.sessionID || a.producer != 2 || !a.generatedAt.Equal(created) || !a.subscribed {
 		t.Fatalf("session alive = %+v", a)
 	}
 	if a.taken.Mono() != time.Millisecond {
@@ -286,7 +284,7 @@ func TestSession_SnapshotCompleteCarriesTheSessionID(t *testing.T) {
 	fm := &types.FeedMessage{Message: &feedXML.SnapshotComplete{ProductID: 3, RequestID: 42}}
 	o.processFeedMessage(t.Context(), fm, types.PrematchOnlyMessageInterest, nil, false, nil)
 	got := l.of("snapshot-complete")
-	if len(got) != 1 || got[0].session != o.sessionID || got[0].producer != 3 || got[0].requestID != 42 || got[0].interest != types.PrematchOnlyMessageInterest {
+	if len(got) != 1 || got[0].session != o.sessionID || got[0].producer != 3 || got[0].requestID != 42 {
 		t.Fatalf("snapshot complete = %+v", got)
 	}
 }
@@ -369,5 +367,106 @@ func TestPump_NoProcessedFactWhenTheAckDoesNotSettle(t *testing.T) {
 	time.Sleep(20 * time.Millisecond)
 	if settled.Load() != 0 {
 		t.Fatalf("a fact was posted for a delivery whose ack was abandoned: %d", settled.Load())
+	}
+}
+
+// pointOf is the resume point the recovery machine would publish for a session
+// from the facts it was told: the latest message that settled, or the latest
+// subscribed alive that was reported with no message held.
+func pointOf(l *factLog) time.Time {
+	var point time.Time
+	later := func(at time.Time) {
+		if at.After(point) {
+			point = at
+		}
+	}
+	for _, e := range l.of("processed") {
+		later(e.generatedAt)
+	}
+	for _, e := range l.of("session-alive") {
+		if e.subscribed && !e.held {
+			later(e.generatedAt)
+		}
+	}
+	return point
+}
+
+// A message the subscription pump holds, waiting for room in the public buffer, is
+// not acked and has not settled: an alive of the session that arrives meanwhile
+// is reported as held and moves the resume point no further than the message
+// before it. Once the buffer is read and the message settles, the next alive
+// moves it.
+func TestSession_AliveWhilePumpHoldsAMessageDoesNotMoveThePointPastIt(t *testing.T) {
+	l := &factLog{}
+	o := factSession(l, &stepClock{})
+	o.msgCh = make(chan sessionEnvelope)
+	c := &Client{subs: map[uuid.UUID]*Subscription{}, logger: discardLogger()}
+	sub := &Subscription{
+		id:              uuid.New(),
+		messages:        make(chan types.SessionMessage, 1),
+		closed:          make(chan struct{}),
+		underlying:      &pumpFakeSession{respCh: o.msgCh},
+		client:          c,
+		pumpDone:        make(chan struct{}),
+		pumpStop:        make(chan struct{}),
+		shutdownTimeout: time.Second,
+	}
+	c.subs[sub.id] = sub
+	c.wg.Add(1)
+	go c.pumpSubscription(sub)
+	t.Cleanup(func() {
+		close(sub.pumpStop)
+		<-sub.pumpDone
+	})
+
+	at := func(s int64) time.Time { return time.Unix(1_699_999_000+s, 0) }
+	subscribed := 1
+	alive := func(created time.Time) {
+		o.processFeedMessage(t.Context(), &types.FeedMessage{
+			BasicFeedMessage: types.BasicFeedMessage{Timestamp: types.MessageTimestamp{Created: created}},
+			Message:          &feedXML.Alive{ProductID: 3, Subscribed: &subscribed},
+		}, types.AllMessageInterest, nil, false, nil)
+	}
+
+	// the first message fills the public buffer and settles
+	o.processFeedMessage(t.Context(), oddsChangeFM(at(1), nil), types.AllMessageInterest, nil, false, nil)
+	waitFor(t, func() bool { return len(l.of("processed")) == 1 }, "the first message settled")
+	// the second is held by the pump: the buffer is full and nobody reads it
+	o.processFeedMessage(t.Context(), oddsChangeFM(at(2), nil), types.AllMessageInterest, nil, false, nil)
+
+	alive(at(3))
+	alives := l.of("session-alive")
+	if len(alives) != 1 || !alives[0].held {
+		t.Fatalf("alive while the pump holds a message = %+v, want one reported as held", alives)
+	}
+	if got := pointOf(l); got.After(at(1)) {
+		t.Fatalf("resume point = %v, past the first message %v, while the second is held", got, at(1))
+	}
+
+	// the consumer reads the buffer: the held message lands, is acked and settles
+	<-sub.Messages()
+	waitFor(t, func() bool { return len(l.of("processed")) == 2 }, "the held message settled")
+	waitFor(t, func() bool { return o.unsettled.Load() == 0 }, "nothing left unsettled")
+
+	alive(at(4))
+	alives = l.of("session-alive")
+	if len(alives) != 2 || alives[1].held {
+		t.Fatalf("alive after the message settled = %+v, want the second one not held", alives)
+	}
+	if got := pointOf(l); !got.Equal(at(4)) {
+		t.Fatalf("resume point = %v, want %v after the next alive", got, at(4))
+	}
+}
+
+// A send that is cancelled hands nothing to the pump: nothing is held for it.
+func TestSession_CancelledSendHoldsNothing(t *testing.T) {
+	l := &factLog{}
+	o := factSession(l, &stepClock{})
+	o.msgCh = make(chan sessionEnvelope)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	o.processFeedMessage(ctx, oddsChangeFM(time.Unix(1_699_999_000, 0), nil), types.AllMessageInterest, nil, false, nil)
+	if n := o.unsettled.Load(); n != 0 {
+		t.Fatalf("unsettled = %d after a cancelled send, want 0", n)
 	}
 }

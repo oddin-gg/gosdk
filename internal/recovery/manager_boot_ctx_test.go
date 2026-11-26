@@ -16,17 +16,12 @@ import (
 	"github.com/oddin-gg/gosdk/internal/producer"
 )
 
-// TestManager_Open_BootstrapHonorsCallerCtx is the regression for
-// the v2.33 finding: pre-fix, recovery.Manager.Open used the caller-
-// provided ctx for both purposes — bootstrap producer fetch AND
-// actor lifetime. The caller (gosdk.Client.ensureNormal) had already
-// applied WithoutCancel, so the bootstrap HTTP fetch effectively
-// ignored the user's Subscribe timeout. A slow /descriptions/producers
-// endpoint blocked Subscribe past its declared timeout.
-//
-// The fix splits the two roles: the caller-passed ctx bounds the
-// bootstrap fetch, and Open derives its OWN actor-lifetime ctx via
-// WithoutCancel internally.
+// TestManager_Open_BootstrapHonorsCallerCtx pins that the caller's ctx bounds the
+// bootstrap producer fetch of Manager.Open, while the actor's lifetime ctx is
+// Open's own, severed from the caller's: gosdk.Client.ensureNormal applies
+// WithoutCancel to the ctx it passes, so a bootstrap fetch that ignored the ctx
+// would block Subscribe past its declared timeout on a slow
+// /descriptions/producers endpoint.
 //
 // Strategy: stand up a fixture that hangs the /descriptions/producers
 // endpoint until the test releases it (or the caller's ctx fires).

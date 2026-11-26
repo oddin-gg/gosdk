@@ -43,6 +43,18 @@ type Producer interface {
 	ProducerScopes() []ProducerScope
 	LastProcessedMessageGenTimestamp() time.Time
 	ProcessingQueDelay() time.Duration
+	// TimestampForRecovery is the point a client that restarts resumes from:
+	// the oldest time any subscription may still be missing messages of this
+	// producer from, as the recovery of the feed knows it. Before the feed has
+	// connected it is the start set with SetProducerRecoveryFromTimestamp. It
+	// can move back as a loss opens a gap, and forward as a recovery closes it.
+	//
+	// The SDK acks a message when it enters the subscription's buffer, and the
+	// point counts it from then on, whether or not the client has read it. After
+	// a clean close in which the subscriptions were drained, resuming from the
+	// point (pass it to SetProducerRecoveryFromTimestamp) misses nothing. When
+	// the process ends without draining, the messages still in a subscription's
+	// buffer are lost, and the point does not cover them: they lie before it.
 	TimestampForRecovery() time.Time
 	StatefulRecoveryWindowInMinutes() int
 	RecoveryInfo() *RecoveryInfo
@@ -114,8 +126,9 @@ const (
 	// auto-delete, so the queue died with the channel and everything
 	// published until the SDK re-binds is gone from the broker. Raised
 	// at the moment of loss, before any reconnect, for the producers the
-	// lost subscription served; the next system alive then starts a
-	// snapshot recovery reaching back at least to the loss.
+	// lost subscription served; once the subscription's queue is bound again
+	// a snapshot recovery reaching back to what the subscription had finished
+	// follows.
 	ConnectionDownProducerStatusReason ProducerStatusReason = 7
 )
 

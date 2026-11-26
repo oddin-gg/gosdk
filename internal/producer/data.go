@@ -38,23 +38,15 @@ type data struct {
 	enabled                          bool
 	flaggedDown                      bool
 	lastProcessedMessageGenTimestamp time.Time
-	lastAliveReceivedGenTimestamp    time.Time
-	// previousAliveReceivedGenTimestamp is the cursor lastAliveReceivedGen-
-	// Timestamp held before its latest advance. LossAnchor prefers it:
-	// the latest alive may have been generated after the broker deleted a
-	// consumer's queue but processed before the loss was seen locally.
-	previousAliveReceivedGenTimestamp time.Time
-	recoveryFromTimestamp             time.Time
-	// recoveryFromExplicit marks recoveryFromTimestamp as an explicit
-	// caller override (SetProducerRecoveryFromTimestamp) that must win
-	// over lastAliveReceivedGenTimestamp for the NEXT snapshot recovery —
-	// the setter's documented purpose is REWINDING the recovery point,
-	// which a live alive timestamp would otherwise defeat. One-shot:
-	// cleared once a recovery is successfully recorded (clearRecoveryFrom-
-	// Override), so subsequent recoveries resume from the freshest alive
-	// cursor rather than re-rewinding to the same point forever.
-	recoveryFromExplicit bool
-	lastRecoveryInfo     types.RecoveryInfo
+	// recoveryFromTimestamp is the recovery start the client set
+	// (SetProducerRecoveryFromTimestamp); the zero time for none.
+	recoveryFromTimestamp time.Time
+	// resumePoint is the point a client that restarts resumes from, published
+	// by the recovery machine; resumePublished says it has published one. The
+	// zero time is a point: everything.
+	resumePoint      time.Time
+	resumePublished  bool
+	lastRecoveryInfo types.RecoveryInfo
 }
 
 // refreshCatalog updates the catalog fields from a fresh API payload
@@ -221,16 +213,11 @@ func (p producerImpl) TimestampForRecovery() time.Time {
 	}
 	p.producerData.mu.RLock()
 	defer p.producerData.mu.RUnlock()
-	// An explicit caller override wins over the alive-derived cursor (its
-	// purpose is rewinding the recovery point — see recoveryFromExplicit).
-	// Absent an override, prefer the freshest known-good cursor
-	// (lastAliveReceivedGenTimestamp) to avoid re-recovering already-
-	// processed data, falling back to any pre-connect recoveryFromTimestamp.
-	if p.producerData.recoveryFromExplicit {
-		return p.producerData.recoveryFromTimestamp
-	}
-	if !p.producerData.lastAliveReceivedGenTimestamp.IsZero() {
-		return p.producerData.lastAliveReceivedGenTimestamp
+	// Once the recovery machine has published a resume point it is the point:
+	// the oldest time any session of the client may still be missing messages
+	// from. Before that it is the start the client set.
+	if p.producerData.resumePublished {
+		return p.producerData.resumePoint
 	}
 	return p.producerData.recoveryFromTimestamp
 }

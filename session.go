@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -113,37 +114,32 @@ type messageBuilder interface {
 // consumer implements or receives it, which is why it lives unexported
 // here rather than in the public types/ package (v1.0.0 surface pass).
 type recoveryMessageProcessor interface {
-	// OnFeedChannelLost reports that session's consumer channel — and
-	// with it its exclusive, auto-delete queue — was lost at lostAt, so
-	// every message published until the consumer re-binds is gone from
-	// the broker. messageInterest is the lost session's: the recovery
-	// manager flags the known producers IN THAT SCOPE down and floors
-	// their recovery at the pre-loss cursor, so the next alive starts a
-	// snapshot recovery over the gap whatever order the alive and this
-	// notice arrive in — but not before OnFeedChannelRestored (or
-	// OnFeedSessionGone) for every lost session in the scope, since a
-	// replay published before the queue exists is lost as well. Raised
-	// at the moment of loss, before the rebind.
-	OnFeedChannelLost(session uuid.UUID, messageInterest types.MessageInterest, lostAt time.Time)
-	// OnFeedChannelRestored reports that the session's consumer has
-	// re-declared and re-bound its queue after a loss.
+	// OnFeedChannelLost reports that the session's consumer channel, and
+	// with it its exclusive, auto-delete queue, was lost: every message
+	// published until the consumer re-binds is gone from the broker. The
+	// recovery manager takes the producers the session receives down and
+	// recovers what it missed once the queue is back, whatever order the
+	// alives around the loss arrive in. Raised at the moment of loss, before
+	// the rebind.
+	OnFeedChannelLost(session uuid.UUID)
+	// OnFeedChannelRestored reports that the session's queue is bound: after
+	// its first open, and after a loss, when the consumer has re-declared and
+	// re-bound it. Nothing is asked for the session's producers before.
 	OnFeedChannelRestored(session uuid.UUID)
 	// OnFeedSessionGone reports that the session's consumer has exited
-	// for good; it needs no queue and must not hold recoveries back.
+	// for good, or never opened; it needs no queue and must not hold
+	// recoveries back.
 	OnFeedSessionGone(session uuid.UUID)
 	// OnClientSessionOpened reports a session of the client about to
-	// consume with the given interest; OnFeedSessionGone ends it. The
-	// recovery manager needs the scopes a snapshot replay can reach.
-	OnClientSessionOpened(session uuid.UUID, messageInterest types.MessageInterest)
+	// consume with the given interest; OnFeedSessionGone ends it. openedAt is
+	// a reading of the clock taken before the session's queue is bound, so no
+	// message in the queue is older than it.
+	OnClientSessionOpened(session uuid.UUID, messageInterest types.MessageInterest, openedAt recovery.Stamp)
 	// OnMessageProcessingStarted / OnMessageProcessingEnded bracket the
 	// processing of ONE message of a session of the client, strictly
-	// paired. The SDK's own alive-only session does not report them.
-	OnMessageProcessingStarted(sessionID uuid.UUID, producerID int, timestamp time.Time)
-	// OnRecoveryMessageReceived reports a message that carries a recovery
-	// request id (the replay of a snapshot or event recovery): the
-	// recovery it belongs to is alive, which renews its snapshot-complete
-	// deadline. Direct, never blocks.
-	OnRecoveryMessageReceived(producerID int, requestID int)
+	// paired; taken is when the session began it. The SDK's own alive-only
+	// session does not report them.
+	OnMessageProcessingStarted(sessionID uuid.UUID, producerID int, taken recovery.Stamp)
 	OnMessageProcessingEnded(sessionID uuid.UUID, producerID int, timestamp time.Time)
 	// OnMessageProcessed reports that the session has finished with a
 	// message of the producer: the client holds it and its ack has run. It
@@ -157,25 +153,28 @@ type recoveryMessageProcessor interface {
 	//
 	// An alive is acknowledged by the session itself, not by the pump, so
 	// it may be reported before the message handed over just before it has
-	// been acknowledged: by one envelope at most, the one the pump holds.
+	// been acknowledged. The session counts the messages it handed to the pump
+	// that have not settled, and an alive reported meanwhile says so (held):
+	// it counts as heard, but it moves no checkpoint past the message.
 	OnMessageProcessed(sessionID uuid.UUID, producerID int, generatedAt time.Time, taken recovery.Stamp, requestID int)
 	// OnSessionAlive reports an alive that a session of the client has
-	// handled, with the instant it was taken. The alives of the alive-only
+	// handled, with the instant it was taken. held says a message of the session
+	// handed to the client has not settled yet: the alive is heard as usual, but it
+	// moves no checkpoint. The alives of the alive-only
 	// interest (the SDK's own alive session, or a client subscription of
 	// that interest) are not the session's: they go to OnAliveReceived.
-	OnSessionAlive(sessionID uuid.UUID, producerID int, generatedAt time.Time, taken recovery.Stamp, isSubscribed bool, messageInterest types.MessageInterest)
-	OnAliveReceived(producerID int, timestamp types.MessageTimestamp, isSubscribed bool, messageInterest types.MessageInterest)
-	// OnSnapshotCompleteReceived admits a snapshot-complete to the
-	// producer's recovery actor. Unlike the lossy observability events
-	// above, this is a CORRECTNESS event — a lost snapshot-complete
-	// strands recovery until MaxRecoveryExecution — so admission is
-	// ctx-bounded backpressure rather than best-effort. It returns a
-	// non-nil error when the completion could NOT be admitted (ctx
-	// cancelled or the recovery manager is shutting down); the caller
-	// must then leave the AMQP delivery UNACKED so the broker redelivers.
-	// A nil error means the transition was admitted and the delivery may
-	// be acked.
-	OnSnapshotCompleteReceived(ctx context.Context, sessionID uuid.UUID, producerID int, requestID int, messageInterest types.MessageInterest) error
+	OnSessionAlive(sessionID uuid.UUID, producerID int, generatedAt time.Time, taken recovery.Stamp, isSubscribed, held bool)
+	// OnAliveReceived reports an alive of the SDK's own alive channel, taken
+	// by the session at received.
+	OnAliveReceived(producerID int, timestamp types.MessageTimestamp, received recovery.Stamp, isSubscribed bool)
+	// OnSnapshotCompleteReceived admits a snapshot-complete to the recovery
+	// actor. Unlike the lossy observability events above, this is a
+	// CORRECTNESS event: a lost snapshot-complete strands a recovery until
+	// its deadline. It returns a non-nil error when the completion could NOT
+	// be admitted (the recovery manager is closed); the caller must then
+	// leave the AMQP delivery UNACKED so the broker redelivers. A nil error
+	// means the completion was admitted and the delivery may be acked.
+	OnSnapshotCompleteReceived(ctx context.Context, sessionID uuid.UUID, producerID int, requestID int) error
 }
 
 type oddsFeedSessionImpl struct {
@@ -202,6 +201,13 @@ type oddsFeedSessionImpl struct {
 	// provides the happens-before). Stays false when the abrupt Close
 	// consumed the Once first — an abrupt close is never a settled drain.
 	gracefulSettled bool
+
+	// unsettled counts the envelopes handed to the subscription pump with a
+	// settled func that has not run: incremented before the hand-over, decremented
+	// when settled runs, or at once when the envelope is not handed over (a
+	// cancelled send). An envelope the pump drops on its stop is never settled, and
+	// stays counted: its delivery is not acked, so no checkpoint passes it.
+	unsettled atomic.Int64
 
 	errMu sync.RWMutex
 	err   error
@@ -250,7 +256,7 @@ func (o *oddsFeedSessionImpl) Open(
 	// and leave a closed session registered. Replay sessions (no hooks)
 	// are not part of the live feed.
 	if !o.isReplay {
-		o.recoveryMessageProcessor.OnClientSessionOpened(o.sessionID, *messageInterest)
+		o.recoveryMessageProcessor.OnClientSessionOpened(o.sessionID, *messageInterest, o.stamp())
 	}
 	ch, err := o.channelConsumer.Open(ctx, routingKeys, messageInterest)
 	if err != nil {
@@ -478,12 +484,9 @@ func (o *oddsFeedSessionImpl) processFeedMessage(ctx context.Context, feedMessag
 	// message counts from the moment the session took it.
 	taken := o.stamp()
 	if reportsProcessing {
-		o.recoveryMessageProcessor.OnMessageProcessingStarted(o.sessionID, producerID, taken.Wall())
+		o.recoveryMessageProcessor.OnMessageProcessingStarted(o.sessionID, producerID, taken)
 	}
 	requestID, hasRequestID := recoveryRequestID(feedMessage.Message)
-	if hasRequestID {
-		o.recoveryMessageProcessor.OnRecoveryMessageReceived(producerID, requestID)
-	}
 
 	// Pair every OnMessageProcessingStarted with exactly one
 	// OnMessageProcessingEnded. Pre-v2.24 the BuildMessage failure
@@ -524,9 +527,14 @@ func (o *oddsFeedSessionImpl) processFeedMessage(ctx context.Context, feedMessag
 		if messageInterest == types.SystemAliveOnly {
 			// The alive channel of the SDK: bound to no session, so it
 			// posts no fact of a session's.
-			o.recoveryMessageProcessor.OnAliveReceived(producerID, feedMessage.Timestamp, subscribed, messageInterest)
+			o.recoveryMessageProcessor.OnAliveReceived(producerID, feedMessage.Timestamp, taken, subscribed)
 		} else {
-			o.recoveryMessageProcessor.OnSessionAlive(o.sessionID, producerID, feedMessage.Timestamp.Created, taken, subscribed, messageInterest)
+			// A message handed to the pump that has not settled is not acked
+			// yet: the alive must not carry the checkpoint past it. Read
+			// without a lock; an alive that sees it unsettled a moment before
+			// it settles only leaves the checkpoint to the next one.
+			held := o.unsettled.Load() > 0
+			o.recoveryMessageProcessor.OnSessionAlive(o.sessionID, producerID, feedMessage.Timestamp.Created, taken, subscribed, held)
 		}
 		endProcessing(feedMessage.Timestamp.Created)
 		// Terminal handling: consumed by the recovery machinery, never
@@ -541,7 +549,7 @@ func (o *oddsFeedSessionImpl) processFeedMessage(ctx context.Context, feedMessag
 		// (default 6h), so if admission fails (ctx cancelled / recovery
 		// manager shutting down) we leave the delivery unacked and let
 		// the broker redeliver.
-		if err := o.recoveryMessageProcessor.OnSnapshotCompleteReceived(ctx, o.sessionID, producerID, msg.RequestID, messageInterest); err != nil {
+		if err := o.recoveryMessageProcessor.OnSnapshotCompleteReceived(ctx, o.sessionID, producerID, msg.RequestID); err != nil {
 			o.logger.WithError(err).
 				WithField("producer_id", producerID).
 				WithField("request_id", msg.RequestID).
@@ -608,19 +616,19 @@ func (o *oddsFeedSessionImpl) processFeedMessage(ctx context.Context, feedMessag
 	var admitted bool
 	switch msg := message.(type) {
 	case types.OddsChange:
-		admitted = o.send(ctx, sessionEnvelope{msg: types.SessionMessage{EventMessage: types.EventMessage{OddsChange: msg}}, ack: ack, settled: settled})
+		admitted = o.sendFinal(ctx, sessionEnvelope{msg: types.SessionMessage{EventMessage: types.EventMessage{OddsChange: msg}}, ack: ack, settled: settled})
 	case types.BetStop:
-		admitted = o.send(ctx, sessionEnvelope{msg: types.SessionMessage{EventMessage: types.EventMessage{BetStop: msg}}, ack: ack, settled: settled})
+		admitted = o.sendFinal(ctx, sessionEnvelope{msg: types.SessionMessage{EventMessage: types.EventMessage{BetStop: msg}}, ack: ack, settled: settled})
 	case types.BetCancel:
-		admitted = o.send(ctx, sessionEnvelope{msg: types.SessionMessage{EventMessage: types.EventMessage{BetCancel: msg}}, ack: ack, settled: settled})
+		admitted = o.sendFinal(ctx, sessionEnvelope{msg: types.SessionMessage{EventMessage: types.EventMessage{BetCancel: msg}}, ack: ack, settled: settled})
 	case types.BetSettlement:
-		admitted = o.send(ctx, sessionEnvelope{msg: types.SessionMessage{EventMessage: types.EventMessage{BetSettlement: msg}}, ack: ack, settled: settled})
+		admitted = o.sendFinal(ctx, sessionEnvelope{msg: types.SessionMessage{EventMessage: types.EventMessage{BetSettlement: msg}}, ack: ack, settled: settled})
 	case types.FixtureChangeMessage:
-		admitted = o.send(ctx, sessionEnvelope{msg: types.SessionMessage{EventMessage: types.EventMessage{FixtureChange: msg}}, ack: ack, settled: settled})
+		admitted = o.sendFinal(ctx, sessionEnvelope{msg: types.SessionMessage{EventMessage: types.EventMessage{FixtureChange: msg}}, ack: ack, settled: settled})
 	case types.RollbackBetSettlement:
-		admitted = o.send(ctx, sessionEnvelope{msg: types.SessionMessage{EventMessage: types.EventMessage{RollbackBetSettlement: msg}}, ack: ack, settled: settled})
+		admitted = o.sendFinal(ctx, sessionEnvelope{msg: types.SessionMessage{EventMessage: types.EventMessage{RollbackBetSettlement: msg}}, ack: ack, settled: settled})
 	case types.RollbackBetCancel:
-		admitted = o.send(ctx, sessionEnvelope{msg: types.SessionMessage{EventMessage: types.EventMessage{RollbackBetCancel: msg}}, ack: ack, settled: settled})
+		admitted = o.sendFinal(ctx, sessionEnvelope{msg: types.SessionMessage{EventMessage: types.EventMessage{RollbackBetCancel: msg}}, ack: ack, settled: settled})
 	default:
 		// Unrecognized built type: treat as unparsable and DO NOT
 		// advance the cursor — we can't claim we processed a message
@@ -686,6 +694,26 @@ func (o *oddsFeedSessionImpl) send(ctx context.Context, env sessionEnvelope) boo
 	case <-ctx.Done():
 		return false
 	}
+}
+
+// sendFinal is send for the envelope that ends a delivery: while one with a
+// settled func is on its way to the client and not settled, it is counted in
+// unsettled, which the alives the session reports read.
+func (o *oddsFeedSessionImpl) sendFinal(ctx context.Context, env sessionEnvelope) bool {
+	if env.settled == nil {
+		return o.send(ctx, env)
+	}
+	o.unsettled.Add(1)
+	settled := env.settled
+	env.settled = func() {
+		defer o.unsettled.Add(-1)
+		settled()
+	}
+	if o.send(ctx, env) {
+		return true
+	}
+	o.unsettled.Add(-1)
+	return false
 }
 
 // sendRawSideChannel publishes the extended-data raw envelope with a nil
@@ -792,9 +820,10 @@ func newSession(
 		// gap once the queue is back. Replay traffic is historical — a
 		// replay queue loss has no live gap to recover, so replay
 		// sessions stay silent.
-		consumer.SetChannelLostHook(func(mi types.MessageInterest, lostAt time.Time) {
-			recoverMessageProcessor.OnFeedChannelLost(sessionID, mi, lostAt)
+		consumer.SetChannelLostHook(func(types.MessageInterest, time.Time) {
+			recoverMessageProcessor.OnFeedChannelLost(sessionID)
 		})
+		consumer.SetChannelBoundHook(func() { recoverMessageProcessor.OnFeedChannelRestored(sessionID) })
 		consumer.SetChannelRestoredHook(func() { recoverMessageProcessor.OnFeedChannelRestored(sessionID) })
 		consumer.SetConsumerGoneHook(func() { recoverMessageProcessor.OnFeedSessionGone(sessionID) })
 	}

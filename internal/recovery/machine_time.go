@@ -14,15 +14,37 @@ import (
 // and the slow retry that these deadlines feed are in machine.go, next to
 // complete.
 
+// processing says which sessions have a message of the client in processing,
+// and since when, on the monotonic clock: the sessions not in it have none. The
+// actor tells it before each tick, from what the sessions report. It is what
+// holds the deadline of a recovery while a session's queue is stuck behind a
+// message, see stalledAmong.
+func (m *machine) processing(since map[uuid.UUID]time.Duration) {
+	for _, s := range m.sessions {
+		s.processingSince, s.processing = since[s.id]
+	}
+}
+
+// stalledAmong reports whether a session of those awaited that has not seen the
+// snapshot_complete has had one message of the client in processing for longer
+// than the maximum inactivity. A busy client always has some message in
+// processing; only one that stays there that long says the session's queue is
+// stuck behind it, with the snapshot it waits for.
+func (m *machine) stalledAmong(awaited, seen map[uuid.UUID]bool, mono time.Duration) bool {
+	for _, s := range m.sessions {
+		if awaited[s.id] && !seen[s.id] && s.processing && mono-s.processingSince > m.settings.maxInactivity {
+			return true
+		}
+	}
+	return false
+}
+
 // tick says the clock moved on: recoveries time out, producers without alives
 // go down, sessions that lag take producers down and bring them back, and
 // recoveries waiting for their backoff go out. The actor calls it at least once a
 // second.
 //
 // Event recoveries expire here, and the deferred ones.
-//
-// Seam for the safety net: a pending reset of it, waiting for a disabled producer, is
-// cancelled here.
 func (m *machine) tick() {
 	mono := m.mono()
 	for _, t := range m.tracks {
@@ -30,14 +52,18 @@ func (m *machine) tick() {
 			continue
 		}
 		if a := t.active; a != nil {
+			if m.stalledAmong(a.awaited, a.seen, mono) {
+				// a session with a client message in processing for longer than the
+				// maximum inactivity counts as heard: its queue is stuck behind the
+				// message, the snapshot with it, and a request again would queue a
+				// second one there
+				a.heardAt = mono
+			}
 			switch {
 			case mono-a.issuedMono > m.settings.maxRecoveryTime:
 				m.counters.timedOut++
 				m.failed(t, a, mono, "no snapshot complete within "+m.settings.maxRecoveryTime.String())
 			case mono-a.heardAt > m.settings.snapshotCompleteTimeout:
-				// Seam for the client's processing hold: a session with a client
-				// message in processing for longer than the maximum inactivity counts
-				// as heard here, so the deadline does not fire on a stuck callback.
 				m.counters.timedOut++
 				m.failed(t, a, mono,
 					"no snapshot complete, nor anything on its way, within "+m.settings.snapshotCompleteTimeout.String())
@@ -71,6 +97,10 @@ func (m *machine) tick() {
 // the recovery was asked for, whether it waited or not.
 func (m *machine) expireEvents(mono time.Duration) {
 	for _, e := range m.sortedEvents() {
+		if e.accepted && m.stalledAmong(e.awaited, e.seen, mono) {
+			// as for a recovery: a stuck callback holds the deadline
+			e.heardAt = mono
+		}
 		var why string
 		switch {
 		case mono-e.askedMono > m.settings.maxRecoveryTime:
@@ -205,5 +235,10 @@ func (m *machine) checkDelay(t *track, mono time.Duration) {
 		m.markDown(t, causeProcessingDelay)
 	case !delayed && t.down && t.cause == causeProcessingDelay:
 		m.markUp(t, causeDelayStabilized)
+	}
+	if t.told && t.toldDelayed != t.delayed {
+		// the flag flipped with no change of the producer's state to carry it: it is
+		// told on its own, with the cause the producer has
+		m.tell(t, t.cause, true)
 	}
 }

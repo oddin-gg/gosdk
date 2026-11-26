@@ -119,7 +119,7 @@ func TestManager_Open_Populates(t *testing.T) {
 //
 // The fix snapshots the existing map under RLock and copies mutable
 // state (enabled, flaggedDown, lastMessageTimestamp,
-// lastProcessedMessageGenTimestamp, lastAliveReceivedGenTimestamp,
+// lastProcessedMessageGenTimestamp,
 // recoveryFromTimestamp, lastRecoveryInfo) onto fresh entries before
 // installing the new map. Catalog fields (name/description/scope/
 // active) are refreshed from the API.
@@ -498,8 +498,8 @@ func TestManager_TimestampSetters(t *testing.T) {
 	if err := mgr.SetLastProcessedMessageGenTimestamp(1, t2); err != nil {
 		t.Fatalf("SetLastProcessedMessageGenTimestamp: %v", err)
 	}
-	if err := mgr.SetLastAliveReceivedGenTimestamp(1, t1); err != nil {
-		t.Fatalf("SetLastAliveReceivedGenTimestamp: %v", err)
+	if err := mgr.SetProducerResumePoint(1, t1); err != nil {
+		t.Fatalf("SetProducerResumePoint: %v", err)
 	}
 
 	// Validate via GetProducer.
@@ -511,7 +511,7 @@ func TestManager_TimestampSetters(t *testing.T) {
 		t.Errorf("LastProcessedMessageGenTimestamp = %v, want %v", p.LastProcessedMessageGenTimestamp(), t2)
 	}
 
-	// TimestampForRecovery prefers the alive-gen timestamp when set.
+	// TimestampForRecovery is the resume point once one is published.
 	if !p.TimestampForRecovery().Equal(t1) {
 		t.Errorf("TimestampForRecovery = %v, want %v", p.TimestampForRecovery(), t1)
 	}
@@ -654,8 +654,7 @@ func TestManager_ConcurrentOpenAndSetters(t *testing.T) {
 	// Both properties matter: unique so a lost write leaves a value that
 	// DIFFERS from what we assert (a constant timestamp made a dropped
 	// write invisible — the prior iteration had already stored it), and
-	// increasing because SetLastAliveReceivedGenTimestamp is monotonic
-	// (it ignores non-advancing values).
+	// increasing so the order of the writes does not matter to the check.
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	for i := 0; i < iterations; i++ {
 		// Alternate the flag so a dropped SetProducerDown leaves the
@@ -686,7 +685,7 @@ func TestManager_ConcurrentOpenAndSetters(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			errs[2] = mgr.SetLastAliveReceivedGenTimestamp(1, wantTS)
+			errs[2] = mgr.SetProducerResumePoint(1, wantTS)
 		}()
 		close(start)
 		wg.Wait()
@@ -709,17 +708,12 @@ func TestManager_ConcurrentOpenAndSetters(t *testing.T) {
 		if down != wantDown {
 			t.Fatalf("iter %d: SetProducerDown(%v) lost across concurrent Open (got %v)", i, wantDown, down)
 		}
-		// LastAliveReceivedGenTimestamp isn't on the public Producer
-		// interface — read it via the internal *data accessor.
-		d, err := mgr.producerCached(1)
+		p, err := mgr.GetProducer(t.Context(), 1)
 		if err != nil {
-			t.Fatalf("iter %d producerCached: %v", i, err)
+			t.Fatalf("iter %d GetProducer: %v", i, err)
 		}
-		d.mu.RLock()
-		got := d.lastAliveReceivedGenTimestamp
-		d.mu.RUnlock()
-		if !got.Equal(wantTS) {
-			t.Fatalf("iter %d: SetLastAliveReceivedGenTimestamp lost across concurrent Open (want %v got %v)", i, wantTS, got)
+		if got := p.TimestampForRecovery(); !got.Equal(wantTS) {
+			t.Fatalf("iter %d: SetProducerResumePoint lost across concurrent Open (want %v got %v)", i, wantTS, got)
 		}
 	}
 }
@@ -858,7 +852,7 @@ func TestNewData_DefaultsFlaggedDownTrue(t *testing.T) {
 
 // TestSetProducerRecoveryFromTimestamp_RoundTrips ensures the
 // SetProducerRecoveryFromTimestamp + TimestampForRecovery interaction
-// works when no alive timestamp has been seen.
+// works when no resume point has been published.
 func TestSetProducerRecoveryFromTimestamp_RoundTrips(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/xml")
@@ -903,13 +897,11 @@ func TestSetProducerRecoveryFromTimestamp_RoundTrips(t *testing.T) {
 	}
 }
 
-// TestSetProducerRecoveryFromTimestamp_OverridesAliveCursor is the
-// regression for the P1 finding: an explicit recovery cursor set AFTER an
-// alive timestamp already exists must still win (the setter's documented
-// purpose is rewinding the recovery point), and must be consumed once a
-// recovery is recorded so later recoveries resume from the freshest alive
-// cursor instead of re-rewinding forever.
-func TestSetProducerRecoveryFromTimestamp_OverridesAliveCursor(t *testing.T) {
+// TestProducer_ResumePointWinsOnceItIsPublished pins what TimestampForRecovery
+// reports: the start the client set before the recovery machine has published a
+// resume point, the point after, whatever the client sets later. The zero time is
+// a point too: everything. The machine is told of a start set after it runs.
+func TestProducer_ResumePointWinsOnceItIsPublished(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/xml")
 		_, _ = io.WriteString(w, producersBody)
@@ -921,57 +913,85 @@ func TestSetProducerRecoveryFromTimestamp_OverridesAliveCursor(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 
-	// An alive advances the alive-gen cursor first.
-	aliveGen := time.Now().Add(-10 * time.Minute)
-	if err := mgr.SetLastAliveReceivedGenTimestamp(1, aliveGen); err != nil {
-		t.Fatalf("SetLastAliveReceivedGenTimestamp: %v", err)
+	set := time.Now().Add(-45 * time.Minute)
+	if err := mgr.SetProducerRecoveryFromTimestamp(t.Context(), 1, set); err != nil {
+		t.Fatalf("SetProducerRecoveryFromTimestamp: %v", err)
 	}
 	p, _ := mgr.GetProducer(t.Context(), 1)
-	if !p.TimestampForRecovery().Equal(aliveGen) {
-		t.Fatalf("pre-override TimestampForRecovery = %v, want alive %v", p.TimestampForRecovery(), aliveGen)
+	if !p.TimestampForRecovery().Equal(set) {
+		t.Fatalf("before a resume point: %v, want the start set %v", p.TimestampForRecovery(), set)
 	}
 
-	// A consumer then rewinds explicitly to an EARLIER point. Pre-fix the
-	// alive cursor kept winning and the rewind was silently ignored.
-	rewind := time.Now().Add(-45 * time.Minute)
+	type told struct {
+		id int
+		at time.Time
+	}
+	var heard []told
+	release := mgr.SetRecoveryFromHook(func(id int, at time.Time) { heard = append(heard, told{id, at}) })
+
+	point := time.Now().Add(-10 * time.Minute)
+	if err := mgr.SetProducerResumePoint(1, point); err != nil {
+		t.Fatalf("SetProducerResumePoint: %v", err)
+	}
+	if !p.TimestampForRecovery().Equal(point) {
+		t.Fatalf("published point: %v, want %v", p.TimestampForRecovery(), point)
+	}
+	if got, err := mgr.RecoveryFromTimestamp(1); err != nil || !got.Equal(set) {
+		t.Fatalf("the client's start: %v, %v, want %v", got, err, set)
+	}
+
+	// a start set later does not replace the point; the machine is told
+	rewind := time.Now().Add(-50 * time.Minute)
 	if err := mgr.SetProducerRecoveryFromTimestamp(t.Context(), 1, rewind); err != nil {
 		t.Fatalf("SetProducerRecoveryFromTimestamp: %v", err)
 	}
-	p, _ = mgr.GetProducer(t.Context(), 1)
-	if !p.TimestampForRecovery().Equal(rewind) {
-		t.Fatalf("post-override TimestampForRecovery = %v, want explicit rewind %v", p.TimestampForRecovery(), rewind)
+	if !p.TimestampForRecovery().Equal(point) {
+		t.Fatalf("after a start was set: %v, want the point %v", p.TimestampForRecovery(), point)
+	}
+	if len(heard) != 1 || heard[0].id != 1 || !heard[0].at.Equal(rewind) {
+		t.Fatalf("the machine was told %v, want producer 1 and %v", heard, rewind)
+	}
+	// a rejected start is not told
+	if err := mgr.SetProducerRecoveryFromTimestamp(t.Context(), 1, time.Now().Add(-2*time.Hour)); err == nil {
+		t.Fatal("expected error for a too-old start")
+	}
+	if len(heard) != 1 {
+		t.Fatalf("the machine was told of a rejected start: %v", heard)
 	}
 
-	// An alive arriving before recovery begins must NOT defeat the override.
-	newerAlive := time.Now().Add(-5 * time.Minute)
-	if err := mgr.SetLastAliveReceivedGenTimestamp(1, newerAlive); err != nil {
-		t.Fatalf("SetLastAliveReceivedGenTimestamp: %v", err)
+	// the zero point is a point: everything
+	if err := mgr.SetProducerResumePoint(1, time.Time{}); err != nil {
+		t.Fatalf("SetProducerResumePoint: %v", err)
 	}
-	p, _ = mgr.GetProducer(t.Context(), 1)
-	if !p.TimestampForRecovery().Equal(rewind) {
-		t.Fatalf("override defeated by a later alive: TimestampForRecovery = %v, want %v", p.TimestampForRecovery(), rewind)
+	if !p.TimestampForRecovery().IsZero() {
+		t.Fatalf("zero point: %v, want everything", p.TimestampForRecovery())
 	}
 
-	// Recording a recovery consumes the one-shot override; the freshest
-	// alive cursor then wins again (no perpetual re-rewind).
-	if err := mgr.SetProducerRecoveryInfo(1, recoveryInfoStub{}); err != nil {
-		t.Fatalf("SetProducerRecoveryInfo: %v", err)
+	// a hook that replaced ours is not removed by our release
+	var other int
+	mgr.SetRecoveryFromHook(func(int, time.Time) { other++ })
+	release()
+	if err := mgr.SetProducerRecoveryFromTimestamp(t.Context(), 1, rewind); err != nil {
+		t.Fatalf("SetProducerRecoveryFromTimestamp: %v", err)
 	}
-	p, _ = mgr.GetProducer(t.Context(), 1)
-	if !p.TimestampForRecovery().Equal(newerAlive) {
-		t.Fatalf("override not consumed after recovery recorded: TimestampForRecovery = %v, want alive %v", p.TimestampForRecovery(), newerAlive)
+	if len(heard) != 1 || other != 1 {
+		t.Fatalf("told: ours %v, the replacement %d, want ours once and the replacement once", heard, other)
+	}
+	release2 := mgr.SetRecoveryFromHook(func(int, time.Time) { other++ })
+	release2()
+	if err := mgr.SetProducerRecoveryFromTimestamp(t.Context(), 1, rewind); err != nil {
+		t.Fatalf("SetProducerRecoveryFromTimestamp: %v", err)
+	}
+	if len(heard) != 1 || other != 1 {
+		t.Fatalf("told after the hook was removed: %v, %d", heard, other)
+	}
+	if _, err := mgr.RecoveryFromTimestamp(99); err == nil {
+		t.Fatal("RecoveryFromTimestamp of an unknown producer: want an error")
+	}
+	if err := mgr.SetProducerResumePoint(99, point); err == nil {
+		t.Fatal("SetProducerResumePoint of an unknown producer: want an error")
 	}
 }
-
-// recoveryInfoStub is a minimal types.RecoveryInfo for the override-
-// consumption assertion (field values are irrelevant to the test).
-type recoveryInfoStub struct{}
-
-func (recoveryInfoStub) After() time.Time            { return time.Time{} }
-func (recoveryInfoStub) Timestamp() time.Time        { return time.Time{} }
-func (recoveryInfoStub) RequestID() int              { return 0 }
-func (recoveryInfoStub) Successful() bool            { return true }
-func (recoveryInfoStub) NodeID() types.Optional[int] { return types.None[int]() }
 
 // TestManager_GenCursors_RejectGrossFutureSkew is the regression for the
 // future-timestamp poison finding: the monotonic gen cursors
@@ -1003,7 +1023,6 @@ func TestManager_GenCursors_RejectGrossFutureSkew(t *testing.T) {
 		read func(*data) time.Time
 	}{
 		{"processed-gen", func(ts time.Time) error { return mgr.SetLastProcessedMessageGenTimestamp(1, ts) }, func(d *data) time.Time { return d.lastProcessedMessageGenTimestamp }},
-		{"alive-gen", func(ts time.Time) error { return mgr.SetLastAliveReceivedGenTimestamp(1, ts) }, func(d *data) time.Time { return d.lastAliveReceivedGenTimestamp }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := tc.set(good); err != nil {
@@ -1108,14 +1127,6 @@ func TestManager_TimestampCursors_Monotonic(t *testing.T) {
 		if got := c.get(); !got.Equal(evenNewer) {
 			t.Errorf("%s = %v after newer write, want %v (monotonic guard must still advance)", c.name, got, evenNewer)
 		}
-	}
-	// SetLastAliveReceivedGenTimestamp shares the identical guard; it has
-	// no public accessor, so exercise the setter for error-free operation.
-	if err := mgr.SetLastAliveReceivedGenTimestamp(1, newer); err != nil {
-		t.Fatalf("SetLastAliveReceivedGenTimestamp newer: %v", err)
-	}
-	if err := mgr.SetLastAliveReceivedGenTimestamp(1, older); err != nil {
-		t.Fatalf("SetLastAliveReceivedGenTimestamp older: %v", err)
 	}
 }
 
