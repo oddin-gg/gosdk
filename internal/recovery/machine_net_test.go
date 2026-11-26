@@ -439,7 +439,10 @@ func TestNet_WhatTheResetDropsOfAProducerItCouldNotAskForStartsWhereItWasWhenThe
 // SafetyNetTest: aLaggingSessionStopsLaggingOnceTheTransportHasMadeTheNextReset
 func TestNet_LaggingSessionStopsLaggingOnceTheTransportHasMadeTheNextReset(t *testing.T) {
 	f := upNet(t, all)
-	for !f.lagging(1) {
+	for round := 0; !f.lagging(1); round++ {
+		if round > 2*safetyNetResets {
+			t.Fatal("the session never lagged: the net kept resetting it")
+		}
 		before := f.calls()
 		f.stale(1, oldAge, 10*time.Minute, func() bool { return f.calls() > before || f.lagging(1) })
 		if f.calls() > before {
