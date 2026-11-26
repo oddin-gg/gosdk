@@ -50,8 +50,11 @@ func (m *machine) tick() {
 	m.cancelResetsWaitingForDisabledProducers(mono)
 	for _, t := range m.tracks {
 		if !m.catalog.enabled(t.id) {
+			// its messages reach no sample: what the net had of its stale window goes
+			m.clearStaleWindows(t)
 			continue
 		}
+		m.downWhileResetting(t)
 		if a := t.active; a != nil {
 			if m.stalledAmong(a.awaited, a.seen, mono) {
 				// a session with a client message in processing for longer than the
@@ -61,14 +64,19 @@ func (m *machine) tick() {
 				a.heardAt = mono
 			}
 			switch {
+			case mono-a.issuedMono > m.settings.maxRecoveryTime && m.underwayFor(t):
+				// the reset of a session replaces the queue its snapshot went to, and its
+				// snapshot_complete is ignored meanwhile: it is given up, not failed, so
+				// that no retry delay holds back the recovery asked for once it is done
+				m.giveUp(t, mono, "no snapshot complete within "+m.settings.maxRecoveryTime.String()+", with a reset under way", true)
 			case mono-a.issuedMono > m.settings.maxRecoveryTime:
 				m.counters.timedOut++
-				m.failed(t, a, mono, "no snapshot complete within "+m.settings.maxRecoveryTime.String())
+				m.failed(t, a, mono, "no snapshot complete within "+m.settings.maxRecoveryTime.String(), endedTimedOut)
 			case mono-a.heardAt > m.settings.snapshotCompleteTimeout && !m.underwayFor(t):
 				// a reset underway gives it up once done; else its snapshot_complete is lost
 				m.counters.timedOut++
 				m.failed(t, a, mono,
-					"no snapshot complete, nor anything on its way, within "+m.settings.snapshotCompleteTimeout.String())
+					"no snapshot complete, nor anything on its way, within "+m.settings.snapshotCompleteTimeout.String(), endedTimedOut)
 			}
 		}
 		if m.started {

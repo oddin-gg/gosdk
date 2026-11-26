@@ -229,8 +229,15 @@ func TestNet_SnapshotCompleteWhileTheResetIsUnderWayIsIgnoredAndTheRecoveryAsked
 	expectSessions(t, f.resetSessions(), []int{1}, "resets")
 
 	// the transport has not replaced the channel yet: these come from the old queue
+	cpBefore, _ := f.checkpoint(1, pre)
 	f.snapshotComplete(1, pre, preReq.requestID)
 	f.snapshotComplete(2, pre, preReq.requestID)
+	// the resetting session's marker was ignored: the request is still the one in flight, its
+	// marker unseen, and its checkpoint where it was
+	expect(t, f.inFlight(pre), preReq.requestID, "the original recovery in flight")
+	expect(t, f.m.byID[pre].active.seen[sid(1)], false, "the resetting session's marker seen")
+	cpAfter, _ := f.checkpoint(1, pre)
+	expectTime(t, cpAfter, cpBefore, "the resetting session's checkpoint")
 	f.runWithAlives(20 * time.Second)
 	expectDown(t, f.feed, pre, true, "while the reset is under way")
 	expect(t, f.calls(), before+2, "requests while it is")
@@ -1070,6 +1077,18 @@ func (f *feed) monoStale(session, limit int, until func() bool) int {
 	return -1
 }
 
+// checkpointsFollowTheProducersClock puts each lane's checkpoint no later than its
+// producer's now: after a step back of the clock the session has taken messages since,
+// which a checkpoint never moves back for, and the net waits for the producer's clock to
+// pass a checkpoint that is ahead of it (see checkpointAhead).
+func (f *feed) checkpointsFollowTheProducersClock() {
+	for _, s := range f.m.sessions {
+		for _, l := range s.lanes {
+			l.checkpoint = earlierOf(l.checkpoint, f.m.byID[l.producer].producerNow(f.clock.Now()))
+		}
+	}
+}
+
 // resetAndRecover is the net's reset made, and what it asked for recovered by
 // session 1.
 func (f *feed) resetAndRecover() {
@@ -1091,6 +1110,8 @@ func TestNetClock_WindowOfStaleMessagesCountsOnTheMonotonicClock(t *testing.T) {
 		f.stepWall(step)
 		// the producer's clock stepped with the SDK's, as its next alive says
 		f.alive(pre)
+		f.alive(live)
+		f.checkpointsFollowTheProducersClock()
 		expect(t, len(f.out.calls), before, "requests after the step")
 		expect(t, f.monoStale(1, 100, asked), 51, "seconds on to the net's request: 61 from the first stale message")
 		expect(t, len(f.out.resets), 0, "resets")
@@ -1111,6 +1132,8 @@ func TestNetClock_BackoffAndCapCountOnTheMonotonicClock(t *testing.T) {
 		// the third reset waits for the backoff of two minutes, not the window of 61 s
 		f.stepWall(time.Duration(300*direction) * time.Second)
 		f.alive(pre)
+		f.alive(live)
+		f.checkpointsFollowTheProducersClock()
 		before := len(f.out.calls)
 		expect(t, f.monoStale(1, 300, func() bool { return len(f.out.calls) > before }), 120, "seconds to the net's request in round 3")
 		f.resetAndRecover()
@@ -1118,6 +1141,8 @@ func TestNetClock_BackoffAndCapCountOnTheMonotonicClock(t *testing.T) {
 		// three resets spend the cap: the session lags, whatever the wall clock says of the cool-down
 		f.stepWall(time.Duration(20*direction) * time.Minute)
 		f.alive(pre)
+		f.alive(live)
+		f.checkpointsFollowTheProducersClock()
 		spent := len(f.out.calls)
 		expect(t, f.monoStale(1, 300, func() bool { return f.lagging(1) }), 61, "seconds to lagging")
 		expect(t, len(f.out.calls), spent, "requests with the cap spent")
@@ -1358,8 +1383,10 @@ func TestNet_CheckpointThatLeavesTheWindowBeforeTheLastAcceptanceCancelsTheReset
 	preReq, liveReq := f.lastSnapshot(pre), f.lastSnapshot(live)
 	f.accept(preReq)
 	f.clock.advance(10 * time.Minute)
+	f.aliveBoth() // both producers are there: the window is what the last acceptance finds
 	f.accept(liveReq)
 	expect(t, len(f.out.resets), 0, "resets")
+	expect(t, f.logCount("reaches back past the producer's recovery window"), 1, "warnings of the window")
 	expect(t, f.m.session(sid(1)).pending == nil, true, "a reset pending")
 	expect(t, f.m.counters.resetRequestsFailed, 1, "net requests failed")
 	expect(t, f.logCount("WARN The safety net did not reset session"), 1, "warnings of the reset not made")

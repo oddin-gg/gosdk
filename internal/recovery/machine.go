@@ -597,6 +597,16 @@ func (m *machine) channelLost(id uuid.UUID) {
 	}
 	s.pending = nil
 	s.lost = true
+	// another session's reset that waits for a recovery of a producer this one
+	// receives goes with it, whether or not this session had seen that recovery's
+	// snapshot_complete: its queue is gone, and its follow-up cannot be asked for
+	// until the new one is bound. No backoff: it is no failure of the net's.
+	for _, o := range m.sessions {
+		if o != s && o.pending != nil && slices.ContainsFunc(s.lanes, func(l *lane) bool { return o.pending.asked[l.producer] != nil }) {
+			m.dropPending(o)
+			m.log.Warnf("The safety net did not reset session %s: the channel of session %s, which receives a producer it asked for, was lost", o.id, s.id)
+		}
+	}
 	m.queueLost(s, causeChannelLost, m.mono())
 }
 
@@ -740,6 +750,7 @@ func (m *machine) alive(producerID int, generatedAt, markAt time.Time, received 
 	if !validStamp(generatedAt) {
 		return
 	}
+	m.downWhileResetting(t)
 	mono := m.mono()
 	// the alive after the one that gave a recovery up: it may be asked for again
 	t.awaitsAlive = false
@@ -872,7 +883,7 @@ func (m *machine) sample(s *session, l *lane, t *track, generatedAt time.Time, t
 	}
 	if l.age <= m.settings.staleLimit {
 		l.above = false
-		if s.lagging && !slices.ContainsFunc(s.lanes, func(other *lane) bool { return other.above }) {
+		if s.lagging && !slices.ContainsFunc(s.lanes, func(other *lane) bool { return other.above && m.catalog.enabled(other.producer) }) {
 			s.lagging = false
 			m.log.Infof("Session %s caught up", s.id)
 		}
@@ -965,7 +976,7 @@ func (m *machine) answeredAt(requestID int, err error, arrived time.Duration) {
 		case err == nil:
 			m.accepted(t, a, min(arrived, mono))
 		default:
-			m.failed(t, a, mono, "the API did not accept it: "+err.Error())
+			m.failed(t, a, mono, "the API did not accept it: "+err.Error(), endedRefused)
 		}
 		return
 	}
@@ -987,9 +998,14 @@ func (m *machine) maybeRequest(t *track, mono time.Duration) {
 // bound, an alive that says the producer is there (after the one that gave the
 // last recovery up), and its backoff over.
 func (m *machine) canRequest(t *track, mono time.Duration) bool {
+	return t.active == nil && m.askable(t, mono)
+}
+
+// askable is canRequest with no regard to a recovery in flight: whether the producer
+// could be asked for once it has none.
+func (m *machine) askable(t *track, mono time.Duration) bool {
 	return m.started &&
 		m.connected &&
-		t.active == nil &&
 		m.catalog.enabled(t.id) &&
 		m.receivers(t) > 0 &&
 		m.aliveRecent(t, mono) &&
@@ -1178,8 +1194,12 @@ func (m *machine) capped(t *track, point time.Time) time.Time {
 	return earlierOf(point, t.producerNow(m.clock.Now()))
 }
 
-// accepted says the API took the request.
-func (m *machine) accepted(t *track, a *active, mono time.Duration) {
+// accepted says the API took the request; arrived is when it did, on the monotonic
+// clock, which an answer handled later makes earlier than now: it is the recovery's
+// acceptedAt, and nothing else. Everything the acceptance decides, the reset, the
+// cancellation's backoff, the pruning, is judged at the actor's own time.
+func (m *machine) accepted(t *track, a *active, arrived time.Duration) {
+	mono := m.mono()
 	for _, s := range m.sessions {
 		if p := s.pending; p != nil && p.asked[t.id] == a {
 			// a is not marked accepted yet: it counts among the recoveries awaited
@@ -1187,7 +1207,7 @@ func (m *machine) accepted(t *track, a *active, mono time.Duration) {
 		}
 	}
 	a.accepted = true
-	a.acceptedAt = mono
+	a.acceptedAt = arrived
 	m.publishInfo(t, a, true)
 	for _, s := range m.sessions {
 		if p := s.pending; p != nil && p.asked[t.id] == a && p.allAccepted() {
@@ -1218,9 +1238,18 @@ func (m *machine) lastAcceptance(s *session, p *pendingReset, mono time.Duration
 			m.resetNotMadeForChangedProducer(s, l.producer, mono)
 			return
 		}
+		if !m.askable(t, mono) {
+			// silent, say, since it was accepted: its follow-up would wait with the queue gone
+			m.resetNotMadeForProducerThatCannotBeAsked(s, l.producer, mono)
+			return
+		}
 	}
 	if id, ok := m.awaitsOtherSessionsChannel(s); ok {
 		m.resetNotMadeForOtherChannel(s, id, mono)
+		return
+	}
+	if id, ok := m.checkpointAhead(s); ok {
+		m.resetNotMadeForCheckpointAhead(s, id, mono)
 		return
 	}
 	if id, ok := m.producerOutsideWindow(s); ok {
@@ -1300,8 +1329,8 @@ func (m *machine) witnessed(a *active) bool {
 // failed says the API did not accept the recovery, or it timed out: it is asked
 // for again after the backoff. Once it has failed more often in a row than it is
 // re-issued, the producer stays down and it is asked for at a slow, steady pace.
-func (m *machine) failed(t *track, a *active, mono time.Duration, reason string) {
-	m.ended(t, a, mono, reason, false)
+func (m *machine) failed(t *track, a *active, mono time.Duration, reason, how string) {
+	m.ended(t, a, mono, how, false)
 	m.publishInfo(t, a, false)
 	m.counters.failed++
 	if !m.hasGaps(t) {
@@ -1352,27 +1381,42 @@ func (m *machine) giveUp(t *track, mono time.Duration, reason string, lost bool)
 	if a == nil {
 		return
 	}
-	m.ended(t, a, mono, reason, lost)
+	how := endedGivenUp
+	if lost {
+		how = endedLost
+	}
+	m.ended(t, a, mono, how, lost)
 	m.counters.abandoned++
 	m.log.Infof("Recovery %d of producer %d given up: %s", a.requestID, t.id, reason)
 }
+
+// How a recovery ended, as the net's warning says it.
+const (
+	endedRefused  = "refused by the API"
+	endedTimedOut = "timed out"
+	endedGivenUp  = "given up"
+	endedLost     = "lost with a queue or the connection"
+)
 
 // ended says the recovery is no longer waited for, without completing: what it
 // sent may still be on its way, ahead of the snapshot of the next one asked for.
 // Whichever way a recovery ends, a reset that asked for it is cancelled: the
 // session's backlog would be dropped with nothing sure to repeat it. The net's
 // backoff starts unless a lost queue or connection ended it.
-func (m *machine) ended(t *track, a *active, mono time.Duration, reason string, lost bool) {
+//
+// how is one of the fixed classifications below, never text that came from the API:
+// it is what the net's warning says.
+func (m *machine) ended(t *track, a *active, mono time.Duration, how string, lost bool) {
 	t.active = nil
 	t.pausedUntil = mono
 	m.out.requestEnded(a.requestID)
 	t.remember(ended{requestID: a.requestID, seq: a.seq})
-	m.cancelResetsAskedFor(t, a, mono, reason, lost)
+	m.cancelResetsAskedFor(t, a, mono, how, lost)
 }
 
 // cancelResetsAskedFor cancels every pending reset whose preflight recovery of the
 // producer is a; the number of resets cancelled.
-func (m *machine) cancelResetsAskedFor(t *track, a *active, mono time.Duration, reason string, lost bool) int {
+func (m *machine) cancelResetsAskedFor(t *track, a *active, mono time.Duration, how string, lost bool) int {
 	n := 0
 	for _, s := range m.sessions {
 		if s.pending == nil || s.pending.asked[t.id] != a {
@@ -1385,8 +1429,8 @@ func (m *machine) cancelResetsAskedFor(t *track, a *active, mono time.Duration, 
 		}
 		n++
 		m.counters.resetRequestsFailed++
-		m.log.Warnf("The safety net did not reset session %s: recovery %d of producer %d ended before it, %s",
-			s.id, a.requestID, t.id, reason)
+		m.log.Warnf("The safety net did not reset session %s: recovery %d of producer %d ended before it: %s",
+			s.id, a.requestID, t.id, how)
 	}
 	return n
 }
@@ -1781,6 +1825,25 @@ func (m *machine) hasDownGaps(t *track) bool {
 
 // ---- the safety net
 
+// downWhileResetting puts a producer down that is up while a session that receives it
+// has a reset under way: one enabled meanwhile was skipped by the reset's own
+// markDown, and its lane has the reset's gap, so the status must say so until the
+// recovery asked for after the reset has completed.
+func (m *machine) downWhileResetting(t *track) {
+	if !t.down && m.catalog.enabled(t.id) && m.underwayFor(t) {
+		m.markDown(t, causeSafetyNetReset)
+	}
+}
+
+// clearStaleWindows forgets the stale window of every session's lane of the producer.
+func (m *machine) clearStaleWindows(t *track) {
+	for _, s := range m.sessions {
+		if l := s.lane(t.id); l != nil {
+			l.above, l.aboveSince = false, 0
+		}
+	}
+}
+
 // trigger says the session has been too far behind the producer for the window: a
 // recovery for every producer it receives that the catalog has enabled first, the
 // reset once the API has accepted them all. With the net's resets spent the session
@@ -1823,6 +1886,11 @@ func (m *machine) trigger(s *session, t *track, age time.Duration, mono time.Dur
 		}
 	}
 	if len(asked) == 0 {
+		return
+	}
+	if _, ahead := m.checkpointAhead(s); ahead {
+		// the producer's clock stepped back: a recovery capped at its now would skip
+		// what the reset drops between; the net waits for the clock to catch up
 		return
 	}
 	if id, outside := m.producerOutsideWindow(s); outside {
@@ -1913,6 +1981,41 @@ func (m *machine) producerOutsideWindow(s *session) (int, bool) {
 		}
 	}
 	return 0, false
+}
+
+// checkpointAhead finds, among the producers the session receives that the catalog
+// has enabled, one whose checkpoint for the session lies after the producer's now,
+// as a recovery is capped at it (see capped): after a step back of the producer's
+// clock the queue may hold messages stamped between, which a recovery asked for from
+// the producer's now would not repeat.
+func (m *machine) checkpointAhead(s *session) (int, bool) {
+	for _, l := range s.lanes {
+		if !m.catalog.enabled(l.producer) || l.checkpoint.IsZero() {
+			continue
+		}
+		if l.checkpoint.After(m.byID[l.producer].producerNow(m.clock.Now())) {
+			return l.producer, true
+		}
+	}
+	return 0, false
+}
+
+// resetNotMadeForCheckpointAhead cancels a reset whose recoveries were accepted, but
+// whose session's checkpoint of the producer lies after the producer's now.
+func (m *machine) resetNotMadeForCheckpointAhead(s *session, producerID int, mono time.Duration) {
+	m.cancelReset(s, mono)
+	m.counters.resetRequestsFailed++
+	m.log.Warnf("The safety net did not reset session %s: its checkpoint of producer %d lies after the producer's clock, where a recovery could not repeat what the reset would drop",
+		s.id, producerID)
+}
+
+// resetNotMadeForProducerThatCannotBeAsked cancels a reset whose recoveries were
+// accepted, but whose producer could not be asked for again once the queue is gone.
+func (m *machine) resetNotMadeForProducerThatCannotBeAsked(s *session, producerID int, mono time.Duration) {
+	m.cancelReset(s, mono)
+	m.counters.resetRequestsFailed++
+	m.log.Warnf("The safety net did not reset session %s: producer %d could not be asked for again after the reset",
+		s.id, producerID)
 }
 
 // resetNotMadeOutsideWindow cancels a reset whose recoveries were accepted, but

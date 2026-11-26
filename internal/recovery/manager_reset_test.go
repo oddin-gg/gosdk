@@ -144,3 +144,22 @@ func TestManager_ResetDoneReachesTheActorAsAFactAndAGoneSessionDropsItsHandle(t 
 		t.Fatal("a gone session keeps its handle")
 	}
 }
+
+// A reset the machine asks for once the close is signalled is not handed to the
+// session's consumer: the shutdown settles the queue, and no follow-up could be asked.
+func TestManager_ResetAfterTheCloseIsSignalledIsNotHandedToTheConsumer(t *testing.T) {
+	r := newRig(t)
+	r.open()
+	s1 := uuid.New()
+	h := &fakeResetter{started: make(chan struct{}, 1)}
+	r.mgr.RegisterSessionResetter(s1, h)
+	r.openSession(s1, types.AllMessageInterest)
+	a := r.mgr.actor()
+	a.signalStop()
+	a.reset(s1, 5)
+	select {
+	case <-h.started:
+		t.Fatal("the consumer was asked to reset after the close was signalled")
+	case <-time.After(200 * time.Millisecond):
+	}
+}
