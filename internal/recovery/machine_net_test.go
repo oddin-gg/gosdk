@@ -1776,3 +1776,74 @@ func TestNet_CancelledResetPausesTheNetForAsLongAsTheResetsMadeInTheCooldownSet(
 		})
 	}
 }
+
+// ---- another session's queue that is not there
+
+// twoSessionNet is session 1 of both producers and session 2 of the live producer
+// only, started, with the first recoveries complete.
+func twoSessionNet(t *testing.T) *netFeed {
+	t.Helper()
+	f := &netFeed{feed: newFeed(t)}
+	f.open(1, all)
+	f.open(2, liveOnly)
+	f.startFeed()
+	f.bothUp(1, 2)
+	return f
+}
+
+// A reset drops the session's backlog of every producer it receives, and the
+// recovery of a producer another session's lost queue holds back cannot be asked for
+// until that queue is back: the net waits for it, without lagging, a gap or a request.
+func TestNet_DoesNotStartAResetWhileAnotherSessionsQueueOfAProducerIsNotBound(t *testing.T) {
+	f := twoSessionNet(t)
+	f.m.channelLost(sid(2))
+	before := f.calls()
+	expect(t, f.stale(1, oldAge, 3*time.Minute, f.untilAsked(before)), -1, "a request")
+	expect(t, f.calls(), before, "requests")
+	expect(t, len(f.out.resets), 0, "resets")
+	expect(t, f.lagging(1), false, "the session lags")
+	expect(t, f.m.counters.lagging, 0, "episodes of lagging")
+	expect(t, f.m.session(sid(1)).pending == nil, true, "a reset pending")
+	for _, l := range f.m.session(sid(1)).lanes {
+		expect(t, l.gap == nil, true, "a gap of the lane")
+	}
+
+	// once the queue is back and recovered, the net acts on a later sample
+	f.m.channelReopened(sid(2))
+	f.complete(f.lastSnapshot(live), 1, 2)
+	f.complete(f.lastSnapshot(pre), 1, 2)
+	after := f.calls()
+	if f.stale(1, oldAge, 3*time.Minute, f.untilAsked(after)) < 0 {
+		t.Fatal("the net did not act once the other queue was back")
+	}
+}
+
+// The same with the other session's reset under way.
+func TestNet_DoesNotStartAResetWhileAnotherSessionsResetIsUnderWay(t *testing.T) {
+	f := twoSessionNet(t)
+	f.m.session(sid(2)).underway = 7
+	before := f.calls()
+	expect(t, f.stale(1, oldAge, 3*time.Minute, f.untilAsked(before)), -1, "a request")
+	expect(t, f.lagging(1), false, "the session lags")
+	expect(t, f.m.session(sid(1)).pending == nil, true, "a reset pending")
+}
+
+// The queue goes between the net's selection and the last acceptance: the reset is
+// not made, the gaps it opened close.
+func TestNet_AnotherSessionsQueueLostBeforeTheLastAcceptanceCancelsTheReset(t *testing.T) {
+	f := twoSessionNet(t)
+	before := f.calls()
+	f.stale(1, oldAge, 5*time.Minute, f.untilAsked(before))
+	preReq, liveReq := f.lastSnapshot(pre), f.lastSnapshot(live)
+	f.accept(preReq)
+	f.m.session(sid(2)).lost = true
+	f.accept(liveReq)
+	expect(t, len(f.out.resets), 0, "resets")
+	expect(t, f.m.session(sid(1)).pending == nil, true, "a reset pending")
+	expect(t, f.m.counters.resetRequestsFailed, 1, "net requests failed")
+	expect(t, f.logCount("WARN The safety net did not reset session"), 1, "warnings of the reset not made")
+	for _, l := range f.m.session(sid(1)).lanes {
+		expect(t, l.gap == nil, true, "a gap of the lane")
+	}
+}
+

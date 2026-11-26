@@ -116,10 +116,19 @@ import (
 // check is made when the last acceptance arrives; a reset that fails it is cancelled. Once the feed is closing the resets waiting for the API
 // are cancelled, and an acceptance handled after that makes none.
 //
+// Nor is a session reset while another session that receives one of its enabled
+// producers has no bound queue (its channel is lost, or its reset is under way): the
+// reset would drop this session's backlog of the producer, whose recovery cannot be
+// asked for until the other queue is back, by when the window may have moved past the
+// checkpoint. The net waits, with no lagging, gap or request, and acts on a later
+// sample; a reset waiting for the API when that happens is cancelled at the last
+// acceptance. A producer in backoff, waiting for its slow retry or silent holds the
+// net back no more than before.
+//
 // The stale window counts only time spent stale: one that began before the last
 // recovery of the producer ended starts again, a recovery that took no sample of the
 // session included.
-//
+
 // The zero time.Time stands for "none" where a time is optional, and for "a
 // full snapshot" where it is a gap's start or a request's.
 //
@@ -1143,6 +1152,10 @@ func (m *machine) accepted(t *track, a *active, mono time.Duration) {
 			}
 			delete(p.unaccepted, t.id)
 			if len(p.unaccepted) == 0 {
+				if id, ok := m.awaitsOtherSessionsChannel(s); ok {
+					m.resetNotMadeForOtherChannel(s, id, mono)
+					continue
+				}
 				if id, ok := m.producerOutsideWindow(s); ok {
 					m.resetNotMadeOutsideWindow(s, id, mono)
 					continue
@@ -1720,7 +1733,7 @@ func (m *machine) trigger(s *session, t *track, age time.Duration, mono time.Dur
 		return
 	}
 	for _, l := range s.lanes {
-		if other := m.byID[l.producer]; m.catalog.enabled(other.id) && other.active != nil {
+		if other := m.byID[l.producer]; m.catalog.enabled(other.id) && (other.active != nil || m.awaitsOtherChannel(s, other)) {
 			return
 		}
 	}
@@ -1828,6 +1841,39 @@ func (m *machine) resetNotMadeOutsideWindow(s *session, producerID int, mono tim
 	m.log.Warnf("The safety net did not reset session %s: its backlog of producer %d reaches back past the producer's recovery window of %d minutes,"+
 		" where a recovery could not repeat what the reset would drop",
 		s.id, producerID, m.byID[producerID].producer.StatefulRecoveryWindowInMinutes())
+}
+
+// awaitsOtherChannel reports whether a session other than s that receives the
+// producer has no bound queue: the producer cannot be asked for until it has.
+func (m *machine) awaitsOtherChannel(s *session, t *track) bool {
+	for _, other := range m.sessions {
+		if other != s && (other.underway != 0 || other.lost) && other.lane(t.id) != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// awaitsOtherSessionsChannel finds, among the enabled producers the session
+// receives, one that awaitsOtherChannel: a reset drops the session's backlog of it,
+// and its recovery cannot be asked for until the other queue is back, by when the
+// recovery window may have moved past the checkpoint.
+func (m *machine) awaitsOtherSessionsChannel(s *session) (int, bool) {
+	for _, l := range s.lanes {
+		if m.catalog.enabled(l.producer) && m.awaitsOtherChannel(s, m.byID[l.producer]) {
+			return l.producer, true
+		}
+	}
+	return 0, false
+}
+
+// resetNotMadeForOtherChannel cancels a reset whose recoveries were accepted, but
+// whose producer's recovery now waits for another session's queue.
+func (m *machine) resetNotMadeForOtherChannel(s *session, producerID int, mono time.Duration) {
+	m.cancelReset(s, mono)
+	m.counters.resetRequestsFailed++
+	m.log.Warnf("The safety net did not reset session %s: another session that receives producer %d has no queue to send to, so a recovery of it could not repeat what the reset would drop",
+		s.id, producerID)
 }
 
 func (m *machine) resetNotMadeForDisabledProducer(s *session, producerID int, mono time.Duration) {

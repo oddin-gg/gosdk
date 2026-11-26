@@ -434,7 +434,12 @@ One recovery actor runs every producer's recovery state. The rules, per producer
   since the window moves on before the recovery asked into the new queue): the
   recovery could not repeat what the reset would drop, so the subscription is
   logged as lagging (one WARN) and nothing is asked, until it catches up. The
-  margin is a margin, not a proof. The net is off while the offset of the
+  margin is a margin, not a proof. It does not reset a subscription while
+  another subscription that receives one of its enabled producers has lost its
+  queue or has a reset under way: the recovery of that producer cannot be asked for
+  until the other queue is back, and the window may move on meanwhile; the net
+  waits and acts on a later sample, and a reset waiting for the API is cancelled if
+  it happens then. The net is off while the offset of the
   producer's clock is stale, and paused for a producer while a recovery of it is in
   flight or a gap is open, since a snapshot ahead of a live message makes it old on
   every subscription. It acts on a backlog old enough to reach the limit: a broker
