@@ -454,7 +454,10 @@ One recovery actor runs every producer's recovery state. The rules, per producer
   until the other queue is back, and the window may move on meanwhile; the net
   waits and acts on a later sample, and a reset waiting for the API is cancelled if
   it happens then. A subscription that is behind past the window margin lags and
-  is not reset. The net is off while the offset of the
+  is not reset. Nor is one whose checkpoint lies after the producer's clock (the
+  clock stepped back): a recovery is capped at the producer's now and would skip
+  what the reset drops in between; the net waits for the clock to pass it. The last
+  acceptance checks again that every enabled producer could still be asked for. The net is off while the offset of the
   producer's clock is stale, and paused for a producer while a recovery of it is in
   flight or a gap is open, since a snapshot ahead of a live message makes it old on
   every subscription. Time with a stale offset is no stale time: a window that
