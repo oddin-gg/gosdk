@@ -103,7 +103,8 @@ import (
 // cool-down, as between resets. So does a snapshot_complete of the session's own for one
 // of the recoveries it waits for: the session has what it sent. The
 // snapshot_completes of a session whose reset is under way are ignored, since they
-// come from the queue being replaced.
+// come from the queue being replaced, and the reset gives every lane of the session a
+// new gap, so that no recovery asked before it can close it.
 //
 // A session is not reset when its checkpoint of any producer the catalog has enabled
 // lies before where that producer's recovery would start, clamped to its stateful
