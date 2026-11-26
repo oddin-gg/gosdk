@@ -356,9 +356,13 @@ One recovery actor runs every producer's recovery state. The rules, per producer
   what it could not ask for), and a gap stays open until a recovery that covers
   it completes. `Producer.TimestampForRecovery()` is that oldest point (or the
   oldest checkpoint when nothing is open): the time a client that restarts
-  resumes from. Because the SDK acks a message when it enters the subscription's
-  buffer (`WithSubscriptionBuffer`, default 256), the point can still lie up to
-  that many messages behind what the client has finished.
+  resumes from. The SDK acks a message when it enters the subscription's buffer
+  (`WithSubscriptionBuffer`, default 256), and the point counts it from then on,
+  read or not. After a clean close in which the subscriptions were drained,
+  resuming from the point misses nothing. When the process ends without draining,
+  the messages still in a subscription's buffer are lost, up to the buffer's size
+  per subscription, and the point does not cover them: they lie before it (see
+  Delivery guarantees).
 - **The start the client sets.** `SetProducerRecoveryFromTimestamp` before `Connect`
   is the seed of a producer's first recovery, and the zero time clears it (a full
   snapshot). After `Connect` the zero time does nothing: what was set before it stays

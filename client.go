@@ -2375,7 +2375,9 @@ func (c *Client) SetProducerEnabled(ctx context.Context, id int, enabled bool) e
 // ignored, with a warning.
 //
 // The point to persist is Producer.TimestampForRecovery: the oldest time a
-// subscription may still be missing messages from.
+// subscription may still be missing messages from. It does not cover the
+// messages still in a subscription's buffer when the process ends without
+// draining it.
 func (c *Client) SetProducerRecoveryFromTimestamp(ctx context.Context, id int, t time.Time) error {
 	if err := c.producerManager.SetProducerRecoveryFromTimestamp(ctx, id, t); err != nil {
 		return fmt.Errorf("gosdk: set producer %d recovery-from %s: %w", id, t.Format(time.RFC3339), err)

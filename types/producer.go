@@ -47,11 +47,14 @@ type Producer interface {
 	// the oldest time any subscription may still be missing messages of this
 	// producer from, as the recovery of the feed knows it. Before the feed has
 	// connected it is the start set with SetProducerRecoveryFromTimestamp. It
-	// can move back as a loss opens a gap, and forward as a recovery closes it;
-	// the SDK acks a message when it enters the subscription's buffer, so the
-	// point can still lie up to the buffer's size behind what the client has
-	// finished. Persist it and pass it to SetProducerRecoveryFromTimestamp to
-	// miss nothing across a restart.
+	// can move back as a loss opens a gap, and forward as a recovery closes it.
+	//
+	// The SDK acks a message when it enters the subscription's buffer, and the
+	// point counts it from then on, whether or not the client has read it. After
+	// a clean close in which the subscriptions were drained, resuming from the
+	// point (pass it to SetProducerRecoveryFromTimestamp) misses nothing. When
+	// the process ends without draining, the messages still in a subscription's
+	// buffer are lost, and the point does not cover them: they lie before it.
 	TimestampForRecovery() time.Time
 	StatefulRecoveryWindowInMinutes() int
 	RecoveryInfo() *RecoveryInfo

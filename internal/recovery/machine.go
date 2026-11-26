@@ -32,7 +32,7 @@ import (
 // recovery that covers it completes, so asking again starts from the same
 // point as the first time. The oldest of the open gaps' starts and the
 // sessions' checkpoints is the producer's resume point: where a client that
-// restarts resumes to miss nothing, published through publishResumePoints.
+// restarts resumes from, published through publishResumePoints.
 //
 // Recoveries. A producer has at most one recovery in flight; whatever happens
 // meanwhile joins it. A recovery covers the gaps open when it was asked for. It
