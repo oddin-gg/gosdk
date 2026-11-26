@@ -825,3 +825,25 @@ func TestChannelReset_ALossTheWatcherToldBeforeTheResetIsRestored(t *testing.T) 
 		t.Fatalf("events = %s, want %s", got, want)
 	}
 }
+
+// An ack whose delivery was taken before a reset, though the envelope was
+// built after it, still counts as a late ack of the closed channel.
+func TestChannelReset_AnAckTakenBeforeTheResetIsDebugOnly(t *testing.T) {
+	var buf bytes.Buffer
+	var bufMu sync.Mutex
+	logger := log.New(slog.New(slog.NewTextHandler(lockedWriter{&bufMu, &buf}, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	o := newResetOpener()
+	c, _ := newResetConsumer(t, o, logger)
+
+	taken := c.resetEpoch.Load()
+	c.resetEpoch.Add(1) // a Reset closed the channel while the delivery was in hand
+	c.addUnsettled()
+	c.ackFunc(testDelivery(closedChannelAcknowledger{}), taken)()
+
+	bufMu.Lock()
+	text := buf.String()
+	bufMu.Unlock()
+	if !strings.Contains(text, "ack after a channel reset") || strings.Contains(text, "level=WARN") {
+		t.Fatalf("a late ack of a delivery taken before the reset must be debug only:\n%s", text)
+	}
+}

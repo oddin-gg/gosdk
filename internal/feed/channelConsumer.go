@@ -1048,6 +1048,7 @@ func (c *ChannelConsumer) consume(ctx context.Context, deliveries <-chan amqp.De
 			// successful decode) builds and returns one. It does NOT
 			// touch the AMQP Acknowledger; ack ownership travels with
 			// the envelope, nack on abort is admit's responsibility.
+			epoch := c.resetEpoch.Load()
 			qm := c.processDelivery(ctx, d)
 
 			// Manual ack semantics (NEXT.md §0.6 / §8): the delivery is
@@ -1061,7 +1062,7 @@ func (c *ChannelConsumer) consume(ctx context.Context, deliveries <-chan amqp.De
 			// not-admitted paths settle explicitly below since their ack
 			// closure never fires.
 			c.addUnsettled()
-			if !c.admit(ctx, d, QueueEnvelope{Msg: qm, Ack: c.ackFunc(d)}) {
+			if !c.admit(ctx, d, QueueEnvelope{Msg: qm, Ack: c.ackFunc(d, epoch)}) {
 				c.settleOne()
 				return
 			}
@@ -1087,8 +1088,11 @@ func (c *ChannelConsumer) consume(ctx context.Context, deliveries <-chan amqp.De
 // Close waited for it; a wedged write is failed with ErrClosed by the
 // connection teardown, which is benign for the same reason. Logged at
 // Debug (not Warn) so clean shutdowns stay quiet.
-func (c *ChannelConsumer) ackFunc(d amqp.Delivery) func() {
-	epoch := c.resetEpoch.Load()
+//
+// epoch is the reset count read when the delivery was received, before it was
+// processed: a Reset that closes the channel while the delivery is in hand
+// must still count as one that happened after the delivery was taken.
+func (c *ChannelConsumer) ackFunc(d amqp.Delivery, epoch uint64) func() {
 	return func() {
 		defer c.settleOne() // settle: terminal disposition reached
 		// Serialize against the graceful-teardown Close (see ackMu). If
