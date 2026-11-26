@@ -1678,3 +1678,58 @@ func TestNet_CancelledResetPausesByTheResetsLeftInTheCooldown(t *testing.T) {
 	expect(t, len(s.resets), 1, "resets in the cool-down")
 	expect(t, s.nextResetAt-f.m.mono(), 2*time.Minute, "the pause after the cancelled reset")
 }
+
+// ---- the check at the last acceptance covers a producer the net did not ask
+
+// The live producer is silent, so the net asks for prematch only; its backlog of the
+// live producer, inside the window when the net selects, ages out of it while the
+// prematch request is pending: the acceptance makes no reset.
+func TestNet_CheckpointOfAProducerTheNetDidNotAskAgesOutBeforeTheLastAcceptanceMakesNoReset(t *testing.T) {
+	f := upNetWithWindow(t, 60)
+	f.runFor(40 * time.Minute)
+	f.noLiveAlives = true
+	before := f.calls()
+	f.stale(1, oldAge, 5*time.Minute, f.untilAsked(before))
+	expect(t, f.calls(), before+1, "requests: prematch only, the live producer is silent")
+	expect(t, f.m.session(sid(1)).pending != nil, true, "a reset waiting for the API")
+	f.clock.advance(10 * time.Minute)
+	f.accept(f.lastSnapshot(pre))
+	expect(t, len(f.out.resets), 0, "resets")
+	expect(t, f.m.session(sid(1)).pending == nil, true, "a reset pending")
+	expect(t, f.m.counters.resetRequestsFailed, 1, "net requests failed")
+	expect(t, f.logCount("WARN The safety net did not reset session"), 1, "warnings of the reset not made")
+}
+
+// ---- lagging with two lanes above the limit
+
+// A session that lags stays lagging while any of its lanes is still above the
+// limit: a fresh message of one producer is not the session catching up.
+func TestNet_LaggingStaysWhileAnotherLaneOfTheSessionIsStillAboveTheLimit(t *testing.T) {
+	f := upNetWithWindow(t, 60)
+	f.runFor(70 * time.Minute)
+	for second := 1; second <= 61; second++ {
+		f.clock.advance(time.Second)
+		if second%10 == 0 {
+			f.aliveBoth()
+		}
+		at := f.now().Add(-70 * time.Minute)
+		f.m.processed(sid(1), pre, at, at, f.stamp(), 0)
+		f.m.processed(sid(1), live, at, at, f.stamp(), 0)
+		f.m.tick()
+	}
+	expect(t, f.lagging(1), true, "the session lags")
+	expect(t, f.m.session(sid(1)).lane(pre).above && f.m.session(sid(1)).lane(live).above, true, "both lanes above the limit")
+
+	f.freshLiveOf(pre)
+	expect(t, f.lagging(1), true, "lagging with the live lane still above")
+	expect(t, f.logCount("caught up"), 0, "lines saying it caught up")
+	f.freshLiveOf(live)
+	expect(t, f.lagging(1), false, "lagging once both lanes are fresh")
+	expect(t, f.logCount("caught up"), 1, "lines saying it caught up")
+}
+
+// freshLiveOf is session 1 taking a live message of the producer as of now.
+func (n *netFeed) freshLiveOf(producer int) {
+	at := n.now()
+	n.m.processed(sid(1), producer, at, at, n.stamp(), 0)
+}
