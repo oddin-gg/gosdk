@@ -442,7 +442,8 @@ One recovery actor runs every producer's recovery state. The rules, per producer
   it happens then. The net is off while the offset of the
   producer's clock is stale, and paused for a producer while a recovery of it is in
   flight or a gap is open, since a snapshot ahead of a live message makes it old on
-  every subscription. It acts on a backlog old enough to reach the limit: a broker
+  every subscription. Time with a stale offset is no stale time: a window that
+  began before an alive refreshed it starts again. It acts on a backlog old enough to reach the limit: a broker
   queue length limit that drops the oldest messages first can keep the age under
   it, so size such a limit against `WithAMQPPrefetch` and the limit.
 - **Processing delay.** Each subscription is judged on its own: a subscription

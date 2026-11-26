@@ -127,8 +127,10 @@ import (
 //
 // The stale window counts only time spent stale: one that began before the last
 // recovery of the producer ended starts again, a recovery that took no sample of the
-// session included.
-
+// session included, and so does one that began before an alive refreshed an offset
+// that had lapsed (two alive intervals without one); samples taken until then are no
+// samples of the net's. Both are the track's pausedUntil.
+//
 // The zero time.Time stands for "none" where a time is optional, and for "a
 // full snapshot" where it is a gap's start or a request's.
 //
@@ -711,6 +713,12 @@ func (m *machine) alive(producerID int, generatedAt, markAt time.Time, received 
 	mono := m.mono()
 	// the alive after the one that gave a recovery up: it may be asked for again
 	t.awaitsAlive = false
+	if t.hasAlive && received.mono-t.lastAliveAt > 2*t.aliveInterval {
+		// the offset was not fresh until now: what was taken before this alive
+		// was not measured against it, and a window of stale samples that began
+		// before it counts time with no age; it is the pause of a recovery
+		t.pausedUntil = max(t.pausedUntil, received.mono)
+	}
 	if t.hasAlive {
 		// a second at least, and the maximum inactivity at most, unless that is less
 		measured := min(max(received.mono-t.lastAliveAt, time.Second), max(time.Second, m.settings.maxInactivity))

@@ -731,8 +731,8 @@ func TestNet_OffForAProducerWhoseLastAliveIsOlderThanTwoIntervals(t *testing.T) 
 	f.noAlives = true
 	expect(t, f.stale(1, oldAge, 3*time.Minute, f.untilAsked(before)), -1, "a request without alives")
 	f.noAlives = false
-	expect(t, f.stale(1, oldAge, 3*time.Minute, f.untilAsked(before)), 70,
-		"seconds to a request once alives resume: the first at 10 s, then the window")
+	expect(t, f.stale(1, oldAge, 3*time.Minute, f.untilAsked(before)), 71,
+		"seconds to a request once alives resume: the first at 10 s, the sample taken with it is no sample of the net's, then the window")
 }
 
 // SafetyNetTest: snapshotMessagesAreNoSamples
@@ -1845,5 +1845,27 @@ func TestNet_AnotherSessionsQueueLostBeforeTheLastAcceptanceCancelsTheReset(t *t
 	for _, l := range f.m.session(sid(1)).lanes {
 		expect(t, l.gap == nil, true, "a gap of the lane")
 	}
+}
+
+// ---- the offset that was not fresh
+
+// Time while the producer's offset was not fresh is no stale time: a window that
+// began before the lapse starts again once an alive has refreshed the offset, even
+// when the lane took no sample meanwhile.
+func TestNet_StaleWindowDoesNotCountTheTimeTheOffsetWasNotFresh(t *testing.T) {
+	f := &netFeed{feed: withSettings(t, func(s *recoverySettings) { s.maxInactivity = 5 * time.Minute })}
+	f.open(1, all)
+	f.startFeed()
+	f.bothUp(1)
+	before := f.calls()
+	expect(t, f.stale(1, oldAge, 40*time.Second, f.untilAsked(before)), -1, "a request inside the window")
+	// no alive and no sample of the lane for longer than two alive intervals
+	for range 6 {
+		f.clock.advance(10 * time.Second)
+		f.m.tick()
+	}
+	f.aliveBoth()
+	expect(t, f.stale(1, oldAge, 3*time.Minute, f.untilAsked(before)), 61,
+		"seconds from the fresh alive to the request: a full window")
 }
 
