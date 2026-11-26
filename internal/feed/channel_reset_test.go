@@ -669,6 +669,36 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 	}
 }
 
+// eventLog records the hooks in the order they fire.
+type eventLog struct {
+	mu     sync.Mutex
+	events []string
+}
+
+func (l *eventLog) add(e string) {
+	l.mu.Lock()
+	l.events = append(l.events, e)
+	l.mu.Unlock()
+}
+
+func (l *eventLog) get() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.events...)
+}
+
+func (l *eventLog) install(c *ChannelConsumer, doneDelay time.Duration) {
+	c.SetChannelLostHook(func(types.MessageInterest, time.Time) { l.add("lost") })
+	c.SetChannelRestoredHook(func() { l.add("restored") })
+	c.SetConsumerGoneHook(func() { l.add("gone") })
+	c.SetChannelResetDoneHook(func(number uint64, replaced bool) {
+		// the report is recorded when the hook returns: a watcher armed before
+		// the hook returns has time to report its loss meanwhile
+		time.Sleep(doneDelay)
+		l.add("done")
+	})
+}
+
 // A Close that has begun, but has not cancelled the loop yet, when the
 // replacement arrives: the reset is not a success.
 func TestChannelReset_ReplacementLandingDuringShutdownIsNotASuccess(t *testing.T) {
@@ -711,5 +741,87 @@ func TestChannelReset_CloseOvertakingASuccessfulReopenReportsNoDone(t *testing.T
 	p.noMoreDone(t)
 	if p.gone.Load() != 1 {
 		t.Fatalf("gone fired %d times, want 1", p.gone.Load())
+	}
+}
+
+// A replacement that is closed already when it is installed: the reset is
+// reported done first, and the loss is the next round's own, restored once.
+func TestChannelReset_ReplacementClosedAtOnceIsReportedAfterTheDone(t *testing.T) {
+	o := newResetOpener()
+	c, _ := newResetConsumer(t, o, nil)
+	channelReopenBackoff = 20 * time.Millisecond
+	var log eventLog
+	// a slow done-report gives a watcher armed before it returns time to report first
+	log.install(c, 100*time.Millisecond)
+	o.afterOpen = func(call int32, rc *resetChannel) {
+		if call == 2 {
+			rc.shut()
+		}
+	}
+	openResetConsumer(t, c)
+
+	c.Reset(1)
+	waitFor(t, "the loss to be restored", func() bool { return len(log.get()) >= 3 })
+	time.Sleep(100 * time.Millisecond)
+	if got, want := strings.Join(log.get(), ","), "done,lost,restored"; got != want {
+		t.Fatalf("events = %s, want %s", got, want)
+	}
+	if got := o.calls.Load(); got != 3 {
+		t.Fatalf("CreateChannel calls = %d, want 3", got)
+	}
+}
+
+// A second Reset, once the first has finished, closes the replacement.
+func TestChannelReset_ASecondIndependentResetClosesTheReplacement(t *testing.T) {
+	o := newResetOpener()
+	c, p := newResetConsumer(t, o, nil)
+	openResetConsumer(t, c)
+
+	c.Reset(1)
+	if got := p.waitDone(t); got != (resetDone{1, true}) {
+		t.Fatalf("done = %+v", got)
+	}
+	c.Reset(2)
+	if got := p.waitDone(t); got != (resetDone{2, true}) {
+		t.Fatalf("done = %+v", got)
+	}
+	p.noMoreDone(t)
+	if o.created() != 3 {
+		t.Fatalf("channels created = %d, want 3", o.created())
+	}
+	if o.channel(1).effective.Load() != 1 {
+		t.Fatalf("the replacement was closed %d times, want 1", o.channel(1).effective.Load())
+	}
+	if p.lost.Load() != 0 {
+		t.Fatal("a reset was reported as a loss")
+	}
+}
+
+// The watcher tells a broker loss while the delivery handoff is parked, and a
+// Reset arrives before the loop gets to it: one loss, one restore, then the
+// reset is done.
+func TestChannelReset_ALossTheWatcherToldBeforeTheResetIsRestored(t *testing.T) {
+	o := newResetOpener()
+	c, _ := newResetConsumer(t, o, nil)
+	var log eventLog
+	log.install(c, 0)
+	out := openResetConsumer(t, c)
+
+	// the loop takes the delivery and parks handing it over
+	select {
+	case o.channel(0).deliveries <- testDelivery(&countingAcknowledger{}):
+	case <-time.After(3 * time.Second):
+		t.Fatal("the consumer takes no delivery")
+	}
+	o.channel(0).fireBrokerClose()
+	waitFor(t, "the watcher's loss", func() bool { return len(log.get()) == 1 })
+	c.Reset(5)
+	env := <-out // releases the handoff
+	env.Ack()
+
+	waitFor(t, "the reset to be done", func() bool { return len(log.get()) >= 3 })
+	time.Sleep(60 * time.Millisecond)
+	if got, want := strings.Join(log.get(), ","), "lost,restored,done"; got != want {
+		t.Fatalf("events = %s, want %s", got, want)
 	}
 }
