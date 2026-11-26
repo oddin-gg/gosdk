@@ -610,6 +610,7 @@ func (m *machine) resetDone(id uuid.UUID, number uint64, replaced bool) {
 	}
 	s.underway = 0
 	mono := m.mono()
+	m.pruneResets(s, mono)
 	if replaced {
 		s.resets = append(s.resets, mono)
 		s.nextResetAt = mono + backoff(firstResetBackoff, len(s.resets))
@@ -625,6 +626,14 @@ func (m *machine) resetDone(id uuid.UUID, number uint64, replaced bool) {
 		m.notSeen(s, mono)
 	}
 	m.releaseDeferred()
+}
+
+// pruneResets forgets the session's resets that are older than the cool-down at mono:
+// the cap and the backoff count the resets of the last safetyNetCooldown only.
+func (m *machine) pruneResets(s *session, mono time.Duration) {
+	for len(s.resets) > 0 && mono-s.resets[0] >= safetyNetCooldown {
+		s.resets = s.resets[1:]
+	}
 }
 
 // loseLane opens the lane's gap from its checkpoint, and remembers where the loss
@@ -1693,9 +1702,7 @@ func (m *machine) hasDownGaps(t *track) bool {
 // what the queue held like any other, to be asked for when it can be. Not once the
 // feed is closing: a reset then drops what the shutdown is about to settle.
 func (m *machine) trigger(s *session, t *track, age time.Duration, mono time.Duration) {
-	for len(s.resets) > 0 && mono-s.resets[0] >= safetyNetCooldown {
-		s.resets = s.resets[1:]
-	}
+	m.pruneResets(s, mono)
 	if len(s.resets) >= safetyNetResets {
 		if !s.lagging {
 			s.lagging = true
@@ -1859,6 +1866,7 @@ func (m *machine) reset(s *session, p *pendingReset) {
 // waits before it tries again, as long as after the resets already made.
 func (m *machine) cancelReset(s *session, mono time.Duration) {
 	s.pending = nil
+	m.pruneResets(s, mono)
 	s.nextResetAt = mono + backoff(firstResetBackoff, len(s.resets)+1)
 	for _, l := range s.lanes {
 		if l.gap != nil && l.gap.pendingReset {

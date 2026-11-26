@@ -1623,3 +1623,58 @@ func TestNet_RecoveryAskedBeforeTheResetDoesNotBringAProducerUpWhileTheQueueIsRe
 	f.complete(f.lastSnapshot(pre), 1, 2)
 	f.expectCause(live, causeProcessingDelay, "the live producer recovered by the new recovery, but its session still processes it late")
 }
+
+// ---- the reset history at the end of a reset
+
+// The first of the resets in the cool-down ages out while the third is under way:
+// when it is done two resets are left in the last ten minutes, and the pause is the
+// two minutes after the second, not the four after a third.
+func TestNet_ResetThatEndsOnceTheFirstHasAgedOutPausesByTheResetsLeftInTheCooldown(t *testing.T) {
+	f := upNet(t, all)
+	for range 2 {
+		before := f.calls()
+		f.stale(1, oldAge, 10*time.Minute, f.untilAsked(before))
+		f.accept(f.lastSnapshot(pre))
+		f.accept(f.lastSnapshot(live))
+		f.resetDone()
+		f.complete(f.lastSnapshot(pre), 1)
+		f.complete(f.lastSnapshot(live), 1)
+	}
+	before := f.calls()
+	f.stale(1, oldAge, 10*time.Minute, f.untilAsked(before))
+	f.accept(f.lastSnapshot(pre))
+	f.accept(f.lastSnapshot(live))
+	expectSessions(t, f.resetSessions(), []int{1, 1, 1}, "resets")
+	// the transport is slow: the first reset is more than ten minutes old when it
+	// ends, the second is not
+	f.runWithAlives(450 * time.Second)
+	f.resetDone()
+	s := f.m.session(sid(1))
+	expect(t, len(s.resets), 2, "resets in the cool-down")
+	expect(t, s.nextResetAt-f.m.mono(), 2*time.Minute, "the pause after the third reset")
+}
+
+// The same for a reset that is cancelled while the first of the resets in the
+// cool-down ages out: the pause counts the resets of the last ten minutes only.
+func TestNet_CancelledResetPausesByTheResetsLeftInTheCooldown(t *testing.T) {
+	f := upNet(t, all)
+	for range 2 {
+		before := f.calls()
+		f.stale(1, oldAge, 10*time.Minute, f.untilAsked(before))
+		f.accept(f.lastSnapshot(pre))
+		f.accept(f.lastSnapshot(live))
+		f.resetDone()
+		f.complete(f.lastSnapshot(pre), 1)
+		f.complete(f.lastSnapshot(live), 1)
+	}
+	f.runWithAlives(340 * time.Second)
+	before := f.calls()
+	f.stale(1, oldAge, 10*time.Minute, f.untilAsked(before))
+	preReq := f.lastSnapshot(pre)
+	f.runWithAlives(150 * time.Second)
+	expect(t, f.m.session(sid(1)).pending != nil, true, "a reset waiting for the API")
+	f.refuse(preReq)
+	s := f.m.session(sid(1))
+	expect(t, len(s.resets), 1, "resets in the cool-down")
+	expect(t, s.nextResetAt-f.m.mono(), 2*time.Minute, "the pause after the cancelled reset")
+}
