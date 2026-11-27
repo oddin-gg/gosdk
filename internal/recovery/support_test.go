@@ -497,7 +497,17 @@ func (r *rig) sync() {
 		}
 	}
 	barrier()
-	eventually(r.t, "the actor's lesser queues to empty", func() bool { return len(a.samples) == 0 && len(a.commands) == 0 })
+	eventually(r.t, "the actor's commands to empty", func() bool { return len(a.commands) == 0 })
+	// a queue that reads empty may hold a sample the actor has taken and not yet handled
+	// (it handles essential facts posted meanwhile first), so the samples are waited for
+	// with one of their own: it is handled after every sample posted before it
+	done := make(chan struct{})
+	a.postSample(factBarrier{done})
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		r.t.Fatal("the actor did not reach the sample barrier")
+	}
 	barrier()
 }
 
