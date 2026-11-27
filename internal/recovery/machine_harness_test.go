@@ -53,22 +53,18 @@ type fakeCatalog struct {
 	// hidden producers are known by id but not listed: ones the catalog had not
 	// activated when the machine was made.
 	hidden map[int]bool
-	// enableAtRead enables a producer at its n-th read of the catalog, counted in reads.
-	enableAtRead  map[int]int
-	disableAtRead map[int]int
-	reads         map[int]int
+	// flipAfterRead toggles a producer after the next read of it, which still gets the
+	// old answer: armed by flipAfterNextRead.
+	flipAfterRead map[int]bool
 }
 
-// disableAtNthRead has the producer disabled at the n-th read of the catalog from now on.
-func (c *fakeCatalog) disableAtNthRead(id, n int) {
-	c.disableAtRead = map[int]int{id: n}
-	c.reads = map[int]int{}
-}
-
-// enableAtNthRead has the producer enabled at the n-th read of the catalog from now on.
-func (c *fakeCatalog) enableAtNthRead(id, n int) {
-	c.enableAtRead = map[int]int{id: n}
-	c.reads = map[int]int{}
+// flipAfterNextRead arms the toggle of the producer's enabled state after the next read
+// of it: that read gets the old answer, every later one the new.
+func (c *fakeCatalog) flipAfterNextRead(id int) {
+	if c.flipAfterRead == nil {
+		c.flipAfterRead = map[int]bool{}
+	}
+	c.flipAfterRead[id] = true
 }
 
 func newFakeCatalog(window int) *fakeCatalog {
@@ -94,21 +90,17 @@ func (c *fakeCatalog) producer(id int) (types.Producer, bool) {
 	return nil, false
 }
 func (c *fakeCatalog) enabled(id int) bool {
-	if n, ok := c.enableAtRead[id]; ok {
-		// a client enables the producer while the machine is reading the catalog: from
-		// the n-th read on it is enabled
-		c.reads[id]++
-		if c.reads[id] >= n {
+	answer := !c.disabled[id]
+	if c.flipAfterRead[id] {
+		// a client toggles the producer right after the machine's first look at it
+		delete(c.flipAfterRead, id)
+		if answer {
+			c.disabled[id] = true
+		} else {
 			delete(c.disabled, id)
 		}
 	}
-	if n, ok := c.disableAtRead[id]; ok {
-		c.reads[id]++
-		if c.reads[id] >= n {
-			c.disabled[id] = true
-		}
-	}
-	return !c.disabled[id]
+	return answer
 }
 func (c *fakeCatalog) recoveryFrom(id int) time.Time { return c.from[id] }
 

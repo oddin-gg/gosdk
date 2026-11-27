@@ -699,6 +699,17 @@ func TestNet_CheckpointOfTheOtherProducerLeavesTheWindowBeforeTheLastAcceptanceC
 	expect(t, f.m.session(sid(1)).pending == nil, true, "a reset pending")
 }
 
+// lastAcceptanceNow makes the last acceptance of session 1's pending reset at once, with
+// every recovery it asked for accepted: the catalog is read from the first look on.
+func (n *netFeed) lastAcceptanceNow() {
+	n.t.Helper()
+	s := n.m.session(sid(1))
+	for id := range s.pending.asked {
+		s.pending.asked[id].accepted = true
+	}
+	n.m.lastAcceptance(s, s.pending, n.m.mono())
+}
+
 // The catalog changes while the last acceptance is checked: the producer is disabled when
 // the acceptance first reads it and enabled by the time the later checks do. All of them
 // go by the first reading, so the producer is treated as one enabled during the reset:
@@ -713,15 +724,13 @@ func TestNet_ProducerEnabledWhileTheLastAcceptanceIsCheckedIsOneEnabledDuringThe
 	before := f.calls()
 	f.stale(1, oldAge, 5*time.Minute, f.untilAsked(before))
 	expect(t, f.calls(), before+1, "requests: prematch only")
-	preReq := f.lastSnapshot(pre)
 
-	// the first read of the live producer in the last acceptance says disabled, the next enabled
-	f.cat.enableAtNthRead(live, 2)
-	f.accept(preReq)
+	// the first look at the live producer in the last acceptance says disabled, the next enabled
+	f.cat.flipAfterNextRead(live)
+	f.lastAcceptanceNow()
 	expectSessions(t, f.resetSessions(), []int{1}, "resets: judged on the first reading")
 	expectDown(t, f.feed, live, true, "the live producer, down for the reset")
 	f.expectCause(live, causeSafetyNetReset, "its cause")
-	f.cat.enableAtRead = nil
 	f.alive(live)
 	underway := f.calls()
 	f.resetDone()
@@ -1112,19 +1121,17 @@ func TestNet_ProducerDisabledAfterItsAcceptanceCancelsTheResetOnTheNextTick(t *t
 	expect(t, len(f.out.resets), 0, "resets")
 }
 
-// The catalog says enabled when the last acceptance runs its first checks and disabled when
-// it reads it for the lanes: an accepted producer that is disabled by that reading cancels
-// the reset instead of being skipped.
+// An accepted producer that the last acceptance finds disabled cancels the reset instead of
+// being skipped.
 func TestNet_AskedProducerDisabledByTheLastAcceptancesReadingCancelsTheReset(t *testing.T) {
 	f := upNet(t, all)
 	before := f.calls()
 	f.stale(1, oldAge, 5*time.Minute, f.untilAsked(before))
-	preReq, liveReq := f.lastSnapshot(pre), f.lastSnapshot(live)
-	f.accept(preReq)
-	// the last acceptance reads the prematch producer: once for the check of the asked
-	// producers, once for its lanes
-	f.cat.disableAtNthRead(pre, 2)
-	f.accept(liveReq)
+	// the prematch producer is disabled when the last acceptance, called as the API's last
+	// answer would call it, first looks at it (the checks of an acceptance that come before
+	// it would cancel the reset on their own)
+	f.cat.disabled[pre] = true
+	f.lastAcceptanceNow()
 	expect(t, len(f.out.resets), 0, "resets")
 	s := f.m.session(sid(1))
 	expect(t, s.pending == nil, true, "a reset pending")
@@ -1264,4 +1271,70 @@ func TestNet_OnTimeSampleOfAnotherLaneDoesNotEndTheLagOfALaneStillOverTheLimit(t
 	f.live(1, live, freshAge)
 	expect(t, f.lagging(1), false, "the session lags once lane A is at the limit")
 	expect(t, f.logCount("caught up"), 1, "log lines of the catch-up")
+}
+
+// Settled late: a stale sample taken before an on-time one reaches the machine after it. It
+// says nothing of how the lane is now, and does not start the window at its earlier take
+// time: the first stale sample taken after the on-time one does, and the net acts a full
+// window after it.
+func TestNet_StaleSampleSettledAfterANewerOnTimeOneDoesNotStartTheWindow(t *testing.T) {
+	f := upNet(t, all)
+	f.clock.advance(time.Second)
+	f.aliveBoth()
+	takenEarly := f.stamp()
+	for range 7 {
+		f.clock.advance(10 * time.Second)
+		f.aliveBoth()
+	}
+	at := f.now()
+	f.m.processed(sid(1), pre, at, at, f.stamp(), 0) // on time, taken now
+	stale := takenEarly.wall.Add(-oldAge)
+	f.m.processed(sid(1), pre, stale, stale, takenEarly, 0) // taken 70 s before, settled now
+	before := f.calls()
+	// the first stale sample taken after the on-time one: not yet a window since
+	if f.stale(1, oldAge, 5*time.Second, f.untilAsked(before)) >= 0 {
+		t.Fatal("the net acted on a window that began with the sample settled late")
+	}
+	expect(t, f.stale(1, oldAge, 5*time.Minute, f.untilAsked(before)) > 0, true, "the net acts once a full window has passed")
+}
+
+// A lane whose producer's clock offset has lapsed has no age: it does not keep the
+// session lagging when another lane takes an on-time sample.
+func TestNet_LaneWhoseOffsetLapsedDoesNotKeepTheSessionLagging(t *testing.T) {
+	f := upNet(t, all)
+	s := f.m.session(sid(1))
+	s.lagging = true
+	a := s.lane(pre)
+	a.above, a.hasAge, a.age = true, true, 3*time.Minute
+	// prematch sends no alive for two intervals, live goes on
+	f.clock.advance(10 * time.Second)
+	f.alive(live)
+	f.clock.advance(10 * time.Second)
+	f.alive(live)
+	f.clock.advance(5 * time.Second)
+	f.live(1, live, freshAge)
+	expect(t, f.lagging(1), false, "the session lags")
+}
+
+// The catch-up check runs on each disable: disable, tick, enable, tick, lag again,
+// disable, tick.
+func TestNet_DisabledProducerEndsALaterLagAgainOnceItWasEnabledInBetween(t *testing.T) {
+	f := upNet(t, all)
+	s := f.m.session(sid(1))
+	lag := func() {
+		s.lagging = true
+		s.lane(pre).above = true
+	}
+	lag()
+	f.cat.disabled[pre] = true
+	f.m.tick()
+	expect(t, f.lagging(1), false, "the session lags after the first disable")
+	delete(f.cat.disabled, pre)
+	f.alive(pre)
+	f.m.tick()
+	lag()
+	f.cat.disabled[pre] = true
+	f.m.tick()
+	expect(t, f.lagging(1), false, "the session lags after the second disable")
+	expect(t, f.logCount("caught up"), 2, "log lines of the catch-up")
 }

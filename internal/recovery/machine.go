@@ -874,6 +874,12 @@ func (m *machine) sessionAlive(id uuid.UUID, producerID int, generatedAt, markAt
 // while the session's reset is pending or under way, and for what was taken before
 // the last recovery of the producer ended, whenever it is handled.
 func (m *machine) sample(s *session, l *lane, t *track, generatedAt time.Time, taken Stamp) {
+	if l.sampled && taken.mono < l.sampledAt {
+		// settled after a newer one: what the pump finished late says nothing of how
+		// the lane is now, and would start the window at a time already behind it
+		return
+	}
+	l.sampled, l.sampledAt = true, taken.mono
 	mono := m.mono()
 	if !m.offsetFresh(t, mono) {
 		l.hasAge = false
@@ -1903,10 +1909,13 @@ func (m *machine) clearStaleWindows(t *track) {
 
 // behind reports whether an enabled lane of the session is still behind: above the
 // limit, or with a last age over it though a sample taken during a recovery cleared
-// its flag. A lane whose offset lapsed has no age and counts as not behind.
+// its flag, while its producer's clock offset is fresh. A lane whose offset lapsed has
+// no age and counts as not behind.
 func (m *machine) behind(s *session) bool {
+	mono := m.mono()
 	return slices.ContainsFunc(s.lanes, func(l *lane) bool {
-		return m.catalog.enabled(l.producer) && (l.above || (l.hasAge && l.age > m.settings.staleLimit))
+		return m.catalog.enabled(l.producer) && m.offsetFresh(m.byID[l.producer], mono) &&
+			(l.above || (l.hasAge && l.age > m.settings.staleLimit))
 	})
 }
 
@@ -2678,6 +2687,10 @@ type lane struct {
 	// the monotonic clock.
 	above      bool
 	aboveSince time.Duration
+	// sampledAt is the newest take time, on the monotonic clock, a sample of the lane
+	// has been judged at, when sampled.
+	sampledAt time.Duration
+	sampled   bool
 }
 
 // gap is what a session misses of a producer, from from; the zero time for
