@@ -443,7 +443,8 @@ One recovery actor runs every producer's recovery state. The rules, per producer
   minutes, as between resets, unless a lost connection or channel cancelled it: that
   is no failure of the net's. It does not reset a
   subscription whose backlog reaches past the producer's stateful recovery window
-  (its checkpoint of any enabled producer it receives is older than the start a
+  (its checkpoint of any enabled producer it receives, or the client's pending
+  recovery timestamp for it when that is earlier, is older than the start a
   recovery could have, or lies within ten minutes of it, at most half the window,
   since the window moves on before the recovery asked into the new queue): the
   recovery could not repeat what the reset would drop, so the subscription is
@@ -457,7 +458,11 @@ One recovery actor runs every producer's recovery state. The rules, per producer
   is not reset. Nor is one whose checkpoint lies after the producer's clock (the
   clock stepped back): a recovery is capped at the producer's now and would skip
   what the reset drops in between; the net waits for the clock to pass it. The last
-  acceptance checks again that every enabled producer could still be asked for. The net is off while the offset of the
+  acceptance checks again that every enabled producer could still be asked for and
+  that none has a gap open that the net did not open; a gap opened meanwhile
+  cancels the reset, and the producer's own recovery goes first. A subscription
+  that starts opening after a reset was handed over holds the recovery that follows
+  the reset until its queue is bound or it is gone. The net is off while the offset of the
   producer's clock is stale, and paused for a producer while a recovery of it is in
   flight or a gap is open, since a snapshot ahead of a live message makes it old on
   every subscription. Time with a stale offset is no stale time: a window that
