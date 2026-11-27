@@ -50,6 +50,21 @@ type fakeCatalog struct {
 	list     []types.Producer
 	disabled map[int]bool
 	from     map[int]time.Time
+	// hidden producers are known by id but not listed: ones the catalog had not
+	// activated when the machine was made.
+	hidden map[int]bool
+	// flipAfterRead toggles a producer after the next read of it, which still gets the
+	// old answer: armed by flipAfterNextRead.
+	flipAfterRead map[int]bool
+}
+
+// flipAfterNextRead arms the toggle of the producer's enabled state after the next read
+// of it: that read gets the old answer, every later one the new.
+func (c *fakeCatalog) flipAfterNextRead(id int) {
+	if c.flipAfterRead == nil {
+		c.flipAfterRead = map[int]bool{}
+	}
+	c.flipAfterRead[id] = true
 }
 
 func newFakeCatalog(window int) *fakeCatalog {
@@ -63,7 +78,9 @@ func newFakeCatalog(window int) *fakeCatalog {
 	}
 }
 
-func (c *fakeCatalog) producers() []types.Producer { return slices.Clone(c.list) }
+func (c *fakeCatalog) producers() []types.Producer {
+	return slices.DeleteFunc(slices.Clone(c.list), func(p types.Producer) bool { return c.hidden[p.ID()] })
+}
 func (c *fakeCatalog) producer(id int) (types.Producer, bool) {
 	for _, p := range c.list {
 		if p.ID() == id {
@@ -72,7 +89,19 @@ func (c *fakeCatalog) producer(id int) (types.Producer, bool) {
 	}
 	return nil, false
 }
-func (c *fakeCatalog) enabled(id int) bool           { return !c.disabled[id] }
+func (c *fakeCatalog) enabled(id int) bool {
+	answer := !c.disabled[id]
+	if c.flipAfterRead[id] {
+		// a client toggles the producer right after the machine's first look at it
+		delete(c.flipAfterRead, id)
+		if answer {
+			c.disabled[id] = true
+		} else {
+			delete(c.disabled, id)
+		}
+	}
+	return answer
+}
 func (c *fakeCatalog) recoveryFrom(id int) time.Time { return c.from[id] }
 
 // fakeOutbox captures what the machine does.
@@ -89,14 +118,27 @@ type fakeOutbox struct {
 	// ended is the id of every snapshot request that left flight, in order.
 	ended    []int
 	outcomes []eventOutcome
+	// resets are the sessions the machine asked to reset, with the numbers of
+	// the resets, in order.
+	resets       []uuid.UUID
+	resetNumbers []uint64
+	// onRequest, when set, is called for every snapshot request as it is sent.
+	onRequest func(snapshotRequest)
+	// onReset, when set, is called for every reset as it is asked of the transport.
+	onReset func(uuid.UUID, uint64)
 }
 
 func newFakeOutbox() *fakeOutbox {
 	return &fakeOutbox{down: map[int]bool{}}
 }
 
-func (o *fakeOutbox) request(call snapshotRequest) { o.calls = append(o.calls, call) }
-func (o *fakeOutbox) requestEnded(id int)          { o.ended = append(o.ended, id) }
+func (o *fakeOutbox) request(call snapshotRequest) {
+	o.calls = append(o.calls, call)
+	if o.onRequest != nil {
+		o.onRequest(call)
+	}
+}
+func (o *fakeOutbox) requestEnded(id int) { o.ended = append(o.ended, id) }
 func (o *fakeOutbox) recoveryInfo(id int, info types.RecoveryInfo) {
 	o.infos = append(o.infos, publishedInfo{producerID: id, info: info})
 }
@@ -105,7 +147,13 @@ func (o *fakeOutbox) resumePoint(id int, point time.Time) {
 }
 func (o *fakeOutbox) eventRequest(call eventRequest)  { o.events = append(o.events, call) }
 func (o *fakeOutbox) eventEnded(outcome eventOutcome) { o.outcomes = append(o.outcomes, outcome) }
-func (o *fakeOutbox) reset(uuid.UUID, uint64)         {}
+func (o *fakeOutbox) reset(session uuid.UUID, number uint64) {
+	o.resets = append(o.resets, session)
+	o.resetNumbers = append(o.resetNumbers, number)
+	if o.onReset != nil {
+		o.onReset(session, number)
+	}
+}
 func (o *fakeOutbox) status(change statusChange) {
 	o.statuses = append(o.statuses, change)
 	o.down[change.producerID] = change.down
@@ -191,6 +239,8 @@ type feed struct {
 	// opened are the sessions open, for the alives in their queues.
 	opened []int
 	ids    int
+	// seenLogs are the log lines taken so far by logCount.
+	seenLogs []string
 }
 
 func defaultSettings() recoverySettings {
@@ -199,6 +249,8 @@ func defaultSettings() recoverySettings {
 		maxInactivity:           20 * time.Second,
 		maxRecoveryTime:         360 * time.Minute,
 		snapshotCompleteTimeout: 5 * time.Minute,
+		staleLimit:              2 * time.Minute,
+		staleWindow:             time.Minute,
 		nodeID:                  &node,
 	}
 }

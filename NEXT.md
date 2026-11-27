@@ -837,6 +837,7 @@ This means a slow or stalled consumer applies backpressure all the way to the br
 
 - `WithAMQPPrefetch(n int)` — broker-side prefetch. Default 1000, accepted range 0..65535 (AMQP carries the count as uint16).
 - `WithSubscriptionBuffer(n int)` — internal channel buffer. Default 256, max 2^20.
+- `WithStaleMessageLimit(d)` / `WithStaleMessageWindow(d)` — the safety net's thresholds: a subscription whose live messages stay older than the limit (default 2 min, > 10 s, ≤ 24 h) for the window (default 1 min, ≥ 1 s, ≤ 24 h) has its AMQP channel replaced once the recoveries asked for first, one for every enabled producer it receives, are accepted. The net starts only when every one of those producers can be asked for now: one that is silent, in backoff, mid-recovery, has a gap open or is held back by another subscription's missing queue holds it back, and a recovery of the net's that ends before the reset cancels it. A reset drops up to `WithAMQPPrefetch` prefetched messages, which the recovery repeats. A subscription whose backlog, or the client's pending recovery timestamp for a producer when that is earlier, reaches past the producer's stateful recovery window, or within ten minutes of its edge (at most half the window), is not reset (the recovery could not repeat what the reset would drop) but logged as lagging.
 - The "slow consumer" situation emits a `slog.Warn` once per detection window if the buffer stays full for >5s — observability, not action.
 
 **Known bound gap (open team decision, pre-beta):** backpressure is
@@ -1145,7 +1146,7 @@ Options listed in §4.
 `gosdk.NewConfig` returns a `Config`; validation happens in `gosdk.New(ctx, cfg)`. Missing/invalid config surfaces as `ErrInvalidConfig` (wrapped with detail) UP FRONT, not as a runtime surprise later. New validates:
 
 - **Required:** access token present; API and MQ endpoints resolvable from the environment/region (or the forced hosts).
-- **Bounded options:** durations (`WithMaxInactivity`, `WithMaxRecoveryExecution`, `WithHTTPClientTimeout`, `WithShutdownTimeout`) must be > 0; `WithInitialSnapshotTime` ≥ 0; `WithMessagingPort` in 1..65535; `WithAMQPPrefetch` / `WithSubscriptionBuffer` / `WithAPICallBodyLimit` ≥ 0 (0 = default/none); `WithExceptionStrategy` / `WithAPICallLogging` a known enum; default locale and exchange/prefix names non-empty.
+- **Bounded options:** durations (`WithMaxInactivity`, `WithMaxRecoveryExecution`, `WithHTTPClientTimeout`, `WithShutdownTimeout`) must be > 0; `WithInitialSnapshotTime` ≥ 0; `WithStaleMessageLimit` > 10 s and `WithStaleMessageWindow` ≥ 1 s, both ≤ 24 h; `WithMessagingPort` in 1..65535; `WithAMQPPrefetch` / `WithSubscriptionBuffer` / `WithAPICallBodyLimit` ≥ 0 (0 = default/none); `WithExceptionStrategy` / `WithAPICallLogging` a known enum; default locale and exchange/prefix names non-empty.
 - **Forced hosts:** `WithAPIHost` / `WithMQHost` must be a bare host (no scheme — already rejected at option time — no userinfo/path/query/fragment/whitespace, well-formed IPv6 brackets). The API host may carry an explicit numeric `:port`; the **MQ host must NOT**, because the dialer appends `WithMessagingPort` (a `host:port` MQ value would build `host:port:port`).
 
 ### Environment helpers

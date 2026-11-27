@@ -148,7 +148,9 @@ func (a *recoveryActor) eventRequest(r eventRequest) {
 // end of the reset comes back as a fact, once: from the session's consumer, or
 // from here, not replaced, when the session has no consumer to reset.
 func (a *recoveryActor) reset(session uuid.UUID, number uint64) {
-	if a.isClosed() {
+	if a.isClosed() || a.stopping() {
+		// the close is signalled, or about to be: a reset now would delete a queue the
+		// feed's shutdown is settling, and the follow-up could not be asked for
 		return
 	}
 	r := a.mgr.resetterOf(session)
@@ -157,6 +159,12 @@ func (a *recoveryActor) reset(session uuid.UUID, number uint64) {
 		defer a.detached.Done()
 		if r == nil {
 			a.postEssential(factResetDone{session: session, number: number})
+			return
+		}
+		// the close may have been signalled since the check above: no reset is started
+		// then. This narrows the window, it does not close it: a reset that meets the
+		// consumer's own close is ended by the consumer as a close.
+		if a.isClosed() || a.stopping() {
 			return
 		}
 		r.Reset(number)

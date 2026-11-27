@@ -100,6 +100,8 @@ gosdk.NewConfig(token, types.IntegrationEnvironment,
     gosdk.WithPreloadLocales(types.EnLocale, types.RuLocale),
     gosdk.WithMaxInactivity(20*time.Second),
     gosdk.WithMaxRecoveryExecution(6*time.Hour),
+    gosdk.WithStaleMessageLimit(2*time.Minute),
+    gosdk.WithStaleMessageWindow(time.Minute),
     gosdk.WithShutdownTimeout(5*time.Second),
     gosdk.WithLogger(slog.Default()),
     gosdk.WithAPICallLogging(gosdk.APILogMetadata),
@@ -402,6 +404,89 @@ One recovery actor runs every producer's recovery state. The rules, per producer
   processing delay, an alive interval, an unsubscribed alive) does not end it. One asked for while a subscription
   is waiting for its queue to be bound waits for it. At most 128 per producer are
   pending; an identical request while one is in flight is that one.
+- **The safety net.** A subscription whose live messages stay older than
+  `WithStaleMessageLimit` (default 2 minutes, by the producer's clock, measured
+  against the offset taken from its alives) for `WithStaleMessageWindow` (default
+  1 minute) is too far behind: the broker's queue for it holds a backlog that
+  only grows. The SDK first asks for a recovery of every producer the
+  subscription receives that is enabled, from the subscription's checkpoint, and
+  once the API has accepted them all it replaces the subscription's AMQP channel,
+  which drops the queue and what it held. The recoveries are then asked for again,
+  as after a lost queue, so nothing is missing afterwards; a recovery of those
+  producers that is still in flight then was asked before the reset, cannot cover
+  what the reset dropped, and is given up and asked for again in the same step. The producers the subscription receives
+  are down with `ProcessingQueueDelayViolationProducerStatusReason` while this
+  runs, and the subscription's `snapshot_complete`s that arrive meanwhile are
+  ignored, since they come from the queue being replaced. A producer that was
+  disabled through the reset and is enabled after it is down for the reset from the
+  moment it is enabled until its recovery completes. A reset drops what the
+  broker had delivered ahead of the client but not yet handed over, up to
+  `WithAMQPPrefetch` messages (default 1000), and raw messages of a disabled producer
+  still queued (with `WithExtendedDataReporting` they are delivered, though the
+  producer's typed messages are not), which no recovery repeats; and what is still in the
+  subscription's buffer is delivered all the same: the recovery repeats those, so a
+  client may see a message twice, never a hole. A subscription is reset at most
+  three times in ten minutes, with 1, 2 and 4 minutes between the resets; after
+  that it is only logged as lagging (a WARN) until it catches up or the first reset
+  ages out, and the processing delay below keeps its producers down for as long as
+  it is late. The net starts only when every enabled producer the subscription
+  receives can be asked for now: a producer that is silent, in backoff or waiting
+  for its slow retry, with a recovery in flight, with a gap open (its own recovery,
+  which starts at that older gap, goes first), or held back by another
+  subscription without a queue, holds the net back for every subscription that
+  receives it, whatever the others are doing. A reset drops the backlog of all of
+  them, and a recovery that could only start later would start from a window that
+  has moved on and repeat nothing of it. The net then waits, with no request,
+  lagging or backoff, and acts on a later sample. A recovery the net asked for
+  that ends before the reset is made, however it ends (the API refuses it or it
+  times out, it is given up, completes, or a connection or channel is lost), a
+  producer that is disabled in the meantime, one that is enabled in the meantime,
+  and a `snapshot_complete` of the subscription's own for one of its recoveries (it
+  has what the recovery sent) cancel the reset. The net then waits before it tries
+  again, 1, 2 or 4 minutes by the number of resets it has made in the last ten
+  minutes, as between resets, unless a lost connection or channel cancelled it: that
+  is no failure of the net's. It does not reset a
+  subscription whose backlog reaches past the producer's stateful recovery window
+  (its checkpoint of any enabled producer it receives, or the client's pending
+  recovery timestamp for it when that is earlier, is older than the start a
+  recovery could have, or lies within ten minutes of it, at most half the window,
+  since the window moves on before the recovery asked into the new queue): the
+  recovery could not repeat what the reset would drop, so the subscription is
+  logged as lagging (one WARN) and nothing is asked, until it catches up. The
+  margin is a margin, not a proof. It does not reset a subscription while
+  another subscription that receives one of its enabled producers has lost its
+  queue or has a reset under way: the recovery of that producer cannot be asked for
+  until the other queue is back, and the window may move on meanwhile; the net
+  waits and acts on a later sample, and a reset waiting for the API is cancelled if
+  it happens then. A subscription that is behind past the window margin lags and
+  is not reset. Nor is one whose checkpoint lies after the producer's clock (the
+  clock stepped back): a recovery is capped at the producer's now and would skip
+  what the reset drops in between; the net waits for the clock to pass it. A producer the net asked
+  for that is disabled before the reset is made cancels it. The net also waits while
+  an enabled producer's clock offset is not fresh. A producer disabled before the net
+  asked, and enabled again before the transport closes the queue, is not covered by
+  the window check; a reset already handed to the transport cannot be recalled when
+  another subscription's queue is lost in that instant; and a broker that delays the
+  reply to the old channel's close delays the reset's end, which belongs to the
+  transport. The last
+  acceptance checks again that every enabled producer could still be asked for and
+  that none has a gap open that the net did not open; a gap opened meanwhile
+  cancels the reset, and the producer's own recovery goes first. A subscription
+  that starts opening after a reset was handed over holds the recovery that follows
+  the reset until its queue is bound or it is gone. A producer the catalog activates
+  while the feed runs has no lane until its first alive is handled: the net does not
+  see it, and its first recovery, from the client's start, covers what a reset dropped
+  of it. With `WithInitialSnapshotTime` set and no start from the client, that
+  recovery starts that long before the producer was first learned, and what a reset
+  dropped of it from before that is not repeated. The last acceptance also cancels the
+  reset when a producer's clock offset has lapsed (no alive for two alive intervals)
+  since the net asked. The net is off while the offset of the
+  producer's clock is stale, and paused for a producer while a recovery of it is in
+  flight or a gap is open, since a snapshot ahead of a live message makes it old on
+  every subscription. Time with a stale offset is no stale time: a window that
+  began before an alive refreshed it starts again. It acts on a backlog old enough to reach the limit: a broker
+  queue length limit that drops the oldest messages first can keep the age under
+  it, so size such a limit against `WithAMQPPrefetch` and the limit.
 - **Processing delay.** Each subscription is judged on its own: a subscription
   that handles messages more than `WithMaxInactivity` after the producer
   generated them, or takes nothing for that long while alives flow, takes the
@@ -456,6 +541,12 @@ What a client that relied on the earlier behaviour will see differently:
   the last system alive's time, which skips what was queued but not yet handled.
   Is: the oldest point a subscription may still be missing, from the settled
   deliveries.
+- **A subscription that stays far behind is reset.** Was: nothing bounded how far
+  a subscription could fall behind; its queue grew on the broker until the
+  broker dropped messages or the queue was lost. Is: see the safety net above
+  (`WithStaleMessageLimit`, `WithStaleMessageWindow`). Up to `WithAMQPPrefetch`
+  prefetched messages (1000 by default) are dropped with the queue at a reset, and
+  the recovery repeats them.
 - **Processing delay per subscription, and no recovery for it.** Was: one
   producer-wide maximum, so a slow subscription next to a fast one went unseen. Is:
   each subscription is judged on its own.

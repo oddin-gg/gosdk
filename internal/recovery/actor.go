@@ -263,6 +263,12 @@ func newRecoveryActor(
 	return a
 }
 
+// The safety net's settings for a configuration that does not carry them.
+const (
+	defaultStaleMessageLimit  = 2 * time.Minute
+	defaultStaleMessageWindow = time.Minute
+)
+
 // settingsOf is the client's settings the recovery rules use. The deadline for a
 // snapshot_complete is never above the maximum recovery time, which it
 // subdivides.
@@ -271,7 +277,13 @@ func settingsOf(cfg config.Config, initialSnapshotTime time.Duration) recoverySe
 	if maxTime := cfg.MaxRecoveryExecution(); maxTime > 0 && (timeout <= 0 || timeout > maxTime) {
 		timeout = maxTime
 	}
+	limit, window := defaultStaleMessageLimit, defaultStaleMessageWindow
+	if stale, ok := cfg.(config.StaleMessages); ok {
+		limit, window = stale.StaleMessageLimit(), stale.StaleMessageWindow()
+	}
 	return recoverySettings{
+		staleLimit:              limit,
+		staleWindow:             window,
 		maxInactivity:           cfg.MaxInactivity(),
 		maxRecoveryTime:         cfg.MaxRecoveryExecution(),
 		snapshotCompleteTimeout: timeout,

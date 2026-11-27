@@ -20,6 +20,15 @@ import (
 	"github.com/oddin-gg/gosdk/types"
 )
 
+// StaleMessages is what the safety net of the recovery manager reads: how old a
+// subscription's messages may be, and for how long, before the subscription's
+// channel is replaced. The gosdk configuration implements it beside Config; a
+// configuration that does not gets the defaults.
+type StaleMessages interface {
+	StaleMessageLimit() time.Duration
+	StaleMessageWindow() time.Duration
+}
+
 // Config is the interface every internal manager depends on for config
 // access. All values are immutable from the manager's perspective —
 // the legacy Set* methods on the pre-v2 interface are gone (they were

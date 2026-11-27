@@ -125,6 +125,14 @@ const (
 	// validateConfigBounds for the rationale (post-broker-setup
 	// allocation must never panic/OOM on an accepted config).
 	maxSubscriptionBuffer = 1 << 20
+
+	// The bounds of the safety net's settings: a limit under ten seconds would
+	// read the jitter of a busy queue as a backlog, a window under the recovery
+	// actor's one-second tick could not be told apart from none, and a day
+	// is longer than any broker keeps a queue worth waiting for.
+	minStaleMessageLimit   = 10 * time.Second
+	minStaleMessageWindow  = time.Second
+	maxStaleMessageSetting = 24 * time.Hour
 )
 
 // dropWarnInterval rate-limits the slog.Warn issued when an event channel
@@ -692,6 +700,7 @@ func isValidHostname(h string) bool {
 //   - initialSnapshotTime is "0 = use default", so only < 0 is rejected;
 //   - sizes (prefetch, buffer, body limit) are "0 = default/none", so
 //     only < 0 is rejected;
+//   - the stale-message limit must be > 10s and the window >= 1s, both at most 24h;
 //   - port must be in 1..65535; enums must be a defined value; the
 //     default locale and exchange/prefix names must be non-empty.
 func validateConfigBounds(cfg *Config) error {
@@ -709,6 +718,12 @@ func validateConfigBounds(cfg *Config) error {
 		if c.d <= 0 {
 			return fmt.Errorf("%w: %s must be > 0, got %v", ErrInvalidConfig, c.name, c.d)
 		}
+	}
+	if cfg.staleMessageLimit <= minStaleMessageLimit || cfg.staleMessageLimit > maxStaleMessageSetting {
+		return fmt.Errorf("%w: WithStaleMessageLimit must be > %v and <= %v, got %v", ErrInvalidConfig, minStaleMessageLimit, maxStaleMessageSetting, cfg.staleMessageLimit)
+	}
+	if cfg.staleMessageWindow < minStaleMessageWindow || cfg.staleMessageWindow > maxStaleMessageSetting {
+		return fmt.Errorf("%w: WithStaleMessageWindow must be >= %v and <= %v, got %v", ErrInvalidConfig, minStaleMessageWindow, maxStaleMessageSetting, cfg.staleMessageWindow)
 	}
 	if cfg.snapshotCompleteDeadline > cfg.maxRecoveryExecution {
 		return fmt.Errorf("%w: WithSnapshotCompleteDeadline (%v) must not exceed WithMaxRecoveryExecution (%v)", ErrInvalidConfig, cfg.snapshotCompleteDeadline, cfg.maxRecoveryExecution)

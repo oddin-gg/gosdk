@@ -267,8 +267,10 @@ type fakeManagerOps struct {
 	emittedMsgs []types.RecoveryMessage
 	processing  map[uuid.UUID]time.Duration
 	resetters   map[uuid.UUID]Resetter
-	gcs         int
-	nextID      atomic.Uint32
+	// onResetterOf, when set, runs as a session's handle is looked up.
+	onResetterOf func()
+	gcs          int
+	nextID       atomic.Uint32
 }
 
 func newFakeManagerOps() *fakeManagerOps { return &fakeManagerOps{} }
@@ -315,6 +317,9 @@ func (f *fakeManagerOps) emitRecoveryMessage(msg types.RecoveryMessage) {
 }
 
 func (f *fakeManagerOps) resetterOf(session uuid.UUID) Resetter {
+	if f.onResetterOf != nil {
+		f.onResetterOf()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.resetters[session]
@@ -492,7 +497,17 @@ func (r *rig) sync() {
 		}
 	}
 	barrier()
-	eventually(r.t, "the actor's lesser queues to empty", func() bool { return len(a.samples) == 0 && len(a.commands) == 0 })
+	eventually(r.t, "the actor's commands to empty", func() bool { return len(a.commands) == 0 })
+	// a queue that reads empty may hold a sample the actor has taken and not yet handled
+	// (it handles essential facts posted meanwhile first), so the samples are waited for
+	// with one of their own: it is handled after every sample posted before it
+	done := make(chan struct{})
+	a.postSample(factBarrier{done})
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		r.t.Fatal("the actor did not reach the sample barrier")
+	}
 	barrier()
 }
 
