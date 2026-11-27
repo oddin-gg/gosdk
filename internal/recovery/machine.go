@@ -894,7 +894,7 @@ func (m *machine) sample(s *session, l *lane, t *track, generatedAt time.Time, t
 	}
 	if l.age <= m.settings.staleLimit {
 		l.above = false
-		if s.lagging && !slices.ContainsFunc(s.lanes, func(other *lane) bool { return other.above && m.catalog.enabled(other.producer) }) {
+		if s.lagging && !m.behind(s) {
 			s.lagging = false
 			m.log.Infof("Session %s caught up", s.id)
 		}
@@ -1901,6 +1901,15 @@ func (m *machine) clearStaleWindows(t *track) {
 	}
 }
 
+// behind reports whether an enabled lane of the session is still behind: above the
+// limit, or with a last age over it though a sample taken during a recovery cleared
+// its flag. A lane whose offset lapsed has no age and counts as not behind.
+func (m *machine) behind(s *session) bool {
+	return slices.ContainsFunc(s.lanes, func(l *lane) bool {
+		return m.catalog.enabled(l.producer) && (l.above || (l.hasAge && l.age > m.settings.staleLimit))
+	})
+}
+
 // producerDisabled is called on the tick that first sees the producer disabled: a session
 // that lagged for it has caught up unless an enabled lane of its own is still behind. A
 // lane is behind when it is above the limit or its last age says so, though a sample
@@ -1912,11 +1921,7 @@ func (m *machine) producerDisabled(t *track) {
 		if s.lane(t.id) == nil || !s.lagging {
 			continue
 		}
-		behind := slices.ContainsFunc(s.lanes, func(other *lane) bool {
-			return m.catalog.enabled(other.producer) &&
-				(other.above || (other.hasAge && other.age > m.settings.staleLimit))
-		})
-		if !behind {
+		if !m.behind(s) {
 			s.lagging = false
 			m.log.Infof("Session %s caught up", s.id)
 		}

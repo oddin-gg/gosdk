@@ -488,22 +488,29 @@ func TestNet_WarningOfARefusedRequestCarriesNoTextOfTheAnswer(t *testing.T) {
 	}
 }
 
-// The producer that is accepted and then silent, before the last acceptance, would
-// have its follow-up blocked once the queue is gone: no reset, with the net's backoff.
 func TestNet_ProducerThatCannotBeAskedAtTheLastAcceptanceCancelsTheReset(t *testing.T) {
-	f := upNet(t, all)
+	// the inactivity limit is shorter than two alive intervals: past it a producer cannot
+	// be asked for while its clock offset is still fresh
+	f := &netFeed{feed: withSettings(t, func(s *recoverySettings) { s.maxInactivity = 12 * time.Second })}
+	f.open(1, all)
+	f.startFeed()
+	f.bothUp(1)
 	before := f.calls()
 	f.stale(1, oldAge, 5*time.Minute, f.untilAsked(before))
 	preReq, liveReq := f.lastSnapshot(pre), f.lastSnapshot(live)
 	f.accept(liveReq)
 	// the live producer's alive is older than the inactivity limit; no tick has run
-	f.clock.advance(25 * time.Second)
+	f.clock.advance(15 * time.Second)
 	f.alive(pre)
+	expect(t, f.m.offsetFresh(f.m.byID[live], f.m.mono()), true, "the live offset fresh")
+	expect(t, f.m.aliveRecent(f.m.byID[live], f.m.mono()), false, "the live producer's alive recent")
 	f.accept(preReq)
 	expect(t, len(f.out.resets), 0, "resets")
 	s := f.m.session(sid(1))
 	expect(t, s.pending == nil, true, "a reset pending")
 	expect(t, f.m.counters.resetRequestsFailed, 1, "net requests failed")
+	expect(t, f.logCount("could not be asked for again after the reset"), 1, "warnings of the producer that cannot be asked")
+	expect(t, f.logCount("clock offset of producer"), 0, "warnings of the offset")
 	expect(t, s.nextResetAt > f.m.mono(), true, "the net waits before it tries again")
 }
 
@@ -1234,4 +1241,27 @@ func TestNet_ProducerDisabledThroughTheResetIsDownWhenItIsEnabledAfterIt(t *test
 	}
 	f.complete(f.lastSnapshot(live), 1)
 	expectDown(t, f.feed, live, false, "the live producer once its recovery completed")
+}
+
+// The session lagged for lane A, whose flag a sample taken during a recovery cleared while
+// its age is over the limit: an on-time sample of lane B does not end the lag. It ends once
+// A's age is at or under the limit.
+func TestNet_OnTimeSampleOfAnotherLaneDoesNotEndTheLagOfALaneStillOverTheLimit(t *testing.T) {
+	f := upNet(t, all)
+	s := f.m.session(sid(1))
+	s.lagging = true
+	a := s.lane(pre)
+	a.above, a.hasAge, a.age = false, true, 3*time.Minute
+	f.clock.advance(time.Second)
+	f.alive(live)
+	f.live(1, live, freshAge)
+	expect(t, f.lagging(1), true, "the session lags while lane A is over the limit")
+	expect(t, f.logCount("caught up"), 0, "log lines of the catch-up")
+
+	a.age = 2 * time.Minute // at the limit
+	f.clock.advance(time.Second)
+	f.alive(live)
+	f.live(1, live, freshAge)
+	expect(t, f.lagging(1), false, "the session lags once lane A is at the limit")
+	expect(t, f.logCount("caught up"), 1, "log lines of the catch-up")
 }
