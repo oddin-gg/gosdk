@@ -462,7 +462,10 @@ One recovery actor runs every producer's recovery state. The rules, per producer
   that none has a gap open that the net did not open; a gap opened meanwhile
   cancels the reset, and the producer's own recovery goes first. A subscription
   that starts opening after a reset was handed over holds the recovery that follows
-  the reset until its queue is bound or it is gone. The net is off while the offset of the
+  the reset until its queue is bound or it is gone. A producer the catalog activates
+  while the feed runs has no lane until its first alive is handled: the net does not
+  see it, and its first recovery, from the client's start, covers what a reset dropped
+  of it. The net is off while the offset of the
   producer's clock is stale, and paused for a producer while a recovery of it is in
   flight or a gap is open, since a snapshot ahead of a live message makes it old on
   every subscription. Time with a stale offset is no stale time: a window that
