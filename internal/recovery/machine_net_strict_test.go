@@ -870,8 +870,175 @@ func TestNet_RewindComfortablyInsideTheWindowIsResetAndTheFollowUpStartsAtIt(t *
 	expectSessions(t, f.resetSessions(), []int{1}, "resets")
 	f.clock.advance(time.Second)
 	f.aliveBoth()
+	asked := len(f.snapshots(pre))
 	f.resetDone()
-	if again := f.lastSnapshot(pre); again.after.After(rewind) {
-		t.Fatalf("the follow-up starts at %s, after the rewind %s", fmtTime(again.after), fmtTime(rewind))
+	expect(t, len(f.snapshots(pre)), asked+1, "prematch requests in the step that ends the reset")
+	again := f.lastSnapshot(pre)
+	if again.requestID == preReq.requestID {
+		t.Fatal("the follow-up is the preflight request")
+	}
+	expectTime(t, again.after, rewind, "the follow-up starts at the rewind")
+}
+
+// A far-future timestamp is a timestamp after the producer's now: its age is nothing, not
+// the wrap of two saturating subtractions into a huge age that would start the net.
+func TestNet_TimestampFarInTheFutureHasNoAgeAndStartsNothing(t *testing.T) {
+	f := upNet(t, all)
+	f.preSkew = 5 * time.Second // the producer's clock is behind the SDK's: a positive offset
+	before := f.calls()
+	for second := 1; second <= 90; second++ {
+		f.clock.advance(time.Second)
+		if second%10 == 0 {
+			f.aliveBoth()
+		}
+		future := f.now().AddDate(1000, 0, 0)
+		f.m.processed(sid(1), pre, future, f.start, f.stamp(), 0)
+		f.m.tick()
+	}
+	expect(t, f.calls(), before, "requests")
+	expect(t, f.m.session(sid(1)).lane(pre).age <= 0, true, "the lane's age")
+	expect(t, f.lagging(1), false, "the session lags")
+}
+
+// A producer the catalog activated after the machine was made has no lane until its
+// first alive is handled. The net does not see it, and a reset drops what the queue held
+// of it; its first recovery, asked when its alive is handled, is from the client's start
+// (here a full snapshot), which covers all of that. This documents it.
+func TestNet_ProducerLearnedAfterTheResetIsRecoveredFromTheClientsStart(t *testing.T) {
+	base := newFeed(t)
+	hidden := newFakeCatalog(statefulWindow)
+	hidden.hidden = map[int]bool{live: true}
+	base.cat = hidden
+	base.m = newMachine(hidden, defaultSettings(), base.out, base.clock, base.m.log, base.m.nextID)
+	f := &netFeed{feed: base}
+	f.noLiveAlives = true
+	f.open(1, all)
+	f.startFeed()
+	f.alive(pre)
+	f.complete(f.lastSnapshot(pre), 1)
+	expect(t, f.m.byID[live] == nil, true, "a track of the live producer")
+	before := f.calls()
+	f.stale(1, oldAge, 5*time.Minute, f.untilAsked(before))
+	expect(t, f.calls(), before+1, "requests: the producer it knows only")
+	f.accept(f.lastSnapshot(pre))
+	expectSessions(t, f.resetSessions(), []int{1}, "resets: the unknown producer is not in it")
+
+	f.alive(live)
+	expect(t, f.m.byID[live] != nil, true, "a track of the live producer once its alive is handled")
+	f.resetDone()
+	f.alive(live)
+	f.m.tick()
+	expectTime(t, f.lastSnapshot(live).after, time.Time{}, "the live producer's first recovery: from the client's start, a full snapshot")
+}
+
+// A session closed while its reset is under way is no longer waited for, as one closed at
+// any time: an event recovery that only it awaited completes, and the producers the reset
+// took down come back up with nothing of that session missing.
+func TestNet_SessionClosedWhileItsResetIsUnderWayLeavesNothingWaitingAndNothingDown(t *testing.T) {
+	f := upNet(t, all)
+	id := f.recoverEvent(live)
+	f.acceptEvent(id)
+	before := f.calls()
+	f.stale(1, oldAge, 5*time.Minute, f.untilAsked(before))
+	f.accept(f.lastSnapshot(pre))
+	f.accept(f.lastSnapshot(live))
+	expectSessions(t, f.resetSessions(), []int{1}, "resets")
+	expectDown(t, f.feed, pre, true, "while the reset is under way")
+	f.close(1)
+	f.expectEnded(id, completed)
+	f.m.tick() // no session processes late any more
+	expectDown(t, f.feed, pre, false, "the prematch producer once the session is gone")
+	expectDown(t, f.feed, live, false, "the live producer once the session is gone")
+}
+
+// A lane with no checkpoint beside a stale lane inside the window: the net asks for both
+// and resets, since a lane with no checkpoint is asked for from the start and is neither
+// outside the window nor ahead of a clock.
+func TestNet_LaneWithNoCheckpointDoesNotHoldTheNetBack(t *testing.T) {
+	f := upNetWithWindow(t, 60)
+	f.m.session(sid(1)).lane(live).checkpoint = time.Time{}
+	before := f.calls()
+	f.stale(1, oldAge, 5*time.Minute, f.untilAsked(before))
+	expect(t, f.calls(), before+2, "requests: both producers")
+	expect(t, f.lagging(1), false, "the session lags")
+	f.accept(f.lastSnapshot(pre))
+	f.accept(f.lastSnapshot(live))
+	expectSessions(t, f.resetSessions(), []int{1}, "resets")
+}
+
+// A producer down for a processing delay, disabled so that the reset skips it, enabled
+// while the reset is under way, with an alive still recent and no new one: the tick alone
+// keeps it down for the reset.
+func TestNet_TickAloneKeepsAProducerEnabledDuringTheResetDown(t *testing.T) {
+	f := &netFeed{feed: withSettings(t, func(s *recoverySettings) { s.staleWindow = 2 * time.Second })}
+	f.open(1, all)
+	f.startFeed()
+	f.bothUp(1)
+	f.m.markDown(f.m.byID[live], causeProcessingDelay)
+	f.alive(live)
+	f.cat.disabled[live] = true
+	before := f.calls()
+	f.stale(1, oldAge, 8*time.Second, f.untilAsked(before))
+	f.accept(f.lastSnapshot(pre))
+	expectSessions(t, f.resetSessions(), []int{1}, "resets")
+	told := len(f.statusesOf(live))
+	delete(f.cat.disabled, live)
+	f.m.tick() // no alive since it was enabled
+	expectDown(t, f.feed, live, true, "the live producer while the reset is under way")
+	for _, c := range f.statusesOf(live)[told:] {
+		if !c.down {
+			t.Fatalf("the live producer was reported up (%s) while the reset was under way", c.cause)
+		}
+	}
+	f.expectCause(live, causeSafetyNetReset, "its cause")
+}
+
+// The net's wait after the subscription's own snapshot_complete for a recovery the reset
+// asked for is the backoff: with a stale window shorter than it, only the backoff holds
+// the next preflight back.
+func TestNet_OwnSnapshotCompleteCancelsTheResetWithTheNetsBackoff(t *testing.T) {
+	f := &netFeed{feed: withSettings(t, func(s *recoverySettings) { s.staleWindow = 2 * time.Second })}
+	f.open(1, all)
+	f.startFeed()
+	f.bothUp(1)
+	before := f.calls()
+	f.stale(1, oldAge, 30*time.Second, f.untilAsked(before))
+	preReq, liveReq := f.lastSnapshot(pre), f.lastSnapshot(live)
+	f.complete(preReq, 1)
+	f.complete(liveReq, 1)
+	s := f.m.session(sid(1))
+	expect(t, s.pending == nil, true, "a reset pending")
+	expect(t, s.nextResetAt > f.m.mono(), true, "the net waits")
+	after := f.calls()
+	expect(t, f.stale(1, oldAge, 50*time.Second, f.untilAsked(after)), -1, "a preflight inside the backoff")
+	if f.stale(1, oldAge, 15*time.Second, f.untilAsked(after)) < 0 {
+		t.Fatal("no preflight once the backoff was over")
+	}
+}
+
+// A reset the transport could not make waits the net's backoff too, not just the stale
+// window: with a window shorter than it, no preflight just before the deadline, one at it.
+func TestNet_ResetTheTransportCouldNotMakeHoldsTheNextPreflightBackForTheBackoff(t *testing.T) {
+	f := &netFeed{feed: withSettings(t, func(s *recoverySettings) { s.staleWindow = 2 * time.Second })}
+	f.open(1, all)
+	f.startFeed()
+	f.bothUp(1)
+	before := f.calls()
+	f.stale(1, oldAge, 30*time.Second, f.untilAsked(before))
+	f.accept(f.lastSnapshot(pre))
+	f.accept(f.lastSnapshot(live))
+	expectSessions(t, f.resetSessions(), []int{1}, "resets")
+	f.resetRefused()
+	refusedAt := f.m.mono()
+	f.complete(f.lastSnapshot(pre), 1)
+	f.complete(f.lastSnapshot(live), 1)
+	after := f.calls()
+	wait := int((f.m.session(sid(1)).nextResetAt - refusedAt) / time.Second)
+	if wait < 55 {
+		t.Fatalf("the net waits %d seconds after the refusal, want about a minute", wait)
+	}
+	expect(t, f.stale(1, oldAge, time.Duration(wait-2)*time.Second, f.untilAsked(after)), -1, "a preflight before the deadline")
+	if f.stale(1, oldAge, 5*time.Second, f.untilAsked(after)) < 0 {
+		t.Fatal("no preflight at the deadline")
 	}
 }

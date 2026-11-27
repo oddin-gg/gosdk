@@ -875,7 +875,10 @@ func (m *machine) sample(s *session, l *lane, t *track, generatedAt time.Time, t
 		l.above = false
 		return
 	}
-	l.age = taken.wall.Sub(generatedAt) - t.offsetAt(taken)
+	// one subtraction, against the producer's estimated now: two would wrap a
+	// timestamp so far ahead that the first saturates, and a timestamp after the
+	// producer's now has no age
+	l.age = max(t.producerNow(taken).Sub(generatedAt), 0)
 	l.hasAge = true
 	if m.settings.staleLimit <= 0 {
 		return
@@ -2030,7 +2033,8 @@ func (m *machine) producerOutsideWindow(s *session, enabled func(int) bool) (int
 // the producer's now would not repeat.
 func (m *machine) checkpointAhead(s *session, enabled func(int) bool) (int, bool) {
 	for _, l := range s.lanes {
-		if !enabled(l.producer) || l.checkpoint.IsZero() {
+		// a lane with no checkpoint (the zero time) is never after a producer's now
+		if !enabled(l.producer) {
 			continue
 		}
 		if l.checkpoint.After(m.byID[l.producer].producerNow(m.clock.Now())) {

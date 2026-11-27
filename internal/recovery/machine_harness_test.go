@@ -50,6 +50,9 @@ type fakeCatalog struct {
 	list     []types.Producer
 	disabled map[int]bool
 	from     map[int]time.Time
+	// hidden producers are known by id but not listed: ones the catalog had not
+	// activated when the machine was made.
+	hidden map[int]bool
 	// enableAtRead enables a producer at its n-th read of the catalog, counted in reads.
 	enableAtRead map[int]int
 	reads        map[int]int
@@ -72,7 +75,9 @@ func newFakeCatalog(window int) *fakeCatalog {
 	}
 }
 
-func (c *fakeCatalog) producers() []types.Producer { return slices.Clone(c.list) }
+func (c *fakeCatalog) producers() []types.Producer {
+	return slices.DeleteFunc(slices.Clone(c.list), func(p types.Producer) bool { return c.hidden[p.ID()] })
+}
 func (c *fakeCatalog) producer(id int) (types.Producer, bool) {
 	for _, p := range c.list {
 		if p.ID() == id {
