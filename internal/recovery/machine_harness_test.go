@@ -50,6 +50,15 @@ type fakeCatalog struct {
 	list     []types.Producer
 	disabled map[int]bool
 	from     map[int]time.Time
+	// enableAtRead enables a producer at its n-th read of the catalog, counted in reads.
+	enableAtRead map[int]int
+	reads        map[int]int
+}
+
+// enableAtNthRead has the producer enabled at the n-th read of the catalog from now on.
+func (c *fakeCatalog) enableAtNthRead(id, n int) {
+	c.enableAtRead = map[int]int{id: n}
+	c.reads = map[int]int{}
 }
 
 func newFakeCatalog(window int) *fakeCatalog {
@@ -72,7 +81,17 @@ func (c *fakeCatalog) producer(id int) (types.Producer, bool) {
 	}
 	return nil, false
 }
-func (c *fakeCatalog) enabled(id int) bool           { return !c.disabled[id] }
+func (c *fakeCatalog) enabled(id int) bool {
+	if n, ok := c.enableAtRead[id]; ok {
+		// a client enables the producer while the machine is reading the catalog: from
+		// the n-th read on it is enabled
+		c.reads[id]++
+		if c.reads[id] >= n {
+			delete(c.disabled, id)
+		}
+	}
+	return !c.disabled[id]
+}
 func (c *fakeCatalog) recoveryFrom(id int) time.Time { return c.from[id] }
 
 // fakeOutbox captures what the machine does.

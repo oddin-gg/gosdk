@@ -161,6 +161,12 @@ func (a *recoveryActor) reset(session uuid.UUID, number uint64) {
 			a.postEssential(factResetDone{session: session, number: number})
 			return
 		}
+		// the close may have been signalled since the check above: no reset is started
+		// then. This narrows the window, it does not close it: a reset that meets the
+		// consumer's own close is ended by the consumer as a close.
+		if a.isClosed() || a.stopping() {
+			return
+		}
 		r.Reset(number)
 	}()
 }

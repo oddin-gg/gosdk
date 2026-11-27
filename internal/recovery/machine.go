@@ -1227,8 +1227,17 @@ func (m *machine) accepted(t *track, a *active, arrived time.Duration) {
 // covers what the reset drops), and no other session's queue may be missing, nor
 // a backlog reach past a recovery window.
 func (m *machine) lastAcceptance(s *session, p *pendingReset, mono time.Duration) {
+	// the catalog changes while the actor runs: every check below is made on this one
+	// reading of it. A producer enabled after it is treated as one enabled during the
+	// reset: reset marks it down, its lane has the reset's gap, and its recovery is
+	// asked for once the reset is done.
+	enabledAt := make(map[int]bool, len(s.lanes))
 	for _, l := range s.lanes {
-		if !m.catalog.enabled(l.producer) {
+		enabledAt[l.producer] = m.catalog.enabled(l.producer)
+	}
+	enabled := func(id int) bool { return enabledAt[id] }
+	for _, l := range s.lanes {
+		if !enabled(l.producer) {
 			continue
 		}
 		t := m.byID[l.producer]
@@ -1244,15 +1253,15 @@ func (m *machine) lastAcceptance(s *session, p *pendingReset, mono time.Duration
 			return
 		}
 	}
-	if id, ok := m.awaitsOtherSessionsChannel(s); ok {
+	if id, ok := m.awaitsOtherSessionsChannel(s, enabled); ok {
 		m.resetNotMadeForOtherChannel(s, id, mono)
 		return
 	}
-	if id, ok := m.checkpointAhead(s); ok {
+	if id, ok := m.checkpointAhead(s, enabled); ok {
 		m.resetNotMadeForCheckpointAhead(s, id, mono)
 		return
 	}
-	if id, ok := m.producerOutsideWindow(s); ok {
+	if id, ok := m.producerOutsideWindow(s, enabled); ok {
 		m.resetNotMadeOutsideWindow(s, id, mono)
 		return
 	}
@@ -1829,17 +1838,31 @@ func (m *machine) hasDownGaps(t *track) bool {
 // has a reset under way: one enabled meanwhile was skipped by the reset's own
 // markDown, and its lane has the reset's gap, so the status must say so until the
 // recovery asked for after the reset has completed.
+//
+// One that is down for a processing delay is put down for the reset as well: the delay
+// check would bring it up as soon as a session is on time, before the reset is done
+// and the recovery asked for after it has completed.
 func (m *machine) downWhileResetting(t *track) {
-	if !t.down && m.catalog.enabled(t.id) && m.underwayFor(t) {
+	if (!t.down || t.cause == causeProcessingDelay) && m.catalog.enabled(t.id) && m.underwayFor(t) {
 		m.markDown(t, causeSafetyNetReset)
 	}
 }
 
 // clearStaleWindows forgets the stale window of every session's lane of the producer.
+//
+// A session that lagged for that lane alone has caught up: no sample of an enabled lane
+// would say so if none of them is behind.
 func (m *machine) clearStaleWindows(t *track) {
 	for _, s := range m.sessions {
-		if l := s.lane(t.id); l != nil {
-			l.above, l.aboveSince = false, 0
+		l := s.lane(t.id)
+		if l == nil {
+			continue
+		}
+		was := l.above
+		l.above, l.aboveSince = false, 0
+		if was && s.lagging && !slices.ContainsFunc(s.lanes, func(other *lane) bool { return other.above && m.catalog.enabled(other.producer) }) {
+			s.lagging = false
+			m.log.Infof("Session %s caught up", s.id)
 		}
 	}
 }
@@ -1888,12 +1911,12 @@ func (m *machine) trigger(s *session, t *track, age time.Duration, mono time.Dur
 	if len(asked) == 0 {
 		return
 	}
-	if _, ahead := m.checkpointAhead(s); ahead {
+	if _, ahead := m.checkpointAhead(s, m.catalog.enabled); ahead {
 		// the producer's clock stepped back: a recovery capped at its now would skip
 		// what the reset drops between; the net waits for the clock to catch up
 		return
 	}
-	if id, outside := m.producerOutsideWindow(s); outside {
+	if id, outside := m.producerOutsideWindow(s, m.catalog.enabled); outside {
 		if !s.lagging {
 			s.lagging = true
 			m.counters.lagging++
@@ -1971,9 +1994,9 @@ func windowMargin(t *track) time.Duration {
 // session, and a recovery starts from the checkpoint, clamped just the same: what
 // lies before the window is out of reach. A lane with no checkpoint is asked for from
 // the start, which is not clamped.
-func (m *machine) producerOutsideWindow(s *session) (int, bool) {
+func (m *machine) producerOutsideWindow(s *session, enabled func(int) bool) (int, bool) {
 	for _, l := range s.lanes {
-		if !m.catalog.enabled(l.producer) || l.checkpoint.IsZero() {
+		if !enabled(l.producer) || l.checkpoint.IsZero() {
 			continue
 		}
 		if start, ok := m.windowStart(m.byID[l.producer]); ok && l.checkpoint.Before(start.Add(windowMargin(m.byID[l.producer]))) {
@@ -1988,9 +2011,9 @@ func (m *machine) producerOutsideWindow(s *session) (int, bool) {
 // as a recovery is capped at it (see capped): after a step back of the producer's
 // clock the queue may hold messages stamped between, which a recovery asked for from
 // the producer's now would not repeat.
-func (m *machine) checkpointAhead(s *session) (int, bool) {
+func (m *machine) checkpointAhead(s *session, enabled func(int) bool) (int, bool) {
 	for _, l := range s.lanes {
-		if !m.catalog.enabled(l.producer) || l.checkpoint.IsZero() {
+		if !enabled(l.producer) || l.checkpoint.IsZero() {
 			continue
 		}
 		if l.checkpoint.After(m.byID[l.producer].producerNow(m.clock.Now())) {
@@ -2043,9 +2066,9 @@ func (m *machine) awaitsOtherChannel(s *session, t *track) bool {
 // receives, one that awaitsOtherChannel: a reset drops the session's backlog of it,
 // and its recovery cannot be asked for until the other queue is back, by when the
 // recovery window may have moved past the checkpoint.
-func (m *machine) awaitsOtherSessionsChannel(s *session) (int, bool) {
+func (m *machine) awaitsOtherSessionsChannel(s *session, enabled func(int) bool) (int, bool) {
 	for _, l := range s.lanes {
-		if m.catalog.enabled(l.producer) && m.awaitsOtherChannel(s, m.byID[l.producer]) {
+		if enabled(l.producer) && m.awaitsOtherChannel(s, m.byID[l.producer]) {
 			return l.producer, true
 		}
 	}

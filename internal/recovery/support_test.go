@@ -267,8 +267,10 @@ type fakeManagerOps struct {
 	emittedMsgs []types.RecoveryMessage
 	processing  map[uuid.UUID]time.Duration
 	resetters   map[uuid.UUID]Resetter
-	gcs         int
-	nextID      atomic.Uint32
+	// onResetterOf, when set, runs as a session's handle is looked up.
+	onResetterOf func()
+	gcs          int
+	nextID       atomic.Uint32
 }
 
 func newFakeManagerOps() *fakeManagerOps { return &fakeManagerOps{} }
@@ -315,6 +317,9 @@ func (f *fakeManagerOps) emitRecoveryMessage(msg types.RecoveryMessage) {
 }
 
 func (f *fakeManagerOps) resetterOf(session uuid.UUID) Resetter {
+	if f.onResetterOf != nil {
+		f.onResetterOf()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.resetters[session]
