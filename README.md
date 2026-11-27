@@ -465,7 +465,11 @@ One recovery actor runs every producer's recovery state. The rules, per producer
   the reset until its queue is bound or it is gone. A producer the catalog activates
   while the feed runs has no lane until its first alive is handled: the net does not
   see it, and its first recovery, from the client's start, covers what a reset dropped
-  of it. The net is off while the offset of the
+  of it. With `WithInitialSnapshotTime` set and no start from the client, that
+  recovery starts that long before the producer was first learned, and what a reset
+  dropped of it from before that is not repeated. The last acceptance also cancels the
+  reset when a producer's clock offset has lapsed (no alive for two alive intervals)
+  since the net asked. The net is off while the offset of the
   producer's clock is stale, and paused for a producer while a recovery of it is in
   flight or a gap is open, since a snapshot ahead of a live message makes it old on
   every subscription. Time with a stale offset is no stale time: a window that
