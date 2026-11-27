@@ -417,7 +417,9 @@ One recovery actor runs every producer's recovery state. The rules, per producer
   what the reset dropped, and is given up and asked for again in the same step. The producers the subscription receives
   are down with `ProcessingQueueDelayViolationProducerStatusReason` while this
   runs, and the subscription's `snapshot_complete`s that arrive meanwhile are
-  ignored, since they come from the queue being replaced. A reset drops what the
+  ignored, since they come from the queue being replaced. A producer that was
+  disabled through the reset and is enabled after it is down for the reset from the
+  moment it is enabled until its recovery completes. A reset drops what the
   broker had delivered ahead of the client but not yet handed over, up to
   `WithAMQPPrefetch` messages (default 1000), and what is still in the
   subscription's buffer is delivered all the same: the recovery repeats those, so a
