@@ -457,7 +457,14 @@ One recovery actor runs every producer's recovery state. The rules, per producer
   it happens then. A subscription that is behind past the window margin lags and
   is not reset. Nor is one whose checkpoint lies after the producer's clock (the
   clock stepped back): a recovery is capped at the producer's now and would skip
-  what the reset drops in between; the net waits for the clock to pass it. The last
+  what the reset drops in between; the net waits for the clock to pass it. A producer the net asked
+  for that is disabled before the reset is made cancels it. The net also waits while
+  an enabled producer's clock offset is not fresh. A producer disabled before the net
+  asked, and enabled again before the transport closes the queue, is not covered by
+  the window check; a reset already handed to the transport cannot be recalled when
+  another subscription's queue is lost in that instant; and a broker that delays the
+  reply to the old channel's close delays the reset's end, which belongs to the
+  transport. The last
   acceptance checks again that every enabled producer could still be asked for and
   that none has a gap open that the net did not open; a gap opened meanwhile
   cancels the reset, and the producer's own recovery goes first. A subscription
