@@ -421,7 +421,9 @@ One recovery actor runs every producer's recovery state. The rules, per producer
   disabled through the reset and is enabled after it is down for the reset from the
   moment it is enabled until its recovery completes. A reset drops what the
   broker had delivered ahead of the client but not yet handed over, up to
-  `WithAMQPPrefetch` messages (default 1000), and what is still in the
+  `WithAMQPPrefetch` messages (default 1000), and raw messages of a disabled producer
+  still queued (with `WithExtendedDataReporting` they are delivered, though the
+  producer's typed messages are not), which no recovery repeats; and what is still in the
   subscription's buffer is delivered all the same: the recovery repeats those, so a
   client may see a message twice, never a hole. A subscription is reset at most
   three times in ten minutes, with 1, 2 and 4 minutes between the resets; after
