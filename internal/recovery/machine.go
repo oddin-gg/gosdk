@@ -137,7 +137,9 @@ import (
 // The last acceptance makes the reset from what holds then, not from what held when
 // the net asked: each enabled producer of the session must have, in flight and
 // accepted, the very recovery the net asked for; one enabled since has none that
-// covers what the reset drops of it, and cancels the reset. So does a gap that has
+// covers what the reset drops of it, and cancels the reset. So does an offset of a
+// producer's clock that is no longer fresh by the rule of the stale samples (offsetFresh).
+// So does a gap that has
 // opened since, which the recovery asked for does not cover: the producer's ordinary
 // recovery goes first. Each of these cancellations starts the net's backoff.
 //
@@ -1258,6 +1260,12 @@ func (m *machine) lastAcceptance(s *session, p *pendingReset, mono time.Duration
 			m.resetNotMadeForProducerThatCannotBeAsked(s, l.producer, mono)
 			return
 		}
+		if !m.offsetFresh(t, mono) {
+			// the offset the stale samples were measured with has lapsed since: the
+			// age they said is not one the net would act on now
+			m.resetNotMadeForOffsetThatLapsed(s, l.producer, mono)
+			return
+		}
 		if m.hasDownGaps(t) {
 			// a gap opened since the net asked, with the recovery still in flight (an
 			// unsubscribed alive before the API accepted it, say): that recovery does not
@@ -2050,6 +2058,15 @@ func (m *machine) resetNotMadeForCheckpointAhead(s *session, producerID int, mon
 	m.cancelReset(s, mono)
 	m.counters.resetRequestsFailed++
 	m.log.Warnf("The safety net did not reset session %s: its checkpoint of producer %d lies after the producer's clock, where a recovery could not repeat what the reset would drop",
+		s.id, producerID)
+}
+
+// resetNotMadeForOffsetThatLapsed cancels a reset whose recoveries were accepted, but
+// whose producer's clock offset is no longer fresh by the rule the stale samples use.
+func (m *machine) resetNotMadeForOffsetThatLapsed(s *session, producerID int, mono time.Duration) {
+	m.cancelReset(s, mono)
+	m.counters.resetRequestsFailed++
+	m.log.Warnf("The safety net did not reset session %s: the clock offset of producer %d has lapsed since the net asked",
 		s.id, producerID)
 }
 

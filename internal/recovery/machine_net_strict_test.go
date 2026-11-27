@@ -1042,3 +1042,45 @@ func TestNet_ResetTheTransportCouldNotMakeHoldsTheNextPreflightBackForTheBackoff
 		t.Fatal("no preflight at the deadline")
 	}
 }
+
+// The offset of a producer's clock lapses (no alive for two intervals) while the producer
+// is still within the maximum inactivity, between the net's requests and the last
+// acceptance: the stale sample would reject that offset, so the reset is not made either,
+// and the net waits.
+func TestNet_OffsetThatLapsedBeforeTheLastAcceptanceCancelsTheReset(t *testing.T) {
+	f := &netFeed{feed: withSettings(t, func(s *recoverySettings) { s.maxInactivity = time.Minute })}
+	f.open(1, all)
+	f.startFeed()
+	f.bothUp(1)
+	before := f.calls()
+	f.stale(1, oldAge, 5*time.Minute, f.untilAsked(before))
+	preReq, liveReq := f.lastSnapshot(pre), f.lastSnapshot(live)
+	f.clock.advance(25 * time.Second) // two intervals are 20 s; the inactivity limit a minute
+	expect(t, f.m.offsetFresh(f.m.byID[pre], f.m.mono()), false, "the prematch offset fresh")
+	expect(t, f.m.aliveRecent(f.m.byID[pre], f.m.mono()), true, "the prematch producer's alive recent")
+	f.accept(preReq)
+	f.accept(liveReq)
+	expect(t, len(f.out.resets), 0, "resets")
+	s := f.m.session(sid(1))
+	expect(t, s.pending == nil, true, "a reset pending")
+	expect(t, s.nextResetAt > f.m.mono(), true, "the net waits before it tries again")
+}
+
+// An alive that refreshes a lapsed offset while the reset is pending leaves it armed: the
+// ages of the stale window were measured while the offset was fresh, and the last
+// acceptance finds it fresh again. This documents it.
+func TestNet_OffsetRefreshedBeforeTheLastAcceptanceLeavesTheResetArmed(t *testing.T) {
+	f := &netFeed{feed: withSettings(t, func(s *recoverySettings) { s.maxInactivity = time.Minute })}
+	f.open(1, all)
+	f.startFeed()
+	f.bothUp(1)
+	before := f.calls()
+	f.stale(1, oldAge, 5*time.Minute, f.untilAsked(before))
+	preReq, liveReq := f.lastSnapshot(pre), f.lastSnapshot(live)
+	f.clock.advance(25 * time.Second)
+	f.aliveBoth()
+	expect(t, f.m.session(sid(1)).pending != nil, true, "a reset still pending")
+	f.accept(preReq)
+	f.accept(liveReq)
+	expectSessions(t, f.resetSessions(), []int{1}, "resets")
+}
