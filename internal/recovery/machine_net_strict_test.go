@@ -1206,3 +1206,32 @@ func TestNet_ChannelLostOfASessionSharingNoProducerLeavesTheResetPending(t *test
 	f.accept(f.lastSnapshot(live))
 	expectSessions(t, f.resetSessions(), []int{1}, "resets")
 }
+
+// A producer disabled through the whole reset has the reset's gap and was never marked down.
+// Enabled after the reset is done, it is down for the reset from the moment its alive is
+// handled, which is when its recovery of that gap is asked for, until that recovery completes.
+func TestNet_ProducerDisabledThroughTheResetIsDownWhenItIsEnabledAfterIt(t *testing.T) {
+	f := upNet(t, all)
+	f.cat.disabled[live] = true
+	before := f.calls()
+	f.stale(1, oldAge, 5*time.Minute, f.untilAsked(before))
+	f.accept(f.lastSnapshot(pre))
+	f.resetDone()
+	f.complete(f.lastSnapshot(pre), 1)
+	expectDown(t, f.feed, live, false, "the disabled live producer, untouched by the reset")
+
+	delete(f.cat.disabled, live)
+	told := len(f.statusesOf(live))
+	asked := len(f.snapshots(live))
+	f.alive(live)
+	expect(t, len(f.snapshots(live)), asked+1, "recoveries of the live producer asked for its reset gap")
+	expectDown(t, f.feed, live, true, "the live producer while that recovery is in flight")
+	f.expectCause(live, causeSafetyNetReset, "its cause")
+	for _, c := range f.statusesOf(live)[told:] {
+		if !c.down {
+			t.Fatalf("the live producer was reported up (%s) before its recovery completed", c.cause)
+		}
+	}
+	f.complete(f.lastSnapshot(live), 1)
+	expectDown(t, f.feed, live, false, "the live producer once its recovery completed")
+}

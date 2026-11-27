@@ -712,6 +712,9 @@ func (m *machine) queueLost(s *session, cause statusCause, mono time.Duration) {
 func (m *machine) loseQueue(s *session, cause statusCause) {
 	for _, l := range s.lanes {
 		m.loseLane(l)
+		if cause == causeSafetyNetReset {
+			l.gap.afterReset = true
+		}
 	}
 	for _, l := range s.lanes {
 		m.markDown(m.byID[l.producer], cause)
@@ -1023,6 +1026,7 @@ func (m *machine) askable(t *track, mono time.Duration) bool {
 }
 
 func (m *machine) request(t *track, mono time.Duration) {
+	m.downWhileResetting(t)
 	now := m.clock.Now()
 	gapStart := m.oldestGap(t)
 	after := m.after(t, gapStart)
@@ -1869,10 +1873,23 @@ func (m *machine) hasDownGaps(t *track) bool {
 // One that is down for a processing delay is put down for the reset as well: the delay
 // check would bring it up as soon as a session is on time, before the reset is done
 // and the recovery asked for after it has completed.
+//
+// So is one enabled after the reset is done, with the reset's gap still open: its
+// recovery is asked for as it is enabled, and it must not report up meanwhile.
 func (m *machine) downWhileResetting(t *track) {
-	if (!t.down || t.cause == causeProcessingDelay) && m.catalog.enabled(t.id) && m.underwayFor(t) {
+	if (!t.down || t.cause == causeProcessingDelay) && m.catalog.enabled(t.id) && (m.underwayFor(t) || m.hasResetGap(t)) {
 		m.markDown(t, causeSafetyNetReset)
 	}
+}
+
+// hasResetGap reports whether a session's lane of the producer has a gap a reset opened.
+func (m *machine) hasResetGap(t *track) bool {
+	for _, s := range m.sessions {
+		if l := s.lane(t.id); l != nil && l.gap != nil && l.gap.afterReset {
+			return true
+		}
+	}
+	return false
 }
 
 // clearStaleWindows forgets the stale window of every session's lane of the producer.
@@ -2187,6 +2204,7 @@ func (m *machine) reset(s *session, p *pendingReset) {
 		// for, say) does not cover it and cannot bring the producer up while the
 		// queue is replaced
 		m.loseLane(l)
+		l.gap.afterReset = true
 	}
 	m.log.Warnf("The safety net resets session %s, %s behind producer %d", s.id, p.age, p.producerID)
 	// down before the transport is told: it may replace the queue at once, and the
@@ -2666,6 +2684,10 @@ type gap struct {
 	seq uint64
 	// pendingReset says the safety net opened it for a reset it has not made yet.
 	pendingReset bool
+	// afterReset says a reset of the session's queue opened it, or joined it: its producer
+	// is down for the reset until a recovery of it completes, whether or not the catalog
+	// had it enabled when the reset was made.
+	afterReset bool
 }
 
 // active is a producer's recovery in flight.
