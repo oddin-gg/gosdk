@@ -117,8 +117,9 @@ import (
 // come from the queue being replaced, and the reset gives every lane of the session a
 // new gap, so that no recovery asked before it can close it.
 //
-// A session is not reset when its checkpoint of any producer the catalog has enabled
-// lies before where that producer's recovery would start, clamped to its stateful
+// A session is not reset when its checkpoint of any producer the catalog has enabled,
+// or the client's pending rewind of it when that is earlier, lies before where that
+// producer's recovery would start, clamped to its stateful
 // recovery window, or within resetWindowMargin of that start (at most half the
 // window): what the reset drops of it no recovery repeats. The margin covers the
 // time from the last acceptance to the recovery asked into the new queue, during
@@ -136,7 +137,9 @@ import (
 // The last acceptance makes the reset from what holds then, not from what held when
 // the net asked: each enabled producer of the session must have, in flight and
 // accepted, the very recovery the net asked for; one enabled since has none that
-// covers what the reset drops of it, and cancels the reset.
+// covers what the reset drops of it, and cancels the reset. So does a gap that has
+// opened since, which the recovery asked for does not cover: the producer's ordinary
+// recovery goes first. Each of these cancellations starts the net's backoff.
 //
 // The stale window counts only time spent stale: one that began before the last
 // recovery of the producer ended starts again, a recovery that took no sample of the
@@ -1252,6 +1255,13 @@ func (m *machine) lastAcceptance(s *session, p *pendingReset, mono time.Duration
 			m.resetNotMadeForProducerThatCannotBeAsked(s, l.producer, mono)
 			return
 		}
+		if m.hasDownGaps(t) {
+			// a gap opened since the net asked, with the recovery still in flight (an
+			// unsubscribed alive before the API accepted it, say): that recovery does not
+			// cover it, and the producer's ordinary recovery goes first
+			m.resetNotMadeForOpenGap(s, l.producer, mono)
+			return
+		}
 	}
 	if id, ok := m.awaitsOtherSessionsChannel(s, enabled); ok {
 		m.resetNotMadeForOtherChannel(s, id, mono)
@@ -1986,8 +1996,8 @@ func windowMargin(t *track) time.Duration {
 }
 
 // producerOutsideWindow finds, among the producers the session receives that the
-// catalog has enabled, one whose checkpoint for the session lies before where a
-// recovery of it would start now, clamped to its stateful recovery window, plus the
+// catalog has enabled, one whose checkpoint for the session, or the client's pending
+// rewind of it when that is earlier, lies before where a recovery of it would start now, clamped to its stateful recovery window, plus the
 // margin (windowMargin): the window moves on before the recovery asked into the new
 // queue, and a checkpoint at its edge would be outside it by then. A reset
 // replaces the whole queue, so it drops the backlog of every producer of the
@@ -1999,7 +2009,14 @@ func (m *machine) producerOutsideWindow(s *session, enabled func(int) bool) (int
 		if !enabled(l.producer) || l.checkpoint.IsZero() {
 			continue
 		}
-		if start, ok := m.windowStart(m.byID[l.producer]); ok && l.checkpoint.Before(start.Add(windowMargin(m.byID[l.producer]))) {
+		t := m.byID[l.producer]
+		point := l.checkpoint
+		if t.rewind != nil && t.rewind.from.Before(point) {
+			// a recovery of the producer starts at the client's rewind when it is the
+			// earlier: what the reset drops of that replay must lie inside the window too
+			point = t.rewind.from
+		}
+		if start, ok := m.windowStart(t); ok && point.Before(start.Add(windowMargin(t))) {
 			return l.producer, true
 		}
 	}
@@ -2029,6 +2046,16 @@ func (m *machine) resetNotMadeForCheckpointAhead(s *session, producerID int, mon
 	m.cancelReset(s, mono)
 	m.counters.resetRequestsFailed++
 	m.log.Warnf("The safety net did not reset session %s: its checkpoint of producer %d lies after the producer's clock, where a recovery could not repeat what the reset would drop",
+		s.id, producerID)
+}
+
+// resetNotMadeForOpenGap cancels a reset whose recoveries were accepted, but a producer
+// of whose has a gap open that the net did not open. The net waits before it tries
+// again, as for every cancellation at the last acceptance.
+func (m *machine) resetNotMadeForOpenGap(s *session, producerID int, mono time.Duration) {
+	m.cancelReset(s, mono)
+	m.counters.resetRequestsFailed++
+	m.log.Warnf("The safety net did not reset session %s: producer %d has a gap open that its recovery of the net's does not cover",
 		s.id, producerID)
 }
 

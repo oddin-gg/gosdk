@@ -787,3 +787,91 @@ func TestNet_SessionLaggingForADisabledProducerAloneHasCaughtUpAtTheNextTick(t *
 	expect(t, f.lagging(1), false, "the session lags")
 	expect(t, f.logCount("Session 00000000-0000-0000-0000-000000000001 caught up"), 1, "log lines of the catch-up")
 }
+
+// A gap opens after the net asked, with its recovery still in flight (an unsubscribed
+// alive before the API accepted it): the recovery does not cover it, and no reset is made.
+func TestNet_GapOpenedBeforeTheLastAcceptanceCancelsTheReset(t *testing.T) {
+	f := upNet(t, all)
+	before := f.calls()
+	f.stale(1, oldAge, 5*time.Minute, f.untilAsked(before))
+	preReq, liveReq := f.lastSnapshot(pre), f.lastSnapshot(live)
+	f.clock.advance(time.Second)
+	f.unsubscribed(pre)
+	expect(t, f.inFlight(pre), preReq.requestID, "the prematch recovery: not accepted, so it stays")
+	f.accept(preReq)
+	f.accept(liveReq)
+	expect(t, len(f.out.resets), 0, "resets")
+	s := f.m.session(sid(1))
+	expect(t, s.pending == nil, true, "a reset pending")
+	expect(t, s.nextResetAt > f.m.mono(), true, "the net waits before it tries again")
+	expect(t, f.logCount("has a gap open"), 1, "warnings of the gap")
+}
+
+// The same when a sibling session's snapshot_complete supplies the last acceptance.
+func TestNet_GapOpenedBeforeAnAcceptanceBySiblingsSnapshotCompleteCancelsTheReset(t *testing.T) {
+	f := twoSessionNet(t)
+	before := f.calls()
+	f.stale(1, oldAge, 5*time.Minute, f.untilAsked(before))
+	preReq, liveReq := f.lastSnapshot(pre), f.lastSnapshot(live)
+	f.clock.advance(time.Second)
+	f.unsubscribed(live)
+	f.accept(preReq)
+	f.snapshotComplete(2, live, liveReq.requestID)
+	expect(t, len(f.out.resets), 0, "resets")
+	expect(t, f.m.session(sid(1)).pending == nil, true, "a reset pending")
+	expect(t, f.logCount("has a gap open"), 1, "warnings of the gap")
+}
+
+// A pending client rewind inside the margin of the window's edge makes the session lag:
+// a recovery starts at the rewind, and the window would move past it before the follow-up.
+func TestNet_RewindInsideTheWindowMarginMakesTheSessionLag(t *testing.T) {
+	f := upNetWithWindow(t, 60)
+	f.runFor(40 * time.Minute)
+	pn := f.m.byID[pre].producerNow(f.clock.Now())
+	f.m.rewind(pre, pn.Add(-55*time.Minute))
+	expect(t, f.m.byID[pre].rewind != nil, true, "a rewind pending")
+	before := f.calls()
+	expect(t, f.stale(1, oldAge, 3*time.Minute, f.untilAsked(before)), -1, "a request")
+	expect(t, f.calls(), before, "requests")
+	expect(t, len(f.out.resets), 0, "resets")
+	expect(t, f.lagging(1), true, "the session lags")
+}
+
+// A rewind that arrives after the net asked, inside the margin, cancels the reset.
+func TestNet_RewindInsideTheWindowMarginBeforeTheLastAcceptanceCancelsTheReset(t *testing.T) {
+	f := upNetWithWindow(t, 60)
+	f.runFor(40 * time.Minute)
+	before := f.calls()
+	f.stale(1, oldAge, 5*time.Minute, f.untilAsked(before))
+	preReq, liveReq := f.lastSnapshot(pre), f.lastSnapshot(live)
+	pn := f.m.byID[pre].producerNow(f.clock.Now())
+	f.m.rewind(pre, pn.Add(-55*time.Minute))
+	f.accept(preReq)
+	f.accept(liveReq)
+	expect(t, len(f.out.resets), 0, "resets")
+	expect(t, f.logCount("reaches back past the producer's recovery window"), 1, "warnings of the window")
+}
+
+// A rewind comfortably inside the window does not hold the net back: the reset is made,
+// and the follow-up starts at the rewind.
+func TestNet_RewindComfortablyInsideTheWindowIsResetAndTheFollowUpStartsAtIt(t *testing.T) {
+	f := upNetWithWindow(t, 60)
+	f.runFor(40 * time.Minute)
+	cp, _ := f.checkpoint(1, pre)
+	rewind := cp.Add(-5 * time.Minute) // the window's edge is 20 minutes before the checkpoint
+	f.m.rewind(pre, rewind)
+	expect(t, f.m.byID[pre].rewind != nil, true, "a rewind pending")
+	before := f.calls()
+	f.stale(1, oldAge, 5*time.Minute, f.untilAsked(before))
+	preReq := f.lastSnapshot(pre)
+	expectTime(t, preReq.after, rewind, "the preflight recovery starts at the rewind")
+	f.accept(preReq)
+	f.accept(f.lastSnapshot(live))
+	expectSessions(t, f.resetSessions(), []int{1}, "resets")
+	f.clock.advance(time.Second)
+	f.aliveBoth()
+	f.resetDone()
+	if again := f.lastSnapshot(pre); again.after.After(rewind) {
+		t.Fatalf("the follow-up starts at %s, after the rewind %s", fmtTime(again.after), fmtTime(rewind))
+	}
+}
