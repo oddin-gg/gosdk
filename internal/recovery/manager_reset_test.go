@@ -146,20 +146,34 @@ func TestManager_ResetDoneReachesTheActorAsAFactAndAGoneSessionDropsItsHandle(t 
 }
 
 // A reset the machine asks for once the close is signalled is not handed to the
-// session's consumer: the shutdown settles the queue, and no follow-up could be asked.
-func TestManager_ResetAfterTheCloseIsSignalledIsNotHandedToTheConsumer(t *testing.T) {
-	r := newRig(t)
-	r.open()
+// session's consumer. The actor's loop is not running, so its own closing flag is not
+// set: only the signal is what stops the reset.
+func TestActor_ResetAfterTheCloseIsSignalledIsNotHandedToTheConsumer(t *testing.T) {
+	r := newActorRig(t)
 	s1 := uuid.New()
-	h := &fakeResetter{started: make(chan struct{}, 1)}
-	r.mgr.RegisterSessionResetter(s1, h)
-	r.openSession(s1, types.AllMessageInterest)
-	a := r.mgr.actor()
-	a.signalStop()
-	a.reset(s1, 5)
-	select {
-	case <-h.started:
-		t.Fatal("the consumer was asked to reset after the close was signalled")
-	case <-time.After(200 * time.Millisecond):
+	h := &fakeResetter{}
+	r.ops.resetters = map[uuid.UUID]Resetter{s1: h}
+	r.a.signalStop()
+	expectNotClosed := r.a.isClosed()
+	expect(t, expectNotClosed, false, "the actor's closing flag")
+	r.a.reset(s1, 5)
+	r.a.detached.Wait()
+	if got := h.asked(); len(got) != 0 {
+		t.Fatalf("the consumer was asked to reset %v after the close was signalled", got)
+	}
+}
+
+// The close is signalled after the actor has looked up the session's handle and before
+// its worker starts: the worker does not start the reset either.
+func TestActor_CloseSignalledBetweenTheLookupAndTheWorkerStartsNoReset(t *testing.T) {
+	r := newActorRig(t)
+	s1 := uuid.New()
+	h := &fakeResetter{}
+	r.ops.resetters = map[uuid.UUID]Resetter{s1: h}
+	r.ops.onResetterOf = r.a.signalStop
+	r.a.reset(s1, 6)
+	r.a.detached.Wait()
+	if got := h.asked(); len(got) != 0 {
+		t.Fatalf("the consumer was asked to reset %v after the close was signalled", got)
 	}
 }

@@ -102,6 +102,10 @@ func TestNet_ProducerEnabledWhileTheResetIsUnderWayIsAskedForOnceItIsDone(t *tes
 	f.alive(live)
 	f.m.tick()
 	expect(t, f.calls(), underway, "requests while the reset is under way")
+	// the session's live checkpoint moves while the reset is under way: the follow-up
+	// starts where it was when the reset was made, the gap the reset opened for the lane
+	later := f.now().Add(time.Hour)
+	f.m.sessionAlive(sid(1), live, later, later, f.stamp(), true, false)
 
 	f.resetDone()
 	expect(t, f.calls(), underway+2, "requests in the step that ends the reset")
@@ -684,4 +688,102 @@ func TestNet_CheckpointOfTheOtherProducerLeavesTheWindowBeforeTheLastAcceptanceC
 	expect(t, len(f.out.resets), 0, "resets")
 	expect(t, f.logCount("reaches back past the producer's recovery window of 60 minutes"), 1, "warnings of the window")
 	expect(t, f.m.session(sid(1)).pending == nil, true, "a reset pending")
+}
+
+// The catalog changes while the last acceptance is checked: the producer is disabled when
+// the acceptance first reads it and enabled by the time the later checks do. All of them
+// go by the first reading, so the producer is treated as one enabled during the reset:
+// the reset is made, the producer is down for it, and it is asked for once it is done.
+func TestNet_ProducerEnabledWhileTheLastAcceptanceIsCheckedIsOneEnabledDuringTheReset(t *testing.T) {
+	f := upNetWithWindow(t, 60)
+	f.cat.disabled[live] = true
+	f.runFor(70 * time.Minute)
+	// the session is up to date with prematch; its backlog of live reaches past the window
+	at := f.now()
+	f.m.processed(sid(1), pre, at, at, f.stamp(), 0)
+	before := f.calls()
+	f.stale(1, oldAge, 5*time.Minute, f.untilAsked(before))
+	expect(t, f.calls(), before+1, "requests: prematch only")
+	preReq := f.lastSnapshot(pre)
+
+	// the first read of the live producer in the last acceptance says disabled, the next enabled
+	f.cat.enableAtNthRead(live, 2)
+	f.accept(preReq)
+	expectSessions(t, f.resetSessions(), []int{1}, "resets: judged on the first reading")
+	expectDown(t, f.feed, live, true, "the live producer, down for the reset")
+	f.expectCause(live, causeSafetyNetReset, "its cause")
+	f.cat.enableAtRead = nil
+	f.alive(live)
+	underway := f.calls()
+	f.resetDone()
+	expect(t, f.calls(), underway+2, "requests in the step that ends the reset: both producers")
+}
+
+// Only the sibling producer's clock goes back: its checkpoint lies after its now while the
+// sampled producer's is valid. The net waits at the trigger.
+func TestNet_SiblingOnlyClockRollbackHoldsTheNetBack(t *testing.T) {
+	f := upNet(t, all)
+	f.liveSkew = 30 * time.Minute
+	before := f.calls()
+	expect(t, f.stale(1, oldAge, 3*time.Minute, f.untilAsked(before)), -1, "a request")
+	expect(t, f.calls(), before, "requests")
+	expect(t, f.m.session(sid(1)).pending == nil, true, "a reset pending")
+	expect(t, f.lagging(1), false, "the session lags")
+}
+
+// The same between the net's requests and the last acceptance: no reset.
+func TestNet_SiblingOnlyClockRollbackBeforeTheLastAcceptanceCancelsTheReset(t *testing.T) {
+	f := upNet(t, all)
+	before := f.calls()
+	f.stale(1, oldAge, 5*time.Minute, f.untilAsked(before))
+	preReq, liveReq := f.lastSnapshot(pre), f.lastSnapshot(live)
+	at := f.now().Add(-30 * time.Minute)
+	f.m.alive(live, at, at, f.stamp(), true)
+	f.accept(preReq)
+	f.accept(liveReq)
+	expect(t, len(f.out.resets), 0, "resets")
+	expect(t, f.logCount("lies after the producer's clock"), 1, "warnings of the clock")
+}
+
+// A producer down for a processing delay, disabled so that the reset skips it, and enabled
+// while the reset is under way, is down for the reset: the delay check does not bring it
+// up before the reset is done and the recovery asked for after it has completed.
+func TestNet_ProducerDownForADelayEnabledDuringTheResetStaysDownUntilItsRecovery(t *testing.T) {
+	f := upNet(t, all)
+	f.m.markDown(f.m.byID[live], causeProcessingDelay)
+	f.cat.disabled[live] = true
+	before := f.calls()
+	f.stale(1, oldAge, 5*time.Minute, f.untilAsked(before))
+	f.accept(f.lastSnapshot(pre))
+	expectSessions(t, f.resetSessions(), []int{1}, "resets")
+	told := len(f.statusesOf(live))
+	delete(f.cat.disabled, live)
+	f.alive(live)
+	f.m.tick()
+	f.clock.advance(time.Second)
+	f.m.tick()
+	expectDown(t, f.feed, live, true, "the live producer while the reset is under way")
+	f.expectCause(live, causeSafetyNetReset, "its cause")
+	for _, c := range f.statusesOf(live)[told:] {
+		if !c.down {
+			t.Fatalf("the live producer was reported up (%s) while the reset was under way", c.cause)
+		}
+	}
+	f.resetDone()
+	f.complete(f.lastSnapshot(live), 1)
+	f.complete(f.lastSnapshot(pre), 1)
+	expectDown(t, f.feed, live, false, "the live producer after its recovery")
+}
+
+// The only stale producer of a lagging session is disabled: the session has caught up
+// at the next tick, with no sample of another producer to say so.
+func TestNet_SessionLaggingForADisabledProducerAloneHasCaughtUpAtTheNextTick(t *testing.T) {
+	f := upNet(t, all)
+	s := f.m.session(sid(1))
+	s.lagging = true
+	s.lane(pre).above = true
+	f.cat.disabled[pre] = true
+	f.m.tick()
+	expect(t, f.lagging(1), false, "the session lags")
+	expect(t, f.logCount("Session 00000000-0000-0000-0000-000000000001 caught up"), 1, "log lines of the catch-up")
 }
