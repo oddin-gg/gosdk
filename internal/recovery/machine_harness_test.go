@@ -54,8 +54,15 @@ type fakeCatalog struct {
 	// activated when the machine was made.
 	hidden map[int]bool
 	// enableAtRead enables a producer at its n-th read of the catalog, counted in reads.
-	enableAtRead map[int]int
-	reads        map[int]int
+	enableAtRead  map[int]int
+	disableAtRead map[int]int
+	reads         map[int]int
+}
+
+// disableAtNthRead has the producer disabled at the n-th read of the catalog from now on.
+func (c *fakeCatalog) disableAtNthRead(id, n int) {
+	c.disableAtRead = map[int]int{id: n}
+	c.reads = map[int]int{}
 }
 
 // enableAtNthRead has the producer enabled at the n-th read of the catalog from now on.
@@ -93,6 +100,12 @@ func (c *fakeCatalog) enabled(id int) bool {
 		c.reads[id]++
 		if c.reads[id] >= n {
 			delete(c.disabled, id)
+		}
+	}
+	if n, ok := c.disableAtRead[id]; ok {
+		c.reads[id]++
+		if c.reads[id] >= n {
+			c.disabled[id] = true
 		}
 	}
 	return !c.disabled[id]

@@ -1246,6 +1246,12 @@ func (m *machine) lastAcceptance(s *session, p *pendingReset, mono time.Duration
 	enabled := func(id int) bool { return enabledAt[id] }
 	for _, l := range s.lanes {
 		if !enabled(l.producer) {
+			if p.asked[l.producer] != nil {
+				// the net asked for it, so its queue holds what it sent while it was enabled,
+				// which no check below covers once it is skipped
+				m.resetNotMadeForDisabledProducer(s, l.producer, mono)
+				return
+			}
 			continue
 		}
 		t := m.byID[l.producer]
@@ -1870,18 +1876,30 @@ func (m *machine) downWhileResetting(t *track) {
 }
 
 // clearStaleWindows forgets the stale window of every session's lane of the producer.
-//
-// A session that lagged for that lane alone has caught up: no sample of an enabled lane
-// would say so if none of them is behind.
 func (m *machine) clearStaleWindows(t *track) {
 	for _, s := range m.sessions {
-		l := s.lane(t.id)
-		if l == nil {
+		if l := s.lane(t.id); l != nil {
+			l.above, l.aboveSince = false, 0
+		}
+	}
+}
+
+// producerDisabled is called on the tick that first sees the producer disabled: a session
+// that lagged for it has caught up unless an enabled lane of its own is still behind. A
+// lane is behind when it is above the limit or its last age says so, though a sample
+// taken during a recovery cleared its flag; one whose offset lapsed has no age, and
+// counts as not behind: the session then catches up here, and lags again at the next
+// trigger if that lane still is.
+func (m *machine) producerDisabled(t *track) {
+	for _, s := range m.sessions {
+		if s.lane(t.id) == nil || !s.lagging {
 			continue
 		}
-		was := l.above
-		l.above, l.aboveSince = false, 0
-		if was && s.lagging && !slices.ContainsFunc(s.lanes, func(other *lane) bool { return other.above && m.catalog.enabled(other.producer) }) {
+		behind := slices.ContainsFunc(s.lanes, func(other *lane) bool {
+			return m.catalog.enabled(other.producer) &&
+				(other.above || (other.hasAge && other.age > m.settings.staleLimit))
+		})
+		if !behind {
 			s.lagging = false
 			m.log.Infof("Session %s caught up", s.id)
 		}
@@ -1895,7 +1913,8 @@ func (m *machine) clearStaleWindows(t *track) {
 //
 // It starts only when every one of those producers can be asked for now: none has a
 // recovery in flight, none is in backoff or waiting for its slow retry, silent or
-// waiting for an alive, no session that receives one has no queue bound, and none has
+// waiting for an alive, its clock offset is fresh by the rule of the stale samples, no
+// session that receives one has no queue bound, and none has
 // a gap open (its own recovery starts at that older gap, not at the checkpoint the
 // window check compares, and goes first). A reset drops the backlog of every producer the session receives, and the
 // recovery of one that could not be asked for now would start later, from a window
@@ -1923,7 +1942,7 @@ func (m *machine) trigger(s *session, t *track, age time.Duration, mono time.Dur
 	var asked []*track
 	for _, l := range s.lanes {
 		if other := m.byID[l.producer]; m.catalog.enabled(other.id) {
-			if !m.canRequest(other, mono) || m.hasGaps(other) {
+			if !m.canRequest(other, mono) || !m.offsetFresh(other, mono) || m.hasGaps(other) {
 				return
 			}
 			asked = append(asked, other)
@@ -1983,15 +2002,16 @@ func (m *machine) cancelResetsWaitingForDisabledProducers(mono time.Duration) {
 	}
 }
 
-// cancelResetWaitingForDisabledProducer gives up the session's pending reset when
-// a recovery it waits for, not yet accepted, is of a producer that has been
-// disabled; whether it did.
+// cancelResetWaitingForDisabledProducer gives up the session's pending reset when a
+// producer it asked a recovery of has been disabled, accepted or not: what the queue
+// holds of it from while it was enabled is covered by no check once it is skipped;
+// whether it did.
 func (m *machine) cancelResetWaitingForDisabledProducer(s *session, mono time.Duration) bool {
 	if s.pending == nil {
 		return false
 	}
-	for id, a := range s.pending.asked {
-		if !a.accepted && !m.catalog.enabled(id) {
+	for id := range s.pending.asked {
+		if !m.catalog.enabled(id) {
 			m.resetNotMadeForDisabledProducer(s, id, mono)
 			return true
 		}
@@ -2145,7 +2165,7 @@ func (m *machine) resetNotMadeForChangedProducer(s *session, producerID int, mon
 func (m *machine) resetNotMadeForDisabledProducer(s *session, producerID int, mono time.Duration) {
 	m.cancelReset(s, mono)
 	m.counters.resetRequestsFailed++
-	m.log.Warnf("The safety net did not reset session %s: producer %d was disabled before its recovery was accepted",
+	m.log.Warnf("The safety net did not reset session %s: producer %d was disabled after the net asked for its recovery",
 		s.id, producerID)
 }
 
@@ -2460,8 +2480,10 @@ func earlierOf(a, b time.Time) time.Time {
 
 // track is one producer, as the machine tracks it.
 type track struct {
-	id       int
-	producer types.Producer
+	// disabledSeen says a tick has seen the producer disabled and not enabled since.
+	disabledSeen bool
+	id           int
+	producer     types.Producer
 	// createdAt is when the machine learned of the producer, on the monotonic
 	// clock: its inactivity counts from then, or from the start if that is later.
 	createdAt time.Duration

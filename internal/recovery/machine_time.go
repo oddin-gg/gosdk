@@ -52,8 +52,13 @@ func (m *machine) tick() {
 		if !m.catalog.enabled(t.id) {
 			// its messages reach no sample: what the net had of its stale window goes
 			m.clearStaleWindows(t)
+			if !t.disabledSeen {
+				t.disabledSeen = true
+				m.producerDisabled(t)
+			}
 			continue
 		}
+		t.disabledSeen = false
 		m.downWhileResetting(t)
 		if a := t.active; a != nil {
 			if m.stalledAmong(a.awaited, a.seen, mono) {

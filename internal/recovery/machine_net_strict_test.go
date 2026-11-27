@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/oddin-gg/gosdk/types"
 )
 
 // The net starts only when every producer of the session that the catalog has
@@ -1082,5 +1084,125 @@ func TestNet_OffsetRefreshedBeforeTheLastAcceptanceLeavesTheResetArmed(t *testin
 	expect(t, f.m.session(sid(1)).pending != nil, true, "a reset still pending")
 	f.accept(preReq)
 	f.accept(liveReq)
+	expectSessions(t, f.resetSessions(), []int{1}, "resets")
+}
+
+// A producer the net asked for that is disabled after its recovery was accepted cancels the
+// reset at the next tick: what its queue holds from while it was enabled is covered by no
+// check once it is skipped.
+func TestNet_ProducerDisabledAfterItsAcceptanceCancelsTheResetOnTheNextTick(t *testing.T) {
+	f := upNet(t, all)
+	before := f.calls()
+	f.stale(1, oldAge, 5*time.Minute, f.untilAsked(before))
+	preReq, liveReq := f.lastSnapshot(pre), f.lastSnapshot(live)
+	f.accept(preReq)
+	f.cat.disabled[pre] = true
+	f.m.tick()
+	s := f.m.session(sid(1))
+	expect(t, s.pending == nil, true, "a reset pending")
+	expect(t, s.nextResetAt > f.m.mono(), true, "the net waits before it tries again")
+	f.accept(liveReq)
+	expect(t, len(f.out.resets), 0, "resets")
+}
+
+// The catalog says enabled when the last acceptance runs its first checks and disabled when
+// it reads it for the lanes: an accepted producer that is disabled by that reading cancels
+// the reset instead of being skipped.
+func TestNet_AskedProducerDisabledByTheLastAcceptancesReadingCancelsTheReset(t *testing.T) {
+	f := upNet(t, all)
+	before := f.calls()
+	f.stale(1, oldAge, 5*time.Minute, f.untilAsked(before))
+	preReq, liveReq := f.lastSnapshot(pre), f.lastSnapshot(live)
+	f.accept(preReq)
+	// the last acceptance reads the prematch producer: once for the check of the asked
+	// producers, once for its lanes
+	f.cat.disableAtNthRead(pre, 2)
+	f.accept(liveReq)
+	expect(t, len(f.out.resets), 0, "resets")
+	s := f.m.session(sid(1))
+	expect(t, s.pending == nil, true, "a reset pending")
+	expect(t, s.nextResetAt > f.m.mono(), true, "the net waits before it tries again")
+}
+
+// A producer whose alive is recent but whose offset has lapsed holds the net back at the
+// trigger, with no request and no backoff, as at the last acceptance.
+func TestNet_ProducerWithALapsedOffsetHoldsTheNetBack(t *testing.T) {
+	f := &netFeed{feed: withSettings(t, func(s *recoverySettings) {
+		s.maxInactivity = time.Minute
+		s.staleWindow = 30 * time.Second
+	})}
+	f.open(1, all)
+	f.startFeed()
+	f.bothUp(1)
+	f.noLiveAlives = true
+	before := f.calls()
+	expect(t, f.stale(1, oldAge, 50*time.Second, f.untilAsked(before)), -1, "a request while the live offset has lapsed")
+	s := f.m.session(sid(1))
+	expect(t, s.pending == nil, true, "a reset pending")
+	expect(t, s.nextResetAt, time.Duration(0), "the net's backoff")
+	expect(t, f.lagging(1), false, "the session lags")
+
+	f.noLiveAlives = false
+	f.alive(live)
+	if f.stale(1, oldAge, 20*time.Second, f.untilAsked(before)) < 0 {
+		t.Fatal("the net did not act once the live offset was fresh")
+	}
+	expect(t, f.calls(), before+2, "requests: both producers")
+}
+
+// A session whose lane was no longer above the limit (its offset lapsed) is not left
+// lagging when the producer is disabled: the tick that first sees it disabled says it has
+// caught up, once.
+func TestNet_DisablingTheLaggingProducerEndsTheLagOnceEvenWhenItsFlagWasCleared(t *testing.T) {
+	f := upNet(t, all)
+	s := f.m.session(sid(1))
+	s.lagging = true
+	s.lane(pre).above = false
+	f.cat.disabled[pre] = true
+	f.m.tick()
+	f.m.tick()
+	expect(t, f.lagging(1), false, "the session lags")
+	expect(t, f.logCount("caught up"), 1, "log lines of the catch-up")
+}
+
+// The session stays lagging while another enabled lane is still behind, though a sample
+// taken during a recovery cleared its flag.
+func TestNet_DisablingAnUnrelatedProducerDoesNotEndTheLagOfALaneStillBehind(t *testing.T) {
+	f := upNet(t, all)
+	s := f.m.session(sid(1))
+	s.lagging = true
+	l := s.lane(live)
+	l.above, l.hasAge, l.age = false, true, 3*time.Minute
+	f.cat.disabled[pre] = true
+	f.m.tick()
+	expect(t, f.lagging(1), true, "the session lags")
+	expect(t, f.logCount("caught up"), 0, "log lines of the catch-up")
+}
+
+// Stale samples for less than a window, a fresh one, then stale again: the window starts
+// again at the first stale sample after the fresh one.
+func TestNet_FreshSampleBetweenTwoStaleStretchesRestartsTheWindow(t *testing.T) {
+	f := upNet(t, all)
+	before := f.calls()
+	f.stale(1, oldAge, 40*time.Second, f.untilAsked(before))
+	expect(t, f.calls(), before, "requests during the first stretch")
+	f.stale(1, freshAge, time.Second, f.untilAsked(before))
+	expect(t, f.stale(1, oldAge, 5*time.Minute, f.untilAsked(before)), 61, "seconds to the first request after the interruption")
+}
+
+// Another session's channel is lost, a session that shares no producer with the pending
+// reset: the reset stays pending and is made at the last acceptance.
+func TestNet_ChannelLostOfASessionSharingNoProducerLeavesTheResetPending(t *testing.T) {
+	f := &netFeed{feed: newFeed(t)}
+	f.open(1, liveOnly)
+	f.open(2, types.PrematchOnlyMessageInterest)
+	f.startFeed()
+	f.bothUp(1, 2)
+	before := f.calls()
+	f.staleOf(1, live, oldAge, 5*time.Minute, f.untilAsked(before))
+	expect(t, f.m.session(sid(1)).pending != nil, true, "a reset waiting for the API")
+	f.m.channelLost(sid(2))
+	expect(t, f.m.session(sid(1)).pending != nil, true, "a reset pending after the other session's loss")
+	f.accept(f.lastSnapshot(live))
 	expectSessions(t, f.resetSessions(), []int{1}, "resets")
 }
